@@ -20,6 +20,7 @@ import {
   browsersFrom,
   canConnectChrome,
   chromeNote,
+  continueTextFrom,
   credentialFrom,
   credentialsFile,
   fingerprint,
@@ -28,6 +29,8 @@ import {
   healthOf,
   identityFromProfile,
   identityFromStatus,
+  isFableSpent,
+  isFableStop,
   isLoginOf,
   isNoBrowser,
   isOnNormalLogin,
@@ -45,7 +48,7 @@ import {
   slotEnv,
   windowPct,
 } from './model'
-import type { Credential, Identity } from './model'
+import type { Credential, Identity, Need } from './model'
 import { Band, Footer, Pane } from './view'
 import type { Actions } from './view'
 
@@ -163,6 +166,7 @@ async function mergeStore($: Host): Promise<void> {
   }
   const footer = footerStyleFrom(await $.store.get('footer'))
   const rotateTo = rotateToFrom(await $.store.get('rotate-to'))
+  const continueText = continueTextFrom(await $.store.get('continue-text'))
   const chrome = await $.store.get('chrome-account')
   const chromeAccountId = typeof chrome === 'string' && accounts.some(a => a.id === chrome) ? chrome : undefined
   const seen = await $.store.get('chrome-accounts')
@@ -182,7 +186,7 @@ async function mergeStore($: Host): Promise<void> {
       const holder = holders[a.id] ?? v.holders[a.id]
       if (holder !== undefined) nextHolders[a.id] = holder
     }
-    return { ...v, accounts, readings: nextReadings, health: nextHealth, holders: nextHolders, footer, rotateTo, chromeAccountId, chromeAccountIds }
+    return { ...v, accounts, readings: nextReadings, health: nextHealth, holders: nextHolders, footer, rotateTo, continueText, chromeAccountId, chromeAccountIds }
   })
 }
 
@@ -422,11 +426,16 @@ async function checkAll($: Host): Promise<void> {
 }
 
 /** Why the login in use is left, counted the way the footer shows it: room left, or what is used. */
-function whyLeave(view: View, now: number): string {
+function whyLeave(view: View, now: number, need?: Need): string {
   if (view.health[view.activeId]?.kind === 'login-needed') return `account ${view.activeId} needs a sign-in`
   const r = view.readings[view.activeId]
   const five = windowPct(r?.fiveHour, now) ?? 0
-  const [window, used] = five >= LEAVE_FIVE_HOUR ? ['5-hour window', five] : ['week', windowPct(r?.sevenDay, now) ?? 0]
+  const [window, used] =
+    need === 'fable' && isFableSpent(r, now)
+      ? ['Fable week', windowPct(r?.fable, now) ?? 0]
+      : five >= LEAVE_FIVE_HOUR
+        ? ['5-hour window', five]
+        : ['week', windowPct(r?.sevenDay, now) ?? 0]
   return view.footer.fill === 'left'
     ? `account ${view.activeId} has ${Math.round(100 - used)}% of its ${window} left`
     : `account ${view.activeId} has used ${Math.round(used)}% of its ${window}`
@@ -435,15 +444,18 @@ function whyLeave(view: View, now: number): string {
 /**
  * Once the active login is spent or locked out, moves to the one the pane's
  * Rotation setting picks; never while it is off, Claude Code's policy refuses
- * it, or Connect holds the session where it is.
+ * it, or Connect holds the session where it is. After a turn that died on the
+ * Fable week (`need`), it leaves for that too, and only for a login with Fable
+ * room: the ticks and responses pass none, so a session that never hit the
+ * Fable week stays on a login whose Fable week is spent.
  */
-async function maybeRotate($: Host): Promise<boolean> {
+async function maybeRotate($: Host, need?: Need): Promise<boolean> {
   const now = await $.clock.now()
   const view = await getView($)
-  if (isConnectingChrome || view.rotateTo === 'off' || view.isSwitchBlocked || view.pending !== undefined || !shouldLeave(view, now)) return false
+  if (isConnectingChrome || view.rotateTo === 'off' || view.isSwitchBlocked || view.pending !== undefined || !shouldLeave(view, now, need)) return false
   // With none to move to, the band above the prompt says when the next login frees up.
-  const target = pickTarget({ ...view, accounts: view.accounts.filter(a => !untaken.has(a.id)) }, now)
-  return target === undefined ? false : switchTo($, target, whyLeave(view, now))
+  const target = pickTarget({ ...view, accounts: view.accounts.filter(a => !untaken.has(a.id)) }, now, need)
+  return target === undefined ? false : switchTo($, target, whyLeave(view, now, need))
 }
 
 /** The login in use, when its token refreshes too soon for the refresh guard to let the session leave it for `target`. */
@@ -543,16 +555,30 @@ async function onMeasure($: Host, limits: readonly SessionRateLimit[]): Promise<
   }
   const reading = readingFromLimits(limits, await $.clock.now())
   if (reading === undefined) return
-  await saveReading($, view.activeId, reading)
+  // A response never lists the Fable week: the one the last check read stays.
+  const fable = view.readings[view.activeId]?.fable
+  await saveReading($, view.activeId, { ...reading, ...(fable ? { fable } : {}) })
   await maybeRotate($)
 }
 
-/** A turn that died on a usage limit or a rejected sign-in: switch, then carry on. */
-async function onStopFailure($: Host, error: string): Promise<void> {
+/** The line that asks Claude to carry on after a switch: the stored one, else the mod's own. */
+async function carryOnText($: Host): Promise<string> {
+  return (await getView($)).continueText ?? CONTINUE
+}
+
+/**
+ * A turn that died on a usage limit or a rejected sign-in: switch, then carry
+ * on. When the limit was the Fable week, it moves only to a login with Fable
+ * room, and leaves the 5-hour window alone: the window is not what ran out, and
+ * a mark on it, stored for every session, would move them all off the login.
+ */
+async function onStopFailure($: Host, stop: { error: string; last_assistant_message?: string }): Promise<void> {
+  const { error } = stop
   if (error !== 'rate_limit' && error !== 'authentication_failed') return
   const view = await getView($)
   const active = view.accounts.find(a => a.id === view.activeId)
   if (active === undefined) return
+  let need: Need | undefined
   if (error === 'authentication_failed') {
     const before = await saveHealth($, active.id, { kind: 'login-needed', why: 'sign-in rejected' })
     if (before?.kind !== 'login-needed') await announceLockout($, active, 'sign-in rejected')
@@ -560,16 +586,25 @@ async function onStopFailure($: Host, error: string): Promise<void> {
     await checkAccount($, active)
     const now = await $.clock.now()
     const after = await getView($)
-    if (!shouldLeave(after, now)) {
+    const r = after.readings[active.id]
+    if (isFableSpent(r, now) || isFableStop(stop.last_assistant_message)) {
+      need = 'fable'
+      await setView($, v => ({ ...v, isFableStopped: true }))
+      // The limit was hit before the usage call shows it: count the Fable week as full.
+      if (!isFableSpent(r, now)) {
+        const resetsAt = r?.fable?.resetsAt
+        await saveReading($, active.id, { ...r, fable: { pct: 100, ...(resetsAt ? { resetsAt } : {}) }, at: now })
+      }
+    } else if (!shouldLeave(after, now)) {
       // The limit was hit before the usage call shows it: count the 5-hour window as full.
-      const r = after.readings[active.id]
       const resetsAt = r?.fiveHour?.resetsAt
       await saveReading($, active.id, { ...r, fiveHour: { pct: 100, ...(resetsAt ? { resetsAt } : {}) }, at: now })
     }
   }
   await setView($, v => ({ ...v, pending: undefined }))
-  if (await maybeRotate($)) {
-    $.clock.after(SETTLE_MS, () => void $.prompt.submit({ text: CONTINUE }))
+  if (await maybeRotate($, need)) {
+    const text = await carryOnText($)
+    $.clock.after(SETTLE_MS, () => void $.prompt.submit({ text }))
   } else if (isConnectingChrome) isCutByVisit = true
 }
 
@@ -697,7 +732,7 @@ function connectChrome($: Host, isQuiet = false, tryId?: string): Promise<Chrome
     }
     const isMoved = (await maybeRotate($)) || done?.isVisit === true
     const isConnected = done?.answer === 'paired' && isChromeAwaited
-    const text = isConnected && done !== undefined ? `Claude in Chrome is connected as Claude account ${label(done.target)}. Continue where you left off.` : isCutByVisit ? CONTINUE : undefined
+    const text = isConnected && done !== undefined ? `Claude in Chrome is connected as Claude account ${label(done.target)}. Continue where you left off.` : isCutByVisit ? await carryOnText($) : undefined
     if (isConnected) isChromeAwaited = false
     isCutByVisit = false
     if (text !== undefined) {
@@ -1059,7 +1094,7 @@ export const register: Register = on => {
   })
 
   on('classic.StopFailure', async ($, e, next) => {
-    void onStopFailure($, e.error).catch(error => debug($, `stop failure handling failed: ${String(error)}`))
+    void onStopFailure($, e).catch(error => debug($, `stop failure handling failed: ${String(error)}`))
     return next(e)
   }).catch(($, e, next) => next(e))
 

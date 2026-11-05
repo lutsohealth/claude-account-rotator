@@ -19,8 +19,11 @@ type World = {
   keychain: Record<string, string>
   /** credentials file -> stored text, or null where it cannot be read */
   files: Record<string, string | null>
-  /** access token -> [5-hour %, week %, or null where the plan reports no weekly limit] */
-  usage: Record<string, [number, number | null]>
+  /**
+   * access token -> [5-hour %, week %, or null where the plan reports no weekly limit], and the Fable
+   * week's % as a third member where the usage endpoint lists one
+   */
+  usage: Record<string, [number, number | null, number?]>
   /** access token -> the email of the account it signs in, as the profile endpoint answers */
   owners: Record<string, string>
   /** The token a /login signs in, where the session reads its sign-in, and its plan. */
@@ -68,6 +71,18 @@ const blob = (token: string, expiresAt = NOW + 6 * HOUR, plan = 'max') =>
       subscriptionType: plan,
     },
   })
+
+/** When the Fable week of every login resets. */
+const FABLE_RESET = '2026-10-17T03:00:00Z'
+
+/** One of the usage body's `limits` rows: a week scoped to a model. */
+const limitRow = (model: string, percent: number) => ({
+  kind: 'weekly_scoped',
+  group: 'weekly',
+  percent,
+  resets_at: FABLE_RESET,
+  scope: { model: { display_name: model } },
+})
 
 const ran = (exitCode: number, stdout: string): ProcessRunResult => ({
   exitCode,
@@ -117,10 +132,12 @@ function world(on: On, w: World, store: Record<string, unknown>): MockClock {
     }
     const usage = w.usage[token]
     if (usage === undefined) return { value: { status: 401, ok: false, headers: {}, text: '' } }
-    const [five, week] = usage
+    const [five, week, fable] = usage
     const body = {
       five_hour: { utilization: five, resets_at: '2026-10-12T12:00:00Z' },
       seven_day: week === null ? null : { utilization: week, resets_at: '2026-10-18T03:00:00Z' },
+      // A row for another model beside the Fable one, spent: read as Fable's, it would show.
+      ...(fable === undefined ? {} : { limits: [limitRow('Sonnet', 100), limitRow('Fable 5.1', fable)] }),
     }
     return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(body) } }
   })
@@ -528,6 +545,193 @@ test('a turn that dies on the usage limit moves to the other login, then asks Cl
   await clock.advance(36_000)
   expect(w.submitted).toHaveLength(1)
   expect(w.submitted[0]).toMatch(/Continue where you left off/)
+})
+
+/** The stop of a turn that used up the Fable week, as Claude Code reports it. */
+const FABLE_STOP = {
+  error: 'rate_limit',
+  last_assistant_message: "You've reached your Fable limit. Switch to another model to continue.",
+}
+
+/** Login 1's 5-hour window as the pane draws it at 20% used, and the week at 30%. */
+const ONE_AT_20 = /^▰{8}▱{2} 80% left$/
+
+test('a Fable stop moves to the login with Fable room and carries on, and the toast names the Fable week, not the 5-hour window', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [20, 30, 100]
+  w.usage['tok-2'] = [10, 30, 10]
+  const clock = world(on, w, TWO_LOGINS)
+  await start($, clock)
+  // Login 1's Fable week is spent, but a session that never hit it has no reason to leave.
+  await clock.advance(2 * 60_000)
+  expect(w.envSets).toEqual([])
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
+  expect(w.toasts.filter(t => /^Switched to Claude account 2.*: account 1 has 0% of its Fable week left\.$/.test(t))).toHaveLength(1)
+  expect(w.toasts.filter(t => /5-hour/.test(t))).toEqual([])
+  expect(w.submitted).toEqual([])
+  await clock.advance(36_000)
+  expect(w.submitted).toHaveLength(1)
+  expect(w.submitted[0]).toMatch(/Continue where you left off/)
+  // The 5-hour window every session shares is not counted full: the pane still reads login 1 at 20% used.
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  expect(await pane.find({ text: ONE_AT_20 })).toBeDefined()
+  await pane.unmount()
+})
+
+test('a Fable stop moves past a login whose Fable week is spent, to the one with room, though the spent one has more 5-hour room', async ($, on) => {
+  const w = fresh()
+  const SLOT3 = `${HOME}/.claude/accounts/3`
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.keychain[await keychainItem(SLOT3)] = blob('tok-3')
+  w.usage['tok-1'] = [20, 30, 100]
+  w.usage['tok-2'] = [10, 30, 100]
+  w.usage['tok-3'] = [50, 50, 0]
+  const three = { accounts: [...TWO_LOGINS.accounts, { id: '3', slot: SLOT3, email: 'three@example.com' }], 'rotate-to': 'room' }
+  const clock = world(on, w, three)
+  await start($, clock)
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT3 }])
+})
+
+test('a Fable stop whose usage read lists no Fable week is told by Claude\'s own words, and still leaves the 5-hour window alone', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [20, 30]
+  w.usage['tok-2'] = [10, 30]
+  const clock = world(on, w, TWO_LOGINS)
+  await start($, clock)
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
+  expect(w.toasts.filter(t => /of its Fable week left/.test(t))).toHaveLength(1)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  expect(await pane.find({ text: ONE_AT_20 })).toBeDefined()
+  await pane.unmount()
+  // Login 1's Fable week is held spent until the next check reads it: the carry-on's own Fable stop on login 2 finds nowhere to go.
+  await clock.advance(36_000)
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  expect(w.envSets).toHaveLength(1)
+})
+
+test('a rate-limit stop whose fresh usage read shows the Fable week spent is a Fable stop, said in no words', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [20, 30, 60]
+  w.usage['tok-2'] = [10, 30, 10]
+  const clock = world(on, w, TWO_LOGINS)
+  await start($, clock)
+  expect(w.envSets).toEqual([])
+  // The week is spent by the time the stop's own read comes in.
+  w.usage['tok-1'] = [20, 30, 100]
+  await $.classic.StopFailure({ error: 'rate_limit' })
+  await clock.settle()
+  expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
+  expect(w.toasts.filter(t => /of its Fable week left/.test(t))).toHaveLength(1)
+})
+
+test('with every login\'s Fable week spent a Fable stop switches nothing and submits nothing, repeated stops included, and the band says when the next one frees up', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [20, 30, 100]
+  w.usage['tok-2'] = [10, 30, 100]
+  const clock = world(on, w, TWO_LOGINS)
+  await start($, clock)
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  await clock.advance(36_000)
+  expect(w.envSets).toEqual([])
+  expect(w.submitted).toEqual([])
+  // Across the 10-minute check, which reads both logins again, stop after stop.
+  for (let i = 0; i < 3; i++) {
+    await clock.advance(11 * 60_000)
+    await $.classic.StopFailure(FABLE_STOP)
+    await clock.settle()
+    await clock.advance(36_000)
+  }
+  expect(w.envSets).toEqual([])
+  expect(w.submitted).toEqual([])
+  const band = await mountBand($)
+  // The Fable weeks reset on 17 October, days from the clock.
+  expect(await band.find({ text: /^Every Claude account has used its Fable week; the next frees up in 4d \d+h\.$/ })).toBeDefined()
+  await band.unmount()
+})
+
+test('a Fable stop with no login to move to leaves the 5-hour window unmarked in the store every session shares, so no session leaves on its tick', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [20, 30, 100]
+  w.usage['tok-2'] = [10, 30, 100]
+  const clock = world(on, w, TWO_LOGINS)
+  await start($, clock)
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  // Its 60-second ticks: a session on login 1 stays, as login 2 has 5-hour room but no Fable room to offer.
+  await clock.advance(5 * 60_000)
+  expect(w.envSets).toEqual([])
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  expect(await pane.find({ text: ONE_AT_20 })).toBeDefined()
+  await pane.unmount()
+})
+
+test('a response keeps the Fable week the last check read, which a response never reports', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [20, 30, 100]
+  w.usage['tok-2'] = [10, 30, 100]
+  const clock = world(on, w, TWO_LOGINS)
+  await start($, clock)
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  w.limits = [
+    { kind: 'five_hour', percentUsed: 21, resetsAt: '2026-10-12T12:00:00Z' },
+    { kind: 'seven_day', percentUsed: 30, resetsAt: '2026-10-18T03:00:00Z' },
+  ]
+  await $.session.measure({ context: { window: 200_000 }, rateLimits: w.limits, changed: ['rateLimits'] })
+  await clock.settle()
+  const band = await mountBand($)
+  expect(await band.find({ text: /^Every Claude account has used its Fable week/ })).toBeDefined()
+  await band.unmount()
+})
+
+test('the line sent to carry on is the one kept in the store under continue-text, else the mod\'s own', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [60, 40]
+  w.usage['tok-2'] = [10, 30]
+  const clock = world(on, w, { ...TWO_LOGINS, 'continue-text': '  Go on with the task.  ' })
+  await start($, clock)
+  w.usage['tok-1'] = [100, 41]
+  await $.classic.StopFailure({ error: 'rate_limit' })
+  await clock.settle()
+  await clock.advance(36_000)
+  expect(w.submitted).toEqual(['Go on with the task.'])
+})
+
+test('a Fable stop carries on with the stored line too', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [20, 30, 100]
+  w.usage['tok-2'] = [10, 30, 10]
+  const clock = world(on, w, { ...TWO_LOGINS, 'continue-text': 'Go on on Fable-free ground.' })
+  await start($, clock)
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  await clock.advance(36_000)
+  expect(w.submitted).toEqual(['Go on on Fable-free ground.'])
 })
 
 test('a switch is confirmed once a response reports the new login usage, and an idle session is not told it failed', async ($, on) => {

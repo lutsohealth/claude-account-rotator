@@ -10,6 +10,7 @@ import {
   blockedAdvice,
   canConnectChrome,
   glyph,
+  isFableSpent,
   isOnNormalLogin,
   isSeatPlan,
   longBar,
@@ -510,6 +511,15 @@ export function Band(ui: Ui, view: View, now: number, act: Actions) {
     return (
       <Text color="warning">
         Every Claude account is near its limit{at === undefined ? '' : `; the next frees up ${untilText(at, now)}`}.
+      </Text>
+    )
+  }
+  // Only a session that hit the Fable week says so: Claude with another model works on these accounts.
+  if (view.isFableStopped && view.accounts.length > 0 && view.accounts.every(a => isFableSpent(view.readings[a.id], now))) {
+    const at = nextReset(view, now, 'fable')
+    return (
+      <Text color="warning">
+        Every Claude account has used its Fable week{at === undefined ? '' : `; the next frees up ${untilText(at, now)}`}.
       </Text>
     )
   }
