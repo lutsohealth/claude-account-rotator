@@ -159,6 +159,16 @@ export function nextReset(view: View, now: number, need?: Need): number | undefi
   return times.length === 0 ? undefined : Math.min(...times)
 }
 
+/**
+ * What to say when every login's Fable week is spent, the soonest reset
+ * included where one is known; undefined while any login has Fable room.
+ */
+export function fableSpentNotice(view: View, now: number): string | undefined {
+  if (view.accounts.length === 0 || !view.accounts.every(a => isFableSpent(view.readings[a.id], now))) return undefined
+  const at = nextReset(view, now, 'fable')
+  return `Every Claude account has used its Fable week${at === undefined ? '' : `; the next frees up ${untilText(at, now)}`}.`
+}
+
 function windowFrom(value: unknown): UsageWindow | undefined {
   if (typeof value !== 'object' || value === null) return undefined
   const { utilization, resets_at } = value as { utilization?: unknown; resets_at?: unknown }
@@ -195,6 +205,18 @@ export function readingFromUsage(body: unknown, now: number): Reading | undefine
   const fable = fableFrom(limits)
   if (fiveHour === undefined && sevenDay === undefined && fable === undefined) return undefined
   return { ...(fiveHour ? { fiveHour } : {}), ...(sevenDay ? { sevenDay } : {}), ...(fable ? { fable } : {}), at: now }
+}
+
+/**
+ * A fresh reading with the Fable week the stored one holds, where the fresh
+ * body lists none: a body without the row says nothing of the week, and the
+ * mark a stop left stands until its reset time passes. A week with no reset
+ * time to go by is not kept. A row in the body replaces it.
+ */
+export function keepFable(fresh: Reading, stored: Reading | undefined, now: number): Reading {
+  const kept = stored?.fable
+  if (fresh.fable !== undefined || kept?.resetsAt === undefined || Date.parse(kept.resetsAt) <= now) return fresh
+  return { ...fresh, fable: kept }
 }
 
 /** The most characters of the line that asks Claude to carry on. */

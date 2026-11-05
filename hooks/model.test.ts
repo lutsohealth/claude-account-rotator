@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import type { RotateTo, View } from '../types'
-import { DEFAULT_FOOTER, availableNow, braille, browsersFrom, chromeNote, continueTextFrom, credentialFrom, credentialsFile, footerStyleFrom, healthOf, identityFromProfile, isFableSpent, isFableStop, isNoBrowser, isPolicyRefusal, keychainItem, nextReset, pickTarget, pie, readingFromUsage, rotateToFrom, shouldLeave, roomColor, windowPct } from './model'
+import { DEFAULT_FOOTER, availableNow, braille, browsersFrom, chromeNote, continueTextFrom, credentialFrom, credentialsFile, fableSpentNotice, footerStyleFrom, healthOf, identityFromProfile, isFableSpent, isFableStop, isNoBrowser, isPolicyRefusal, keepFable, keychainItem, nextReset, pickTarget, pie, readingFromUsage, rotateToFrom, shouldLeave, roomColor, windowPct } from './model'
 
 const NOW = Date.parse('2026-10-12T10:00:00Z')
 const LATER = '2026-10-12T12:00:00Z'
@@ -152,6 +152,64 @@ test('the Fable week is spent at 95% and not before, and not once its reset time
   expect(isFableSpent(fable(100), Date.parse(FABLE_END) + 1)).toBe(false)
   expect(isFableSpent({ at: NOW }, NOW)).toBe(false)
   expect(isFableSpent(undefined, NOW)).toBe(false)
+})
+
+test('a fresh reading keeps the Fable week the stored one holds where its body lists none, until that week resets, and then drops it', () => {
+  const five_hour = { utilization: 20, resets_at: LATER }
+  const fresh = readingFromUsage({ five_hour }, NOW)!
+  const stored = { fiveHour: { pct: 50, resetsAt: LATER }, fable: { pct: 100, resetsAt: FABLE_END }, at: NOW - 60_000 }
+  expect(keepFable(fresh, stored, NOW)).toEqual({ ...fresh, fable: stored.fable })
+  expect(keepFable(fresh, stored, Date.parse(FABLE_END) - 1)).toEqual({ ...fresh, fable: stored.fable })
+  expect(keepFable(fresh, stored, Date.parse(FABLE_END))).toEqual(fresh)
+  expect(keepFable(fresh, stored, Date.parse(FABLE_END) + 1)).toEqual(fresh)
+  // A stored week with no reset time to go by is not kept past this check; nothing stored adds nothing.
+  expect(keepFable(fresh, { fable: { pct: 100 }, at: NOW }, NOW)).toEqual(fresh)
+  expect(keepFable(fresh, { at: NOW }, NOW)).toEqual(fresh)
+  expect(keepFable(fresh, undefined, NOW)).toEqual(fresh)
+})
+
+test('a fresh reading keeps the stored Fable week whatever way its body lists none: no limits, none left, another model only, a Fable row without a percent', () => {
+  const five_hour = { utilization: 20, resets_at: LATER }
+  const bodies: [string, unknown][] = [
+    ['no limits', { five_hour }],
+    ['an empty list', { five_hour, limits: [] }],
+    ['another model only', { five_hour, limits: [fableRow('Sonnet', 100)] }],
+    ['a Fable row without a percent', { five_hour, limits: [fableRow('Fable', 'lots')] }],
+    ['a row of another kind', { five_hour, limits: [{ ...fableRow('Fable'), kind: 'weekly_all' }] }],
+  ]
+  const stored = { fable: { pct: 100, resetsAt: FABLE_END }, at: NOW - 60_000 }
+  for (const [name, body] of bodies) {
+    const fresh = readingFromUsage(body, NOW)!
+    expect([name, keepFable(fresh, stored, NOW).fable]).toEqual([name, stored.fable])
+  }
+})
+
+test('a fresh reading with its own Fable week replaces the stored one, whatever either says', () => {
+  const five_hour = { utilization: 20, resets_at: LATER }
+  for (const stored of [100, 30]) {
+    for (const percent of [0, 40, 94, 95, 100]) {
+      const fresh = readingFromUsage({ five_hour, limits: [fableRow('Fable 5.1', percent)] }, NOW)!
+      const kept = keepFable(fresh, { fable: { pct: stored, resetsAt: FABLE_END }, at: NOW - 60_000 }, NOW)
+      expect([stored, percent, kept.fable]).toEqual([stored, percent, { pct: percent, resetsAt: FABLE_END }])
+    }
+  }
+})
+
+test('the words for every Fable week spent give the next reset, none while any account has Fable room, and no time where none is known', () => {
+  expect(fableSpentNotice(view({ '1': [20, 30, 100], '2': [10, 30, 100] }), NOW)).toBe('Every Claude account has used its Fable week; the next frees up in 4d 17h.')
+  // The soonest of the weeks answers.
+  const sooner = view({ '1': [20, 30, 100], '2': [10, 30, 100] })
+  sooner.readings['2'] = { ...sooner.readings['2'], fable: { pct: 100, resetsAt: '2026-10-16T03:00:00Z' }, at: NOW }
+  expect(fableSpentNotice(sooner, NOW)).toBe('Every Claude account has used its Fable week; the next frees up in 3d 17h.')
+  // Any account with room, read below 95% or not read at all, or a week that has reset: nothing to say.
+  expect(fableSpentNotice(view({ '1': [20, 30, 100], '2': [10, 30, 94] }), NOW)).toBeUndefined()
+  expect(fableSpentNotice(view({ '1': [20, 30, 100], '2': [10, 30] }), NOW)).toBeUndefined()
+  expect(fableSpentNotice(view({ '1': [20, 30, 100], '2': [10, 30, 100] }), Date.parse(FABLE_END) + 1)).toBeUndefined()
+  expect(fableSpentNotice({ ...view({ '1': [20, 30, 100] }), accounts: [] }, NOW)).toBeUndefined()
+  // Marked spent with no reset time known: the words without a time.
+  const marked = view({ '1': [20, 30] })
+  marked.readings['1'] = { ...marked.readings['1'], fable: { pct: 100 }, at: NOW }
+  expect(fableSpentNotice(marked, NOW)).toBe('Every Claude account has used its Fable week.')
 })
 
 test('a stop that says the Fable limit was reached is told from any other', () => {

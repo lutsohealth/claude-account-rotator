@@ -23,6 +23,7 @@ import {
   continueTextFrom,
   credentialFrom,
   credentialsFile,
+  fableSpentNotice,
   fingerprint,
   footerStyleFrom,
   freeId,
@@ -35,6 +36,7 @@ import {
   isNoBrowser,
   isOnNormalLogin,
   isPolicyRefusal,
+  keepFable,
   keychainItem,
   keychainUser,
   label,
@@ -332,6 +334,17 @@ async function announceLockout($: Host, account: Account, why: string): Promise<
   await $.ui.notify(text, { title: TITLE })
 }
 
+/** The terminal has been told that every account has used its Fable week: once a session, however many stops follow. */
+let isFableTold = false
+
+/** A Fable stop that found no account with Fable room says so through the terminal's own notice, for a session left running; the band and toast are easy to miss. */
+async function announceFableSpent($: Host): Promise<void> {
+  const text = fableSpentNotice(await getView($), await $.clock.now())
+  if (text === undefined || isFableTold) return
+  isFableTold = true
+  await $.ui.notify(text, { title: TITLE })
+}
+
 /**
  * Who a login's sign-in belongs to: as answered for its token before, else
  * asked while the token is live. A /login in a session on a login signs in
@@ -404,7 +417,8 @@ async function checkAccount($: Host, account: Account): Promise<void> {
       if (usage.kind === 'failed') await debug($, `usage for account ${account.id}: HTTP ${usage.status}`)
       if (usage.kind === 'ok') {
         const reading = readingFromUsage(usage.body, now)
-        if (reading !== undefined) await saveReading($, account.id, reading)
+        // A body with no Fable row leaves the week a stop marked spent as it is.
+        if (reading !== undefined) await saveReading($, account.id, keepFable(reading, (await getView($)).readings[account.id], now))
       }
     }
   }
@@ -612,7 +626,10 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
   await setView($, v => ({ ...v, pending: undefined }))
   if (await maybeRotate($, need)) {
     $.clock.after(SETTLE_MS, () => void carryOn($, need))
-  } else if (isConnectingChrome) isCutByVisit = true
+  } else {
+    if (isConnectingChrome) isCutByVisit = true
+    if (need === 'fable') await announceFableSpent($)
+  }
 }
 
 // ---------------------------------------------------------------- Claude in Chrome
