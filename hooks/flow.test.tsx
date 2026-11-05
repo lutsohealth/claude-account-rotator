@@ -2045,3 +2045,244 @@ test('a session without Claude in Chrome is asked once, and its pane has no Chro
   expect(await pane.find({ text: /Chrome/ })).toBeUndefined()
   await pane.unmount()
 })
+
+// ---------------------------------------------------------------- a switch held back, a stay told, a carry-on that is still current
+
+/** Claude Code's own way out of the Fable limit, which every notice of a stay ends on. */
+const WAY_OUT = 'Run /usage-credits to continue or switch models with /model.'
+
+/** Login 1's token refreshes in 5 minutes, inside the refresh guard: a switch off it waits for the refresh. */
+async function guarded(on: On, w: World, store: Record<string, unknown>, atStop: [number, number, number?]): Promise<MockClock> {
+  w.keychain['Claude Code-credentials'] = blob('tok-1', NOW + 5 * 60_000)
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = atStop
+  w.usage['tok-2'] = [10, 30, 10]
+  return world(on, w, { ...TWO_LOGINS, ...store })
+}
+
+/** Claude Code refreshes login 1's token: the next try at the switch goes through. */
+const refresh = (w: World) => {
+  w.keychain['Claude Code-credentials'] = blob('tok-1', NOW + 8 * HOUR)
+}
+
+for (const rotateTo of ['reset', 'room', 'order']) {
+  for (const line of [undefined, 'Go on on Fable-free ground.']) {
+    test(`with the rotation going by ${rotateTo} and ${line === undefined ? 'no' : 'a'} line kept, a Fable stop held back for a token about to refresh moves when the refresh lands and carries on once`, async ($, on) => {
+      const w = fresh()
+      const clock = await guarded(on, w, { 'rotate-to': rotateTo, ...(line === undefined ? {} : { 'fable-continue-text': line }) }, [20, 30, 100])
+      await start($, clock)
+      await $.classic.StopFailure(FABLE_STOP)
+      await clock.settle()
+      await clock.advance(2 * 60_000)
+      expect(w.envSets).toEqual([])
+      expect(w.submitted).toEqual([])
+      refresh(w)
+      await clock.advance(60_000)
+      expect(slots(w)).toEqual([SLOT2])
+      // The carry-on waits for the switch to land, 35 s on, as for a switch made at once.
+      expect(w.submitted).toEqual([])
+      await clock.advance(36_000)
+      expect(w.submitted).toHaveLength(1)
+      expect(w.submitted[0]).toMatch(line === undefined ? /Continue where you left off/ : /^Go on on Fable-free ground\.$/)
+      expect(w.asUser).toEqual([line !== undefined])
+      await clock.advance(5 * 60_000)
+      expect(w.submitted).toHaveLength(1)
+    })
+  }
+}
+
+test('a second Fable stop while the first is held back adds no second carry-on', async ($, on) => {
+  const w = fresh()
+  const clock = await guarded(on, w, {}, [20, 30, 100])
+  await start($, clock)
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  await clock.advance(60_000)
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  refresh(w)
+  await clock.advance(2 * 60_000)
+  await clock.advance(36_000)
+  expect(slots(w)).toEqual([SLOT2])
+  expect(w.submitted).toHaveLength(1)
+})
+
+/** The stops that are not the Fable week's: a plain limit in three wordings, and a rejected sign-in. */
+const NOT_FABLE_STOPS = [...PLAIN_STOPS.map(last_assistant_message => ({ error: 'rate_limit', last_assistant_message })), { error: 'authentication_failed' }]
+
+for (const stop of NOT_FABLE_STOPS) {
+  test(`${stop.error === 'rate_limit' ? `a plain usage-limit stop ("${stop.last_assistant_message}")` : 'a rejected sign-in'} held back for a token about to refresh moves when the refresh lands and, as before, carries on with nothing`, async ($, on) => {
+    const w = fresh()
+    const clock = await guarded(on, w, {}, [100, 41])
+    await start($, clock)
+    await $.classic.StopFailure(stop)
+    await clock.settle()
+    await clock.advance(2 * 60_000)
+    expect(w.envSets).toEqual([])
+    refresh(w)
+    await clock.advance(60_000)
+    expect(slots(w)).toEqual([SLOT2])
+    await clock.advance(5 * 60_000)
+    expect(w.submitted).toEqual([])
+  })
+}
+
+/** A Fable stop on login 1 of a session that has settled in, `setup` having shaped the world; the notices about the Fable limit it left. */
+type StayCase = {
+  name: string
+  /** What its words say. */
+  notice: RegExp
+  /** The usage of each login and the store the case starts from. */
+  usage: Record<string, [number, number, number?]>
+  store?: Record<string, unknown>
+  /** The policy refuses switching. */
+  isBlocked?: boolean
+  /** The session visits the Claude in Chrome account while the stops come. */
+  isVisiting?: boolean
+}
+
+const STAY_CASES: StayCase[] = [
+  { name: 'the other login has its 5-hour window full', notice: /^Fable limit reached on account 1, and no other Claude account can take over/, usage: { 'tok-1': [20, 30, 100], 'tok-2': [95, 30, 10] } },
+  { name: 'the other login has its week full', notice: /^Fable limit reached on account 1, and no other Claude account can take over/, usage: { 'tok-1': [20, 30, 100], 'tok-2': [10, 96, 10] } },
+  { name: 'the rotation is off', notice: /^Fable limit reached on account 1, and usage based rotation is disabled/, usage: { 'tok-1': [20, 30, 100], 'tok-2': [10, 30, 10] }, store: { 'rotate-to': 'off' } },
+  { name: 'Claude Code\'s policy refuses switching', notice: /^Fable limit reached on account 1, and Claude Code's policy stops this session from switching accounts/, usage: { 'tok-1': [20, 30, 100], 'tok-2': [10, 30, 10] }, isBlocked: true },
+  { name: 'Connect holds the session on the Claude in Chrome account', notice: /^Fable limit reached on account 2 while Claude in Chrome connects/, usage: { 'tok-1': [20, 30], 'tok-2': [100, 30] }, store: { 'chrome-account': '2' }, isVisiting: true },
+]
+
+for (const { name, notice, usage, store = {}, isBlocked = false, isVisiting = false } of STAY_CASES) {
+  test(`when ${name}, a Fable stop that cannot move tells the terminal why and the way out, once however many stops follow`, async ($, on) => {
+    const w = fresh()
+    w.refuseEnv = isBlocked
+    if (isVisiting) w.chrome = { extensions: [SLOT2] }
+    w.keychain['Claude Code-credentials'] = blob('tok-1')
+    w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+    Object.assign(w.usage, usage)
+    const clock = world(on, w, { ...TWO_LOGINS, ...store })
+    await start($, clock)
+    for (let i = 0; i < 3; i++) {
+      await $.classic.StopFailure(FABLE_STOP)
+      await clock.settle()
+      // A visit lasts until the clock moves on; the other stays are over at the next stop.
+      if (!isVisiting) await clock.advance(36_000)
+      expect(w.notices.filter(t => /Fable/.test(t))).toHaveLength(1)
+    }
+    const told = w.notices.filter(t => /Fable/.test(t))[0] ?? ''
+    expect(told).toMatch(notice)
+    expect(told.endsWith(WAY_OUT)).toBe(true)
+    if (!isVisiting) expect(w.envSets).toEqual([])
+  })
+}
+
+test('with every login\'s Fable week spent, and one of them full besides, a Fable stop that cannot move tells the Fable week\'s words, not the full login\'s', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [20, 30, 100]
+  w.usage['tok-2'] = [95, 30, 100]
+  const clock = world(on, w, TWO_LOGINS)
+  await start($, clock)
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  expect(w.notices.filter(t => /Fable/.test(t))).toHaveLength(1)
+  expect(w.notices.filter(t => /Fable/.test(t))[0]).toMatch(ALL_SPENT_NOTICE)
+})
+
+test('each reason a Fable stop stays for is told once in a session: a new reason is told, the same one never again', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [20, 30, 100]
+  w.usage['tok-2'] = [95, 30, 10]
+  const clock = world(on, w, TWO_LOGINS)
+  await start($, clock)
+  const stop = async () => {
+    await $.classic.StopFailure(FABLE_STOP)
+    await clock.settle()
+  }
+  await stop()
+  await stop()
+  expect(w.notices.filter(t => /Fable/.test(t))).toHaveLength(1)
+  // The person turns the rotation off in the pane: that is a new reason.
+  const pane = await mountPane($)
+  await pane.press({ key: 'rotate-to-off' })
+  await clock.settle()
+  await pane.unmount()
+  await stop()
+  await stop()
+  const told = w.notices.filter(t => /Fable/.test(t))
+  expect(told).toHaveLength(2)
+  expect(told[0]).toMatch(/no other Claude account can take over/)
+  expect(told[1]).toMatch(/usage based rotation is disabled/)
+})
+
+test('a Fable stop that moves, or is held back for a token about to refresh, says nothing of staying', async ($, on) => {
+  const moved = fresh()
+  const clockMoved = world(on, moved, TWO_LOGINS)
+  moved.keychain['Claude Code-credentials'] = blob('tok-1')
+  moved.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  moved.usage['tok-1'] = [20, 30, 100]
+  moved.usage['tok-2'] = [10, 30, 10]
+  await start($, clockMoved)
+  await $.classic.StopFailure(FABLE_STOP)
+  await clockMoved.settle()
+  await clockMoved.advance(36_000)
+  expect(slots(moved)).toEqual([SLOT2])
+  expect(moved.notices.filter(t => /Fable/.test(t))).toEqual([])
+})
+
+test('a Fable stop held back for a token about to refresh says nothing of staying', async ($, on) => {
+  const w = fresh()
+  const clock = await guarded(on, w, {}, [20, 30, 100])
+  await start($, clock)
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  await clock.advance(2 * 60_000)
+  expect(w.envSets).toEqual([])
+  expect(w.notices.filter(t => /Fable/.test(t))).toEqual([])
+})
+
+/** Three logins; a Fable stop on login 1 moves to login 2 (next in the list), and the carry-on is 35 s away. */
+async function threeLogins($: Engine, on: On, w: World): Promise<MockClock> {
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.keychain[await keychainItem(SLOT3)] = blob('tok-3')
+  w.usage['tok-1'] = [20, 30, 100]
+  w.usage['tok-2'] = [10, 30, 10]
+  w.usage['tok-3'] = [10, 30, 10]
+  const three = { accounts: [...TWO_LOGINS.accounts, { id: '3', slot: SLOT3, email: 'three@example.com' }], 'rotate-to': 'order' }
+  const clock = world(on, w, three)
+  await start($, clock)
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  expect(slots(w)).toEqual([SLOT2])
+  return clock
+}
+
+/** What the person or the rotation does in the 35 s before the carry-on: later switches, or nothing. */
+const LATER_SWITCHES: { name: string; keys: string[]; slots: string[]; submitted: number }[] = [
+  { name: 'nothing', keys: [], slots: [SLOT2], submitted: 1 },
+  { name: 'Use now on a third login', keys: ['use-3'], slots: [SLOT2, SLOT3], submitted: 0 },
+  { name: 'Use now back on the login the stop left', keys: ['use-1'], slots: [SLOT2, ''], submitted: 0 },
+  { name: 'Rotate now', keys: ['rotate'], slots: [SLOT2, SLOT3], submitted: 0 },
+  { name: 'Use now on a third login and then back on the one the Fable stop moved to', keys: ['use-3', 'use-2'], slots: [SLOT2, SLOT3, SLOT2], submitted: 0 },
+]
+
+for (const { name, keys, slots: expected, submitted } of LATER_SWITCHES) {
+  test(`${name} between a Fable switch and its carry-on ${submitted === 1 ? 'leaves the carry-on to go out' : 'cancels the carry-on, a later switch having been made'}`, async ($, on) => {
+    const w = fresh()
+    const clock = await threeLogins($, on, w)
+    await clock.advance(10_000)
+    const pane = await mountPane($)
+    for (const key of keys) {
+      await pane.press({ key })
+      await clock.settle()
+    }
+    await pane.unmount()
+    await clock.advance(36_000)
+    expect(slots(w)).toEqual(expected)
+    expect(w.submitted).toHaveLength(submitted)
+    // And it does not come late.
+    await clock.advance(5 * 60_000)
+    expect(w.submitted).toHaveLength(submitted)
+  })
+}

@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import type { RotateTo, View } from '../types'
-import { DEFAULT_FOOTER, availableNow, braille, browsersFrom, chromeNote, continueTextFrom, credentialFrom, credentialsFile, fableMark, fableSpentNotice, footerStyleFrom, healthOf, identityFromProfile, isFableSpent, isFableStop, isNoBrowser, isPolicyRefusal, keepFable, keychainItem, nextReset, pickTarget, pie, readingFromUsage, rotateToFrom, shouldLeave, roomColor, windowPct } from './model'
+import { DEFAULT_FOOTER, availableNow, braille, browsersFrom, chromeNote, continueTextFrom, credentialFrom, credentialsFile, fableMark, fableSpentNotice, fableStay, footerStyleFrom, healthOf, identityFromProfile, isFableSpent, isFableStop, isNoBrowser, isPolicyRefusal, keepFable, keychainItem, nextReset, pickTarget, pie, readingFromUsage, rotateToFrom, shouldLeave, roomColor, windowPct } from './model'
 
 const NOW = Date.parse('2026-10-12T10:00:00Z')
 const LATER = '2026-10-12T12:00:00Z'
@@ -424,4 +424,66 @@ test('the notes about Claude in Chrome say what the mod does now and what to tel
   expect(chromeNote({ ...blocked, chrome: { as: '1', isPaired: false } }, 'no-browser')).toMatch(/If it matches, they restart Chrome, then you try again\./)
   expect(chromeNote({ ...onTwo, chromeAccountId: undefined }, 'unset')).toMatch(/doesn't know which one that is\. Ask the user to press Use for Chrome or Try to connect next to it under Chrome in the Claude accounts panel/)
   for (const kind of ['held', 'connecting', 'no-browser', 'blocked', 'unset'] as const) expect(chromeNote(onTwo, kind)).not.toMatch(/Run \/login|run \/login/)
+})
+
+/** Claude Code's own way out of the Fable limit, which every notice of a stay ends on. */
+const WAY_OUT = 'Run /usage-credits to continue or switch models with /model.'
+
+/** A Fable stop on account 1 with Fable room on account 2: the session moves, so there is nothing to explain. */
+const CAN_MOVE = () => view({ '1': [20, 30, 100], '2': [10, 30, 10] })
+
+/** Each reason a Fable stop can end with the session where it was, and a view, the connect flag and the accounts skipped that stage it. */
+const STAYS: { name: string; reason: string; view: View; isConnecting?: boolean; skip?: string[] }[] = [
+  { name: 'Connect holds the session', reason: 'chrome', view: CAN_MOVE(), isConnecting: true },
+  { name: 'rotation off', reason: 'off', view: { ...CAN_MOVE(), rotateTo: 'off' } },
+  { name: 'Claude Code refuses switching', reason: 'blocked', view: { ...CAN_MOVE(), isSwitchBlocked: true } },
+  { name: 'a switch is still pending', reason: 'pending', view: { ...CAN_MOVE(), pending: { id: '2', from: '1', since: NOW } } },
+  { name: 'every Fable week spent', reason: 'fable-spent', view: view({ '1': [20, 30, 100], '2': [10, 30, 100] }) },
+  { name: 'the other account has its 5-hour window full', reason: 'no-room', view: view({ '1': [20, 30, 100], '2': [95, 30, 10] }) },
+  { name: 'the other account has its week full', reason: 'no-room', view: view({ '1': [20, 30, 100], '2': [10, 96, 10] }) },
+  { name: 'the other account needs a sign-in', reason: 'no-room', view: view({ '1': [20, 30, 100], '2': [10, 30, 10] }, { '2': { kind: 'login-needed', why: 'not signed in yet' } }) },
+  { name: 'the other account was tried and did not take', reason: 'no-room', view: CAN_MOVE(), skip: ['2'] },
+]
+
+test('a Fable stop that did not move gives the reason, one per cause the rotation can stay for', () => {
+  expect(fableStay(CAN_MOVE(), NOW, false, new Set())).toBeUndefined()
+  for (const { name, reason, view: v, isConnecting = false, skip = [] } of STAYS) {
+    expect([name, fableStay(v, NOW, isConnecting, new Set(skip))?.reason]).toEqual([name, reason])
+  }
+})
+
+test('the reasons are told in the order maybeRotate checks them', () => {
+  const all = { ...view({ '1': [20, 30, 100], '2': [95, 30, 100] }), rotateTo: 'off' as const, isSwitchBlocked: true, pending: { id: '2', from: '1', since: NOW } }
+  let v: View = { ...all, rotateTo: 'off' }
+  expect(fableStay(v, NOW, true, new Set())?.reason).toBe('chrome')
+  expect(fableStay(v, NOW, false, new Set())?.reason).toBe('off')
+  v = { ...v, rotateTo: 'room' }
+  expect(fableStay(v, NOW, false, new Set())?.reason).toBe('blocked')
+  v = { ...v, isSwitchBlocked: false }
+  expect(fableStay(v, NOW, false, new Set())?.reason).toBe('pending')
+  v = { ...v, pending: undefined }
+  expect(fableStay(v, NOW, false, new Set())?.reason).toBe('fable-spent')
+  v = { ...v, readings: { ...v.readings, '2': { ...v.readings['2'], fable: { pct: 10, resetsAt: FABLE_END }, at: NOW } } }
+  expect(fableStay(v, NOW, false, new Set())?.reason).toBe('no-room')
+})
+
+test('every reason has its own words, naming the account and ending on Claude Code\'s way out; every Fable week spent keeps its words', () => {
+  const texts = new Map<string, string>()
+  for (const { name, reason, view: v, isConnecting = false, skip = [] } of STAYS) {
+    const stay = fableStay(v, NOW, isConnecting, new Set(skip))
+    expect(stay).toBeDefined()
+    const text = stay?.text ?? ''
+    if (reason === 'fable-spent') {
+      expect([name, text]).toEqual([name, fableSpentNotice(v, NOW)])
+      continue
+    }
+    expect([name, text.startsWith('Fable limit reached on account 1')]).toEqual([name, true])
+    expect([name, text.endsWith(WAY_OUT)]).toEqual([name, true])
+    expect(text.length).toBeLessThan(260)
+    texts.set(reason, text)
+  }
+  // One text per reason, whatever stages it.
+  expect([...texts.keys()].sort()).toEqual(['blocked', 'chrome', 'no-room', 'off', 'pending'])
+  expect(new Set(texts.values()).size).toBe(5)
+  expect(texts.get('pending')).toMatch(/switch to account 2 is still settling/)
 })

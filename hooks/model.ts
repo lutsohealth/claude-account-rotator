@@ -169,6 +169,31 @@ export function fableSpentNotice(view: View, now: number): string | undefined {
   return `Every Claude account has used its Fable week${at === undefined ? '' : `; the next frees up ${untilText(at, now)}`}.`
 }
 
+/** Why a turn that died on the Fable week left the session where it was. */
+export type StayReason = 'chrome' | 'off' | 'blocked' | 'pending' | 'fable-spent' | 'no-room'
+
+/** Claude Code's own way out of the Fable limit. */
+const FABLE_WAY_OUT = 'Run /usage-credits to continue or switch models with /model.'
+
+/**
+ * For a Fable stop the rotation did not act on: why, in the order the rotation
+ * checks (Connect, rotation off, Claude Code's policy, a switch pending), then
+ * no account with Fable room, then no account ready at all, and the words that
+ * say it with the way out. Undefined where the session can move. `skip` holds
+ * the accounts a switch did not take.
+ */
+export function fableStay(view: View, now: number, isConnecting: boolean, skip: ReadonlySet<string>): { reason: StayReason; text: string } | undefined {
+  const stay = (reason: StayReason, why: string) => ({ reason, text: `Fable limit reached on account ${view.activeId}${why} ${FABLE_WAY_OUT}` })
+  if (isConnecting) return stay('chrome', ' while Claude in Chrome connects, so the session stays.')
+  if (view.rotateTo === 'off') return stay('off', ', and usage based rotation is disabled, so the session stays. Pick another Move to in the accounts pane.')
+  if (view.isSwitchBlocked) return stay('blocked', ", and Claude Code's policy stops this session from switching accounts.")
+  if (view.pending !== undefined) return stay('pending', ` while the switch to account ${view.pending.id} is still settling.`)
+  const spent = fableSpentNotice(view, now)
+  if (spent !== undefined) return { reason: 'fable-spent', text: spent }
+  if (pickTarget({ ...view, accounts: view.accounts.filter(a => !skip.has(a.id)) }, now, 'fable') !== undefined) return undefined
+  return stay('no-room', ', and no other Claude account can take over now (5-hour window or week full, a sign-in needed, or a switch there that did not take).')
+}
+
 function windowFrom(value: unknown): UsageWindow | undefined {
   if (typeof value !== 'object' || value === null) return undefined
   const { utilization, resets_at } = value as { utilization?: unknown; resets_at?: unknown }
