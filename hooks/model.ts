@@ -219,6 +219,19 @@ export function keepFable(fresh: Reading, stored: Reading | undefined, now: numb
   return { ...fresh, fable: kept }
 }
 
+/** How long a Fable week runs: a mark with no reset time of its own stands this long. */
+export const FABLE_WEEK_MS = 7 * 24 * 3600_000
+
+/**
+ * The mark a Fable stop leaves on a login: its Fable week spent, until the
+ * reset time the last read gave, else a week from the stop, so that a check
+ * whose usage lists no Fable week cannot end it at once.
+ */
+export function fableMark(read: UsageWindow | undefined, now: number): UsageWindow {
+  const isAhead = read?.resetsAt !== undefined && Date.parse(read.resetsAt) > now
+  return { pct: 100, resetsAt: isAhead ? (read.resetsAt as string) : new Date(now + FABLE_WEEK_MS).toISOString() }
+}
+
 /** The most characters of the line that asks Claude to carry on. */
 const CONTINUE_TEXT_MAX = 500
 

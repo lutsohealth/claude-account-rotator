@@ -23,6 +23,7 @@ import {
   continueTextFrom,
   credentialFrom,
   credentialsFile,
+  fableMark,
   fableSpentNotice,
   fingerprint,
   footerStyleFrom,
@@ -613,10 +614,7 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
       need = 'fable'
       await setView($, v => ({ ...v, isFableStopped: true }))
       // The limit was hit before the usage call shows it: count the Fable week as full.
-      if (!isFableSpent(r, now)) {
-        const resetsAt = r?.fable?.resetsAt
-        await saveReading($, active.id, { ...r, fable: { pct: 100, ...(resetsAt ? { resetsAt } : {}) }, at: now })
-      }
+      if (!isFableSpent(r, now)) await saveReading($, active.id, { ...r, fable: fableMark(r?.fable, now), at: now })
     } else if (!shouldLeave(after, now)) {
       // The limit was hit before the usage call shows it: count the 5-hour window as full.
       const resetsAt = r?.fiveHour?.resetsAt

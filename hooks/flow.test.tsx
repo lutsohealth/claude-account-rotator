@@ -791,7 +791,8 @@ const ONE_LOGIN_STOPS: { name: string; start: [number, number, number?]; atStop:
     start: [20, 30],
     atStop: [20, 30],
     stop: FABLE_STOP,
-    band: /^Every Claude account has used its Fable week\.$/,
+    // The usage gave no reset time, so the mark stands a week from the stop; the band is drawn 36 s after it.
+    band: /^Every Claude account has used its Fable week; the next frees up in 6d 23h\.$/,
   },
 ]
 
@@ -943,6 +944,49 @@ test('the mark a stop left ends at the reset time of the week it marks: a check 
   expect(w.submitted).toHaveLength(2)
 })
 
+/** Two logins whose usage lists no Fable week: a Fable stop on each leaves a mark with no reset time the usage gave. */
+async function markedWithNoRow($: Engine, on: On, w: World, store: Record<string, unknown>): Promise<MockClock> {
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [20, 30]
+  w.usage['tok-2'] = [10, 30]
+  const clock = world(on, w, { ...TWO_LOGINS, ...store })
+  await start($, clock)
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  await clock.advance(36_000)
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  expect(slots(w)).toEqual([SLOT2])
+  expect(w.submitted).toHaveLength(1)
+  await clock.advance(11 * 60_000)
+  return clock
+}
+
+for (const rotateTo of ['reset', 'room', 'order']) {
+  test(`with the rotation going by ${rotateTo}, a Fable mark with no reset time from the usage survives a check that lists no Fable week, and the next stop moves nothing`, async ($, on) => {
+    const w = fresh()
+    const clock = await markedWithNoRow($, on, w, { 'rotate-to': rotateTo })
+    await $.classic.StopFailure(FABLE_STOP)
+    await clock.settle()
+    await clock.advance(36_000)
+    expect(slots(w)).toEqual([SLOT2])
+    expect(w.submitted).toHaveLength(1)
+  })
+}
+
+test('a Fable mark with no reset time from the usage is replaced by a check that lists the Fable week, so the session can move back', async ($, on) => {
+  const w = fresh()
+  const clock = await markedWithNoRow($, on, w, {})
+  w.usage['tok-1'] = [20, 30, 40]
+  await clock.advance(11 * 60_000)
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  await clock.advance(36_000)
+  expect(slots(w)).toEqual([SLOT2, ''])
+  expect(w.submitted).toHaveLength(2)
+})
+
 /** What the terminal is told when a Fable stop finds no account with Fable room. */
 const ALL_SPENT_NOTICE = /^Every Claude account has used its Fable week; the next frees up in 4d \d+h\.$/
 
@@ -967,7 +1011,8 @@ const FABLE_NOTICE_CASES: { name: string; logins: Record<string, [number, number
     logins: { 'tok-1': [20, 30] },
     atStop: { 'tok-1': [20, 30] },
     stop: FABLE_STOP,
-    notice: /^Every Claude account has used its Fable week\.$/,
+    // The usage gave no reset time, so the mark stands a week from the stop.
+    notice: /^Every Claude account has used its Fable week; the next frees up in 7d 0h\.$/,
   },
   {
     name: 'two logins, both weeks spent',

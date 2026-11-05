@@ -1,12 +1,13 @@
 import { expect, test } from 'claude-code/testing'
 
 import type { RotateTo, View } from '../types'
-import { DEFAULT_FOOTER, availableNow, braille, browsersFrom, chromeNote, continueTextFrom, credentialFrom, credentialsFile, fableSpentNotice, footerStyleFrom, healthOf, identityFromProfile, isFableSpent, isFableStop, isNoBrowser, isPolicyRefusal, keepFable, keychainItem, nextReset, pickTarget, pie, readingFromUsage, rotateToFrom, shouldLeave, roomColor, windowPct } from './model'
+import { DEFAULT_FOOTER, availableNow, braille, browsersFrom, chromeNote, continueTextFrom, credentialFrom, credentialsFile, fableMark, fableSpentNotice, footerStyleFrom, healthOf, identityFromProfile, isFableSpent, isFableStop, isNoBrowser, isPolicyRefusal, keepFable, keychainItem, nextReset, pickTarget, pie, readingFromUsage, rotateToFrom, shouldLeave, roomColor, windowPct } from './model'
 
 const NOW = Date.parse('2026-10-12T10:00:00Z')
 const LATER = '2026-10-12T12:00:00Z'
 const WEEK_END = '2026-10-18T03:00:00Z'
 const FABLE_END = '2026-10-17T03:00:00Z'
+const HOUR = 3600_000
 
 /** A login's usage is [5-hour %, week %], with the Fable week's % as a third member where it has one. */
 function view(
@@ -182,6 +183,34 @@ test('a fresh reading keeps the stored Fable week whatever way its body lists no
     const fresh = readingFromUsage(body, NOW)!
     expect([name, keepFable(fresh, stored, NOW).fable]).toEqual([name, stored.fable])
   }
+})
+
+test('a Fable stop\'s mark with no reset time of its own stands a week: a check that lists no Fable week keeps it, and it ends seven days on', () => {
+  const MARK_END = NOW + 7 * 24 * HOUR
+  const mark = fableMark(undefined, NOW)
+  expect(mark).toEqual({ pct: 100, resetsAt: new Date(MARK_END).toISOString() })
+  const stored = { fable: mark, at: NOW }
+  const fresh = readingFromUsage({ five_hour: { utilization: 20, resets_at: LATER } }, NOW + HOUR)!
+  expect(keepFable(fresh, stored, NOW + HOUR).fable).toEqual(mark)
+  expect(keepFable(fresh, stored, MARK_END - 1).fable).toEqual(mark)
+  expect(keepFable(fresh, stored, MARK_END).fable).toBeUndefined()
+  expect(isFableSpent(stored, MARK_END - 1)).toBe(true)
+  expect(isFableSpent(stored, MARK_END)).toBe(false)
+  // A Fable row in a later check replaces it.
+  const read = readingFromUsage({ limits: [fableRow('Fable', 40)] }, NOW + HOUR)!
+  expect(keepFable(read, stored, NOW + HOUR).fable).toEqual({ pct: 40, resetsAt: FABLE_END })
+})
+
+test('a Fable stop\'s mark takes the reset time the last read gave while it lies ahead, else a week from the stop', () => {
+  const weekOn = new Date(NOW + 7 * 24 * HOUR).toISOString()
+  const reads: [string, { pct: number; resetsAt?: string } | undefined, string][] = [
+    ['no read', undefined, weekOn],
+    ['a read with no reset time', { pct: 60 }, weekOn],
+    ['a read whose reset has passed', { pct: 60, resetsAt: new Date(NOW - HOUR).toISOString() }, weekOn],
+    ['a read whose reset is now', { pct: 60, resetsAt: new Date(NOW).toISOString() }, weekOn],
+    ['a read whose reset lies ahead', { pct: 60, resetsAt: FABLE_END }, FABLE_END],
+  ]
+  for (const [name, read, resetsAt] of reads) expect([name, fableMark(read, NOW)]).toEqual([name, { pct: 100, resetsAt }])
 })
 
 test('a fresh reading with its own Fable week replaces the stored one, whatever either says', () => {
