@@ -34,6 +34,8 @@ type World = {
   envSets: { name: string; value?: string }[]
   spawned: { argv: readonly string[]; env?: Record<string, string> }[]
   submitted: string[]
+  /** Whether each line in `submitted` was sent as the person's own words (`asUser`), not under the mod's name. */
+  asUser: boolean[]
   /** What the session's last response reported, as `$.session.usage()` answers it. */
   limits: SessionRateLimit[]
   /** Ids of the panes open now. */
@@ -169,6 +171,7 @@ function world(on: On, w: World, store: Record<string, unknown>): MockClock {
   })
   on('prompt.submit', (_$, e) => {
     w.submitted.push(e.text)
+    w.asUser.push(e.origin.kind === 'plugin' && e.origin.asUser === true)
     return { text: e.text }
   })
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
@@ -212,6 +215,7 @@ const fresh = (system: World['system'] = 'macOS'): World => ({
   envSets: [],
   spawned: [],
   submitted: [],
+  asUser: [],
   limits: [],
   panes: [],
   toasts: [],
@@ -638,6 +642,170 @@ test('a rate-limit stop whose fresh usage read shows the Fable week spent is a F
   expect(w.toasts.filter(t => /of its Fable week left/.test(t))).toHaveLength(1)
 })
 
+/** Whether the band above the prompt says anything of the Fable week; the mount refuses where no band is drawn. */
+async function hasFableBand($: Engine): Promise<boolean> {
+  try {
+    const band = await mountBand($)
+    const found = (await band.find({ text: /Fable week/ })) !== undefined
+    await band.unmount()
+    return found
+  } catch (error) {
+    if (/no implementation for ui\.render/.test(String(error))) return false
+    throw error
+  }
+}
+
+/** What Claude says when a turn dies on a limit that is not the Fable week. */
+const PLAIN_STOPS = ["You've hit your session limit · resets 3pm", "You've hit your weekly limit · resets Oct 18", 'Claude usage limit reached.']
+
+for (const message of PLAIN_STOPS) {
+  test(`a plain usage-limit stop ("${message}") on a login whose Fable week is spent marks the 5-hour window and moves to any login with room, with no Fable band`, async ($, on) => {
+    const w = fresh()
+    w.keychain['Claude Code-credentials'] = blob('tok-1')
+    w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+    w.usage['tok-1'] = [20, 30, 100]
+    w.usage['tok-2'] = [10, 30, 100]
+    const clock = world(on, w, TWO_LOGINS)
+    await start($, clock)
+    await $.classic.StopFailure({ error: 'rate_limit', last_assistant_message: message })
+    await clock.settle()
+    expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
+    expect(w.toasts.filter(t => /^Switched to Claude account 2.*: account 1 has 0% of its 5-hour window left\.$/.test(t))).toHaveLength(1)
+    expect(w.toasts.filter(t => /Fable/.test(t))).toEqual([])
+    expect(await hasFableBand($)).toBe(false)
+    await clock.advance(36_000)
+    expect(w.submitted).toHaveLength(1)
+    expect(w.asUser).toEqual([false])
+  })
+}
+
+/** The stops of a turn that died on a limit, with no words that name which: no message, or an empty one. */
+const WORDLESS_STOPS = [{ error: 'rate_limit' }, { error: 'rate_limit', last_assistant_message: '' }]
+
+for (const stop of WORDLESS_STOPS) {
+  test(`a rate-limit stop with ${'last_assistant_message' in stop ? 'an empty' : 'no'} message is a Fable stop when its usage read shows the Fable week spent, and a plain one when it does not`, async ($, on) => {
+    const w = fresh()
+    w.keychain['Claude Code-credentials'] = blob('tok-1')
+    w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+    w.usage['tok-1'] = [20, 30, 60]
+    w.usage['tok-2'] = [10, 30, 100]
+    const clock = world(on, w, TWO_LOGINS)
+    await start($, clock)
+    w.usage['tok-1'] = [20, 30, 100]
+    await $.classic.StopFailure(stop)
+    await clock.settle()
+    // Login 2's Fable week is spent too: a Fable stop has nowhere to go.
+    expect(w.envSets).toEqual([])
+    expect(await hasFableBand($)).toBe(true)
+    // The read shows the 5-hour window spent instead: a plain stop, which moves.
+    w.usage['tok-1'] = [100, 30, 60]
+    await $.classic.StopFailure(stop)
+    await clock.settle()
+    expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
+  })
+}
+
+/**
+ * Three logins, login 1 with its Fable week spent, login 2 not read for it and
+ * ahead on every other count (the same 5-hour reset as login 3, more room,
+ * first in the list), login 3 read with Fable room.
+ */
+async function readAndUnread(w: World, rotateTo: string): Promise<{ accounts: unknown[]; 'rotate-to': string }> {
+  const SLOT3 = `${HOME}/.claude/accounts/3`
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.keychain[await keychainItem(SLOT3)] = blob('tok-3')
+  w.usage['tok-1'] = [20, 30, 100]
+  w.usage['tok-2'] = [30, 20]
+  w.usage['tok-3'] = [40, 50, 40]
+  return { accounts: [...TWO_LOGINS.accounts, { id: '3', slot: SLOT3, email: 'three@example.com' }], 'rotate-to': rotateTo }
+}
+
+for (const rotateTo of ['reset', 'room', 'order']) {
+  test(`with the rotation going by ${rotateTo}, a Fable stop moves to the login with a Fable reading below 95% over the one with none`, async ($, on) => {
+    const w = fresh()
+    const store = await readAndUnread(w, rotateTo)
+    const clock = world(on, w, store)
+    await start($, clock)
+    await $.classic.StopFailure(FABLE_STOP)
+    await clock.settle()
+    expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: `${HOME}/.claude/accounts/3` }])
+  })
+}
+
+test('with no login read for the Fable week a Fable stop takes one, the stop there moves on, and once all are marked spent nothing moves', async ($, on) => {
+  const w = fresh()
+  const SLOT3 = `${HOME}/.claude/accounts/3`
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.keychain[await keychainItem(SLOT3)] = blob('tok-3')
+  w.usage['tok-1'] = [20, 30]
+  w.usage['tok-2'] = [20, 30]
+  w.usage['tok-3'] = [20, 30]
+  const three = { accounts: [...TWO_LOGINS.accounts, { id: '3', slot: SLOT3, email: 'three@example.com' }] }
+  const clock = world(on, w, three)
+  await start($, clock)
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  await clock.advance(36_000)
+  expect(slots(w)).toHaveLength(1)
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  await clock.advance(36_000)
+  // Logins 2 and 3, each once; login 1 was marked at the first stop.
+  expect([...slots(w)].sort()).toEqual([SLOT2, SLOT3])
+  expect(w.submitted).toHaveLength(2)
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  await clock.advance(36_000)
+  expect([...slots(w)].sort()).toEqual([SLOT2, SLOT3])
+  expect(w.submitted).toHaveLength(2)
+})
+
+/** One login only: the usage its read answers at the session's start and at the stop, and the stop. */
+const ONE_LOGIN_STOPS: { name: string; start: [number, number, number?]; atStop: [number, number, number?]; stop: { error: string; last_assistant_message?: string }; band: RegExp }[] = [
+  {
+    name: 'a Fable stop on a read that shows the week spent',
+    start: [20, 30, 100],
+    atStop: [20, 30, 100],
+    stop: FABLE_STOP,
+    band: /^Every Claude account has used its Fable week; the next frees up in 4d \d+h\.$/,
+  },
+  {
+    name: 'a stop that says nothing, on a read that shows the week spent by then',
+    start: [20, 30, 60],
+    atStop: [20, 30, 100],
+    stop: { error: 'rate_limit' },
+    band: /^Every Claude account has used its Fable week; the next frees up in 4d \d+h\.$/,
+  },
+  {
+    name: 'a Fable stop on a read that lists no Fable week',
+    start: [20, 30],
+    atStop: [20, 30],
+    stop: FABLE_STOP,
+    band: /^Every Claude account has used its Fable week\.$/,
+  },
+]
+
+for (const { name, start: at, atStop, stop, band } of ONE_LOGIN_STOPS) {
+  test(`with one login, ${name} switches nothing and submits nothing, and the band says the Fable week is used`, async ($, on) => {
+    const w = fresh()
+    w.keychain['Claude Code-credentials'] = blob('tok-1')
+    w.usage['tok-1'] = at
+    const clock = world(on, w, { accounts: [TWO_LOGINS.accounts[0]] })
+    await start($, clock)
+    w.usage['tok-1'] = atStop
+    await $.classic.StopFailure(stop)
+    await clock.settle()
+    await clock.advance(36_000)
+    expect(w.envSets).toEqual([])
+    expect(w.submitted).toEqual([])
+    const shown = await mountBand($)
+    expect(await shown.find({ text: band })).toBeDefined()
+    await shown.unmount()
+  })
+}
+
 test('with every login\'s Fable week spent a Fable stop switches nothing and submits nothing, repeated stops included, and the band says when the next one frees up', async ($, on) => {
   const w = fresh()
   w.keychain['Claude Code-credentials'] = blob('tok-1')
@@ -705,34 +873,89 @@ test('a response keeps the Fable week the last check read, which a response neve
   await band.unmount()
 })
 
-test('the line sent to carry on is the one kept in the store under continue-text, else the mod\'s own', async ($, on) => {
-  const w = fresh()
-  w.keychain['Claude Code-credentials'] = blob('tok-1')
-  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
-  w.usage['tok-1'] = [60, 40]
-  w.usage['tok-2'] = [10, 30]
-  const clock = world(on, w, { ...TWO_LOGINS, 'continue-text': '  Go on with the task.  ' })
-  await start($, clock)
-  w.usage['tok-1'] = [100, 41]
-  await $.classic.StopFailure({ error: 'rate_limit' })
-  await clock.settle()
-  await clock.advance(36_000)
-  expect(w.submitted).toEqual(['Go on with the task.'])
-})
-
-test('a Fable stop carries on with the stored line too', async ($, on) => {
+/** A Fable stop on login 1, which login 2 answers with Fable room; the store as given. */
+async function fableSwitch($: Engine, on: On, store: Record<string, unknown>): Promise<World> {
   const w = fresh()
   w.keychain['Claude Code-credentials'] = blob('tok-1')
   w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
   w.usage['tok-1'] = [20, 30, 100]
   w.usage['tok-2'] = [10, 30, 10]
-  const clock = world(on, w, { ...TWO_LOGINS, 'continue-text': 'Go on on Fable-free ground.' })
+  const clock = world(on, w, { ...TWO_LOGINS, ...store })
   await start($, clock)
   await $.classic.StopFailure(FABLE_STOP)
   await clock.settle()
   await clock.advance(36_000)
+  return w
+}
+
+test('after a Fable switch the line sent to carry on is the one kept in the store under fable-continue-text, as the person\'s own words', async ($, on) => {
+  const w = await fableSwitch($, on, { 'fable-continue-text': '  Go on on Fable-free ground.  ' })
   expect(w.submitted).toEqual(['Go on on Fable-free ground.'])
+  expect(w.asUser).toEqual([true])
 })
+
+test('after a Fable switch with no line kept, the mod\'s own line is sent under its name', async ($, on) => {
+  const w = await fableSwitch($, on, {})
+  expect(w.submitted).toHaveLength(1)
+  expect(w.submitted[0]).toMatch(/Continue where you left off/)
+  expect(w.asUser).toEqual([false])
+})
+
+/** Switches that are not for the Fable week, each with the stored Fable line set: they carry on with the mod's own line. */
+const OTHER_SWITCHES: { name: string; run: ($: Engine, on: On, w: World) => Promise<void> }[] = [
+  {
+    name: 'a plain usage-limit stop',
+    run: async ($, on, w) => {
+      w.keychain['Claude Code-credentials'] = blob('tok-1')
+      w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+      w.usage['tok-1'] = [60, 40]
+      w.usage['tok-2'] = [10, 30]
+      const clock = world(on, w, { ...TWO_LOGINS, 'fable-continue-text': 'Go on on Fable-free ground.' })
+      await start($, clock)
+      w.usage['tok-1'] = [100, 41]
+      await $.classic.StopFailure({ error: 'rate_limit', last_assistant_message: "You've hit your session limit" })
+      await clock.settle()
+      await clock.advance(36_000)
+    },
+  },
+  {
+    name: 'a rejected sign-in',
+    run: async ($, on, w) => {
+      w.keychain['Claude Code-credentials'] = blob('tok-1')
+      w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+      w.usage['tok-1'] = [60, 40]
+      w.usage['tok-2'] = [10, 30]
+      const clock = world(on, w, { ...TWO_LOGINS, 'fable-continue-text': 'Go on on Fable-free ground.' })
+      await start($, clock)
+      await $.classic.StopFailure({ error: 'authentication_failed' })
+      await clock.settle()
+      await clock.advance(36_000)
+    },
+  },
+  {
+    name: 'a usage-limit stop while the session visits the Claude in Chrome account',
+    run: async ($, on, w) => {
+      w.chrome = { extensions: [SLOT2] }
+      await spentTwo(w)
+      const clock = world(on, w, { ...TWO_LOGINS, 'chrome-account': '2', 'fable-continue-text': 'Go on on Fable-free ground.' })
+      await start($, clock)
+      await $.classic.StopFailure({ error: 'rate_limit' })
+      await clock.settle()
+      await clock.advance(72_000)
+    },
+  },
+]
+
+for (const { name, run } of OTHER_SWITCHES) {
+  test(`${name} carries on with the mod's own line, not the stored Fable one, under the mod's name`, async ($, on) => {
+    const w = fresh()
+    await run($, on, w)
+    expect(w.envSets.length).toBeGreaterThan(0)
+    expect(w.submitted).toHaveLength(1)
+    expect(w.submitted[0]).toMatch(/Continue where you left off/)
+    expect(w.asUser).toEqual([false])
+  })
+}
 
 test('a switch is confirmed once a response reports the new login usage, and an idle session is not told it failed', async ($, on) => {
   const w = fresh()

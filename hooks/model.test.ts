@@ -180,6 +180,31 @@ test('moving for the Fable week skips a login whose Fable week is spent, takes o
   expect(pickTarget(view({ '1': [20, 30, 100], '2': [10, 30, 99] }), NOW, 'fable')).toBeUndefined()
 })
 
+test('moving for the Fable week takes a login with a Fable reading below 95% over one with none, whatever the rotation picks by', () => {
+  const rotations: RotateTo[] = ['reset', 'room', 'order', 'off']
+  for (const rotateTo of rotations) {
+    // Login 2 is unread and has more of everything; login 3 is read, with less.
+    const v = view({ '1': [20, 30, 100], '2': [30, 20], '3': [60, 60, 94] }, {}, rotateTo)
+    expect([rotateTo, pickTarget(v, NOW, 'fable')?.id]).toEqual([rotateTo, '3'])
+    // Without the need, the unread one still ranks as it did.
+    expect([rotateTo, pickTarget(v, NOW)?.id]).toEqual([rotateTo, '2'])
+  }
+})
+
+test('moving for the Fable week takes a login with no Fable reading only when no read login has room', () => {
+  const rotations: RotateTo[] = ['reset', 'room', 'order', 'off']
+  for (const rotateTo of rotations) {
+    const v = view({ '1': [20, 30, 100], '2': [0, 0], '3': [60, 60, 95] }, {}, rotateTo)
+    expect([rotateTo, pickTarget(v, NOW, 'fable')?.id]).toEqual([rotateTo, '2'])
+    // Unread logins only: one is taken, and none is left once all are marked spent.
+    const unread = view({ '1': [20, 30, 100], '2': [0, 0], '3': [0, 0] }, {}, rotateTo)
+    expect(pickTarget(unread, NOW, 'fable')).toBeDefined()
+    unread.readings['2'] = { ...unread.readings['2'], fable: { pct: 100 }, at: NOW }
+    unread.readings['3'] = { ...unread.readings['3'], fable: { pct: 100 }, at: NOW }
+    expect([rotateTo, pickTarget(unread, NOW, 'fable')]).toEqual([rotateTo, undefined])
+  }
+})
+
 test('the next reset counts the Fable week, which alone can be what is spent', () => {
   const v = {
     ...view({ '1': [0, 0], '2': [0, 0] }),

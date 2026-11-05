@@ -88,8 +88,8 @@ export type View = {
   footer: FooterStyle
   /** Which login the rotation moves to, picked in the pane and kept across sessions. */
   rotateTo: RotateTo
-  /** The line that asks Claude to carry on after a switch, kept across sessions; the mod's own where none is kept. */
-  continueText?: string
+  /** The line that asks Claude to carry on after a switch for the Fable week, kept across sessions; the mod's own where none is kept. */
+  fableContinueText?: string
   /** This session only: a turn died on the Fable week, so the band says when it frees up once every account has used it. */
   isFableStopped?: boolean
   /** This session only: Claude Code's security default refuses switching, as on a Team or Enterprise account. */

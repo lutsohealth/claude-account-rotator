@@ -108,18 +108,22 @@ function fiveHourReset(r: Reading | undefined, now: number): number {
  * whose 5-hour window resets soonest, so room about to refill is used first,
  * the most room breaking ties; or the next in the list after the one in use.
  * With the rotation off, Rotate now takes the one with the most room.
- * For the Fable week (`need`), one whose Fable week is spent is not ready, and
- * the most room means the most Fable room, then the most 5-hour room.
+ * For the Fable week (`need`), one whose Fable week is spent is not ready, one
+ * with a Fable reading comes before any with none, and the most room means the
+ * most Fable room, then the most 5-hour room.
  */
 export function pickTarget(view: View, now: number, need?: Need): Account | undefined {
   const isFable = need === 'fable'
-  const ready = view.accounts.filter(
+  const open = view.accounts.filter(
     a =>
       a.id !== view.activeId &&
       view.health[a.id]?.kind === 'ok' &&
       !isSpent(view.readings[a.id], now) &&
       !(isFable && isFableSpent(view.readings[a.id], now)),
   )
+  // A login never read for the Fable week may have none: it is taken only when no read one has room.
+  const read = open.filter(a => view.readings[a.id]?.fable !== undefined)
+  const ready = isFable && read.length > 0 ? read : open
   const available = (a: Account) => availableNow(view.readings[a.id], now) ?? 100
   const fableRoom = (a: Account) => 100 - (windowPct(view.readings[a.id]?.fable, now) ?? 0)
   const byRoom = (a: Account, b: Account) => (isFable && fableRoom(a) !== fableRoom(b) ? fableRoom(b) - fableRoom(a) : available(b) - available(a))
@@ -196,7 +200,7 @@ export function readingFromUsage(body: unknown, now: number): Reading | undefine
 /** The most characters of the line that asks Claude to carry on. */
 const CONTINUE_TEXT_MAX = 500
 
-/** The line that asks Claude to carry on, as stored: text of at most 500 characters, trimmed; anything else is ignored. */
+/** The line that asks Claude to carry on after a Fable switch, as stored: text of at most 500 characters, trimmed; anything else is ignored. */
 export function continueTextFrom(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined
   const text = value.trim()

@@ -166,7 +166,7 @@ async function mergeStore($: Host): Promise<void> {
   }
   const footer = footerStyleFrom(await $.store.get('footer'))
   const rotateTo = rotateToFrom(await $.store.get('rotate-to'))
-  const continueText = continueTextFrom(await $.store.get('continue-text'))
+  const fableContinueText = continueTextFrom(await $.store.get('fable-continue-text'))
   const chrome = await $.store.get('chrome-account')
   const chromeAccountId = typeof chrome === 'string' && accounts.some(a => a.id === chrome) ? chrome : undefined
   const seen = await $.store.get('chrome-accounts')
@@ -186,7 +186,7 @@ async function mergeStore($: Host): Promise<void> {
       const holder = holders[a.id] ?? v.holders[a.id]
       if (holder !== undefined) nextHolders[a.id] = holder
     }
-    return { ...v, accounts, readings: nextReadings, health: nextHealth, holders: nextHolders, footer, rotateTo, continueText, chromeAccountId, chromeAccountIds }
+    return { ...v, accounts, readings: nextReadings, health: nextHealth, holders: nextHolders, footer, rotateTo, fableContinueText, chromeAccountId, chromeAccountIds }
   })
 }
 
@@ -561,9 +561,14 @@ async function onMeasure($: Host, limits: readonly SessionRateLimit[]): Promise<
   await maybeRotate($)
 }
 
-/** The line that asks Claude to carry on after a switch: the stored one, else the mod's own. */
-async function carryOnText($: Host): Promise<string> {
-  return (await getView($)).continueText ?? CONTINUE
+/**
+ * Asks Claude to carry on after a switch. After a switch for the Fable week the
+ * line kept in the store goes as the person's own words; every other switch,
+ * and a Fable one with no line kept, sends the mod's own line under its name.
+ */
+async function carryOn($: Host, need?: Need): Promise<void> {
+  const kept = need === 'fable' ? (await getView($)).fableContinueText : undefined
+  await $.prompt.submit(kept === undefined ? { text: CONTINUE } : { text: kept, asUser: true })
 }
 
 /**
@@ -587,7 +592,10 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
     const now = await $.clock.now()
     const after = await getView($)
     const r = after.readings[active.id]
-    if (isFableSpent(r, now) || isFableStop(stop.last_assistant_message)) {
+    // Claude's own words tell the Fable week from any other limit; the usage read decides only where there are none.
+    const said = stop.last_assistant_message
+    const isFable = said === undefined || said === '' ? isFableSpent(r, now) : isFableStop(said)
+    if (isFable) {
       need = 'fable'
       await setView($, v => ({ ...v, isFableStopped: true }))
       // The limit was hit before the usage call shows it: count the Fable week as full.
@@ -603,8 +611,7 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
   }
   await setView($, v => ({ ...v, pending: undefined }))
   if (await maybeRotate($, need)) {
-    const text = await carryOnText($)
-    $.clock.after(SETTLE_MS, () => void $.prompt.submit({ text }))
+    $.clock.after(SETTLE_MS, () => void carryOn($, need))
   } else if (isConnectingChrome) isCutByVisit = true
 }
 
@@ -732,7 +739,7 @@ function connectChrome($: Host, isQuiet = false, tryId?: string): Promise<Chrome
     }
     const isMoved = (await maybeRotate($)) || done?.isVisit === true
     const isConnected = done?.answer === 'paired' && isChromeAwaited
-    const text = isConnected && done !== undefined ? `Claude in Chrome is connected as Claude account ${label(done.target)}. Continue where you left off.` : isCutByVisit ? await carryOnText($) : undefined
+    const text = isConnected && done !== undefined ? `Claude in Chrome is connected as Claude account ${label(done.target)}. Continue where you left off.` : isCutByVisit ? CONTINUE : undefined
     if (isConnected) isChromeAwaited = false
     isCutByVisit = false
     if (text !== undefined) {
