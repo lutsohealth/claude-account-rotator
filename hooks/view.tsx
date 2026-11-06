@@ -9,6 +9,7 @@ import {
   availableNow,
   blockedAdvice,
   canConnectChrome,
+  fableSpentNotice,
   glyph,
   isOnNormalLogin,
   isSeatPlan,
@@ -513,6 +514,9 @@ export function Band(ui: Ui, view: View, now: number, act: Actions) {
       </Text>
     )
   }
+  // Only a session that hit the Fable week says so: Claude with another model works on these accounts.
+  const fableSpent = view.isFableStopped ? fableSpentNotice(view, now) : undefined
+  if (fableSpent !== undefined) return <Text color="warning">{fableSpent}</Text>
   return undefined
 }
 

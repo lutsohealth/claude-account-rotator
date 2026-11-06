@@ -73,8 +73,26 @@ export function isSpent(r: Reading | undefined, now: number): boolean {
   )
 }
 
-export function shouldLeave(view: View, now: number): boolean {
-  return view.health[view.activeId]?.kind === 'login-needed' || isSpent(view.readings[view.activeId], now)
+/** Whether a login's Fable week is as full as the week is when the rotation leaves it. */
+export function isFableSpent(r: Reading | undefined, now: number): boolean {
+  return (windowPct(r?.fable, now) ?? 0) >= LEAVE_SEVEN_DAY
+}
+
+/**
+ * What a move is for, when the 5-hour window and the week are not the reason:
+ * the Fable week. A session leaves a login for it only after a turn died on it,
+ * so a session that never uses Fable stays where it is.
+ */
+export type Need = 'fable'
+
+/** Whether the last message of a turn that died on a limit says the limit was the Fable week: the fallback when the usage read does not show it. */
+export function isFableStop(text: string | undefined): boolean {
+  return /reached your Fable limit/.test(text ?? '')
+}
+
+export function shouldLeave(view: View, now: number, need?: Need): boolean {
+  const r = view.readings[view.activeId]
+  return view.health[view.activeId]?.kind === 'login-needed' || isSpent(r, now) || (need === 'fable' && isFableSpent(r, now))
 }
 
 /** When a login's 5-hour window resets, epoch ms; Infinity while none is running. */
@@ -90,13 +108,25 @@ function fiveHourReset(r: Reading | undefined, now: number): number {
  * whose 5-hour window resets soonest, so room about to refill is used first,
  * the most room breaking ties; or the next in the list after the one in use.
  * With the rotation off, Rotate now takes the one with the most room.
+ * For the Fable week (`need`), one whose Fable week is spent is not ready, one
+ * with a Fable reading comes before any with none, and the most room means the
+ * most Fable room, then the most 5-hour room.
  */
-export function pickTarget(view: View, now: number): Account | undefined {
-  const ready = view.accounts.filter(
-    a => a.id !== view.activeId && view.health[a.id]?.kind === 'ok' && !isSpent(view.readings[a.id], now),
+export function pickTarget(view: View, now: number, need?: Need): Account | undefined {
+  const isFable = need === 'fable'
+  const open = view.accounts.filter(
+    a =>
+      a.id !== view.activeId &&
+      view.health[a.id]?.kind === 'ok' &&
+      !isSpent(view.readings[a.id], now) &&
+      !(isFable && isFableSpent(view.readings[a.id], now)),
   )
+  // A login never read for the Fable week may have none: it is taken only when no read one has room.
+  const read = open.filter(a => view.readings[a.id]?.fable !== undefined)
+  const ready = isFable && read.length > 0 ? read : open
   const available = (a: Account) => availableNow(view.readings[a.id], now) ?? 100
-  const byRoom = (a: Account, b: Account) => available(b) - available(a)
+  const fableRoom = (a: Account) => 100 - (windowPct(view.readings[a.id]?.fable, now) ?? 0)
+  const byRoom = (a: Account, b: Account) => (isFable && fableRoom(a) !== fableRoom(b) ? fableRoom(b) - fableRoom(a) : available(b) - available(a))
   switch (view.rotateTo) {
     case 'room':
     case 'off':
@@ -113,15 +143,55 @@ export function pickTarget(view: View, now: number): Account | undefined {
   }
 }
 
-/** When the soonest spent window among all logins resets, epoch ms. */
-export function nextReset(view: View, now: number): number | undefined {
+/**
+ * When the soonest spent window among all logins resets, epoch ms; with
+ * `need`, only the Fable week counts.
+ */
+export function nextReset(view: View, now: number, need?: Need): number | undefined {
   const times = view.accounts.flatMap(a => {
     const r = view.readings[a.id]
-    return [r?.fiveHour, r?.sevenDay]
+    // A Fable week holds nothing back until it is spent.
+    const fable = isFableSpent(r, now) ? r?.fable : undefined
+    return (need === 'fable' ? [fable] : [r?.fiveHour, r?.sevenDay, fable])
       .filter((w): w is UsageWindow => w !== undefined && w.resetsAt !== undefined && (windowPct(w, now) ?? 0) > 0)
       .map(w => Date.parse(w.resetsAt ?? ''))
   })
   return times.length === 0 ? undefined : Math.min(...times)
+}
+
+/**
+ * What to say when every login's Fable week is spent, the soonest reset
+ * included where one is known; undefined while any login has Fable room.
+ */
+export function fableSpentNotice(view: View, now: number): string | undefined {
+  if (view.accounts.length === 0 || !view.accounts.every(a => isFableSpent(view.readings[a.id], now))) return undefined
+  const at = nextReset(view, now, 'fable')
+  return `Every Claude account has used its Fable week${at === undefined ? '' : `; the next frees up ${untilText(at, now)}`}.`
+}
+
+/** Why a turn that died on the Fable week left the session where it was. */
+export type StayReason = 'chrome' | 'off' | 'blocked' | 'pending' | 'fable-spent' | 'no-room'
+
+/** Claude Code's own way out of the Fable limit. */
+const FABLE_WAY_OUT = 'Run /usage-credits to continue or switch models with /model.'
+
+/**
+ * For a Fable stop the rotation did not act on: why, in the order the rotation
+ * checks (Connect, rotation off, Claude Code's policy, a switch pending), then
+ * no account with Fable room, then no account ready at all, and the words that
+ * say it with the way out. Undefined where the session can move. `skip` holds
+ * the accounts a switch did not take.
+ */
+export function fableStay(view: View, now: number, isConnecting: boolean, skip: ReadonlySet<string>): { reason: StayReason; text: string } | undefined {
+  const stay = (reason: StayReason, why: string) => ({ reason, text: `Fable limit reached on account ${view.activeId}${why} ${FABLE_WAY_OUT}` })
+  if (isConnecting) return stay('chrome', ' while Claude in Chrome connects, so the session stays.')
+  if (view.rotateTo === 'off') return stay('off', ', and usage based rotation is disabled, so the session stays. Pick another Move to in the accounts pane.')
+  if (view.isSwitchBlocked) return stay('blocked', ", and Claude Code's policy stops this session from switching accounts.")
+  if (view.pending !== undefined) return stay('pending', ` while the switch to account ${view.pending.id} is still settling.`)
+  const spent = fableSpentNotice(view, now)
+  if (spent !== undefined) return { reason: 'fable-spent', text: spent }
+  if (pickTarget({ ...view, accounts: view.accounts.filter(a => !skip.has(a.id)) }, now, 'fable') !== undefined) return undefined
+  return stay('no-room', ', and no other Claude account can take over now (5-hour window or week full, a sign-in needed, or a switch there that did not take).')
 }
 
 function windowFrom(value: unknown): UsageWindow | undefined {
@@ -131,14 +201,70 @@ function windowFrom(value: unknown): UsageWindow | undefined {
   return { pct: utilization, ...(typeof resets_at === 'string' ? { resetsAt: resets_at } : {}) }
 }
 
+/** The model names read as Fable: "Fable", "Fable 5", "Fable 5.1". */
+const FABLE_NAME = /^fable(\s|$)/i
+
+/**
+ * The Fable week from the usage body's `limits` rows: the row of a week scoped
+ * to a model named Fable, its percent used 0-100. A row scoped to a surface or
+ * to another model is not it.
+ */
+function fableFrom(limits: unknown): UsageWindow | undefined {
+  if (!Array.isArray(limits)) return undefined
+  for (const row of limits as unknown[]) {
+    if (typeof row !== 'object' || row === null) continue
+    const { kind, scope, percent, resets_at } = row as { kind?: unknown; scope?: { model?: { display_name?: unknown } | null } | null; percent?: unknown; resets_at?: unknown }
+    const name = scope?.model?.display_name
+    if (kind !== 'weekly_scoped' || typeof name !== 'string' || !FABLE_NAME.test(name) || typeof percent !== 'number') continue
+    return { pct: percent, ...(typeof resets_at === 'string' ? { resetsAt: resets_at } : {}) }
+  }
+  return undefined
+}
+
 /** A reading from the body of GET /api/oauth/usage. */
 export function readingFromUsage(body: unknown, now: number): Reading | undefined {
   if (typeof body !== 'object' || body === null) return undefined
-  const { five_hour, seven_day } = body as { five_hour?: unknown; seven_day?: unknown }
+  const { five_hour, seven_day, limits } = body as { five_hour?: unknown; seven_day?: unknown; limits?: unknown }
   const fiveHour = windowFrom(five_hour)
   const sevenDay = windowFrom(seven_day)
-  if (fiveHour === undefined && sevenDay === undefined) return undefined
-  return { ...(fiveHour ? { fiveHour } : {}), ...(sevenDay ? { sevenDay } : {}), at: now }
+  const fable = fableFrom(limits)
+  if (fiveHour === undefined && sevenDay === undefined && fable === undefined) return undefined
+  return { ...(fiveHour ? { fiveHour } : {}), ...(sevenDay ? { sevenDay } : {}), ...(fable ? { fable } : {}), at: now }
+}
+
+/**
+ * A fresh reading with the Fable week the stored one holds, where the fresh
+ * body lists none: a body without the row says nothing of the week, and the
+ * mark a stop left stands until its reset time passes. A week with no reset
+ * time to go by is not kept. A row in the body replaces it.
+ */
+export function keepFable(fresh: Reading, stored: Reading | undefined, now: number): Reading {
+  const kept = stored?.fable
+  if (fresh.fable !== undefined || kept?.resetsAt === undefined || Date.parse(kept.resetsAt) <= now) return fresh
+  return { ...fresh, fable: kept }
+}
+
+/** How long a Fable week runs: a mark with no reset time of its own stands this long. */
+export const FABLE_WEEK_MS = 7 * 24 * 3600_000
+
+/**
+ * The mark a Fable stop leaves on a login: its Fable week spent, until the
+ * reset time the last read gave, else a week from the stop, so that a check
+ * whose usage lists no Fable week cannot end it at once.
+ */
+export function fableMark(read: UsageWindow | undefined, now: number): UsageWindow {
+  const isAhead = read?.resetsAt !== undefined && Date.parse(read.resetsAt) > now
+  return { pct: 100, resetsAt: isAhead ? (read.resetsAt as string) : new Date(now + FABLE_WEEK_MS).toISOString() }
+}
+
+/** The most characters of the line that asks Claude to carry on. */
+const CONTINUE_TEXT_MAX = 500
+
+/** The line that asks Claude to carry on after a Fable switch, as stored: text of at most 500 characters, trimmed; anything else is ignored. */
+export function continueTextFrom(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined
+  const text = value.trim()
+  return text.length > 0 && text.length <= CONTINUE_TEXT_MAX ? text : undefined
 }
 
 /** A reading from the rate-limit windows the last response reported. */

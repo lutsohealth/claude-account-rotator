@@ -1,8 +1,11 @@
 /** One usage window of a login: percent used, and when it resets (ISO 8601). */
 export type UsageWindow = { pct: number; resetsAt?: string }
 
-/** A login's usage as last read, `at` in epoch milliseconds. */
-export type Reading = { fiveHour?: UsageWindow; sevenDay?: UsageWindow; at: number }
+/**
+ * A login's usage as last read, `at` in epoch milliseconds. `fable` is the
+ * Fable week, which only the usage endpoint lists: a response never reports it.
+ */
+export type Reading = { fiveHour?: UsageWindow; sevenDay?: UsageWindow; fable?: UsageWindow; at: number }
 
 /** Whether a login can serve requests, or why not. */
 export type Health =
@@ -85,6 +88,10 @@ export type View = {
   footer: FooterStyle
   /** Which login the rotation moves to, picked in the pane and kept across sessions. */
   rotateTo: RotateTo
+  /** The line that asks Claude to carry on after a switch for the Fable week, kept across sessions; the mod's own where none is kept. */
+  fableContinueText?: string
+  /** This session only: a turn died on the Fable week, so the band says when it frees up once every account has used it. */
+  isFableStopped?: boolean
   /** This session only: Claude Code's security default refuses switching, as on a Team or Enterprise account. */
   isSwitchBlocked?: boolean
   /**

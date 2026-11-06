@@ -1,14 +1,17 @@
 import { expect, test } from 'claude-code/testing'
 
 import type { RotateTo, View } from '../types'
-import { DEFAULT_FOOTER, availableNow, braille, browsersFrom, chromeNote, credentialFrom, credentialsFile, footerStyleFrom, healthOf, identityFromProfile, isNoBrowser, isPolicyRefusal, keychainItem, pickTarget, pie, readingFromUsage, rotateToFrom, shouldLeave, roomColor, windowPct } from './model'
+import { DEFAULT_FOOTER, availableNow, braille, browsersFrom, chromeNote, continueTextFrom, credentialFrom, credentialsFile, fableMark, fableSpentNotice, fableStay, footerStyleFrom, healthOf, identityFromProfile, isFableSpent, isFableStop, isNoBrowser, isPolicyRefusal, keepFable, keychainItem, nextReset, pickTarget, pie, readingFromUsage, rotateToFrom, shouldLeave, roomColor, windowPct } from './model'
 
 const NOW = Date.parse('2026-10-12T10:00:00Z')
 const LATER = '2026-10-12T12:00:00Z'
 const WEEK_END = '2026-10-18T03:00:00Z'
+const FABLE_END = '2026-10-17T03:00:00Z'
+const HOUR = 3600_000
 
+/** A login's usage is [5-hour %, week %], with the Fable week's % as a third member where it has one. */
 function view(
-  readings: Record<string, [number, number]>,
+  readings: Record<string, [number, number] | [number, number, number]>,
   health: Record<string, View['health'][string]> = {},
   rotateTo: RotateTo = 'room',
 ): View {
@@ -17,8 +20,16 @@ function view(
     accounts: ids.map(id => ({ id, slot: id === '1' ? '' : `/h/.claude/accounts/${id}` })),
     readings: Object.fromEntries(
       ids.map(id => {
-        const [five, week] = readings[id] ?? [0, 0]
-        return [id, { fiveHour: { pct: five, resetsAt: LATER }, sevenDay: { pct: week, resetsAt: WEEK_END }, at: NOW }]
+        const [five, week, fable] = readings[id] ?? [0, 0]
+        return [
+          id,
+          {
+            fiveHour: { pct: five, resetsAt: LATER },
+            sevenDay: { pct: week, resetsAt: WEEK_END },
+            ...(fable === undefined ? {} : { fable: { pct: fable, resetsAt: FABLE_END } }),
+            at: NOW,
+          },
+        ]
       }),
     ),
     health: Object.fromEntries(ids.map(id => [id, health[id] ?? { kind: 'ok' as const }])),
@@ -105,6 +116,207 @@ test('reads the usage endpoint body as /usage serves it', () => {
     sevenDay: { pct: 55, resetsAt: '2026-10-18T03:00:00.246781+00:00' },
     at: NOW,
   })
+})
+
+const fableRow = (display_name: string, percent: unknown = 100) => ({
+  kind: 'weekly_scoped',
+  group: 'weekly',
+  percent,
+  resets_at: FABLE_END,
+  scope: { model: { display_name } },
+})
+
+test('reads the Fable week from the usage body\'s limits rows: Fable and its numbered versions, no other model, no surface, no row without a percent', () => {
+  const five_hour = { utilization: 20, resets_at: LATER }
+  const read = (...limits: unknown[]) => readingFromUsage({ five_hour, limits }, NOW)?.fable
+  expect(read(fableRow('Fable', 100))).toEqual({ pct: 100, resetsAt: FABLE_END })
+  expect(read(fableRow('Fable 5.1', 40))).toEqual({ pct: 40, resetsAt: FABLE_END })
+  expect(read(fableRow('fable 5', 7))).toEqual({ pct: 7, resetsAt: FABLE_END })
+  expect(read(fableRow('Sonnet', 100))).toBeUndefined()
+  expect(read(fableRow('Fabled', 100))).toBeUndefined()
+  expect(read({ kind: 'weekly_scoped', percent: 100, resets_at: FABLE_END, scope: { surface: { display_name: 'Fable' } } })).toBeUndefined()
+  expect(read({ ...fableRow('Fable'), kind: 'weekly_all' })).toBeUndefined()
+  expect(read(fableRow('Fable', 'lots'))).toBeUndefined()
+  expect(readingFromUsage({ five_hour }, NOW)?.fable).toBeUndefined()
+})
+
+test('a usage body with only limits answers a reading holding the Fable week alone', () => {
+  expect(readingFromUsage({ limits: [fableRow('Fable 5.1', 62)] }, NOW)).toEqual({ fable: { pct: 62, resetsAt: FABLE_END }, at: NOW })
+  expect(readingFromUsage({ limits: [fableRow('Sonnet', 62)] }, NOW)).toBeUndefined()
+})
+
+test('the Fable week is spent at 95% and not before, and not once its reset time has passed', () => {
+  const fable = (pct: number) => ({ fable: { pct, resetsAt: FABLE_END }, at: NOW })
+  expect(isFableSpent(fable(95), NOW)).toBe(true)
+  expect(isFableSpent(fable(100), NOW)).toBe(true)
+  expect(isFableSpent(fable(94), NOW)).toBe(false)
+  expect(isFableSpent(fable(100), Date.parse(FABLE_END) + 1)).toBe(false)
+  expect(isFableSpent({ at: NOW }, NOW)).toBe(false)
+  expect(isFableSpent(undefined, NOW)).toBe(false)
+})
+
+test('a fresh reading keeps the Fable week the stored one holds where its body lists none, until that week resets, and then drops it', () => {
+  const five_hour = { utilization: 20, resets_at: LATER }
+  const fresh = readingFromUsage({ five_hour }, NOW)!
+  const stored = { fiveHour: { pct: 50, resetsAt: LATER }, fable: { pct: 100, resetsAt: FABLE_END }, at: NOW - 60_000 }
+  expect(keepFable(fresh, stored, NOW)).toEqual({ ...fresh, fable: stored.fable })
+  expect(keepFable(fresh, stored, Date.parse(FABLE_END) - 1)).toEqual({ ...fresh, fable: stored.fable })
+  expect(keepFable(fresh, stored, Date.parse(FABLE_END))).toEqual(fresh)
+  expect(keepFable(fresh, stored, Date.parse(FABLE_END) + 1)).toEqual(fresh)
+  // A stored week with no reset time to go by is not kept past this check; nothing stored adds nothing.
+  expect(keepFable(fresh, { fable: { pct: 100 }, at: NOW }, NOW)).toEqual(fresh)
+  expect(keepFable(fresh, { at: NOW }, NOW)).toEqual(fresh)
+  expect(keepFable(fresh, undefined, NOW)).toEqual(fresh)
+})
+
+test('a fresh reading keeps the stored Fable week whatever way its body lists none: no limits, none left, another model only, a Fable row without a percent', () => {
+  const five_hour = { utilization: 20, resets_at: LATER }
+  const bodies: [string, unknown][] = [
+    ['no limits', { five_hour }],
+    ['an empty list', { five_hour, limits: [] }],
+    ['another model only', { five_hour, limits: [fableRow('Sonnet', 100)] }],
+    ['a Fable row without a percent', { five_hour, limits: [fableRow('Fable', 'lots')] }],
+    ['a row of another kind', { five_hour, limits: [{ ...fableRow('Fable'), kind: 'weekly_all' }] }],
+  ]
+  const stored = { fable: { pct: 100, resetsAt: FABLE_END }, at: NOW - 60_000 }
+  for (const [name, body] of bodies) {
+    const fresh = readingFromUsage(body, NOW)!
+    expect([name, keepFable(fresh, stored, NOW).fable]).toEqual([name, stored.fable])
+  }
+})
+
+test('a Fable stop\'s mark with no reset time of its own stands a week: a check that lists no Fable week keeps it, and it ends seven days on', () => {
+  const MARK_END = NOW + 7 * 24 * HOUR
+  const mark = fableMark(undefined, NOW)
+  expect(mark).toEqual({ pct: 100, resetsAt: new Date(MARK_END).toISOString() })
+  const stored = { fable: mark, at: NOW }
+  const fresh = readingFromUsage({ five_hour: { utilization: 20, resets_at: LATER } }, NOW + HOUR)!
+  expect(keepFable(fresh, stored, NOW + HOUR).fable).toEqual(mark)
+  expect(keepFable(fresh, stored, MARK_END - 1).fable).toEqual(mark)
+  expect(keepFable(fresh, stored, MARK_END).fable).toBeUndefined()
+  expect(isFableSpent(stored, MARK_END - 1)).toBe(true)
+  expect(isFableSpent(stored, MARK_END)).toBe(false)
+  // A Fable row in a later check replaces it.
+  const read = readingFromUsage({ limits: [fableRow('Fable', 40)] }, NOW + HOUR)!
+  expect(keepFable(read, stored, NOW + HOUR).fable).toEqual({ pct: 40, resetsAt: FABLE_END })
+})
+
+test('a Fable stop\'s mark takes the reset time the last read gave while it lies ahead, else a week from the stop', () => {
+  const weekOn = new Date(NOW + 7 * 24 * HOUR).toISOString()
+  const reads: [string, { pct: number; resetsAt?: string } | undefined, string][] = [
+    ['no read', undefined, weekOn],
+    ['a read with no reset time', { pct: 60 }, weekOn],
+    ['a read whose reset has passed', { pct: 60, resetsAt: new Date(NOW - HOUR).toISOString() }, weekOn],
+    ['a read whose reset is now', { pct: 60, resetsAt: new Date(NOW).toISOString() }, weekOn],
+    ['a read whose reset lies ahead', { pct: 60, resetsAt: FABLE_END }, FABLE_END],
+  ]
+  for (const [name, read, resetsAt] of reads) expect([name, fableMark(read, NOW)]).toEqual([name, { pct: 100, resetsAt }])
+})
+
+test('a fresh reading with its own Fable week replaces the stored one, whatever either says', () => {
+  const five_hour = { utilization: 20, resets_at: LATER }
+  for (const stored of [100, 30]) {
+    for (const percent of [0, 40, 94, 95, 100]) {
+      const fresh = readingFromUsage({ five_hour, limits: [fableRow('Fable 5.1', percent)] }, NOW)!
+      const kept = keepFable(fresh, { fable: { pct: stored, resetsAt: FABLE_END }, at: NOW - 60_000 }, NOW)
+      expect([stored, percent, kept.fable]).toEqual([stored, percent, { pct: percent, resetsAt: FABLE_END }])
+    }
+  }
+})
+
+test('the words for every Fable week spent give the next reset, none while any account has Fable room, and no time where none is known', () => {
+  expect(fableSpentNotice(view({ '1': [20, 30, 100], '2': [10, 30, 100] }), NOW)).toBe('Every Claude account has used its Fable week; the next frees up in 4d 17h.')
+  // The soonest of the weeks answers.
+  const sooner = view({ '1': [20, 30, 100], '2': [10, 30, 100] })
+  sooner.readings['2'] = { ...sooner.readings['2'], fable: { pct: 100, resetsAt: '2026-10-16T03:00:00Z' }, at: NOW }
+  expect(fableSpentNotice(sooner, NOW)).toBe('Every Claude account has used its Fable week; the next frees up in 3d 17h.')
+  // Any account with room, read below 95% or not read at all, or a week that has reset: nothing to say.
+  expect(fableSpentNotice(view({ '1': [20, 30, 100], '2': [10, 30, 94] }), NOW)).toBeUndefined()
+  expect(fableSpentNotice(view({ '1': [20, 30, 100], '2': [10, 30] }), NOW)).toBeUndefined()
+  expect(fableSpentNotice(view({ '1': [20, 30, 100], '2': [10, 30, 100] }), Date.parse(FABLE_END) + 1)).toBeUndefined()
+  expect(fableSpentNotice({ ...view({ '1': [20, 30, 100] }), accounts: [] }, NOW)).toBeUndefined()
+  // Marked spent with no reset time known: the words without a time.
+  const marked = view({ '1': [20, 30] })
+  marked.readings['1'] = { ...marked.readings['1'], fable: { pct: 100 }, at: NOW }
+  expect(fableSpentNotice(marked, NOW)).toBe('Every Claude account has used its Fable week.')
+})
+
+test('a stop that says the Fable limit was reached is told from any other', () => {
+  expect(isFableStop("You've reached your Fable limit. Switch to another model to continue.")).toBe(true)
+  expect(isFableStop("You've reached your Fable limit. Run /usage-credits to continue or switch models with /model.")).toBe(true)
+  expect(isFableStop("You've hit your session limit")).toBe(false)
+  expect(isFableStop(undefined)).toBe(false)
+})
+
+test('on a Fable stop the session leaves a login whose Fable week is spent, and only then', () => {
+  const v = view({ '1': [20, 30, 100] })
+  expect(shouldLeave(v, NOW)).toBe(false)
+  expect(shouldLeave(v, NOW, 'fable')).toBe(true)
+  expect(shouldLeave(view({ '1': [20, 30, 50] }), NOW, 'fable')).toBe(false)
+  expect(shouldLeave(view({ '1': [20, 30] }), NOW, 'fable')).toBe(false)
+  expect(shouldLeave(view({ '1': [90, 30] }), NOW, 'fable')).toBe(true)
+})
+
+test('moving for the Fable week skips a login whose Fable week is spent, takes one not read yet, and ranks by Fable room first', () => {
+  const v = view({ '1': [20, 30, 100], '2': [10, 30, 100], '3': [50, 50] })
+  expect(pickTarget(v, NOW)?.id).toBe('2')
+  expect(pickTarget(v, NOW, 'fable')?.id).toBe('3')
+  const rooms = view({ '1': [20, 30, 100], '2': [10, 30, 80], '3': [60, 30, 10] })
+  expect(pickTarget(rooms, NOW)?.id).toBe('2')
+  expect(pickTarget(rooms, NOW, 'fable')?.id).toBe('3')
+  expect(pickTarget(view({ '1': [20, 30, 100], '2': [10, 30, 99] }), NOW, 'fable')).toBeUndefined()
+})
+
+test('moving for the Fable week takes a login with a Fable reading below 95% over one with none, whatever the rotation picks by', () => {
+  const rotations: RotateTo[] = ['reset', 'room', 'order', 'off']
+  for (const rotateTo of rotations) {
+    // Login 2 is unread and has more of everything; login 3 is read, with less.
+    const v = view({ '1': [20, 30, 100], '2': [30, 20], '3': [60, 60, 94] }, {}, rotateTo)
+    expect([rotateTo, pickTarget(v, NOW, 'fable')?.id]).toEqual([rotateTo, '3'])
+    // Without the need, the unread one still ranks as it did.
+    expect([rotateTo, pickTarget(v, NOW)?.id]).toEqual([rotateTo, '2'])
+  }
+})
+
+test('moving for the Fable week takes a login with no Fable reading only when no read login has room', () => {
+  const rotations: RotateTo[] = ['reset', 'room', 'order', 'off']
+  for (const rotateTo of rotations) {
+    const v = view({ '1': [20, 30, 100], '2': [0, 0], '3': [60, 60, 95] }, {}, rotateTo)
+    expect([rotateTo, pickTarget(v, NOW, 'fable')?.id]).toEqual([rotateTo, '2'])
+    // Unread logins only: one is taken, and none is left once all are marked spent.
+    const unread = view({ '1': [20, 30, 100], '2': [0, 0], '3': [0, 0] }, {}, rotateTo)
+    expect(pickTarget(unread, NOW, 'fable')).toBeDefined()
+    unread.readings['2'] = { ...unread.readings['2'], fable: { pct: 100 }, at: NOW }
+    unread.readings['3'] = { ...unread.readings['3'], fable: { pct: 100 }, at: NOW }
+    expect([rotateTo, pickTarget(unread, NOW, 'fable')]).toEqual([rotateTo, undefined])
+  }
+})
+
+test('the next reset counts the Fable week, which alone can be what is spent', () => {
+  const v = {
+    ...view({ '1': [0, 0], '2': [0, 0] }),
+    readings: {
+      '1': { fable: { pct: 100, resetsAt: FABLE_END }, at: NOW },
+      '2': { fable: { pct: 100, resetsAt: '2026-10-16T03:00:00Z' }, at: NOW },
+    },
+  }
+  expect(nextReset(v, NOW)).toBe(Date.parse('2026-10-16T03:00:00Z'))
+  // A Fable week not spent holds nothing back; asked for the Fable week, the 5-hour window does not answer.
+  const mixed = view({ '1': [40, 10, 20], '2': [40, 10, 100] })
+  mixed.readings['1'] = { ...mixed.readings['1'], fable: { pct: 20, resetsAt: '2026-10-14T03:00:00Z' }, at: NOW }
+  expect(nextReset(mixed, NOW)).toBe(Date.parse(LATER))
+  expect(nextReset(mixed, NOW, 'fable')).toBe(Date.parse(FABLE_END))
+})
+
+test('the line sent to carry on is kept when it is text of at most 500 characters, trimmed; anything else is ignored', () => {
+  expect(continueTextFrom('Go on.')).toBe('Go on.')
+  expect(continueTextFrom('  Go on.\n')).toBe('Go on.')
+  expect(continueTextFrom('x'.repeat(500))).toBe('x'.repeat(500))
+  expect(continueTextFrom('x'.repeat(501))).toBeUndefined()
+  expect(continueTextFrom('   ')).toBeUndefined()
+  expect(continueTextFrom('')).toBeUndefined()
+  expect(continueTextFrom(42)).toBeUndefined()
+  expect(continueTextFrom(undefined)).toBeUndefined()
 })
 
 test('a stored login whose refresh token ran out needs a sign-in', () => {
@@ -212,4 +424,66 @@ test('the notes about Claude in Chrome say what the mod does now and what to tel
   expect(chromeNote({ ...blocked, chrome: { as: '1', isPaired: false } }, 'no-browser')).toMatch(/If it matches, they restart Chrome, then you try again\./)
   expect(chromeNote({ ...onTwo, chromeAccountId: undefined }, 'unset')).toMatch(/doesn't know which one that is\. Ask the user to press Use for Chrome or Try to connect next to it under Chrome in the Claude accounts panel/)
   for (const kind of ['held', 'connecting', 'no-browser', 'blocked', 'unset'] as const) expect(chromeNote(onTwo, kind)).not.toMatch(/Run \/login|run \/login/)
+})
+
+/** Claude Code's own way out of the Fable limit, which every notice of a stay ends on. */
+const WAY_OUT = 'Run /usage-credits to continue or switch models with /model.'
+
+/** A Fable stop on account 1 with Fable room on account 2: the session moves, so there is nothing to explain. */
+const CAN_MOVE = () => view({ '1': [20, 30, 100], '2': [10, 30, 10] })
+
+/** Each reason a Fable stop can end with the session where it was, and a view, the connect flag and the accounts skipped that stage it. */
+const STAYS: { name: string; reason: string; view: View; isConnecting?: boolean; skip?: string[] }[] = [
+  { name: 'Connect holds the session', reason: 'chrome', view: CAN_MOVE(), isConnecting: true },
+  { name: 'rotation off', reason: 'off', view: { ...CAN_MOVE(), rotateTo: 'off' } },
+  { name: 'Claude Code refuses switching', reason: 'blocked', view: { ...CAN_MOVE(), isSwitchBlocked: true } },
+  { name: 'a switch is still pending', reason: 'pending', view: { ...CAN_MOVE(), pending: { id: '2', from: '1', since: NOW } } },
+  { name: 'every Fable week spent', reason: 'fable-spent', view: view({ '1': [20, 30, 100], '2': [10, 30, 100] }) },
+  { name: 'the other account has its 5-hour window full', reason: 'no-room', view: view({ '1': [20, 30, 100], '2': [95, 30, 10] }) },
+  { name: 'the other account has its week full', reason: 'no-room', view: view({ '1': [20, 30, 100], '2': [10, 96, 10] }) },
+  { name: 'the other account needs a sign-in', reason: 'no-room', view: view({ '1': [20, 30, 100], '2': [10, 30, 10] }, { '2': { kind: 'login-needed', why: 'not signed in yet' } }) },
+  { name: 'the other account was tried and did not take', reason: 'no-room', view: CAN_MOVE(), skip: ['2'] },
+]
+
+test('a Fable stop that did not move gives the reason, one per cause the rotation can stay for', () => {
+  expect(fableStay(CAN_MOVE(), NOW, false, new Set())).toBeUndefined()
+  for (const { name, reason, view: v, isConnecting = false, skip = [] } of STAYS) {
+    expect([name, fableStay(v, NOW, isConnecting, new Set(skip))?.reason]).toEqual([name, reason])
+  }
+})
+
+test('the reasons are told in the order maybeRotate checks them', () => {
+  const all = { ...view({ '1': [20, 30, 100], '2': [95, 30, 100] }), rotateTo: 'off' as const, isSwitchBlocked: true, pending: { id: '2', from: '1', since: NOW } }
+  let v: View = { ...all, rotateTo: 'off' }
+  expect(fableStay(v, NOW, true, new Set())?.reason).toBe('chrome')
+  expect(fableStay(v, NOW, false, new Set())?.reason).toBe('off')
+  v = { ...v, rotateTo: 'room' }
+  expect(fableStay(v, NOW, false, new Set())?.reason).toBe('blocked')
+  v = { ...v, isSwitchBlocked: false }
+  expect(fableStay(v, NOW, false, new Set())?.reason).toBe('pending')
+  v = { ...v, pending: undefined }
+  expect(fableStay(v, NOW, false, new Set())?.reason).toBe('fable-spent')
+  v = { ...v, readings: { ...v.readings, '2': { ...v.readings['2'], fable: { pct: 10, resetsAt: FABLE_END }, at: NOW } } }
+  expect(fableStay(v, NOW, false, new Set())?.reason).toBe('no-room')
+})
+
+test('every reason has its own words, naming the account and ending on Claude Code\'s way out; every Fable week spent keeps its words', () => {
+  const texts = new Map<string, string>()
+  for (const { name, reason, view: v, isConnecting = false, skip = [] } of STAYS) {
+    const stay = fableStay(v, NOW, isConnecting, new Set(skip))
+    expect(stay).toBeDefined()
+    const text = stay?.text ?? ''
+    if (reason === 'fable-spent') {
+      expect([name, text]).toEqual([name, fableSpentNotice(v, NOW)])
+      continue
+    }
+    expect([name, text.startsWith('Fable limit reached on account 1')]).toEqual([name, true])
+    expect([name, text.endsWith(WAY_OUT)]).toEqual([name, true])
+    expect(text.length).toBeLessThan(260)
+    texts.set(reason, text)
+  }
+  // One text per reason, whatever stages it.
+  expect([...texts.keys()].sort()).toEqual(['blocked', 'chrome', 'no-room', 'off', 'pending'])
+  expect(new Set(texts.values()).size).toBe(5)
+  expect(texts.get('pending')).toMatch(/switch to account 2 is still settling/)
 })

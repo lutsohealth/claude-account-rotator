@@ -20,18 +20,24 @@ import {
   browsersFrom,
   canConnectChrome,
   chromeNote,
+  continueTextFrom,
   credentialFrom,
   credentialsFile,
+  fableMark,
+  fableStay,
   fingerprint,
   footerStyleFrom,
   freeId,
   healthOf,
   identityFromProfile,
   identityFromStatus,
+  isFableSpent,
+  isFableStop,
   isLoginOf,
   isNoBrowser,
   isOnNormalLogin,
   isPolicyRefusal,
+  keepFable,
   keychainItem,
   keychainUser,
   label,
@@ -45,7 +51,7 @@ import {
   slotEnv,
   windowPct,
 } from './model'
-import type { Credential, Identity } from './model'
+import type { Credential, Identity, Need, StayReason } from './model'
 import { Band, Footer, Pane } from './view'
 import type { Actions } from './view'
 
@@ -88,8 +94,16 @@ let running: HookStream<ProcessSpawnChunk, ProcessSpawnResult> | undefined
 /** The login this session is signing in; a stored 'logging-in' from a session that died is checked again. */
 let signingIn: string | undefined
 let signInQueue: Promise<void> = Promise.resolve()
-/** A switch the refresh guard holds back: the latest one asked for, tried again each minute until it goes. */
-let held: { target: Account; why: string; timer: Timer } | undefined
+/** The carry-on a switch owes: what the turn that stopped died on, which picks the line sent. */
+type CarryOn = { need?: Need }
+/**
+ * A switch the refresh guard holds back: the latest one asked for, tried again
+ * each minute until it goes. A Fable stop's carry-on waits in it, and goes out
+ * once the held switch lands; a plain stop's does not.
+ */
+let held: { target: Account; why: string; timer: Timer; carry?: CarryOn; isRotation: boolean } | undefined
+/** How many switches this session has made: a carry-on goes out only if no switch came after the one it follows. */
+let moves = 0
 /** Logins a switch to did not take this session: the rotation leaves them be; Use now still tries. */
 const untaken = new Set<string>()
 /** When this session last moved to another login: until SETTLE_MS after, its requests may still go out as the one before. */
@@ -163,6 +177,7 @@ async function mergeStore($: Host): Promise<void> {
   }
   const footer = footerStyleFrom(await $.store.get('footer'))
   const rotateTo = rotateToFrom(await $.store.get('rotate-to'))
+  const fableContinueText = continueTextFrom(await $.store.get('fable-continue-text'))
   const chrome = await $.store.get('chrome-account')
   const chromeAccountId = typeof chrome === 'string' && accounts.some(a => a.id === chrome) ? chrome : undefined
   const seen = await $.store.get('chrome-accounts')
@@ -182,7 +197,7 @@ async function mergeStore($: Host): Promise<void> {
       const holder = holders[a.id] ?? v.holders[a.id]
       if (holder !== undefined) nextHolders[a.id] = holder
     }
-    return { ...v, accounts, readings: nextReadings, health: nextHealth, holders: nextHolders, footer, rotateTo, chromeAccountId, chromeAccountIds }
+    return { ...v, accounts, readings: nextReadings, health: nextHealth, holders: nextHolders, footer, rotateTo, fableContinueText, chromeAccountId, chromeAccountIds }
   })
 }
 
@@ -328,6 +343,17 @@ async function announceLockout($: Host, account: Account, why: string): Promise<
   await $.ui.notify(text, { title: TITLE })
 }
 
+/** The reasons a Fable stop left the session where it was that the terminal has been told: each once a session, however many stops follow. */
+const toldStays = new Set<StayReason>()
+
+/** A Fable stop that did not move says why, and the way out, through the terminal's own notice, for a session left running; the band and toast are easy to miss. */
+async function announceStay($: Host): Promise<void> {
+  const stay = fableStay(await getView($), await $.clock.now(), isConnectingChrome, untaken)
+  if (stay === undefined || toldStays.has(stay.reason)) return
+  toldStays.add(stay.reason)
+  await $.ui.notify(stay.text, { title: TITLE })
+}
+
 /**
  * Who a login's sign-in belongs to: as answered for its token before, else
  * asked while the token is live. A /login in a session on a login signs in
@@ -400,7 +426,8 @@ async function checkAccount($: Host, account: Account): Promise<void> {
       if (usage.kind === 'failed') await debug($, `usage for account ${account.id}: HTTP ${usage.status}`)
       if (usage.kind === 'ok') {
         const reading = readingFromUsage(usage.body, now)
-        if (reading !== undefined) await saveReading($, account.id, reading)
+        // A body with no Fable row leaves the week a stop marked spent as it is.
+        if (reading !== undefined) await saveReading($, account.id, keepFable(reading, (await getView($)).readings[account.id], now))
       }
     }
   }
@@ -422,11 +449,16 @@ async function checkAll($: Host): Promise<void> {
 }
 
 /** Why the login in use is left, counted the way the footer shows it: room left, or what is used. */
-function whyLeave(view: View, now: number): string {
+function whyLeave(view: View, now: number, need?: Need): string {
   if (view.health[view.activeId]?.kind === 'login-needed') return `account ${view.activeId} needs a sign-in`
   const r = view.readings[view.activeId]
   const five = windowPct(r?.fiveHour, now) ?? 0
-  const [window, used] = five >= LEAVE_FIVE_HOUR ? ['5-hour window', five] : ['week', windowPct(r?.sevenDay, now) ?? 0]
+  const [window, used] =
+    need === 'fable' && isFableSpent(r, now)
+      ? ['Fable week', windowPct(r?.fable, now) ?? 0]
+      : five >= LEAVE_FIVE_HOUR
+        ? ['5-hour window', five]
+        : ['week', windowPct(r?.sevenDay, now) ?? 0]
   return view.footer.fill === 'left'
     ? `account ${view.activeId} has ${Math.round(100 - used)}% of its ${window} left`
     : `account ${view.activeId} has used ${Math.round(used)}% of its ${window}`
@@ -435,15 +467,20 @@ function whyLeave(view: View, now: number): string {
 /**
  * Once the active login is spent or locked out, moves to the one the pane's
  * Rotation setting picks; never while it is off, Claude Code's policy refuses
- * it, or Connect holds the session where it is.
+ * it, or Connect holds the session where it is. After a turn that died on the
+ * Fable week (`need`), it leaves for that too, and only for a login with Fable
+ * room: the ticks and responses pass none, so a session that never hit the
+ * Fable week stays on a login whose Fable week is spent.
  */
-async function maybeRotate($: Host): Promise<boolean> {
+async function maybeRotate($: Host, need?: Need, carry?: CarryOn): Promise<boolean> {
   const now = await $.clock.now()
   const view = await getView($)
-  if (isConnectingChrome || view.rotateTo === 'off' || view.isSwitchBlocked || view.pending !== undefined || !shouldLeave(view, now)) return false
+  // A tick or a response is no stop: it leaves a held Fable recovery where it is going, to a login with Fable room.
+  if (need === undefined && carry === undefined && held?.carry !== undefined) return false
+  if (isConnectingChrome || view.rotateTo === 'off' || view.isSwitchBlocked || view.pending !== undefined || !shouldLeave(view, now, need)) return false
   // With none to move to, the band above the prompt says when the next login frees up.
-  const target = pickTarget({ ...view, accounts: view.accounts.filter(a => !untaken.has(a.id)) }, now)
-  return target === undefined ? false : switchTo($, target, whyLeave(view, now))
+  const target = pickTarget({ ...view, accounts: view.accounts.filter(a => !untaken.has(a.id)) }, now, need)
+  return target === undefined ? false : switchTo($, target, whyLeave(view, now, need), false, carry, true)
 }
 
 /** The login in use, when its token refreshes too soon for the refresh guard to let the session leave it for `target`. */
@@ -456,19 +493,57 @@ async function refreshingSoon($: Host, view: View, target: Account, now: number)
   return isSoon ? active : undefined
 }
 
-/** Points this session at `target`; false while the refresh guard holds it back, or Claude Code's policy refuses it. Quiet: no toast. */
-async function switchTo($: Host, target: Account, why: string, isQuiet = false): Promise<boolean> {
+/**
+ * Tries the held switch again. One the rotation asked for is asked of it again:
+ * turned off or refused by Claude Code's policy since, the switch is dropped; while
+ * Connect holds the session, it waits for the next minute. One the person pressed for goes.
+ */
+async function retryHeld($: Host): Promise<void> {
+  const h = held
+  if (h === undefined) return
+  if (h.isRotation) {
+    const view = await getView($)
+    if (view.rotateTo === 'off' || view.isSwitchBlocked) {
+      h.timer.cancel()
+      if (held === h) held = undefined
+      return
+    }
+    if (isConnectingChrome) return
+  }
+  await switchTo($, h.target, h.why, false, h.carry, h.isRotation)
+}
+
+/**
+ * Asks Claude to carry on once the switch just made has landed, if the session
+ * is still on its account then: no other change of account came since, every
+ * one (a Use now, a Rotate now, a switch pointed back) counting in `moves`.
+ */
+function carryOnAfterSettle($: Host, owed: CarryOn): void {
+  const mark = moves
+  $.clock.after(SETTLE_MS, () => {
+    if (moves === mark) void carryOn($, owed.need).catch(error => debug($, `carry-on failed: ${String(error)}`))
+  })
+}
+
+/**
+ * Points this session at `target`; false while the refresh guard holds it back, or Claude Code's policy refuses it. Quiet: no toast.
+ * `carry`: the carry-on the switch owes, sent once it lands. Held back, a Fable stop's carry-on waits for the switch; a plain stop's does not.
+ */
+async function switchTo($: Host, target: Account, why: string, isQuiet = false, carry?: CarryOn, isRotation = false): Promise<boolean> {
   const active = await refreshingSoon($, await getView($), target, await $.clock.now())
   if (active !== undefined) {
+    // Where the held switch goes, what it carries on with and who asked for it are one intent, replaced together:
+    // a later stop or press brings its own (a plain stop's, a press's, carries on with nothing); the retry brings the held one's.
+    const owes = carry?.need === 'fable' ? carry : undefined
     if (held === undefined) {
       tell($, `Switching to Claude account ${target.id} in a few minutes, once account ${active.id}'s token has refreshed.`)
-      const retry = () => {
-        if (held !== undefined) void switchTo($, held.target, held.why)
-      }
-      held = { target, why, timer: $.clock.every(60_000, retry) }
-    } else held = { ...held, target, why }
+      const retry = () => void retryHeld($).catch(error => debug($, `held switch retry failed: ${String(error)}`))
+      held = { target, why, timer: $.clock.every(60_000, retry), carry: owes, isRotation }
+    } else held = { ...held, target, why, carry: owes, isRotation }
     return false
   }
+  // A switch carries on with what it was asked to: the retry passes the held switch's own carry-on, a press none.
+  const owed = carry
   held?.timer.cancel()
   held = undefined
   await keepChrome($)
@@ -482,6 +557,7 @@ async function switchTo($: Host, target: Account, why: string, isQuiet = false):
   }
   const now = await $.clock.now()
   movedAt = now
+  moves += 1
   await setView($, v => ({
     ...v,
     activeId: target.id,
@@ -489,6 +565,7 @@ async function switchTo($: Host, target: Account, why: string, isQuiet = false):
     removing: undefined,
   }))
   if (!isQuiet) $.ui.toast(`Switched to Claude account ${label(target)}: ${why}.`, { timeoutMs: 6000 })
+  if (owed !== undefined) carryOnAfterSettle($, owed)
   return true
 }
 
@@ -522,6 +599,7 @@ async function settlePending($: Host, isResponse: boolean): Promise<void> {
     try {
       await useSlot($, from.slot)
       movedAt = now
+      moves += 1
     } catch (error) {
       await debug($, `switch back failed: ${String(error)}`)
     }
@@ -543,16 +621,35 @@ async function onMeasure($: Host, limits: readonly SessionRateLimit[]): Promise<
   }
   const reading = readingFromLimits(limits, await $.clock.now())
   if (reading === undefined) return
-  await saveReading($, view.activeId, reading)
+  // A response never lists the Fable week: the one the last check read stays.
+  const fable = view.readings[view.activeId]?.fable
+  await saveReading($, view.activeId, { ...reading, ...(fable ? { fable } : {}) })
   await maybeRotate($)
 }
 
-/** A turn that died on a usage limit or a rejected sign-in: switch, then carry on. */
-async function onStopFailure($: Host, error: string): Promise<void> {
+/**
+ * Asks Claude to carry on after a switch. After a switch for the Fable week the
+ * line kept in the store goes as the person's own words; every other switch,
+ * and a Fable one with no line kept, sends the mod's own line under its name.
+ */
+async function carryOn($: Host, need?: Need): Promise<void> {
+  const kept = need === 'fable' ? (await getView($)).fableContinueText : undefined
+  await $.prompt.submit(kept === undefined ? { text: CONTINUE } : { text: kept, asUser: true })
+}
+
+/**
+ * A turn that died on a usage limit or a rejected sign-in: switch, then carry
+ * on. When the limit was the Fable week, it moves only to a login with Fable
+ * room, and leaves the 5-hour window alone: the window is not what ran out, and
+ * a mark on it, stored for every session, would move them all off the login.
+ */
+async function onStopFailure($: Host, stop: { error: string; last_assistant_message?: string }): Promise<void> {
+  const { error } = stop
   if (error !== 'rate_limit' && error !== 'authentication_failed') return
   const view = await getView($)
   const active = view.accounts.find(a => a.id === view.activeId)
   if (active === undefined) return
+  let need: Need | undefined
   if (error === 'authentication_failed') {
     const before = await saveHealth($, active.id, { kind: 'login-needed', why: 'sign-in rejected' })
     if (before?.kind !== 'login-needed') await announceLockout($, active, 'sign-in rejected')
@@ -560,17 +657,27 @@ async function onStopFailure($: Host, error: string): Promise<void> {
     await checkAccount($, active)
     const now = await $.clock.now()
     const after = await getView($)
-    if (!shouldLeave(after, now)) {
+    const r = after.readings[active.id]
+    // Claude's own words tell the Fable week from any other limit; the usage read decides only where there are none.
+    const said = stop.last_assistant_message
+    const isFable = said === undefined || said === '' ? isFableSpent(r, now) : isFableStop(said)
+    if (isFable) {
+      need = 'fable'
+      await setView($, v => ({ ...v, isFableStopped: true }))
+      // The limit was hit before the usage call shows it: count the Fable week as full.
+      if (!isFableSpent(r, now)) await saveReading($, active.id, { ...r, fable: fableMark(r?.fable, now), at: now })
+    } else if (!shouldLeave(after, now)) {
       // The limit was hit before the usage call shows it: count the 5-hour window as full.
-      const r = after.readings[active.id]
       const resetsAt = r?.fiveHour?.resetsAt
       await saveReading($, active.id, { ...r, fiveHour: { pct: 100, ...(resetsAt ? { resetsAt } : {}) }, at: now })
     }
   }
   await setView($, v => ({ ...v, pending: undefined }))
-  if (await maybeRotate($)) {
-    $.clock.after(SETTLE_MS, () => void $.prompt.submit({ text: CONTINUE }))
-  } else if (isConnectingChrome) isCutByVisit = true
+  // The switch sends the carry-on once it lands, held back for a refresh or not.
+  if (!(await maybeRotate($, need, { need }))) {
+    if (isConnectingChrome) isCutByVisit = true
+    if (need === 'fable') await announceStay($)
+  }
 }
 
 // ---------------------------------------------------------------- Claude in Chrome
@@ -791,7 +898,7 @@ async function leaveVisit($: Host, from: Account): Promise<void> {
     return
   }
   const target = pickTarget({ ...view, accounts: view.accounts.filter(a => !untaken.has(a.id)) }, now)
-  if (target !== undefined) await switchTo($, target, whyLeave({ ...view, activeId: from.id }, now))
+  if (target !== undefined) await switchTo($, target, whyLeave({ ...view, activeId: from.id }, now), false, undefined, true)
 }
 
 /**
@@ -1059,7 +1166,7 @@ export const register: Register = on => {
   })
 
   on('classic.StopFailure', async ($, e, next) => {
-    void onStopFailure($, e.error).catch(error => debug($, `stop failure handling failed: ${String(error)}`))
+    void onStopFailure($, e).catch(error => debug($, `stop failure handling failed: ${String(error)}`))
     return next(e)
   }).catch(($, e, next) => next(e))
 
