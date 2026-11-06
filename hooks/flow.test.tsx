@@ -2127,6 +2127,55 @@ for (const stop of NOT_FABLE_STOPS) {
   })
 }
 
+/**
+ * Review RT1 (HELD-INTENT-SPLIT). The switch held back is one intent: where it
+ * goes and what it carries on with. A later stop replaces both; a tick, which
+ * is no stop, leaves a held Fable recovery as it is.
+ */
+for (const stop of NOT_FABLE_STOPS) {
+  test(`${stop.error === 'rate_limit' ? `a plain usage-limit stop ("${stop.last_assistant_message}")` : 'a rejected sign-in'} after a Fable stop held back for a token about to refresh takes its place: the switch lands, and no Fable carry-on goes`, async ($, on) => {
+    const w = fresh()
+    const clock = await guarded(on, w, { 'fable-continue-text': 'Go on on Fable-free ground.' }, [20, 30, 100])
+    await start($, clock)
+    await $.classic.StopFailure(FABLE_STOP)
+    await clock.settle()
+    await $.classic.StopFailure(stop)
+    await clock.settle()
+    refresh(w)
+    await clock.advance(60_000)
+    await clock.advance(36_000)
+    expect(slots(w)).toEqual([SLOT2])
+    expect(w.submitted).toEqual([])
+  })
+}
+
+for (const rotateTo of ['reset', 'room', 'order']) {
+  for (const [window, atStop] of [['5-hour window', [90, 30, 100]], ['week', [20, 95, 100]]] as const) {
+    test(`with the rotation going by ${rotateTo}, a Fable stop held back for a token about to refresh keeps its login with Fable room when the ${window} of the login in use fills and the minute's tick runs`, async ($, on) => {
+      const w = fresh()
+      w.keychain['Claude Code-credentials'] = blob('tok-1', NOW + 5 * 60_000)
+      w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+      w.keychain[await keychainItem(SLOT3)] = blob('tok-3')
+      w.usage['tok-1'] = [20, 30, 100]
+      w.usage['tok-2'] = [10, 30, 100]
+      w.usage['tok-3'] = [40, 30, 10]
+      const clock = world(on, w, { ...THREE_LOGINS, 'rotate-to': rotateTo })
+      await start($, clock)
+      w.usage['tok-1'] = [...atStop]
+      await $.classic.StopFailure(FABLE_STOP)
+      await clock.settle()
+      expect(w.envSets).toEqual([])
+      // The minute's tick finds login 1 spent by its own windows, with the Fable recovery still held.
+      await clock.advance(61_000)
+      refresh(w)
+      await clock.advance(60_000)
+      await clock.advance(36_000)
+      expect(slots(w)).toEqual([SLOT3])
+      expect(w.submitted).toHaveLength(1)
+    })
+  }
+}
+
 /** A Fable stop on login 1 of a session that has settled in, `setup` having shaped the world; the notices about the Fable limit it left. */
 type StayCase = {
   name: string

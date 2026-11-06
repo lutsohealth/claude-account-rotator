@@ -475,6 +475,8 @@ function whyLeave(view: View, now: number, need?: Need): string {
 async function maybeRotate($: Host, need?: Need, carry?: CarryOn): Promise<boolean> {
   const now = await $.clock.now()
   const view = await getView($)
+  // A tick or a response is no stop: it leaves a held Fable recovery where it is going, to a login with Fable room.
+  if (need === undefined && carry === undefined && held?.carry !== undefined) return false
   if (isConnectingChrome || view.rotateTo === 'off' || view.isSwitchBlocked || view.pending !== undefined || !shouldLeave(view, now, need)) return false
   // With none to move to, the band above the prompt says when the next login frees up.
   const target = pickTarget({ ...view, accounts: view.accounts.filter(a => !untaken.has(a.id)) }, now, need)
@@ -510,14 +512,16 @@ function carryOnAfterSettle($: Host, owed: CarryOn): void {
 async function switchTo($: Host, target: Account, why: string, isQuiet = false, carry?: CarryOn): Promise<boolean> {
   const active = await refreshingSoon($, await getView($), target, await $.clock.now())
   if (active !== undefined) {
-    const keep = carry?.need === 'fable' ? { carry } : {}
+    // Where the held switch goes and what it carries on with are one intent, replaced together: a later stop
+    // or press brings its own (a plain stop's, a press's, carries on with nothing); the retry brings the held one's.
+    const owes = carry?.need === 'fable' ? carry : undefined
     if (held === undefined) {
       tell($, `Switching to Claude account ${target.id} in a few minutes, once account ${active.id}'s token has refreshed.`)
       const retry = () => {
-        if (held !== undefined) void switchTo($, held.target, held.why)
+        if (held !== undefined) void switchTo($, held.target, held.why, false, held.carry)
       }
-      held = { target, why, timer: $.clock.every(60_000, retry), ...keep }
-    } else held = { ...held, target, why, ...keep }
+      held = { target, why, timer: $.clock.every(60_000, retry), carry: owes }
+    } else held = { ...held, target, why, carry: owes }
     return false
   }
   // The held switch's own carry-on goes with it, to the account it was held for.
