@@ -101,7 +101,7 @@ type CarryOn = { need?: Need }
  * each minute until it goes. A Fable stop's carry-on waits in it, and goes out
  * once the held switch lands; a plain stop's does not.
  */
-let held: { target: Account; why: string; timer: Timer; carry?: CarryOn } | undefined
+let held: { target: Account; why: string; timer: Timer; carry?: CarryOn; isRotation: boolean } | undefined
 /** How many switches this session has made: a carry-on goes out only if no switch came after the one it follows. */
 let moves = 0
 /** Logins a switch to did not take this session: the rotation leaves them be; Use now still tries. */
@@ -480,7 +480,7 @@ async function maybeRotate($: Host, need?: Need, carry?: CarryOn): Promise<boole
   if (isConnectingChrome || view.rotateTo === 'off' || view.isSwitchBlocked || view.pending !== undefined || !shouldLeave(view, now, need)) return false
   // With none to move to, the band above the prompt says when the next login frees up.
   const target = pickTarget({ ...view, accounts: view.accounts.filter(a => !untaken.has(a.id)) }, now, need)
-  return target === undefined ? false : switchTo($, target, whyLeave(view, now, need), false, carry)
+  return target === undefined ? false : switchTo($, target, whyLeave(view, now, need), false, carry, true)
 }
 
 /** The login in use, when its token refreshes too soon for the refresh guard to let the session leave it for `target`. */
@@ -491,6 +491,26 @@ async function refreshingSoon($: Host, view: View, target: Account, now: number)
   const credential = stored.state === 'present' ? stored.credential : undefined
   const isSoon = credential !== undefined && credential.expiresAt > now && credential.expiresAt - now < REFRESH_GUARD_MS
   return isSoon ? active : undefined
+}
+
+/**
+ * Tries the held switch again. One the rotation asked for is asked of it again:
+ * turned off or refused by Claude Code's policy since, the switch is dropped; while
+ * Connect holds the session, it waits for the next minute. One the person pressed for goes.
+ */
+async function retryHeld($: Host): Promise<void> {
+  const h = held
+  if (h === undefined) return
+  if (h.isRotation) {
+    const view = await getView($)
+    if (view.rotateTo === 'off' || view.isSwitchBlocked) {
+      h.timer.cancel()
+      if (held === h) held = undefined
+      return
+    }
+    if (isConnectingChrome) return
+  }
+  await switchTo($, h.target, h.why, false, h.carry, h.isRotation)
 }
 
 /**
@@ -509,23 +529,21 @@ function carryOnAfterSettle($: Host, owed: CarryOn): void {
  * Points this session at `target`; false while the refresh guard holds it back, or Claude Code's policy refuses it. Quiet: no toast.
  * `carry`: the carry-on the switch owes, sent once it lands. Held back, a Fable stop's carry-on waits for the switch; a plain stop's does not.
  */
-async function switchTo($: Host, target: Account, why: string, isQuiet = false, carry?: CarryOn): Promise<boolean> {
+async function switchTo($: Host, target: Account, why: string, isQuiet = false, carry?: CarryOn, isRotation = false): Promise<boolean> {
   const active = await refreshingSoon($, await getView($), target, await $.clock.now())
   if (active !== undefined) {
-    // Where the held switch goes and what it carries on with are one intent, replaced together: a later stop
-    // or press brings its own (a plain stop's, a press's, carries on with nothing); the retry brings the held one's.
+    // Where the held switch goes, what it carries on with and who asked for it are one intent, replaced together:
+    // a later stop or press brings its own (a plain stop's, a press's, carries on with nothing); the retry brings the held one's.
     const owes = carry?.need === 'fable' ? carry : undefined
     if (held === undefined) {
       tell($, `Switching to Claude account ${target.id} in a few minutes, once account ${active.id}'s token has refreshed.`)
-      const retry = () => {
-        if (held !== undefined) void switchTo($, held.target, held.why, false, held.carry)
-      }
-      held = { target, why, timer: $.clock.every(60_000, retry), carry: owes }
-    } else held = { ...held, target, why, carry: owes }
+      const retry = () => void retryHeld($).catch(error => debug($, `held switch retry failed: ${String(error)}`))
+      held = { target, why, timer: $.clock.every(60_000, retry), carry: owes, isRotation }
+    } else held = { ...held, target, why, carry: owes, isRotation }
     return false
   }
-  // The held switch's own carry-on goes with it, to the account it was held for.
-  const owed = carry ?? (held?.target.id === target.id ? held.carry : undefined)
+  // A switch carries on with what it was asked to: the retry passes the held switch's own carry-on, a press none.
+  const owed = carry
   held?.timer.cancel()
   held = undefined
   await keepChrome($)
@@ -880,7 +898,7 @@ async function leaveVisit($: Host, from: Account): Promise<void> {
     return
   }
   const target = pickTarget({ ...view, accounts: view.accounts.filter(a => !untaken.has(a.id)) }, now)
-  if (target !== undefined) await switchTo($, target, whyLeave({ ...view, activeId: from.id }, now))
+  if (target !== undefined) await switchTo($, target, whyLeave({ ...view, activeId: from.id }, now), false, undefined, true)
 }
 
 /**

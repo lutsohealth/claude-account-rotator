@@ -2176,6 +2176,76 @@ for (const rotateTo of ['reset', 'room', 'order']) {
   }
 }
 
+/** Presses in the pane that move the session to login 2: the pane's key for each. */
+const PRESSES_TO_TWO = [['Use now', 'use-2'], ['Rotate now', 'rotate']] as const
+
+/**
+ * Review RT2 (HELD-INTENT-SPLIT). Once the token has refreshed and before the
+ * retry fires, a press toward the held login is the person's own move: it
+ * carries on with nothing, as every press does.
+ */
+for (const rotateTo of ['reset', 'room', 'order']) {
+  for (const [name, key] of PRESSES_TO_TWO) {
+    test(`with the rotation going by ${rotateTo}, ${name} toward the login a Fable stop was held back for, once the token has refreshed, moves there and sends no Fable carry-on`, async ($, on) => {
+      const w = fresh()
+      const clock = await guarded(on, w, { 'rotate-to': rotateTo, 'fable-continue-text': 'Go on on Fable-free ground.' }, [20, 30, 100])
+      await start($, clock)
+      await $.classic.StopFailure(FABLE_STOP)
+      await clock.settle()
+      expect(w.envSets).toEqual([])
+      refresh(w)
+      const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+      await pane.press({ key })
+      await clock.settle()
+      await pane.unmount()
+      await clock.advance(2 * 60_000)
+      expect(slots(w)).toEqual([SLOT2])
+      expect(w.submitted).toEqual([])
+    })
+  }
+}
+
+/**
+ * Review RT2 (HELD-RETRY-POLICY). A switch the rotation asked for, held back
+ * for a token refresh, is asked again of the rotation when it is retried:
+ * turned off meanwhile, it is dropped. A switch the person pressed for is theirs.
+ */
+for (const rotateTo of ['reset', 'room', 'order']) {
+  for (const [kind, stop, atStop] of [['a Fable stop', FABLE_STOP, [20, 30, 100]], ['a plain usage-limit stop', { error: 'rate_limit', last_assistant_message: PLAIN_STOPS[0] }, [100, 41]]] as const) {
+    test(`with the rotation going by ${rotateTo}, a switch ${kind} asked for, held back for a token about to refresh, is dropped when the rotation is turned off before the refresh lands`, async ($, on) => {
+      const w = fresh()
+      const clock = await guarded(on, w, { 'rotate-to': rotateTo }, [...atStop])
+      await start($, clock)
+      await $.classic.StopFailure(stop)
+      await clock.settle()
+      const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+      await pane.press({ key: 'rotate-to-off' })
+      await clock.settle()
+      await pane.unmount()
+      refresh(w)
+      await clock.advance(2 * 60_000)
+      expect(w.envSets).toEqual([])
+      expect(w.submitted).toEqual([])
+    })
+  }
+}
+
+test('Use now held back for a token about to refresh still lands when the rotation is turned off meanwhile: the person pressed for it', async ($, on) => {
+  const w = fresh()
+  const clock = await guarded(on, w, {}, [20, 30])
+  await start($, clock)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  await pane.press({ key: 'use-2' })
+  await clock.settle()
+  expect(w.envSets).toEqual([])
+  await pane.press({ key: 'rotate-to-off' })
+  await clock.settle()
+  await pane.unmount()
+  refresh(w)
+  await clock.advance(2 * 60_000)
+  expect(slots(w)).toEqual([SLOT2])
+})
+
 /** A Fable stop on login 1 of a session that has settled in, `setup` having shaped the world; the notices about the Fable limit it left. */
 type StayCase = {
   name: string
