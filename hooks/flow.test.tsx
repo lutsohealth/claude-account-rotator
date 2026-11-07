@@ -3422,6 +3422,28 @@ for (const [name, by] of [['no owner', undefined], ['another login as owner', '2
   })
 }
 
+// RULING 4278: a week mark still spends a login whose reading was dropped as no one's.
+test('a week mark spends a login whose stored reading has no owner: the pane shows its week spent, and it is not the launch pick', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.failing = { 'tok-1': 429 }
+  w.usage['tok-2'] = [null, 99]
+  const store = new Map<string, unknown>(Object.entries({
+    ...TWO_LOGINS,
+    'rotate-to': 'off',
+    'launch-on': 'account:1',
+    'reading:1': { sevenDay: { pct: 11, resetsAt: '2026-10-18T03:00:00Z' }, at: NOW - HOUR },
+    'week-mark:1': { pct: 100, resetsAt: '2026-10-18T03:00:00Z', at: NOW - HOUR },
+  }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  expect((store.get('launch-slot') as { id?: string } | undefined)?.id).not.toBe('1')
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  expect(await pane.find({ text: /^▱+ 0% left$/ })).toBeDefined()
+  await pane.unmount()
+})
+
 // puma-4q7j2.8: account 3's reading was stored under account 1, and the launch pick named spent account 1.
 test('a response measured before the session knows its login is stored under no other login', async ($, on) => {
   const w = fresh()
