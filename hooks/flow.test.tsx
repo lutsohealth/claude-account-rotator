@@ -24,6 +24,8 @@ type World = {
    * plan reports no weekly limit], and the Fable week's % as a third member where the usage endpoint lists one
    */
   usage: Record<string, [number | null, number | null, number?]>
+  /** access token -> the HTTP status the usage endpoint fails with, where it fails */
+  failing?: Record<string, number>
   /** access token -> the email of the account it signs in, as the profile endpoint answers */
   owners: Record<string, string>
   /** The token a /login signs in, where the session reads its sign-in, and its plan. */
@@ -152,6 +154,8 @@ function world(on: On, w: World, store: Record<string, unknown> | Map<string, un
       }
       return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(profile) } }
     }
+    const failing = w.failing?.[token]
+    if (failing !== undefined) return { value: { status: failing, ok: false, headers: {}, text: '' } }
     const usage = w.usage[token]
     if (usage === undefined) return { value: { status: 401, ok: false, headers: {}, text: '' } }
     const [five, week, fable] = usage
@@ -1841,6 +1845,59 @@ test('a switch held back for a token about to refresh is said once and made once
   expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
   expect(w.toasts.filter(t => /Switched to Claude account 2/.test(t))).toHaveLength(1)
   await pane.unmount()
+})
+
+// Bug puma-4q7j2.3, the slot-4 overwrite: a session that starts on a login whose token has already run out refreshes it
+// first, and a switch made before that refresh lands saved the login's refreshed sign-in under the account moved to.
+test('a session that starts on a spent login whose token has run out holds the switch until Claude Code refreshes the token there', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1', NOW - HOUR)
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [null, 100]
+  w.usage['tok-2'] = [null, 30]
+  // Another session read login 1's spent week while its token was live.
+  const clock = world(on, w, { ...TWO_LOGINS, 'reading:1': { sevenDay: { pct: 100, resetsAt: '2026-10-18T03:00:00Z' }, at: NOW - 2 * HOUR } })
+  await start($, clock)
+  await clock.advance(2 * 60_000)
+  expect(w.envSets).toEqual([])
+  expect(w.toasts.filter(t => /Switching to Claude account 2/.test(t))).toHaveLength(1)
+  w.keychain['Claude Code-credentials'] = blob('tok-1', NOW + 8 * HOUR)
+  await clock.advance(61_000)
+  expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
+})
+
+// RULING 4232: a usage check that fails says so in the pane and the store, until one succeeds.
+test('a usage check that fails shows its HTTP status on the login\'s line and in the store, and a later check that succeeds clears both', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [null, 30]
+  w.usage['tok-2'] = [null, 40]
+  w.failing = { 'tok-2': 429 }
+  const store = new Map<string, unknown>(Object.entries(TWO_LOGINS))
+  const clock = world(on, w, store)
+  await start($, clock)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  expect((await pane.findAll({ type: 'Text', text: /its last usage check failed: the usage call answered HTTP 429$/ })).length).toBe(1)
+  expect(store.get('check-error:2')).toEqual({ why: 'the usage call answered HTTP 429', at: NOW })
+  w.failing = {}
+  await clock.advance(10 * 60_000)
+  await pane.redraw()
+  expect(await pane.find({ text: /its last usage check failed/ })).toBeUndefined()
+  expect(store.has('check-error:2')).toBe(false)
+  await pane.unmount()
+})
+
+test('a session on a login whose sign-in has run out, token and all, moves off it at once: nothing will refresh there', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = JSON.stringify({
+    claudeAiOauth: { accessToken: 'tok-1', refreshToken: 'refresh-tok-1', expiresAt: NOW - HOUR, refreshTokenExpiresAt: NOW - 60_000, scopes: ['user:inference'], subscriptionType: 'max' },
+  })
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-2'] = [null, 30]
+  const clock = world(on, w, TWO_LOGINS)
+  await start($, clock)
+  expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
 })
 
 test('a login whose plan reports no weekly limit leaves its week blank in the footer', async ($, on) => {

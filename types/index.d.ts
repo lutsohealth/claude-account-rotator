@@ -17,6 +17,9 @@ export type Reading = { fiveHour?: UsageWindow; sevenDay?: UsageWindow; fable?: 
  */
 export type Mark = { pct: number; resetsAt: string; at: number }
 
+/** A usage check that failed: what failed (a stage and an HTTP status, or the error), and when, in epoch milliseconds. */
+export type CheckError = { why: string; at: number }
+
 /** Whether a login can serve requests, or why not. */
 export type Health =
   | { kind: 'ok'; refreshExpiresAt?: number }
@@ -98,6 +101,8 @@ export type View = {
   noFiveHour?: Record<string, boolean>
   /** Each login's week a stop marked spent, under its own key, `week-mark:<id>`, for the reason `Mark` gives. */
   weekMarks?: Record<string, Mark>
+  /** Each login's last usage check that failed, under `check-error:<id>`, until one succeeds: what failed, and when. */
+  checkErrors?: Record<string, CheckError>
   health: Record<string, Health>
   /** Who each login's sign-in belongs to: a /login in a session on a login signs in there, whoever it signs in. */
   holders: Record<string, Holder>

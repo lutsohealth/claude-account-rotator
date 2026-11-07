@@ -10,7 +10,7 @@ import type {
   Timer,
 } from 'claude-code'
 
-import type { Account, FiveHourLimit, FooterStyle, Health, Holder, Mark, Reading, RotateTo, View } from '../types'
+import type { Account, CheckError, FiveHourLimit, FooterStyle, Health, Holder, Mark, Reading, RotateTo, View } from '../types'
 import {
   CHROME_SERVER,
   CHROME_TOOL,
@@ -248,6 +248,7 @@ async function mergeStore($: Host): Promise<void> {
   const marks: Record<string, Mark> = {}
   const noFiveHour: Record<string, boolean> = {}
   const weekMarks: Record<string, Mark> = {}
+  const checkErrors: Record<string, CheckError> = {}
   const health: Record<string, Health> = {}
   const holders: Record<string, Holder> = {}
   for (const a of accounts) {
@@ -259,6 +260,8 @@ async function mergeStore($: Host): Promise<void> {
     if (typeof n === 'boolean') noFiveHour[a.id] = n
     const k = markFrom(await $.store.get(`week-mark:${a.id}`))
     if (k !== undefined) weekMarks[a.id] = k
+    const e = await $.store.get(`check-error:${a.id}`)
+    if (typeof e === 'object' && e !== null && typeof (e as CheckError).why === 'string' && typeof (e as CheckError).at === 'number') checkErrors[a.id] = e as CheckError
     const h = await $.store.get(`health:${a.id}`)
     if (typeof h === 'object' && h !== null && typeof (h as Health).kind === 'string') health[a.id] = h as Health
     const s = await $.store.get(`holder:${a.id}`)
@@ -300,7 +303,7 @@ async function mergeStore($: Host): Promise<void> {
       const holder = holders[a.id] ?? v.holders[a.id]
       if (holder !== undefined) nextHolders[a.id] = holder
     }
-    return { ...v, accounts, readings: nextReadings, marks: nextMarks, noFiveHour: nextNoFiveHour, weekMarks: nextWeekMarks, health: nextHealth, holders: nextHolders, footer, rotateTo, fiveHourLimit, fableContinueText, chromeAccountId, chromeAccountIds }
+    return { ...v, accounts, readings: nextReadings, marks: nextMarks, noFiveHour: nextNoFiveHour, weekMarks: nextWeekMarks, checkErrors, health: nextHealth, holders: nextHolders, footer, rotateTo, fiveHourLimit, fableContinueText, chromeAccountId, chromeAccountIds }
   })
 }
 
@@ -543,8 +546,9 @@ async function checkAccount($: Host, account: Account): Promise<void> {
     else if (isLive) {
       const usage = await fetchUsage($, credential.accessToken)
       if (usage.kind === 'rejected') health = { kind: 'login-needed', why: 'sign-in rejected' }
-      if (usage.kind === 'failed') await debug($, `usage for account ${account.id}: HTTP ${usage.status}`)
+      if (usage.kind === 'failed') await saveCheckError($, account.id, `the usage call answered HTTP ${usage.status}`)
       if (usage.kind === 'ok') {
+        await saveCheckError($, account.id, undefined)
         const read = readingFromUsage(usage.body, now)
         if (read !== undefined) {
           const { noFiveHour, ...reading } = read
@@ -568,9 +572,30 @@ async function checkAll($: Host): Promise<void> {
       await checkAccount($, account)
     } catch (error) {
       await debug($, `checking account ${account.id} failed: ${String(error)}`)
+      await saveCheckError($, account.id, `the check failed: ${String(error)}`).catch(() => undefined)
     }
   }
   await maybeRotate($)
+}
+
+/** The longest failure the pane and the store keep, in characters. */
+const CHECK_ERROR_MAX = 200
+
+/** Records, for every session, that a login's usage check failed and why; undefined clears it once a check succeeds. */
+async function saveCheckError($: Host, id: string, why: string | undefined): Promise<void> {
+  if (why === undefined) {
+    if ((await getView($)).checkErrors?.[id] === undefined) return
+    await $.store.delete(`check-error:${id}`)
+    await setView($, v => {
+      const { [id]: _cleared, ...checkErrors } = v.checkErrors ?? {}
+      return { ...v, checkErrors }
+    })
+    return
+  }
+  await debug($, `account ${id}: ${why}`)
+  const failure: CheckError = { why: why.slice(0, CHECK_ERROR_MAX), at: await $.clock.now() }
+  await $.store.set(`check-error:${id}`, failure)
+  await setView($, v => ({ ...v, checkErrors: { ...v.checkErrors, [id]: failure } }))
 }
 
 /** Why the login in use is left, counted the way the footer shows it: room left, or what is used. */
@@ -614,7 +639,10 @@ async function refreshingSoon($: Host, view: View, target: Account, now: number)
   if (active === undefined || active.id === target.id) return undefined
   const stored = await readStored($, active.slot)
   const credential = stored.state === 'present' ? stored.credential : undefined
-  const isSoon = credential !== undefined && credential.expiresAt > now && credential.expiresAt - now < REFRESH_GUARD_MS
+  // A token that has already run out is refreshed first of all, at the session's next request: the switch waits for it too.
+  // A sign-in whose refresh token has run out refreshes nothing, so nothing holds the switch off it.
+  const canRefresh = credential !== undefined && healthOf(credential, now).kind === 'ok'
+  const isSoon = canRefresh && credential.expiresAt - now < REFRESH_GUARD_MS
   return isSoon ? active : undefined
 }
 
@@ -1182,6 +1210,7 @@ async function removeAccount($: Host, id: string): Promise<void> {
   await $.store.delete(`mark:${id}`)
   await $.store.delete(`no-five-hour:${id}`)
   await $.store.delete(`week-mark:${id}`)
+  await $.store.delete(`check-error:${id}`)
   await $.store.delete(`health:${id}`)
   await $.store.delete(`holder:${id}`)
   await setView($, v => {
@@ -1195,7 +1224,8 @@ async function removeAccount($: Host, id: string): Promise<void> {
     delete holders[id]
     const { [id]: _none, ...noFiveHour } = v.noFiveHour ?? {}
     const { [id]: _week, ...weekMarks } = v.weekMarks ?? {}
-    return { ...v, readings, marks, noFiveHour, weekMarks, health, holders, removing: undefined }
+    const { [id]: _error, ...checkErrors } = v.checkErrors ?? {}
+    return { ...v, readings, marks, noFiveHour, weekMarks, checkErrors, health, holders, removing: undefined }
   })
 }
 

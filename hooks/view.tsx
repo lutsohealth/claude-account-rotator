@@ -621,6 +621,7 @@ function accountRows(ui: Ui, view: View, a: Account, now: number, act: Actions) 
   const r = view.readings[a.id]
   const isActive = a.id === view.activeId
   const expiry = health?.kind === 'ok' ? health.refreshExpiresAt : undefined
+  const failure = view.checkErrors?.[a.id]
   // Its organization and plan, and whether the Chrome extension is signed in to it.
   const about = [
     ...(a.orgName === undefined ? [] : [a.plan ? `${a.orgName} · ${a.plan}` : a.orgName]),
@@ -647,6 +648,7 @@ function accountRows(ui: Ui, view: View, a: Account, now: number, act: Actions) 
       {expiry !== undefined && expiry - now < SIGN_IN_WARN_MS && (
         <Text color="warning">   sign-in runs out {untilText(expiry, now)}; signing in again renews it</Text>
       )}
+      {failure !== undefined && <Text color="warning">   its last usage check failed: {failure.why}</Text>}
     </Box>
   )
 }
