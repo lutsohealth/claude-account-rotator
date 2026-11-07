@@ -32,6 +32,10 @@ type World = {
   usageCalls: string[]
   /** Access tokens whose usage call throws, as a dropped connection does. */
   throwing?: string[]
+  /** access token -> when its week resets, as its usage body says; `WEEK_RESET` where unset */
+  weekResets?: Record<string, string>
+  /** access token -> the HTTP status the profile endpoint fails with, where it fails */
+  profileFailing?: Record<string, number>
   /** access token -> the email of the account it signs in, as the profile endpoint answers */
   owners: Record<string, string>
   /** The token a /login signs in, where the session reads its sign-in, and its plan. */
@@ -85,6 +89,9 @@ const blob = (token: string, expiresAt = NOW + 6 * HOUR, plan = 'max') =>
       subscriptionType: plan,
     },
   })
+
+/** When the week of every login resets, unless the world names another for its token. */
+const WEEK_RESET = '2026-10-18T03:00:00Z'
 
 /** When the Fable week of every login resets. */
 const FABLE_RESET = '2026-10-17T03:00:00Z'
@@ -152,6 +159,8 @@ function world(on: On, w: World, store: Record<string, unknown> | Map<string, un
   on('http.fetch', (_$, e) => {
     const token = (e.init?.headers?.Authorization ?? '').replace('Bearer ', '')
     if (e.url === 'https://api.anthropic.com/api/oauth/profile') {
+      const profileFailing = w.profileFailing?.[token]
+      if (profileFailing !== undefined) return { value: { status: profileFailing, ok: false, headers: {}, text: '' } }
       const email = w.owners[token]
       if (email === undefined) return { value: { status: 404, ok: false, headers: {}, text: '' } }
       const profile = {
@@ -170,7 +179,7 @@ function world(on: On, w: World, store: Record<string, unknown> | Map<string, un
     const [five, week, fable] = usage
     const body = {
       five_hour: five === null ? null : { utilization: five, resets_at: '2026-10-12T12:00:00Z' },
-      seven_day: week === null ? null : { utilization: week, resets_at: '2026-10-18T03:00:00Z' },
+      seven_day: week === null ? null : { utilization: week, resets_at: w.weekResets?.[token] ?? WEEK_RESET },
       // A row for another model beside the Fable one, spent: read as Fable's, it would show.
       ...(fable === undefined ? {} : { limits: [limitRow('Sonnet', 100), limitRow('Fable 5.1', fable, w.fableResets)] }),
     }
@@ -4056,4 +4065,127 @@ for (const c of SIGN_IN_GATES) {
     await clock.settle()
     expect([c.name, callsWith(w, 'tok-9')]).toEqual([c.name, 1])
   })
+}
+
+// ---------------------------------------------------------------- readings that cannot cross (C4)
+
+/** What the store holds as a login's reading, under either key: the current one or the legacy one. */
+const storedOf = (store: Map<string, unknown>, id: string) => (store.get(`usage:${id}`) ?? store.get(`reading:${id}`)) as { sevenDay?: { pct?: number; resetsAt?: string }; by?: string } | undefined
+
+/** Account 2's week resets a day before account 1's, so a response tells by its reset whose week it is. */
+const OTHER_WEEK = '2026-10-17T05:00:00Z'
+
+test('a usage body for a token whose holder is unknown, its profile call answering 429, is stored for no login', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [10, 20]
+  w.usage['tok-2'] = [10, 30]
+  w.owners = { 'tok-1': 'one@example.com' }
+  w.profileFailing = { 'tok-2': 429 }
+  const store = new Map<string, unknown>(Object.entries(TWO_LOGINS))
+  const clock = world(on, w, store)
+  await start($, clock)
+  expect(storedOf(store, '1')?.sevenDay?.pct).toBe(20)
+  expect(storedOf(store, '2')).toBeUndefined()
+})
+
+test('a response whose week resets with another login\'s, not the login in use\'s, is stored for no login', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [10, 20]
+  w.usage['tok-2'] = [10, 30]
+  w.weekResets = { 'tok-2': OTHER_WEEK }
+  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off' }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  // Login 1 is in use, but the response carries login 2's week: it went out on login 2's sign-in.
+  w.limits = [{ kind: 'seven_day', percentUsed: 77, resetsAt: OTHER_WEEK }]
+  await respond($, clock, w)
+  expect(storedOf(store, '1')?.sevenDay?.pct).toBe(20)
+  expect(storedOf(store, '2')?.sevenDay?.pct).toBe(30)
+})
+
+test('a response whose week resets with two logins at once is stored for neither: its reset cannot tell them apart', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [10, 20]
+  w.usage['tok-2'] = [10, 30]
+  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off' }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  w.limits = [{ kind: 'seven_day', percentUsed: 31, resetsAt: WEEK_RESET }]
+  await respond($, clock, w)
+  expect(storedOf(store, '1')?.sevenDay?.pct).toBe(20)
+})
+
+test('a switch whose responses still carry the week of the login left, within 3 points of both, is not confirmed and stores nothing under the login moved to', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [10, 40]
+  w.usage['tok-2'] = [10, 41]
+  w.weekResets = { 'tok-2': OTHER_WEEK }
+  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off' }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  await pane.press({ key: 'use-2' })
+  await clock.settle()
+  await pane.unmount()
+  expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
+  // The switch did not take: responses still carry login 1's week, within 3 points of both logins' weeks.
+  w.limits = [{ kind: 'seven_day', percentUsed: 42, resetsAt: WEEK_RESET }]
+  await clock.advance(60_000)
+  await respond($, clock, w)
+  await clock.advance(4 * 60_000)
+  await respond($, clock, w)
+  expect(w.toasts.filter(t => /did not take/.test(t))).toHaveLength(1)
+  expect(storedOf(store, '2')?.sevenDay?.resetsAt).toBe(OTHER_WEEK)
+})
+
+test('a reading an older version writes after this session started says, once, to restart that session', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.usage['tok-1'] = [10, 20]
+  const store = new Map<string, unknown>(Object.entries({ accounts: [{ id: '1', slot: '', email: 'one@example.com' }] }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  expect(await bandText($)).not.toMatch(/older account-rotator/)
+  // An older version writes only reading:<id>, never usage:<id>.
+  store.set('reading:1', { sevenDay: { pct: 50, resetsAt: WEEK_RESET }, at: NOW + 30_000, by: '1' })
+  await clock.advance(61_000)
+  expect(await bandText($)).toMatch(/^An older account-rotator still runs in another session; restart it\.$/)
+})
+
+// Regression guard (passes at the base): the crossed pair the operator saw, reading:3 and reading:5 with no `by`.
+test('readings stored with no owner, as an older version left accounts 3 and 5, are never drawn', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.usage['tok-1'] = [10, 20]
+  const store = new Map<string, unknown>(Object.entries({
+    ...THREE_LOGINS,
+    'reading:2': { sevenDay: { pct: 13, resetsAt: WEEK_RESET }, at: NOW - 60_000 },
+    'reading:3': { sevenDay: { pct: 11, resetsAt: WEEK_RESET }, at: NOW - 59_720 },
+  }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  expect(await pane.find({ text: /8[79]% left/ })).toBeUndefined()
+  await pane.unmount()
+})
+
+/** The band's text above the prompt, or '' where no band is drawn. */
+async function bandText($: Engine): Promise<string> {
+  try {
+    const band = await mountBand($)
+    const texts = (await band.findAll({ type: 'Text' })).map(t => t.text ?? '')
+    await band.unmount()
+    return texts.join('\n')
+  } catch (error) {
+    if (/no implementation for ui\.render/.test(String(error))) return ''
+    throw error
+  }
 }
