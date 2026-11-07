@@ -1318,10 +1318,39 @@ async function removeAccount($: Host, id: string): Promise<void> {
 
 // ---------------------------------------------------------------- wiring
 
-/** The footer's one press: opens the pane, or closes it while it shows. */
-function togglePane($: Host): Promise<unknown> {
-  isPaneShown = !isPaneShown
-  return isPaneShown ? $.ui.open({ id: PANE, title: TITLE, columns: PANE_COLUMNS }) : $.ui.close({ id: PANE })
+/** The footer's one press: opens the pane, or closes it while it shows; what it shows changes only once that took. */
+async function togglePane($: Host): Promise<void> {
+  if (isPaneShown) {
+    await $.ui.close({ id: PANE })
+    isPaneShown = false
+  } else {
+    await $.ui.open({ id: PANE, title: TITLE, columns: PANE_COLUMNS })
+    isPaneShown = true
+  }
+}
+
+/** Whether `/accounts` is this mod's: registered by it, with no other command of that name. */
+let isAccountsOurs = false
+
+/**
+ * Registers `/accounts` unless a command of the person's, an MCP server's or another plugin's has the name: theirs
+ * stays theirs, said once in the debug log. A refused registration leaves the name to its owner the same way.
+ */
+async function registerAccounts($: Host): Promise<void> {
+  const listed = await $.command.list().catch(() => [])
+  const other = listed.find(c => c.name === ACCOUNTS_COMMAND && !(c.source === 'plugin' && c.plugin?.startsWith('account-rotator') === true))
+  if (other !== undefined) {
+    isAccountsOurs = false
+    await debug($, `/${ACCOUNTS_COMMAND} is not registered: a ${other.source} command has the name`)
+    return
+  }
+  try {
+    await $.command.register({ name: ACCOUNTS_COMMAND, description: `Open or close the ${TITLE} panel`, immediate: true })
+    isAccountsOurs = true
+  } catch (error) {
+    isAccountsOurs = false
+    await debug($, `/${ACCOUNTS_COMMAND} not registered: ${String(error)}`)
+  }
 }
 
 /** After a /login, which signs in the login this session is on: who it is now, and a move off it when that is another login's account. */
@@ -1413,6 +1442,9 @@ async function boot($: Host, isInteractive: boolean): Promise<void> {
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
+    // A command typed at the prompt is the person's: it opens the pane as the footer's press does, with no mouse.
+    // Awaited before next(e), so a session whose first prompt is /accounts finds it (the engine awaits the first start).
+    await registerAccounts($)
     const started = await next(e)
     void boot($, e.isInteractive).catch(error => debug($, `start failed: ${String(error)}`))
     void $.ui.panes().then(panes => {
@@ -1427,16 +1459,14 @@ export const register: Register = on => {
     $.clock.every(10 * 60_000, () => {
       void checkAll($).catch(error => debug($, `check failed: ${String(error)}`))
     })
-    // A command typed at the prompt is the person's: it opens the pane as the footer's press does, with no mouse.
-    void $.command
-      .register({ name: ACCOUNTS_COMMAND, description: `Open or close the ${TITLE} panel`, immediate: true })
-      .catch(error => debug($, `/${ACCOUNTS_COMMAND} not registered: ${String(error)}`))
     return started
   })
 
-  on('command.run', { command: ACCOUNTS_COMMAND }, async $ => {
-    await togglePane($)
-    return { text: '' }
+  // Only while /accounts is this mod's; else the run goes on to the command that owns the name. It shows a pane, no text.
+  on('command.run', { command: ACCOUNTS_COMMAND }, async ($, e, next) => {
+    if (!isAccountsOurs) return next(e)
+    await togglePane($).catch(error => tell($, `The ${TITLE} panel did not ${isPaneShown ? 'close' : 'open'}: ${String(error)}`))
+    return {}
   })
 
   on('session.measure', async ($, e, next) => {
@@ -1476,9 +1506,11 @@ export const register: Register = on => {
     return note === undefined ? done : { ...done, context: [...(done.context ?? []), note] }
   }).catch(($, e, next) => next(e))
 
+  // However the pane closes, it shows no more once the close took: a hook below that refuses answers `{ deny }`, not a throw.
   on('ui.close', async ($, e, next) => {
-    if (e.id === PANE) isPaneShown = false
-    return next(e)
+    const closed = await next(e)
+    if (e.id === PANE && !('deny' in closed && closed.deny !== undefined)) isPaneShown = false
+    return closed
   })
 
 
