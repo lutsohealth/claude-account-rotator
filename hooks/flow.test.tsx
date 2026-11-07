@@ -26,6 +26,10 @@ type World = {
   usage: Record<string, [number | null, number | null, number?]>
   /** access token -> the HTTP status the usage endpoint fails with, where it fails */
   failing?: Record<string, number>
+  /** access token -> the Retry-After header a failing usage call carries, where it carries one */
+  retryAfter?: Record<string, string>
+  /** The access token of each usage call the mod made, in order. */
+  usageCalls: string[]
   /** access token -> the email of the account it signs in, as the profile endpoint answers */
   owners: Record<string, string>
   /** The token a /login signs in, where the session reads its sign-in, and its plan. */
@@ -154,8 +158,10 @@ function world(on: On, w: World, store: Record<string, unknown> | Map<string, un
       }
       return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(profile) } }
     }
+    w.usageCalls.push(token)
     const failing = w.failing?.[token]
-    if (failing !== undefined) return { value: { status: failing, ok: false, headers: {}, text: '' } }
+    const retryAfter = w.retryAfter?.[token]
+    if (failing !== undefined) return { value: { status: failing, ok: false, headers: retryAfter === undefined ? {} : { 'retry-after': retryAfter }, text: '' } }
     const usage = w.usage[token]
     if (usage === undefined) return { value: { status: 401, ok: false, headers: {}, text: '' } }
     const [five, week, fable] = usage
@@ -237,6 +243,7 @@ const fresh = (system: World['system'] = 'macOS'): World => ({
   keychain: {},
   files: {},
   usage: {},
+  usageCalls: [],
   owners: {},
   emails: {},
   envSets: [],
@@ -3779,4 +3786,83 @@ test('a stored reading no login can be shown to own is dropped, and a login whos
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
   expect(await pane.find({ text: /89% left/ })).toBeUndefined()
   await pane.unmount()
+})
+
+// ---------------------------------------------------------------- one usage schedule per store
+
+/** How many usage calls the mod made with `token`. */
+const callsWith = (w: World, token: string) => w.usageCalls.filter(t => t === token).length
+
+test('boot makes no usage call for a login another session has scheduled, and calls for one nobody has', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [10, 20]
+  w.usage['tok-2'] = [10, 30]
+  // Another session read account 2 a minute ago: its next read is due in nine minutes.
+  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'usage-due:2': { next: NOW + 9 * 60_000, fails: 0, at: NOW - 60_000 } }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  expect(callsWith(w, 'tok-1')).toBe(1)
+  expect(callsWith(w, 'tok-2')).toBe(0)
+  expect(store.get('usage-due:1')).toMatchObject({ fails: 0, at: expect.any(Number) })
+})
+
+test('after a 429 with Retry-After 1800 no session calls for 30 minutes, and the pane names the wait', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [10, 20]
+  w.failing = { 'tok-2': 429 }
+  w.retryAfter = { 'tok-2': '1800' }
+  const store = new Map<string, unknown>(Object.entries(TWO_LOGINS))
+  const clock = world(on, w, store)
+  await start($, clock)
+  expect(callsWith(w, 'tok-2')).toBe(1)
+  // Stored for every session: the back-off is the header's, not the two-minute floor.
+  expect((store.get('usage-due:2') as { next?: number; fails?: number } | undefined)?.next).toBeGreaterThanOrEqual(NOW + 30 * 60_000)
+  expect((store.get('check-error:2') as { why?: string } | undefined)?.why).toMatch(/HTTP 429.*1800/)
+  await clock.advance(10 * 60_000 + 1000)
+  expect(callsWith(w, 'tok-2')).toBe(1)
+  // The back-off ends just after the 30-minute check: the 40-minute one reads again.
+  await clock.advance(31 * 60_000)
+  expect(callsWith(w, 'tok-2')).toBe(2)
+})
+
+test('after a switch on an idle session, the minutes it settles make no usage call', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [92, 40]
+  w.usage['tok-2'] = [10, 30]
+  const clock = world(on, w, TWO_LOGINS)
+  await start($, clock)
+  expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
+  const before = w.usageCalls.length
+  await clock.advance(5 * 60_000)
+  expect(w.usageCalls.length).toBe(before)
+})
+
+test('a usage-limit stop calls again only when the last read is over a minute old and no back-off stands', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.usage['tok-1'] = [50, 20]
+  const store = new Map<string, unknown>(Object.entries({ accounts: [{ id: '1', slot: '', email: 'one@example.com' }] }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  expect(callsWith(w, 'tok-1')).toBe(1)
+  // Seconds after the boot's read: nothing new to learn.
+  await $.classic.StopFailure({ error: 'rate_limit' })
+  await clock.settle()
+  expect(callsWith(w, 'tok-1')).toBe(1)
+  await clock.advance(2 * 60_000)
+  await $.classic.StopFailure({ error: 'rate_limit' })
+  await clock.settle()
+  expect(callsWith(w, 'tok-1')).toBe(2)
+  // A back-off another session stored holds a stop's call too.
+  store.set('usage-due:1', { next: NOW + HOUR, fails: 2, at: NOW })
+  await clock.advance(2 * 60_000)
+  await $.classic.StopFailure({ error: 'rate_limit' })
+  await clock.settle()
+  expect(callsWith(w, 'tok-1')).toBe(2)
 })
