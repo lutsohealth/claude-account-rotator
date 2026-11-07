@@ -1,5 +1,5 @@
-/** One usage window of a login: percent used, and when it resets (ISO 8601). */
-export type UsageWindow = { pct: number; resetsAt?: string }
+/** One usage window of a login: percent used, and when it resets (ISO 8601); `isStop` where a stop marked it, not a read. */
+export type UsageWindow = { pct: number; resetsAt?: string; isStop?: true }
 
 /**
  * A login's usage as last read, `at` in epoch milliseconds. `fable` is the
@@ -50,6 +50,9 @@ export type Fill = 'left' | 'used'
  */
 export type RotateTo = 'reset' | 'room' | 'order' | 'off'
 
+/** Whether a 5-hour window counts where the usage read reports one ('on'), or never ('off'): then only the week and the Fable week do. */
+export type FiveHourLimit = 'on' | 'off'
+
 /** The footer's look, picked in the pane and kept across sessions. */
 export type FooterStyle = {
   session: Glyphs
@@ -88,6 +91,8 @@ export type View = {
   footer: FooterStyle
   /** Which login the rotation moves to, picked in the pane and kept across sessions. */
   rotateTo: RotateTo
+  /** Whether the 5-hour window counts, picked in the pane and kept across sessions. */
+  fiveHourLimit: FiveHourLimit
   /** The line that asks Claude to carry on after a switch for the Fable week, kept across sessions; the mod's own where none is kept. */
   fableContinueText?: string
   /** This session only: a turn died on the Fable week, so the band says when it frees up once every account has used it. */

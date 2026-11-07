@@ -1,4 +1,4 @@
-import type { Account, Fill, FooterStyle, Glyphs, Health, Highlight, Reading, RotateTo, UsageWindow, View } from '../types'
+import type { Account, Fill, FiveHourLimit, FooterStyle, Glyphs, Health, Highlight, Reading, RotateTo, UsageWindow, View } from '../types'
 
 /** Leave a login once its 5-hour window is this full (percent). */
 export const LEAVE_FIVE_HOUR = 90
@@ -11,6 +11,9 @@ export const DEFAULT_FOOTER: FooterStyle = { session: 'braille', week: 'bars', s
 
 export const DEFAULT_ROTATE_TO: RotateTo = 'reset'
 
+/** On: a 5-hour window counts where the usage read reports one. Off: only the week and the Fable week count. */
+export const DEFAULT_FIVE_HOUR_LIMIT: FiveHourLimit = 'on'
+
 export const EMPTY_VIEW: View = {
   accounts: [],
   readings: {},
@@ -19,6 +22,7 @@ export const EMPTY_VIEW: View = {
   activeId: '1',
   footer: DEFAULT_FOOTER,
   rotateTo: DEFAULT_ROTATE_TO,
+  fiveHourLimit: DEFAULT_FIVE_HOUR_LIMIT,
   hasFontBlocks: false,
 }
 
@@ -26,6 +30,7 @@ export const GLYPHS: readonly Glyphs[] = ['bars', 'pie', 'braille', 'none']
 export const HIGHLIGHTS: readonly Highlight[] = ['lines', 'tile', 'dim']
 export const FILLS: readonly Fill[] = ['left', 'used']
 export const ROTATE_TOS: readonly RotateTo[] = ['reset', 'room', 'order', 'off']
+export const FIVE_HOUR_LIMITS: readonly FiveHourLimit[] = ['on', 'off']
 
 const isOneOf = <T extends string>(value: unknown, allowed: readonly T[]): value is T =>
   typeof value === 'string' && (allowed as readonly string[]).includes(value)
@@ -33,6 +38,35 @@ const isOneOf = <T extends string>(value: unknown, allowed: readonly T[]): value
 /** Which login the rotation moves to, as stored; unknown is the default's. */
 export function rotateToFrom(value: unknown): RotateTo {
   return isOneOf(value, ROTATE_TOS) ? value : DEFAULT_ROTATE_TO
+}
+
+/** Whether the 5-hour window counts, as stored; unknown is the default's. */
+export function fiveHourLimitFrom(value: unknown): FiveHourLimit {
+  return isOneOf(value, FIVE_HOUR_LIMITS) ? value : DEFAULT_FIVE_HOUR_LIMIT
+}
+
+/** How long a 5-hour window runs: a stop's mark with no reset time of its own stands this long. */
+export const FIVE_HOUR_MS = 5 * 3600_000
+
+/**
+ * A reading as the rules count it. A full 5-hour window with no reset time is
+ * the mark a stop left before marks carried one: it stands five hours from its
+ * read. A read window with room and no reset time is one not yet started. A mark
+ * past its reset time is dropped, as the account reported no window. With the
+ * limit off, a 5-hour window the usage read reported is dropped; the mark a stop
+ * leaves stays, so the session that hit the stop still moves.
+ */
+export function counted(r: Reading, limit: FiveHourLimit, now: number): Reading {
+  const w = r.fiveHour
+  if (w === undefined) return r
+  const isOldMark = w.resetsAt === undefined && w.isStop !== true && w.pct >= 100
+  const fiveHour: UsageWindow = isOldMark ? { ...w, resetsAt: new Date(r.at + FIVE_HOUR_MS).toISOString(), isStop: true } : w
+  const isOver = fiveHour.isStop === true && fiveHour.resetsAt !== undefined && Date.parse(fiveHour.resetsAt) <= now
+  if (isOver || (limit === 'off' && fiveHour.isStop !== true)) {
+    const { fiveHour: _dropped, ...rest } = r
+    return rest
+  }
+  return fiveHour === w ? r : { ...r, fiveHour }
 }
 
 /** The footer's look as stored; any part missing or unknown is the default's. */
@@ -95,9 +129,9 @@ export function shouldLeave(view: View, now: number, need?: Need): boolean {
   return view.health[view.activeId]?.kind === 'login-needed' || isSpent(r, now) || (need === 'fable' && isFableSpent(r, now))
 }
 
-/** When a login's 5-hour window resets, epoch ms; Infinity while none is running. */
-function fiveHourReset(r: Reading | undefined, now: number): number {
-  const w = r?.fiveHour
+/** When a login's 5-hour window resets, or its week where it reports no 5-hour window, epoch ms; Infinity while none is running. */
+function resetOf(r: Reading | undefined, now: number): number {
+  const w = r?.fiveHour ?? r?.sevenDay
   if (w?.resetsAt === undefined || (windowPct(w, now) ?? 0) === 0) return Infinity
   return Date.parse(w.resetsAt)
 }
@@ -124,7 +158,8 @@ export function pickTarget(view: View, now: number, need?: Need): Account | unde
   // A login never read for the Fable week may have none: it is taken only when no read one has room.
   const read = open.filter(a => view.readings[a.id]?.fable !== undefined)
   const ready = isFable && read.length > 0 ? read : open
-  const available = (a: Account) => availableNow(view.readings[a.id], now) ?? 100
+  // A login with no 5-hour window serves what its week has left.
+  const available = (a: Account) => availableNow(view.readings[a.id], now) ?? roomLeft(view.readings[a.id]?.sevenDay, now) ?? 100
   const fableRoom = (a: Account) => 100 - (windowPct(view.readings[a.id]?.fable, now) ?? 0)
   const byRoom = (a: Account, b: Account) => (isFable && fableRoom(a) !== fableRoom(b) ? fableRoom(b) - fableRoom(a) : available(b) - available(a))
   switch (view.rotateTo) {
@@ -132,7 +167,7 @@ export function pickTarget(view: View, now: number, need?: Need): Account | unde
     case 'off':
       return ready.sort(byRoom)[0]
     case 'reset': {
-      const reset = (a: Account) => fiveHourReset(view.readings[a.id], now)
+      const reset = (a: Account) => resetOf(view.readings[a.id], now)
       return ready.sort((a, b) => (reset(a) === reset(b) ? byRoom(a, b) : reset(a) < reset(b) ? -1 : 1))[0]
     }
     case 'order': {
@@ -244,6 +279,18 @@ export function keepFable(fresh: Reading, stored: Reading | undefined, now: numb
   return { ...fresh, fable: kept }
 }
 
+/**
+ * A fresh read with the 5-hour mark a stop left on the stored one, where the
+ * read lists no 5-hour window and the mark has not reached its reset time: a
+ * check or a response that lists none cannot end the mark early. A 5-hour
+ * window in the read replaces it.
+ */
+export function keepFiveHourMark(fresh: Reading, stored: Reading | undefined, now: number): Reading {
+  if (fresh.fiveHour !== undefined || stored === undefined) return fresh
+  const mark = counted(stored, 'on', now).fiveHour
+  return mark?.isStop === true ? { ...fresh, fiveHour: mark } : fresh
+}
+
 /** How long a Fable week runs: a mark with no reset time of its own stands this long. */
 export const FABLE_WEEK_MS = 7 * 24 * 3600_000
 
@@ -253,8 +300,13 @@ export const FABLE_WEEK_MS = 7 * 24 * 3600_000
  * whose usage lists no Fable week cannot end it at once.
  */
 export function fableMark(read: UsageWindow | undefined, now: number): UsageWindow {
+  return spentMark(read, now, FABLE_WEEK_MS)
+}
+
+/** A window marked spent by a stop: until the reset time the last read gave, else `lengthMs` from the stop. */
+export function spentMark(read: UsageWindow | undefined, now: number, lengthMs: number): UsageWindow {
   const isAhead = read?.resetsAt !== undefined && Date.parse(read.resetsAt) > now
-  return { pct: 100, resetsAt: isAhead ? (read.resetsAt as string) : new Date(now + FABLE_WEEK_MS).toISOString() }
+  return { pct: 100, resetsAt: isAhead ? (read.resetsAt as string) : new Date(now + lengthMs).toISOString() }
 }
 
 /** The most characters of the line that asks Claude to carry on. */

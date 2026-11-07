@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import type { RotateTo, View } from '../types'
-import { DEFAULT_FOOTER, availableNow, braille, browsersFrom, chromeNote, continueTextFrom, credentialFrom, credentialsFile, fableMark, fableSpentNotice, fableStay, footerStyleFrom, healthOf, identityFromProfile, isFableSpent, isFableStop, isNoBrowser, isPolicyRefusal, keepFable, keychainItem, nextReset, pickTarget, pie, readingFromUsage, rotateToFrom, shouldLeave, roomColor, windowPct } from './model'
+import { DEFAULT_FOOTER, availableNow, braille, browsersFrom, chromeNote, continueTextFrom, counted, fiveHourLimitFrom, credentialFrom, credentialsFile, fableMark, fableSpentNotice, fableStay, footerStyleFrom, healthOf, identityFromProfile, isFableSpent, isFableStop, isNoBrowser, isPolicyRefusal, keepFable, keepFiveHourMark, keychainItem, nextReset, pickTarget, pie, readingFromUsage, rotateToFrom, shouldLeave, roomColor, windowPct } from './model'
 
 const NOW = Date.parse('2026-10-12T10:00:00Z')
 const LATER = '2026-10-12T12:00:00Z'
@@ -37,9 +37,70 @@ function view(
     activeId: '1',
     footer: DEFAULT_FOOTER,
     rotateTo,
+    fiveHourLimit: 'on',
     hasFontBlocks: false,
   }
 }
+
+/** A login that reports no 5-hour window: its week alone, used `week` percent, resetting at `resetsAt`. */
+const weekOnly = (week: number, resetsAt: string) => ({ sevenDay: { pct: week, resetsAt }, at: NOW })
+
+test('a stored 5-hour limit choice is kept when known, else on', () => {
+  expect(fiveHourLimitFrom('off')).toBe('off')
+  expect(fiveHourLimitFrom('on')).toBe('on')
+  expect(fiveHourLimitFrom('nope')).toBe('on')
+  expect(fiveHourLimitFrom(undefined)).toBe('on')
+})
+
+test('logins that report no 5-hour window rank by their week: soonest reset by its week reset, most room by its week room', () => {
+  const v = view({ '1': [95, 50], '2': [0, 0], '3': [0, 0], '4': [0, 0] }, {}, 'reset')
+  v.readings['2'] = weekOnly(90, '2026-10-12T20:00:00Z')
+  v.readings['3'] = weekOnly(20, '2026-10-14T03:00:00Z')
+  v.readings['4'] = weekOnly(60, '2026-10-13T03:00:00Z')
+  expect(pickTarget(v, NOW)?.id).toBe('2')
+  expect(pickTarget({ ...v, rotateTo: 'room' }, NOW)?.id).toBe('3')
+  // Spent by its week, a login with no 5-hour window is never a target.
+  v.readings['2'] = weekOnly(96, '2026-10-12T20:00:00Z')
+  expect(pickTarget(v, NOW)?.id).toBe('4')
+})
+
+test('with the 5-hour limit off a reported 5-hour window is dropped and a stop\'s mark stays; a mark with no reset time stands five hours from its read', () => {
+  const read = { fiveHour: { pct: 95, resetsAt: LATER }, sevenDay: { pct: 10, resetsAt: WEEK_END }, at: NOW }
+  expect(counted(read, 'on', NOW)).toBe(read)
+  expect(counted(read, 'off', NOW)).toEqual({ sevenDay: { pct: 10, resetsAt: WEEK_END }, at: NOW })
+  const v = view({ '1': [95, 10] })
+  expect(shouldLeave(v, NOW)).toBe(true)
+  expect(shouldLeave({ ...v, readings: { '1': counted(read, 'off', NOW) } }, NOW)).toBe(false)
+  const mark = { ...read, fiveHour: { pct: 100, resetsAt: LATER, isStop: true as const } }
+  expect(counted(mark, 'off', NOW)).toBe(mark)
+  // The mark a stop left before marks carried a reset time: five hours from its read, then gone.
+  const old = { fiveHour: { pct: 100 }, at: NOW }
+  expect(counted(old, 'on', NOW + 5 * HOUR - 1).fiveHour).toEqual({ pct: 100, resetsAt: new Date(NOW + 5 * HOUR).toISOString(), isStop: true })
+  expect(counted(old, 'on', NOW + 5 * HOUR)).toEqual({ at: NOW })
+})
+
+test('a stop\'s 5-hour mark stands through a read that lists no 5-hour window until its reset; a read window replaces it', () => {
+  const fresh = { sevenDay: { pct: 20, resetsAt: WEEK_END }, at: NOW + HOUR }
+  const mark = { pct: 100, resetsAt: LATER, isStop: true as const }
+  const stored = { fiveHour: mark, sevenDay: { pct: 10, resetsAt: WEEK_END }, at: NOW }
+  expect(keepFiveHourMark(fresh, stored, NOW + HOUR)).toEqual({ ...fresh, fiveHour: mark })
+  expect(keepFiveHourMark(fresh, stored, Date.parse(LATER))).toEqual(fresh)
+  const read = { ...fresh, fiveHour: { pct: 30, resetsAt: LATER } }
+  expect(keepFiveHourMark(read, stored, NOW + HOUR)).toBe(read)
+  // A read window, not a stop's, is not carried: the fresh read says the account reports none now.
+  expect(keepFiveHourMark(fresh, { ...stored, fiveHour: { pct: 30, resetsAt: LATER } }, NOW + HOUR)).toBe(fresh)
+  // The old mark with no reset time stands five hours from its read.
+  const old = { fiveHour: { pct: 100 }, at: NOW }
+  expect(keepFiveHourMark(fresh, old, NOW + HOUR).fiveHour).toEqual({ pct: 100, resetsAt: new Date(NOW + 5 * HOUR).toISOString(), isStop: true })
+  expect(keepFiveHourMark(fresh, old, NOW + 5 * HOUR)).toBe(fresh)
+  expect(keepFiveHourMark(fresh, undefined, NOW)).toBe(fresh)
+})
+
+test('a 5-hour window read with no reset time and room left is a read, not a stop\'s mark: off drops it, on keeps it as read', () => {
+  const unstarted = { fiveHour: { pct: 0 }, sevenDay: { pct: 10, resetsAt: WEEK_END }, at: NOW }
+  expect(counted(unstarted, 'on', NOW + 6 * HOUR)).toBe(unstarted)
+  expect(counted(unstarted, 'off', NOW)).toEqual({ sevenDay: { pct: 10, resetsAt: WEEK_END }, at: NOW })
+})
 
 test('leaves at 90% of the 5-hour window or 95% of the week, and not before', () => {
   expect(shouldLeave(view({ '1': [89, 94] }), NOW)).toBe(false)

@@ -10,12 +10,17 @@ import type {
   Timer,
 } from 'claude-code'
 
-import type { Account, FooterStyle, Health, Holder, Reading, RotateTo, View } from '../types'
+import type { Account, FiveHourLimit, FooterStyle, Health, Holder, Reading, RotateTo, View } from '../types'
 import {
   CHROME_SERVER,
   CHROME_TOOL,
   EMPTY_VIEW,
+  FIVE_HOUR_MS,
   LEAVE_FIVE_HOUR,
+  counted,
+  fiveHourLimitFrom,
+  keepFiveHourMark,
+  spentMark,
   blockedText,
   browsersFrom,
   canConnectChrome,
@@ -141,8 +146,22 @@ async function saveAccounts($: Host, accounts: Account[]): Promise<void> {
   await setView($, v => ({ ...v, accounts }))
 }
 
-async function saveReading($: Host, id: string, reading: Reading): Promise<void> {
-  await $.store.set(`reading:${id}`, reading)
+/** A login's reading as stored: the read itself, before the 5-hour limit counts it. */
+async function storedReading($: Host, id: string): Promise<Reading | undefined> {
+  const r = await $.store.get(`reading:${id}`)
+  return typeof r === 'object' && r !== null && typeof (r as Reading).at === 'number' ? (r as Reading) : undefined
+}
+
+/**
+ * Stores a read as read, keeping a stop's 5-hour mark it does not replace, so
+ * turning the 5-hour limit back on finds the windows off hid; the view gets it
+ * as the limit counts it.
+ */
+async function saveReading($: Host, id: string, read: Reading): Promise<void> {
+  const now = await $.clock.now()
+  const kept = keepFiveHourMark(read, await storedReading($, id), now)
+  await $.store.set(`reading:${id}`, kept)
+  const reading = counted(kept, (await getView($)).fiveHourLimit, now)
   await setView($, v => ({ ...v, readings: { ...v.readings, [id]: reading } }))
 }
 
@@ -166,8 +185,8 @@ async function mergeStore($: Host): Promise<void> {
   const health: Record<string, Health> = {}
   const holders: Record<string, Holder> = {}
   for (const a of accounts) {
-    const r = await $.store.get(`reading:${a.id}`)
-    if (typeof r === 'object' && r !== null && typeof (r as Reading).at === 'number') readings[a.id] = r as Reading
+    const r = await storedReading($, a.id)
+    if (r !== undefined) readings[a.id] = r
     const h = await $.store.get(`health:${a.id}`)
     if (typeof h === 'object' && h !== null && typeof (h as Health).kind === 'string') health[a.id] = h as Health
     const s = await $.store.get(`holder:${a.id}`)
@@ -177,6 +196,8 @@ async function mergeStore($: Host): Promise<void> {
   }
   const footer = footerStyleFrom(await $.store.get('footer'))
   const rotateTo = rotateToFrom(await $.store.get('rotate-to'))
+  const fiveHourLimit = fiveHourLimitFrom(await $.store.get('five-hour-limit'))
+  const now = await $.clock.now()
   const fableContinueText = continueTextFrom(await $.store.get('fable-continue-text'))
   const chrome = await $.store.get('chrome-account')
   const chromeAccountId = typeof chrome === 'string' && accounts.some(a => a.id === chrome) ? chrome : undefined
@@ -189,15 +210,16 @@ async function mergeStore($: Host): Promise<void> {
     for (const a of accounts) {
       const mine = v.readings[a.id]
       const theirs = readings[a.id]
-      const reading = mine !== undefined && (theirs === undefined || mine.at >= theirs.at) ? mine : theirs
-      if (reading !== undefined) nextReadings[a.id] = reading
+      // On a tie the stored read wins: this session's copy is already counted, and may have lost a window.
+      const reading = mine !== undefined && (theirs === undefined || mine.at > theirs.at) ? mine : theirs
+      if (reading !== undefined) nextReadings[a.id] = counted(reading, fiveHourLimit, now)
       const own = v.health[a.id]
       const h = signingIn === a.id ? own : (health[a.id] ?? own)
       if (h !== undefined) nextHealth[a.id] = h
       const holder = holders[a.id] ?? v.holders[a.id]
       if (holder !== undefined) nextHolders[a.id] = holder
     }
-    return { ...v, accounts, readings: nextReadings, health: nextHealth, holders: nextHolders, footer, rotateTo, fableContinueText, chromeAccountId, chromeAccountIds }
+    return { ...v, accounts, readings: nextReadings, health: nextHealth, holders: nextHolders, footer, rotateTo, fiveHourLimit, fableContinueText, chromeAccountId, chromeAccountIds }
   })
 }
 
@@ -212,6 +234,23 @@ async function setFooter($: Host, change: Partial<FooterStyle>): Promise<void> {
 async function setRotateTo($: Host, rotateTo: RotateTo): Promise<void> {
   await $.store.set('rotate-to', rotateTo)
   await setView($, v => ({ ...v, rotateTo }))
+}
+
+/** Turns the 5-hour window's count on or off, for every session, recounting each stored read at once. */
+async function setFiveHourLimit($: Host, fiveHourLimit: FiveHourLimit): Promise<void> {
+  await $.store.set('five-hour-limit', fiveHourLimit)
+  const now = await $.clock.now()
+  const stored: Record<string, Reading> = {}
+  for (const id of Object.keys((await getView($)).readings)) {
+    const r = await storedReading($, id)
+    if (r !== undefined) stored[id] = r
+  }
+  await setView($, v => ({
+    ...v,
+    fiveHourLimit,
+    readings: Object.fromEntries(Object.entries(v.readings).map(([id, r]) => [id, counted(stored[id] ?? r, fiveHourLimit, now)])),
+  }))
+  await maybeRotate($)
 }
 
 /** Names the account the Chrome extension is signed in to, for every session; none forgets it. */
@@ -658,6 +697,8 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
     const now = await $.clock.now()
     const after = await getView($)
     const r = after.readings[active.id]
+    // A mark goes on the read as stored, so a 5-hour window the limit hides stays in it.
+    const read = (await storedReading($, active.id)) ?? r
     // Claude's own words tell the Fable week from any other limit; the usage read decides only where there are none.
     const said = stop.last_assistant_message
     const isFable = said === undefined || said === '' ? isFableSpent(r, now) : isFableStop(said)
@@ -665,11 +706,10 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
       need = 'fable'
       await setView($, v => ({ ...v, isFableStopped: true }))
       // The limit was hit before the usage call shows it: count the Fable week as full.
-      if (!isFableSpent(r, now)) await saveReading($, active.id, { ...r, fable: fableMark(r?.fable, now), at: now })
+      if (!isFableSpent(r, now)) await saveReading($, active.id, { ...read, fable: fableMark(r?.fable, now), at: now })
     } else if (!shouldLeave(after, now)) {
-      // The limit was hit before the usage call shows it: count the 5-hour window as full.
-      const resetsAt = r?.fiveHour?.resetsAt
-      await saveReading($, active.id, { ...r, fiveHour: { pct: 100, ...(resetsAt ? { resetsAt } : {}) }, at: now })
+      // The limit was hit before the usage call shows it: count the 5-hour window as full, five hours at most where none is reported.
+      await saveReading($, active.id, { ...read, fiveHour: { ...spentMark(read?.fiveHour, now, FIVE_HOUR_MS), isStop: true }, at: now })
     }
   }
   await setView($, v => ({ ...v, pending: undefined }))
@@ -1095,6 +1135,7 @@ function actions($: Host): Actions {
     remove: id => background(removeAccount($, id)),
     setFooter: change => background(setFooter($, change)),
     setRotateTo: rotateTo => background(setRotateTo($, rotateTo)),
+    setFiveHourLimit: limit => background(setFiveHourLimit($, limit)),
     tryChromeAccount: id => background(tryChromeAccount($, id)),
     toggleChromeOthers: () => background(setView($, v => ({ ...v, isChromeOthersShown: !v.isChromeOthersShown }))),
     connectChrome: () => background(connectChrome($)),

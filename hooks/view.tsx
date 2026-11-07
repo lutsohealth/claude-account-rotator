@@ -1,6 +1,6 @@
 import type { Elements, RenderChildren, RenderSurface } from 'claude-code'
 
-import type { Account, Fill, FooterRun, FooterStyle, Glyphs, Highlight, RotateTo, UsageWindow, View } from '../types'
+import type { Account, Fill, FiveHourLimit, FooterRun, FooterStyle, Glyphs, Highlight, RotateTo, UsageWindow, View } from '../types'
 import {
   GLYPHS,
   LEAVE_FIVE_HOUR,
@@ -38,6 +38,7 @@ export type Actions = {
   remove: (id: string) => void
   setFooter: (change: Partial<FooterStyle>) => void
   setRotateTo: (rotateTo: RotateTo) => void
+  setFiveHourLimit: (limit: FiveHourLimit) => void
   tryChromeAccount: (id: string) => void
   toggleChromeOthers: () => void
   connectChrome: () => void
@@ -290,6 +291,10 @@ const ROTATE_CHOICES = [
   ['order', 'next in list'],
   ['off', 'disabled'],
 ] as const satisfies readonly (readonly [RotateTo, string])[]
+const FIVE_HOUR_CHOICES = [
+  ['on', 'where reported'],
+  ['off', 'off'],
+] as const satisfies readonly (readonly [FiveHourLimit, string])[]
 const PREVIEW_CHOICES = [
   ['real', 'your usage'],
   ['demo', 'demo values'],
@@ -334,10 +339,11 @@ function FooterSettings(ui: Ui, view: View, act: Actions) {
   ])
 }
 
-/** Which login the rotation moves to. */
+/** Which login the rotation moves to, and whether the 5-hour window counts. */
 function RotationSettings(ui: Ui, view: View, act: Actions) {
   return section(ui, 'rotation', 'Usage based rotation', [
     choice(ui, 'rotate-to', 'Move to', ROTATE_CHOICES, view.rotateTo, act.setRotateTo),
+    choice(ui, 'five-hour-limit', '5h limit', FIVE_HOUR_CHOICES, view.fiveHourLimit, act.setFiveHourLimit),
   ])
 }
 
@@ -647,19 +653,19 @@ function accountRows(ui: Ui, view: View, a: Account, now: number, act: Actions) 
 
 /** Where the rotation moves to, as its setting picks. */
 const RULE_TARGETS: Record<Exclude<RotateTo, 'off'>, string> = {
-  reset: 'the account whose 5-hour window resets soonest',
+  reset: 'the account whose 5-hour window, or else week, resets soonest',
   room: 'the account with the most room right now',
   order: 'the next account in the list with room',
 }
 
-/** When the rotation moves on, counted the way the footer shows it (room left, or what is used), and where to. */
-function rule(fill: Fill, rotateTo: RotateTo): string {
+/** When the rotation moves on, counted the way the footer shows it (room left, or what is used), and where to; with the 5-hour limit off, by the week alone. */
+function rule(fill: Fill, rotateTo: RotateTo, limit: FiveHourLimit): string {
   if (rotateTo === 'off') return 'Rotation is disabled: the session stays on the account in use until you pick another.'
-  const when =
-    fill === 'left'
-      ? `Once the account in use has ${100 - LEAVE_FIVE_HOUR}% of its 5-hour window or ${100 - LEAVE_SEVEN_DAY}% of its week left`
-      : `Once the account in use has used ${LEAVE_FIVE_HOUR}% of its 5-hour window or ${LEAVE_SEVEN_DAY}% of its week`
-  return `${when}, moves to ${RULE_TARGETS[rotateTo]}.`
+  const [five, week] = fill === 'left' ? [100 - LEAVE_FIVE_HOUR, 100 - LEAVE_SEVEN_DAY] : [LEAVE_FIVE_HOUR, LEAVE_SEVEN_DAY]
+  const windows = limit === 'off' ? `${week}% of its week` : `${five}% of its 5-hour window, where it reports one, or ${week}% of its week`
+  const when = fill === 'left' ? `Once the account in use has ${windows} left` : `Once the account in use has used ${windows}`
+  const target = limit === 'off' && rotateTo === 'reset' ? 'the account whose week resets soonest' : RULE_TARGETS[rotateTo]
+  return `${when}, moves to ${target}.`
 }
 
 /** The pane's first line while Claude Code's security policy refuses every switch. */
@@ -712,7 +718,7 @@ export function Pane(ui: Ui, view: View, now: number, act: Actions) {
   ]
   return (
     <Box flexDirection="column" rowGap={1}>
-      {view.isSwitchBlocked ? <Text color="warning">{blockedRule(view)}</Text> : <Text dimColor>{rule(view.footer.fill, view.rotateTo)}</Text>}
+      {view.isSwitchBlocked ? <Text color="warning">{blockedRule(view)}</Text> : <Text dimColor>{rule(view.footer.fill, view.rotateTo, view.fiveHourLimit)}</Text>}
       {LoginLine(ui, view)}
       {section(ui, 'accounts', 'Accounts', accounts)}
       {(view.hasChrome === true || view.chromeAccountId !== undefined || (view.chromeAccountIds?.length ?? 0) > 0) && ChromeSettings(ui, view, act)}
