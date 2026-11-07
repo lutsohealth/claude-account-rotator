@@ -316,7 +316,10 @@ async function mergeStore($: Host): Promise<void> {
       const weekMark = weekMarks[a.id] ?? v.weekMarks?.[a.id]
       if (weekMark !== undefined) nextWeekMarks[a.id] = weekMark
       // On a tie the stored read wins: this session's copy is already counted, and may have lost a window.
-      const reading = mine !== undefined && (theirs === undefined || mine.at > theirs.at) ? mine : theirs
+      const kept = mine !== undefined && (theirs === undefined || mine.at > theirs.at) ? mine : theirs
+      // A stop's mark still in force counts with no reading under it: a reading dropped as no one's takes no mark along.
+      const inForce = (m: Mark | undefined) => m !== undefined && Date.parse(m.resetsAt) > now
+      const reading = kept ?? (inForce(mark) || inForce(weekMark) ? { at: now, by: a.id } : undefined)
       if (reading !== undefined) nextReadings[a.id] = viewed(reading, { mark, weekMark, noFiveHour: none }, fiveHourLimit, now)
       const own = v.health[a.id]
       const h = signingIn === a.id ? own : (health[a.id] ?? own)
