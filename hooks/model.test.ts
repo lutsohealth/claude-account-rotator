@@ -571,7 +571,6 @@ const STAYS: { name: string; reason: string; view: View; isConnecting?: boolean;
   { name: 'Connect holds the session', reason: 'chrome', view: CAN_MOVE(), isConnecting: true },
   { name: 'rotation off', reason: 'off', view: { ...CAN_MOVE(), rotateTo: 'off' } },
   { name: 'Claude Code refuses switching', reason: 'blocked', view: { ...CAN_MOVE(), isSwitchBlocked: true } },
-  { name: 'a switch is still pending', reason: 'pending', view: { ...CAN_MOVE(), pending: { id: '2', from: '1', since: NOW } } },
   { name: 'every Fable week spent', reason: 'fable-spent', view: view({ '1': [20, 30, 100], '2': [10, 30, 100] }) },
   { name: 'the other account has its 5-hour window full', reason: 'no-room', view: view({ '1': [20, 30, 100], '2': [95, 30, 10] }) },
   { name: 'the other account has its week full', reason: 'no-room', view: view({ '1': [20, 30, 100], '2': [10, 100, 10] }) },
@@ -581,6 +580,8 @@ const STAYS: { name: string; reason: string; view: View; isConnecting?: boolean;
 
 test('a Fable stop that did not move gives the reason, one per cause the rotation can stay for', () => {
   expect(fableStay(CAN_MOVE(), NOW, false, new Set())).toBeUndefined()
+  // A stop moves the session on from a switch still settling (maybeRotate lets it through), so that is no reason.
+  expect(fableStay({ ...CAN_MOVE(), pending: { id: '2', from: '1', since: NOW } }, NOW, false, new Set())).toBeUndefined()
   for (const { name, reason, view: v, isConnecting = false, skip = [] } of STAYS) {
     expect([name, fableStay(v, NOW, isConnecting, new Set(skip))?.reason]).toEqual([name, reason])
   }
@@ -594,8 +595,6 @@ test('the reasons are told in the order maybeRotate checks them', () => {
   v = { ...v, rotateTo: 'room' }
   expect(fableStay(v, NOW, false, new Set())?.reason).toBe('blocked')
   v = { ...v, isSwitchBlocked: false }
-  expect(fableStay(v, NOW, false, new Set())?.reason).toBe('pending')
-  v = { ...v, pending: undefined }
   expect(fableStay(v, NOW, false, new Set())?.reason).toBe('fable-spent')
   v = { ...v, readings: { ...v.readings, '2': { ...v.readings['2'], fable: { pct: 10, resetsAt: FABLE_END }, at: NOW } } }
   expect(fableStay(v, NOW, false, new Set())?.reason).toBe('no-room')
@@ -617,9 +616,8 @@ test('every reason has its own words, naming the account and ending on Claude Co
     texts.set(reason, text)
   }
   // One text per reason, whatever stages it.
-  expect([...texts.keys()].sort()).toEqual(['blocked', 'chrome', 'no-room', 'off', 'pending'])
-  expect(new Set(texts.values()).size).toBe(5)
-  expect(texts.get('pending')).toMatch(/switch to account 2 is still settling/)
+  expect([...texts.keys()].sort()).toEqual(['blocked', 'chrome', 'no-room', 'off'])
+  expect(new Set(texts.values()).size).toBe(4)
 })
 
 // ---------------------------------------------------------------- one usage schedule per store

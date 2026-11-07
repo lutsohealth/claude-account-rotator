@@ -10,7 +10,7 @@ import type {
   Timer,
 } from 'claude-code'
 
-import type { Account, CheckError, FiveHourLimit, FooterStyle, Health, Holder, LaunchOn, LaunchPick, Mark, Reading, RotateTo, UsageDue, View } from '../types'
+import type { Account, CheckError, FiveHourLimit, FooterStyle, Health, Holder, LaunchOn, LaunchPick, Mark, Reading, ReadingSource, RotateTo, UsageDue, View } from '../types'
 import {
   CHROME_SERVER,
   CHROME_TOOL,
@@ -62,8 +62,9 @@ import {
   readingFromLimits,
   readingFromUsage,
   sameLogin,
-  sameUsage,
   shouldLeave,
+  WRITER_VERSION,
+  whoseWeek,
   slotEnv,
   windowPct,
   USAGE_CLAIM_WAIT_MS,
@@ -120,6 +121,8 @@ let isPaneShown = false
 
 /** Whether boot has set the view's login to the one this session uses. */
 let isBooted = false
+/** When this session's boot read the store: an older version's reading written after it says that version still runs. */
+let bootedAt: number | undefined
 /** The `claude auth login` child of the sign-in under way, so Cancel can end it. */
 let running: HookStream<ProcessSpawnChunk, ProcessSpawnResult> | undefined
 /** The login this session is signing in; a stored 'logging-in' from a session that died is checked again. */
@@ -174,10 +177,21 @@ async function saveAccounts($: Host, accounts: Account[]): Promise<void> {
   await setView($, v => ({ ...v, accounts }))
 }
 
-/** A login's reading as stored: the read itself, before the 5-hour limit counts it. */
+const asReading = (r: unknown): Reading | undefined =>
+  typeof r === 'object' && r !== null && typeof (r as Reading).at === 'number' ? (r as Reading) : undefined
+
+/**
+ * A login's reading as stored: the read itself, before the 5-hour limit counts it. Only this version and later
+ * write `usage:<id>`, so an older session still running can never cross it.
+ */
 async function storedReading($: Host, id: string): Promise<Reading | undefined> {
-  const r = await $.store.get(`reading:${id}`)
-  return typeof r === 'object' && r !== null && typeof (r as Reading).at === 'number' ? (r as Reading) : undefined
+  const r = asReading(await $.store.get(`usage:${id}`))
+  return r !== undefined && typeof r.v === 'number' && r.v >= 1 ? r : undefined
+}
+
+/** The reading an older version keeps under `reading:<id>`: read only for the stop marks it may carry, and to tell it runs. */
+async function legacyReading($: Host, id: string): Promise<Reading | undefined> {
+  return asReading(await $.store.get(`reading:${id}`))
 }
 
 /** A login's stored reading when that login produced it; one with no owner, or another's, is no one's to build on. */
@@ -225,12 +239,11 @@ async function saveWeekMark($: Host, id: string, weekMark: Mark): Promise<void> 
  * writes; a mark an older version of the mod left inside the stored reading
  * moves to that key first, so a session still on that version keeps its stop.
  */
-async function saveReading($: Host, id: string, read: Reading): Promise<void> {
+async function saveReading($: Host, id: string, read: Reading, src: ReadingSource): Promise<void> {
   const now = await $.clock.now()
-  const stored = await storedReading($, id)
-  const legacy = legacyMark(stored, now)
+  const legacy = legacyMark(await legacyReading($, id), now)
   if (legacy !== undefined) await keepLegacyMark($, id, legacy)
-  await $.store.set(`reading:${id}`, read)
+  await $.store.set(`usage:${id}`, { ...read, v: WRITER_VERSION, src })
   await setView($, v => ({ ...v, readings: { ...v.readings, [id]: viewed(read, besideOf(v, id), v.fiveHourLimit, now) } }))
 }
 
@@ -277,14 +290,16 @@ async function mergeStore($: Host): Promise<void> {
   const checkErrors: Record<string, CheckError> = {}
   const health: Record<string, Health> = {}
   const holders: Record<string, Holder> = {}
+  let hasOlderWriter = false
   for (const a of accounts) {
     const r = await storedReading($, a.id)
     if (r?.by === a.id) readings[a.id] = r
-    else {
-      // A reading no login can be shown to own is not read back; a stop an older version marked inside it keeps.
-      const legacy = legacyMark(r, await $.clock.now())
-      if (legacy !== undefined) await keepLegacyMark($, a.id, legacy)
-    }
+    // An older version's reading is never read back; a stop it marked inside one keeps, and one written since this
+    // session started says that version still runs.
+    const old = await legacyReading($, a.id)
+    const legacy = legacyMark(old, await $.clock.now())
+    if (legacy !== undefined) await keepLegacyMark($, a.id, legacy)
+    if (bootedAt !== undefined && old !== undefined && old.at > bootedAt) hasOlderWriter = true
     const m = markFrom(await $.store.get(`mark:${a.id}`))
     if (m !== undefined) marks[a.id] = m
     const n = await $.store.get(`no-five-hour:${a.id}`)
@@ -339,7 +354,7 @@ async function mergeStore($: Host): Promise<void> {
       const holder = holders[a.id] ?? v.holders[a.id]
       if (holder !== undefined) nextHolders[a.id] = holder
     }
-    return { ...v, accounts, readings: nextReadings, marks: nextMarks, noFiveHour: nextNoFiveHour, weekMarks: nextWeekMarks, checkErrors, health: nextHealth, holders: nextHolders, footer, rotateTo, fiveHourLimit, weekLeave, launchOn, fableContinueText, chromeAccountId, chromeAccountIds }
+    return { ...v, accounts, readings: nextReadings, marks: nextMarks, noFiveHour: nextNoFiveHour, weekMarks: nextWeekMarks, checkErrors, health: nextHealth, holders: nextHolders, footer, rotateTo, fiveHourLimit, weekLeave, launchOn, fableContinueText, chromeAccountId, chromeAccountIds, hasOlderWriter: v.hasOlderWriter === true || hasOlderWriter }
   })
 }
 
@@ -676,7 +691,8 @@ async function checkAccount($: Host, account: Account, gate: UsageGate): Promise
     const holder = await holderOf($, account, credential, isLive)
     const twin = holder === undefined ? undefined : await followSignIn($, account, holder.who)
     if (twin !== undefined) health = { kind: 'login-needed', why: `signed in as account ${twin.id} now` }
-    else if (isLive) {
+    // A token no profile call has named may be another login's: its usage is read and stored once it is named.
+    else if (isLive && holder !== undefined) {
       const usage = await requestUsage($, account, credential.accessToken, gate)
       if (usage?.kind === 'rejected') health = { kind: 'login-needed', why: 'sign-in rejected' }
       if (usage?.kind === 'failed') await saveCheckError($, account.id, failedWhy(usage))
@@ -688,7 +704,7 @@ async function checkAccount($: Host, account: Account, gate: UsageGate): Promise
           // A body whose 5-hour window it cannot read leaves what the last one said.
           if (reading.fiveHour !== undefined || noFiveHour === true) await saveNoFiveHour($, account.id, noFiveHour === true)
           // A body with no Fable row leaves the week a stop marked spent as it is.
-          await saveReading($, account.id, { ...keepFable(reading, (await getView($)).readings[account.id], now), by: account.id })
+          await saveReading($, account.id, { ...keepFable(reading, (await getView($)).readings[account.id], now), by: account.id }, 'body')
         }
       }
     }
@@ -778,7 +794,9 @@ async function maybeRotate($: Host, need?: Need, carry?: CarryOn): Promise<boole
   const view = await getView($)
   // A tick or a response is no stop: it leaves a held Fable recovery where it is going, to a login with Fable room.
   if (need === undefined && carry === undefined && held?.carry !== undefined) return false
-  if (isConnectingChrome || view.rotateTo === 'off' || view.isSwitchBlocked || view.pending !== undefined || !shouldLeave(view, now, need)) return false
+  // A settling switch holds every tick and response; a stop (it carries on) may move the session on from it.
+  const isSettling = view.pending !== undefined && carry === undefined
+  if (isConnectingChrome || view.rotateTo === 'off' || view.isSwitchBlocked || isSettling || !shouldLeave(view, now, need)) return false
   // With none to move to, the band above the prompt says when the next login frees up.
   const target = pickTarget({ ...view, accounts: view.accounts.filter(a => !untaken.has(a.id)) }, now, need)
   return target === undefined ? false : switchTo($, target, whyLeave(view, now, need), false, carry, true)
@@ -894,9 +912,11 @@ async function settlePending($: Host, isResponse: boolean): Promise<void> {
   const reading = readingFromLimits((await $.session.usage()).rateLimits, now)
   const target = accounts.find(a => a.id === pending.id)
   if (isResponse && target !== undefined) await checkAccount($, target, { since: pending.since })
-  const isTarget = (v: View) => sameUsage(reading, v.readings[pending.id], now)
-  const isSource = (v: View) => sameUsage(reading, v.readings[pending.from], now)
-  // A response that matches the login left as well tells nothing: confirmed on it, the old login's next responses
+  // A response proves its login by its week's reset, which each account has at a time of its own; its percents prove
+  // nothing, as two logins can stand within a few points of each other.
+  const isTarget = (v: View) => whoseWeek(reading, v.readings).includes(pending.id)
+  const isSource = (v: View) => whoseWeek(reading, v.readings).includes(pending.from)
+  // A response whose week the login left shares tells nothing: confirmed on it, the old login's next responses
   // would be stored as the new one's.
   if (isTarget(await getView($)) && !isSource(await getView($))) {
     untaken.delete(pending.id)
@@ -945,11 +965,19 @@ async function onMeasure($: Host, limits: readonly SessionRateLimit[]): Promise<
   if (!isBooted) return
   const reading = readingFromLimits(limits, await $.clock.now())
   if (reading === undefined) return
+  // Stored only as the login in use's own week: a response whose week is another login's went out on that login's
+  // sign-in, and one whose week two logins share proves neither.
+  const owners = whoseWeek(reading, view.readings)
+  if (owners.length !== 1 || owners[0] !== view.activeId) {
+    await debug($, `a response with ${owners.length === 0 ? 'no known week' : `the week of account ${owners.join(', ')}`} is not stored as account ${view.activeId}'s`)
+    await maybeRotate($)
+    return
+  }
   // A response that reports a 5-hour window shows the account has one, whatever the last usage check said.
   if (reading.fiveHour !== undefined && view.noFiveHour?.[view.activeId] === true) await saveNoFiveHour($, view.activeId, false)
   // A response never lists the Fable week: the one the last check read stays.
   const fable = view.readings[view.activeId]?.fable
-  await saveReading($, view.activeId, { ...reading, ...(fable ? { fable } : {}), by: view.activeId })
+  await saveReading($, view.activeId, { ...reading, ...(fable ? { fable } : {}), by: view.activeId }, 'response')
   await maybeRotate($)
 }
 
@@ -1003,7 +1031,7 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
       need = 'fable'
       await setView($, v => ({ ...v, isFableStopped: true }))
       // The limit was hit before the usage call shows it: count the Fable week as full.
-      if (!isFableSpent(r, now)) await saveReading($, active.id, { ...read, fable: fableMark(r?.fable, now), at: now, by: active.id })
+      if (!isFableSpent(r, now)) await saveReading($, active.id, { ...read, fable: fableMark(r?.fable, now), at: now, by: active.id }, 'stop')
     } else if (!shouldLeave(after, now) && isSessionStop(said)) {
       // Claude's words name the 5-hour window: the account has one, whatever its last usage check said.
       await saveNoFiveHour($, active.id, false)
@@ -1020,7 +1048,8 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
       await saveMark($, active.id, { pct: spent.pct, resetsAt: spent.resetsAt ?? new Date(now + FIVE_HOUR_MS).toISOString(), at: now })
     }
   }
-  await setView($, v => ({ ...v, pending: undefined }))
+  // A switch still settling stays settling: only a new switch, or a response that proves one, ends it. The stop may
+  // move the session meanwhile (maybeRotate lets a stop through a settling switch), and that switch settles anew.
   // The switch sends the carry-on once it lands, held back for a refresh or not.
   if (!(await maybeRotate($, need, { need }))) {
     if (isConnectingChrome) isCutByVisit = true
@@ -1383,6 +1412,7 @@ async function removeAccount($: Host, id: string): Promise<void> {
   if (view.chromeAccountId === id) await setChromeAccount($, undefined)
   await noteChromeAccount($, id, false)
   await $.store.delete(`reading:${id}`)
+  await $.store.delete(`usage:${id}`)
   await $.store.delete(`mark:${id}`)
   await $.store.delete(`no-five-hour:${id}`)
   await $.store.delete(`week-mark:${id}`)
@@ -1494,6 +1524,31 @@ function actions($: Host): Actions {
   }
 }
 
+/** How long a session's `writer:<sessionId>` record stays after it was written: a session restarts long before. */
+const WRITER_KEEP_MS = 24 * 3600_000
+
+/** Records, for every session, which version this session writes as; drops the records of sessions long gone. */
+async function noteWriter($: Host, sessionId: string, now: number): Promise<void> {
+  await $.store.set(`writer:${sessionId}`, { version: WRITER_VERSION, at: now })
+  for (const key of (await $.store.keys()).filter(k => k.startsWith('writer:') && k !== `writer:${sessionId}`)) {
+    const w = await $.store.get(key)
+    const at = typeof w === 'object' && w !== null ? (w as { at?: unknown }).at : undefined
+    if (typeof at !== 'number' || now - at > WRITER_KEEP_MS) await $.store.delete(key)
+  }
+}
+
+/**
+ * A login with no `usage:<id>` yet (its reading was an older version's) is read at boot, not when the older
+ * schedule comes round, so the pane shows it at once. A back-off still stands.
+ */
+async function readUnreadLogins($: Host, accounts: readonly Account[]): Promise<void> {
+  for (const a of accounts) {
+    if ((await storedReading($, a.id)) !== undefined) continue
+    const due = usageDueFrom(await $.store.get(`usage-due:${a.id}`))
+    if (due !== undefined && due.fails === 0) await $.store.delete(`usage-due:${a.id}`)
+  }
+}
+
 /** First run makes the normal login number 1; then: which login this session uses, and Claude in Chrome connected as the extension's account. */
 async function boot($: Host, isInteractive: boolean): Promise<void> {
   // Terminal.app is the terminal that names itself so and draws block characters from its font.
@@ -1514,6 +1569,9 @@ async function boot($: Host, isInteractive: boolean): Promise<void> {
   }
   const activeId = active.id
   const sessionId = await $.session.id().catch(() => undefined)
+  bootedAt = await $.clock.now()
+  await noteWriter($, sessionId ?? SELF, bootedAt)
+  await readUnreadLogins($, accounts)
   await mergeStore($)
   await setView($, v => ({ ...v, activeId, ...(sessionId === undefined ? {} : { sessionId }) }))
   isBooted = true
