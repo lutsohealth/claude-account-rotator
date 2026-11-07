@@ -66,6 +66,16 @@ export type RotateTo = 'reset' | 'room' | 'order' | 'off'
 /** Whether a 5-hour window counts where the usage read reports one ('on'), or never ('off'): then only the week and the Fable week do. */
 export type FiveHourLimit = 'on' | 'off'
 
+/**
+ * Which login new Claude Code sessions start on, as `bin/account-rotator-launch` names it to a launcher:
+ * the most room, the first in the list with room, the soonest reset, or one account (`account:<id>`), and the
+ * next with room after it when it has none.
+ */
+export type LaunchOn = 'room' | 'nonzero' | 'reset' | `account:${string}`
+
+/** The login a launcher starts new sessions on, as the mod last picked it: its id and slot, why, and when. */
+export type LaunchPick = { id: string; slot: string; why: string; at: number }
+
 /** The footer's look, picked in the pane and kept across sessions. */
 export type FooterStyle = {
   session: Glyphs
@@ -117,6 +127,10 @@ export type View = {
   rotateTo: RotateTo
   /** Whether the 5-hour window counts, picked in the pane and kept across sessions. */
   fiveHourLimit: FiveHourLimit
+  /** The percent of its week left at which the session leaves the login in use, 0 to 99, picked in the pane and kept across sessions. */
+  weekLeave: number
+  /** Which login new sessions start on, picked in the pane and kept across sessions. */
+  launchOn: LaunchOn
   /** The line that asks Claude to carry on after a switch for the Fable week, kept across sessions; the mod's own where none is kept. */
   fableContinueText?: string
   /** This session only: a turn died on the Fable week, so the band says when it frees up once every account has used it. */

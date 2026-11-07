@@ -10,7 +10,7 @@ import type {
   Timer,
 } from 'claude-code'
 
-import type { Account, CheckError, FiveHourLimit, FooterStyle, Health, Holder, Mark, Reading, RotateTo, View } from '../types'
+import type { Account, CheckError, FiveHourLimit, FooterStyle, Health, Holder, LaunchOn, LaunchPick, Mark, Reading, RotateTo, View } from '../types'
 import {
   CHROME_SERVER,
   CHROME_TOOL,
@@ -20,6 +20,11 @@ import {
   WEEK_MS,
   counted,
   fiveHourLimitFrom,
+  weekLeaveFrom,
+  launchOnFrom,
+  pickLaunch,
+  isSessionStop,
+  WEEK_LEAVE_MAX,
   legacyMark,
   markFrom,
   spentMark,
@@ -272,6 +277,8 @@ async function mergeStore($: Host): Promise<void> {
   const footer = footerStyleFrom(await $.store.get('footer'))
   const rotateTo = rotateToFrom(await $.store.get('rotate-to'))
   const fiveHourLimit = fiveHourLimitFrom(await $.store.get('five-hour-limit'))
+  const weekLeave = weekLeaveFrom(await $.store.get('week-leave'))
+  const launchOn = launchOnFrom(await $.store.get('launch-on'))
   const now = await $.clock.now()
   const fableContinueText = continueTextFrom(await $.store.get('fable-continue-text'))
   const chrome = await $.store.get('chrome-account')
@@ -303,7 +310,7 @@ async function mergeStore($: Host): Promise<void> {
       const holder = holders[a.id] ?? v.holders[a.id]
       if (holder !== undefined) nextHolders[a.id] = holder
     }
-    return { ...v, accounts, readings: nextReadings, marks: nextMarks, noFiveHour: nextNoFiveHour, weekMarks: nextWeekMarks, checkErrors, health: nextHealth, holders: nextHolders, footer, rotateTo, fiveHourLimit, fableContinueText, chromeAccountId, chromeAccountIds }
+    return { ...v, accounts, readings: nextReadings, marks: nextMarks, noFiveHour: nextNoFiveHour, weekMarks: nextWeekMarks, checkErrors, health: nextHealth, holders: nextHolders, footer, rotateTo, fiveHourLimit, weekLeave, launchOn, fableContinueText, chromeAccountId, chromeAccountIds }
   })
 }
 
@@ -335,6 +342,38 @@ async function setFiveHourLimit($: Host, fiveHourLimit: FiveHourLimit): Promise<
     readings: Object.fromEntries(Object.entries(v.readings).map(([id, r]) => [id, viewed(stored[id] ?? r, besideOf(v, id), fiveHourLimit, now)])),
   }))
   await maybeRotate($)
+}
+
+/** Sets, for every session, how much of its week is left when the session leaves the login in use: 0 to 99, a press one step. */
+async function setWeekLeave($: Host, weekLeave: number): Promise<void> {
+  const kept = Math.min(WEEK_LEAVE_MAX, Math.max(0, Math.round(weekLeave)))
+  await $.store.set('week-leave', kept)
+  await setView($, v => ({ ...v, weekLeave: kept }))
+  await maybeRotate($)
+}
+
+/** Sets, for every session, which login new sessions start on. */
+async function setLaunchOn($: Host, launchOn: LaunchOn): Promise<void> {
+  await $.store.set('launch-on', launchOn)
+  await setView($, v => ({ ...v, launchOn }))
+  await saveLaunchPick($)
+}
+
+/**
+ * Stores the login a launcher starts new sessions on, as the setting picks it
+ * now, for `bin/account-rotator-launch`; none, while no login has room.
+ */
+async function saveLaunchPick($: Host): Promise<void> {
+  const now = await $.clock.now()
+  const pick = pickLaunch(await getView($), now)
+  const held = await $.store.get('launch-slot')
+  const was = typeof held === 'object' && held !== null ? (held as LaunchPick) : undefined
+  if (pick === undefined) {
+    if (was !== undefined) await $.store.delete('launch-slot')
+    return
+  }
+  if (was?.id === pick.id && was.slot === pick.slot && was.why === pick.why) return
+  await $.store.set('launch-slot', { ...pick, at: now })
 }
 
 /** Names the account the Chrome extension is signed in to, for every session; none forgets it. */
@@ -626,6 +665,8 @@ function whyLeave(view: View, now: number, need?: Need): string {
  * Fable week stays on a login whose Fable week is spent.
  */
 async function maybeRotate($: Host, need?: Need, carry?: CarryOn): Promise<boolean> {
+  // Every check, response and tick comes through here: the login new sessions start on follows the same readings.
+  await saveLaunchPick($).catch(error => debug($, `launch pick failed: ${String(error)}`))
   const now = await $.clock.now()
   const view = await getView($)
   // A tick or a response is no stop: it leaves a held Fable recovery where it is going, to a login with Fable room.
@@ -839,6 +880,11 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
       await setView($, v => ({ ...v, isFableStopped: true }))
       // The limit was hit before the usage call shows it: count the Fable week as full.
       if (!isFableSpent(r, now)) await saveReading($, active.id, { ...read, fable: fableMark(r?.fable, now), at: now })
+    } else if (!shouldLeave(after, now) && isSessionStop(said)) {
+      // Claude's words name the 5-hour window: the account has one, whatever its last usage check said.
+      await saveNoFiveHour($, active.id, false)
+      const spent = spentMark(read?.fiveHour, now, FIVE_HOUR_MS)
+      await saveMark($, active.id, { pct: spent.pct, resetsAt: spent.resetsAt ?? new Date(now + FIVE_HOUR_MS).toISOString(), at: now })
     } else if (!shouldLeave(after, now) && (isWeeklyStop(said) || reportsNoFiveHour(r))) {
       // The week ran out before the usage call shows it, by Claude's words or as the only window the account has:
       // count the week as full until its reset, never a 5-hour window.
@@ -1233,6 +1279,8 @@ async function removeAccount($: Host, id: string): Promise<void> {
     const { [id]: _error, ...checkErrors } = v.checkErrors ?? {}
     return { ...v, readings, marks, noFiveHour, weekMarks, checkErrors, health, holders, removing: undefined }
   })
+  // A launcher must never start a session on the account just removed.
+  await saveLaunchPick($)
 }
 
 // ---------------------------------------------------------------- wiring
@@ -1283,6 +1331,8 @@ function actions($: Host): Actions {
     setFooter: change => background(setFooter($, change)),
     setRotateTo: rotateTo => background(setRotateTo($, rotateTo)),
     setFiveHourLimit: limit => background(setFiveHourLimit($, limit)),
+    setWeekLeave: weekLeave => background(setWeekLeave($, weekLeave)),
+    setLaunchOn: launchOn => background(setLaunchOn($, launchOn)),
     tryChromeAccount: id => background(tryChromeAccount($, id)),
     toggleChromeOthers: () => background(setView($, v => ({ ...v, isChromeOthersShown: !v.isChromeOthersShown }))),
     connectChrome: () => background(connectChrome($)),

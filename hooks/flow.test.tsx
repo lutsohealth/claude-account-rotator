@@ -1282,18 +1282,19 @@ test('with next in list picked, Rotate now moves to the login after the one in u
   const clock = world(on, w, three)
   await start($, clock)
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
-  expect(await pane.find({ text: /moves to the account whose 5-hour window, or else week, resets soonest/ })).toBeDefined()
+  expect(await pane.find({ text: /^● soonest reset$/ })).toBeDefined()
   await pane.press({ key: 'rotate-to-order' })
   await clock.settle()
   await pane.redraw()
-  expect(await pane.find({ text: /moves to the next account in the list with room/ })).toBeDefined()
+  expect(await pane.find({ text: /^● next in list$/ })).toBeDefined()
   await pane.press({ key: 'rotate' })
   await clock.settle()
   expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
   await pane.unmount()
 })
 
-test('with the 5-hour limit off, the account in use past 90% of its 5-hour window stays and the pane\'s rule names the week alone; turned on in the pane, it moves', async ($, on) => {
+// puma-4q7j2.4: the pane's first line no longer states the rule; the settings rows do.
+test('with the 5-hour limit off, the account in use past 90% of its 5-hour window stays, and the pane names no 5-hour rule at its top; turned on in the pane, it moves', async ($, on) => {
   const w = fresh()
   w.keychain['Claude Code-credentials'] = blob('tok-1')
   w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
@@ -1304,14 +1305,12 @@ test('with the 5-hour limit off, the account in use past 90% of its 5-hour windo
   await clock.advance(11 * 60_000)
   expect(w.envSets).toEqual([])
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
-  expect(await pane.find({ text: /^Once the account in use has 5% of its week left, moves to the account whose week resets soonest\.$/ })).toBeDefined()
+  expect(await pane.find({ text: /^Once the account in use/ })).toBeUndefined()
   expect(await pane.find({ text: /5-hour/ })).toBeUndefined()
   await pane.press({ key: 'five-hour-limit-on' })
   await clock.settle()
   await clock.advance(10 * 60_000)
   expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
-  await pane.redraw()
-  expect(await pane.find({ text: /10% of its 5-hour window, where it reports one, or 5% of its week left/ })).toBeDefined()
   await pane.unmount()
 })
 
@@ -1468,7 +1467,7 @@ test('turning the 5-hour limit off moves at once to a login held back only by it
   const w = fresh()
   w.keychain['Claude Code-credentials'] = blob('tok-1')
   w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
-  w.usage['tok-1'] = [10, 96]
+  w.usage['tok-1'] = [10, 100]
   w.usage['tok-2'] = [95, 30]
   const clock = world(on, w, TWO_LOGINS)
   await start($, clock)
@@ -2124,38 +2123,159 @@ test('a /login in a session on login 3 as its own account again, as a new token 
   await pane.unmount()
 })
 
-test('the pane names Claude Code\'s own login, where new sessions start, and its plan; on another login it says /login there signs that one in', async ($, on) => {
+// RULING 4230: a stop whose words name the session limit proves a 5-hour window, whatever the last usage check said.
+test('a session-limit stop on an account whose usage reported no 5-hour window marks five hours and says the account has one', async ($, on) => {
   const w = fresh()
   w.keychain['Claude Code-credentials'] = blob('tok-1')
-  w.keychain[await keychainItem(SLOT2)] = blob('tok-2', NOW + 6 * HOUR, 'team')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [null, 40]
+  w.usage['tok-2'] = [null, 30]
+  const store = new Map<string, unknown>(Object.entries(TWO_LOGINS))
+  const clock = world(on, w, store)
+  await start($, clock)
+  expect(store.get('no-five-hour:1')).toBe(true)
+  await $.classic.StopFailure({ error: 'rate_limit', last_assistant_message: "You've hit your session limit · resets 3pm" })
+  await clock.settle()
+  expect(store.get('no-five-hour:1')).toBe(false)
+  expect(store.get('mark:1')).toMatchObject({ pct: 100 })
+  expect(store.get('week-mark:1')).toBeUndefined()
+  expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
+})
+
+// RULING 4230: the two writers of no-five-hour:<id> beside the usage check, each with a test.
+test('a response that reports a 5-hour window clears no-five-hour, and Remove deletes it with the week mark and the check error', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [null, 40]
+  w.usage['tok-2'] = [null, 30]
+  const week = { pct: 100, resetsAt: '2026-10-18T03:00:00Z', at: NOW }
+  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off', 'week-mark:2': week, 'check-error:2': { why: 'x', at: NOW } }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  expect(store.get('no-five-hour:1')).toBe(true)
+  w.limits = [{ kind: 'five_hour', percentUsed: 30, resetsAt: '2026-10-12T12:00:00Z' }, { kind: 'seven_day', percentUsed: 40, resetsAt: '2026-10-18T03:00:00Z' }]
+  await $.session.measure({ context: { window: 200_000 }, rateLimits: w.limits, changed: ['rateLimits'] })
+  await clock.settle()
+  expect(store.get('no-five-hour:1')).toBe(false)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  await pane.press({ key: 'ask-remove-2' })
+  await clock.settle()
+  await pane.redraw()
+  await pane.press({ key: 'remove-2' })
+  await clock.settle()
+  expect(['no-five-hour:2', 'week-mark:2', 'check-error:2'].filter(k => store.has(k))).toEqual([])
+  await pane.unmount()
+})
+
+// puma-4q7j2.4: the week left at which the session leaves, set in the pane by - and +, 0 to 99.
+test('the Week row steps the week left by one with - and +, stops at 0 and at 99, and the session leaves at it', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [null, 97]
+  w.usage['tok-2'] = [null, 30]
+  const store = new Map<string, unknown>(Object.entries(TWO_LOGINS))
+  const clock = world(on, w, store)
+  await start($, clock)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  // At the default, 0, login 1 with 3% of its week left stays; - does nothing.
+  expect(await pane.find({ type: 'Text', text: /^leave at 0% left$/ })).toBeDefined()
+  await pane.press({ key: 'week-leave-down' })
+  await clock.settle()
+  expect(store.get('week-leave')).toBe(0)
+  expect(w.envSets).toEqual([])
+  for (const _ of [1, 2, 3]) {
+    await pane.press({ key: 'week-leave-up' })
+    await clock.settle()
+    await pane.redraw()
+  }
+  // At 3% left, it leaves.
+  expect(store.get('week-leave')).toBe(3)
+  expect(await pane.find({ type: 'Text', text: /^leave at 3% left$/ })).toBeDefined()
+  expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
+  store.set('week-leave', 99)
+  await clock.advance(61_000)
+  await pane.redraw()
+  await pane.press({ key: 'week-leave-up' })
+  await clock.settle()
+  expect(store.get('week-leave')).toBe(99)
+  await pane.unmount()
+})
+
+// puma-4q7j2.5: the login a launcher starts new sessions on, stored for bin/account-rotator-launch.
+test('the login new sessions start on is stored for a launcher, by the New on setting, skipping a login with a limit at 0% left', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [null, 100]
+  w.usage['tok-2'] = [null, 30]
+  const store = new Map<string, unknown>(Object.entries(TWO_LOGINS))
+  const clock = world(on, w, store)
+  await start($, clock)
+  expect(store.get('launch-slot')).toMatchObject({ id: '2', slot: SLOT2, why: 'it has the most room' })
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  await pane.press({ key: 'launch-on-account:1' })
+  await clock.settle()
+  expect(store.get('launch-on')).toBe('account:1')
+  expect(store.get('launch-slot')).toMatchObject({ id: '2', why: 'account 1 has no room, and it is the next with room' })
+  await pane.unmount()
+})
+
+// Review R1 of 181dc8e, removed_pick: a launcher must never start a session on an account just removed.
+test('removing the account the launcher would start on picks another at once', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [null, 40]
+  w.usage['tok-2'] = [null, 30]
+  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off', 'launch-on': 'account:2' }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  expect(store.get('launch-slot')).toMatchObject({ id: '2' })
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  await pane.press({ key: 'ask-remove-2' })
+  await clock.settle()
+  await pane.redraw()
+  await pane.press({ key: 'remove-2' })
+  await clock.settle()
+  expect(store.get('launch-slot')).toMatchObject({ id: '1' })
+  await pane.unmount()
+})
+
+// Review R1 of 181dc8e, footer_week_leave: the footer counts the week by the same setting the rotation does.
+test('the footer shows no room now on a login whose week is down to the Week setting, as the rotation counts it', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.usage['tok-1'] = [10, 96]
+  const clock = world(on, w, { accounts: [TWO_LOGINS.accounts[0]], 'rotate-to': 'off', 'week-leave': 5 })
+  await start($, clock)
+  const footer = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'SessionMode', props: { modes: [] } })
+  // 4% of its week left, at a Week setting of 5: nothing to serve now, so 0% where 90% of the 5-hour window would show.
+  expect((await footer.find(GLYPHS))?.text).toMatch(/ 0% /)
+  await footer.unmount()
+})
+
+// puma-4q7j2.5: the pane no longer names Claude Code's login; New on picks where new sessions start.
+test('the pane names no "Claude Code\'s login" line, on the login or after a move off it', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
   w.usage['tok-1'] = [20, 30]
   w.usage['tok-2'] = [10, 30]
   w.owners = { 'tok-1': 'one@example.com', 'tok-2': 'two@example.com' }
   const clock = world(on, w, TWO_LOGINS)
   await start($, clock)
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
-  expect(await pane.find({ type: 'Text', text: "Claude Code's login: account 1 (one@example.com), personal Max. New sessions start on it." })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /Claude Code's login|New sessions start on it/ })).toBeUndefined()
   await pane.press({ key: 'rotate' })
   await clock.settle()
   await pane.redraw()
-  expect(await pane.find({ type: 'Text', text: /^Claude Code's login: account 1 \(one@example\.com\), personal Max\. New sessions start on it\. \/login in this session signs in account 2 instead\.$/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /Claude Code's login|\/login in this session signs in/ })).toBeUndefined()
   await pane.unmount()
 })
 
-test('a Team seat as Claude Code\'s own login is told in the pane: new sessions start on it, and can\'t switch', async ($, on) => {
-  const w = fresh()
-  w.keychain['Claude Code-credentials'] = blob('tok-1', NOW + 6 * HOUR, 'team')
-  w.usage['tok-1'] = [20, 30]
-  w.owners = { 'tok-1': 'one@example.com' }
-  const clock = world(on, w, TWO_LOGINS)
-  await start($, clock)
-  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
-  const line = await pane.find({ type: 'Text', text: /^Claude Code's login: account 1 \(one@example\.com\), a Team seat\. New sessions start on it, and can't switch accounts: / })
-  expect(line?.props).toMatchObject({ color: 'warning' })
-  await pane.unmount()
-})
-
-test('a /login on Claude Code\'s login that signs in a Team seat on the list leaves login 1 needing its own sign-in, and the pane names the seat as Claude Code\'s login', async ($, on) => {
+test('a /login on Claude Code\'s login that signs in a Team seat on the list leaves login 1 needing its own sign-in, and the session moves to the seat', async ($, on) => {
   const w = fresh()
   w.keychain['Claude Code-credentials'] = blob('tok-1')
   w.keychain[await keychainItem(SLOT2)] = blob('tok-2', NOW + 6 * HOUR, 'team')
@@ -2172,10 +2292,6 @@ test('a /login on Claude Code\'s login that signs in a Team seat on the list lea
   await clock.settle()
   expect(w.toasts.filter(t => /^Claude account 1 \(one@example.com · Org\) needs a sign-in \(signed in as account 2 now\)/.test(t))).toHaveLength(1)
   expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
-  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
-  const line = await pane.find({ type: 'Text', text: /^Claude Code's login: account 1 \(two@example\.com\), a Team seat\. New sessions start on it, and can't switch accounts: .* \/login in this session signs in account 2 instead\.$/ })
-  expect(line?.props).toMatchObject({ color: 'warning' })
-  await pane.unmount()
 })
 
 test('a view kept from the code before a hot reload, which lacks what this code added, still draws and checks', async ($, on) => {
@@ -2195,7 +2311,9 @@ test('a view kept from the code before a hot reload, which lacks what this code 
   })
   await start($, clock)
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
-  expect(await pane.find({ type: 'Text', text: "Claude Code's login: account 1 (one@example.com), personal Max. New sessions start on it." })).toBeDefined()
+  // The settings this code added draw at their defaults from a view that lacks them.
+  expect(await pane.find({ type: 'Text', text: /^leave at 0% left$/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /^● most room$/ })).toBeDefined()
   await pane.unmount()
 })
 
@@ -2898,7 +3016,7 @@ type StayCase = {
 
 const STAY_CASES: StayCase[] = [
   { name: 'the other login has its 5-hour window full', notice: /^Fable limit reached on account 1, and no other Claude account can take over/, usage: { 'tok-1': [20, 30, 100], 'tok-2': [95, 30, 10] } },
-  { name: 'the other login has its week full', notice: /^Fable limit reached on account 1, and no other Claude account can take over/, usage: { 'tok-1': [20, 30, 100], 'tok-2': [10, 96, 10] } },
+  { name: 'the other login has its week full', notice: /^Fable limit reached on account 1, and no other Claude account can take over/, usage: { 'tok-1': [20, 30, 100], 'tok-2': [10, 100, 10] } },
   { name: 'the rotation is off', notice: /^Fable limit reached on account 1, and usage based rotation is disabled/, usage: { 'tok-1': [20, 30, 100], 'tok-2': [10, 30, 10] }, store: { 'rotate-to': 'off' } },
   { name: 'Claude Code\'s policy refuses switching', notice: /^Fable limit reached on account 1, and Claude Code's policy stops this session from switching accounts/, usage: { 'tok-1': [20, 30, 100], 'tok-2': [10, 30, 10] }, isBlocked: true },
   { name: 'Connect holds the session on the Claude in Chrome account', notice: /^Fable limit reached on account 2 while Claude in Chrome connects/, usage: { 'tok-1': [20, 30], 'tok-2': [100, 30] }, store: { 'chrome-account': '2' }, isVisiting: true },
