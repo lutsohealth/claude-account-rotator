@@ -57,7 +57,7 @@ export type Account = {
   plan?: string
   /** The plan's name as the profile names it (`organization.plan_display_name`): Ultra. */
   planName?: string
-  /** The sign-in's rate-limit tier: its `rateLimitTier` (default_claude_max_20x), or `claude auth status`'s `planTier` (max_20x). */
+  /** The sign-in's rate-limit tier, its credential's `rateLimitTier`: default_claude_max_20x. */
   tier?: string
 }
 

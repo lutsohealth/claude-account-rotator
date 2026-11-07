@@ -646,8 +646,28 @@ async function holderOf($: Host, account: Account, credential: Credential, isLiv
   const holder = { token, who: { ...who, email: who.email, ...(credential.plan === undefined ? {} : { plan: credential.plan }) } }
   await saveHolder($, account.id, holder)
   // The schedule, its back-off and its minute gate were the old sign-in's: the new one is read at once.
-  if (known !== undefined) await $.store.delete(`usage-due:${account.id}`)
+  // What the old sign-in's usage said is its own, not the new one's (its plan above all): it goes with it.
+  if (known !== undefined) await dropSignInUsage($, account.id)
   return holder
+}
+
+/**
+ * The account as `who`'s sign-in names it. The plan's name and the tier are the sign-in's own: what `who` names
+ * replaces them, and what it leaves out clears them, so a new sign-in never wears the last one's plan.
+ */
+function withSignIn(account: Account, who: Identity): Account {
+  const { planName: _planName, tier: _tier, ...rest } = account
+  return { ...rest, ...who }
+}
+
+/** Drops what the last sign-in's usage left on a login (its reading, its no-five-hour, its schedule), for every session. */
+async function dropSignInUsage($: Host, id: string): Promise<void> {
+  for (const key of [`usage:${id}`, `no-five-hour:${id}`, `usage-due:${id}`]) await $.store.delete(key)
+  await setView($, v => {
+    const { [id]: _reading, ...readings } = v.readings
+    const { [id]: _noFive, ...noFiveHour } = v.noFiveHour ?? {}
+    return { ...v, readings, noFiveHour }
+  })
 }
 
 /**
@@ -663,7 +683,7 @@ async function followSignIn($: Host, account: Account, who: Identity): Promise<A
   const isSame = own.email === undefined || isLoginOf(own, who)
   const twin = isSame ? undefined : accounts.find(a => a.id !== own.id && isLoginOf(a, who))
   if (twin !== undefined) return twin
-  const followed = { ...own, ...who }
+  const followed = withSignIn(own, who)
   const fields = ['email', 'orgId', 'orgName', 'plan', 'planName', 'tier'] as const
   if (fields.some(f => followed[f] !== own[f])) {
     await saveAccounts($, accounts.map(a => (a.id === own.id ? followed : a)))
@@ -1509,7 +1529,7 @@ async function adoptSignIn($: Host, account: Account): Promise<void> {
     )
     return
   }
-  const updated = accounts.map(a => (a.id === account.id && who !== undefined ? { ...a, ...who } : a))
+  const updated = accounts.map(a => (a.id === account.id && who !== undefined ? withSignIn(a, who) : a))
   await saveAccounts($, updated)
   await saveHealth($, account.id, { kind: 'ok' })
   const fresh = updated.find(a => a.id === account.id) ?? account

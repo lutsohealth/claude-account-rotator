@@ -846,11 +846,12 @@ test('the Company is the organization unless it is the one named for the account
   expect(companyOf({ email: 'a@b.c' })).toBeUndefined()
 })
 
-test('the sign-in\'s tier comes from its rateLimitTier, and claude auth status\'s from its planTier', () => {
+// Opus advisory TIER-TWO-SPELLINGS: the tier has one source, the credential; claude auth status's planTier is not read.
+test('the sign-in\'s tier comes from its rateLimitTier alone', () => {
   const text = JSON.stringify({ claudeAiOauth: { accessToken: 't', expiresAt: 1, subscriptionType: 'max', rateLimitTier: 'default_claude_max_20x' } })
   expect(credentialFrom(text)?.tier).toBe('default_claude_max_20x')
   const status = JSON.stringify({ loggedIn: true, email: 'a@b.c', subscriptionType: 'max', planTier: 'max_20x' })
-  expect(identityFromStatus(status)?.tier).toBe('max_20x')
+  expect(identityFromStatus(status)?.tier).toBeUndefined()
   const profile = { account: { email: 'a@b.c' }, organization: { uuid: 'o', name: 'N', plan_display_name: 'Ultra' } }
   expect(identityFromProfile(profile)?.planName).toBe('Ultra')
 })

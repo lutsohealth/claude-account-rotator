@@ -808,7 +808,6 @@ export function identityFromStatus(stdout: string): Identity | undefined {
     ...(typeof status.orgId === 'string' ? { orgId: status.orgId } : {}),
     ...(typeof status.orgName === 'string' ? { orgName: status.orgName } : {}),
     ...(typeof status.subscriptionType === 'string' ? { plan: status.subscriptionType } : {}),
-    ...(typeof status.planTier === 'string' && status.planTier !== '' ? { tier: status.planTier } : {}),
   }
 }
 
