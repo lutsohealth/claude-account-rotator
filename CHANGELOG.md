@@ -2,6 +2,13 @@
 
 What each version of the account rotator changed. To get each one as Claude Code starts, turn on auto-update: in `/plugin`, open **Marketplaces**, pick **claude-account-rotator** and choose **Enable auto-update**. To update by hand, run `claude plugin marketplace update claude-account-rotator`, then `claude plugin update account-rotator@claude-account-rotator`, and start a new session.
 
+## 0.5.5-lutso.1 - 2026-11-07
+
+- **Each account shows only its own usage.** A response counts for the account in use only when its week resets at that account's time, which each account has of its own. Accounts whose weeks reset together are read from the usage check alone, so two accounts no longer show one account's numbers.
+- **A sign-in nobody has confirmed as an account gets no usage at all**, and the panel says why, as in "the profile call answered HTTP 429, so its usage is not read until it names the sign-in". The next check that names it reads its usage.
+- **When an older version of the mod still runs in another session**, the line above the prompt says "An older account-rotator still runs in another session; restart it." The line goes once that session has stored no reading for 30 minutes.
+- **A usage-limit stop while a switch is still unproven** marks the account a response since the switch names, or none when no response names one alone. With no response since the switch, it marks the account moved to, and drops that mark if the switch turns out not to have taken.
+
 ## 0.5.4-lutso.1 - 2026-11-07
 
 - **All your sessions share one usage schedule.** Each account's usage is read once per interval, however many sessions run: every 10 minutes for an account a session is using, every 30 for the rest. More sessions no longer mean more usage calls, so the usage endpoint answers "HTTP 429" far less. Sessions on an older version still read on their own until they restart.
