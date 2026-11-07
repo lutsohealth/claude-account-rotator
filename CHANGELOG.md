@@ -2,6 +2,12 @@
 
 What each version of the account rotator changed. To get each one as Claude Code starts, turn on auto-update: in `/plugin`, open **Marketplaces**, pick **claude-account-rotator** and choose **Enable auto-update**. To update by hand, run `claude plugin marketplace update claude-account-rotator`, then `claude plugin update account-rotator@claude-account-rotator`, and start a new session.
 
+## 0.4.2-lutso.1 - 2026-11-07
+
+- **An account with no 5-hour window never shows one.** A verified Ultra account's usage reports only a week, and the panel showed it a 5-hour window at 0% left after a usage limit, so every account read near its limit and nothing could rotate. Such an account now takes no 5-hour mark, whatever **5h limit** is set to, and the marks earlier versions left on it count for nothing once this version loads.
+- **A new session that starts on a spent account no longer blames the account it moves to.** The session moves at once, but Claude Code sends on the old account for up to 35 seconds; a turn that dies then is the old account's. Nothing is marked on the account moved to, and Claude carries on there once the switch lands, once however many turns died.
+- **A weekly limit marks the week.** A turn that dies on the weekly limit, or any limit on an account with no 5-hour window, counts that account's week spent until the week resets, through every later check.
+
 ## 0.4.1-lutso.1 - 2026-11-07
 
 - **A usage-limit stop is no longer lost between two sessions.** A session saving an account's usage could erase the stop another session had just recorded on it, and that account then rejoined the rotation early. The stop now has its own record, which no save of usage touches, and it counts until its reset: the 5-hour window's, or five hours where the account reports none.

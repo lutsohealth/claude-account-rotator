@@ -17,6 +17,7 @@ import {
   EMPTY_VIEW,
   FIVE_HOUR_MS,
   LEAVE_FIVE_HOUR,
+  WEEK_MS,
   counted,
   fiveHourLimitFrom,
   legacyMark,
@@ -40,6 +41,9 @@ import {
   identityFromStatus,
   isFableSpent,
   isFableStop,
+  isWeeklyStop,
+  withWeekMark,
+  reportsNoFiveHour,
   isLoginOf,
   isNoBrowser,
   isOnNormalLogin,
@@ -103,6 +107,8 @@ let signingIn: string | undefined
 let signInQueue: Promise<void> = Promise.resolve()
 /** The carry-on a switch owes: what the turn that stopped died on, which picks the line sent. */
 type CarryOn = { need?: Need }
+/** When the switch began whose landing a turn that died before it already carries on after. */
+let carriedFor: number | undefined
 /**
  * A switch the refresh guard holds back: the latest one asked for, tried again
  * each minute until it goes. A Fable stop's carry-on waits in it, and goes out
@@ -154,9 +160,37 @@ async function storedReading($: Host, id: string): Promise<Reading | undefined> 
   return typeof r === 'object' && r !== null && typeof (r as Reading).at === 'number' ? (r as Reading) : undefined
 }
 
-/** A login's reading as the rules count it: the stored read with its stop mark, under the 5-hour limit. */
-function viewed(read: Reading, mark: Mark | undefined, limit: FiveHourLimit, now: number): Reading {
-  return counted(withMark(read, mark, now) ?? read, limit, now)
+/** What the store holds beside a login's reading, each under its own key: its stop marks, and whether it has no 5-hour window. */
+type Beside = { mark?: Mark; weekMark?: Mark; noFiveHour?: boolean }
+
+const besideOf = (v: View, id: string): Beside => ({ mark: v.marks?.[id], weekMark: v.weekMarks?.[id], noFiveHour: v.noFiveHour?.[id] })
+
+/**
+ * A login's reading as the rules count it: the stored read with whether its usage endpoint
+ * reports no 5-hour window, then its stop marks, under the 5-hour limit.
+ */
+function viewed(read: Reading, beside: Beside, limit: FiveHourLimit, now: number): Reading {
+  const { noFiveHour: _stored, ...bare } = read
+  const r: Reading = beside.noFiveHour === true ? { ...bare, noFiveHour: true } : bare
+  const weekly = withWeekMark(r, beside.weekMark, now) ?? r
+  return counted(withMark(weekly, beside.mark, now) ?? weekly, limit, now)
+}
+
+/** Stores whether a login's usage endpoint said it has no 5-hour window, for every session. */
+async function saveNoFiveHour($: Host, id: string, hasNoFiveHour: boolean): Promise<void> {
+  await $.store.set(`no-five-hour:${id}`, hasNoFiveHour)
+  await setView($, v => ({ ...v, noFiveHour: { ...v.noFiveHour, [id]: hasNoFiveHour } }))
+}
+
+/** Marks a login's week spent for every session, under its own key, which no save of a reading writes. */
+async function saveWeekMark($: Host, id: string, weekMark: Mark): Promise<void> {
+  await $.store.set(`week-mark:${id}`, weekMark)
+  const now = await $.clock.now()
+  const read = (await storedReading($, id)) ?? { at: weekMark.at }
+  await setView($, v => {
+    const weekMarks = { ...v.weekMarks, [id]: weekMark }
+    return { ...v, weekMarks, readings: { ...v.readings, [id]: viewed(read, { ...besideOf(v, id), weekMark }, v.fiveHourLimit, now) } }
+  })
 }
 
 /**
@@ -167,10 +201,11 @@ function viewed(read: Reading, mark: Mark | undefined, limit: FiveHourLimit, now
  */
 async function saveReading($: Host, id: string, read: Reading): Promise<void> {
   const now = await $.clock.now()
-  const legacy = legacyMark(await storedReading($, id), now)
+  const stored = await storedReading($, id)
+  const legacy = legacyMark(stored, now)
   if (legacy !== undefined) await keepLegacyMark($, id, legacy)
   await $.store.set(`reading:${id}`, read)
-  await setView($, v => ({ ...v, readings: { ...v.readings, [id]: viewed(read, v.marks?.[id], v.fiveHourLimit, now) } }))
+  await setView($, v => ({ ...v, readings: { ...v.readings, [id]: viewed(read, besideOf(v, id), v.fiveHourLimit, now) } }))
 }
 
 /** Moves an older version's mark to the mark's own key, unless the mark there already stands longer. */
@@ -189,7 +224,7 @@ async function saveMark($: Host, id: string, mark: Mark): Promise<void> {
   await setView($, v => ({
     ...v,
     marks: { ...v.marks, [id]: mark },
-    readings: { ...v.readings, [id]: viewed(read, mark, v.fiveHourLimit, now) },
+    readings: { ...v.readings, [id]: viewed(read, { ...besideOf(v, id), mark }, v.fiveHourLimit, now) },
   }))
 }
 
@@ -211,6 +246,8 @@ async function mergeStore($: Host): Promise<void> {
   const accounts = await loadAccounts($)
   const readings: Record<string, Reading> = {}
   const marks: Record<string, Mark> = {}
+  const noFiveHour: Record<string, boolean> = {}
+  const weekMarks: Record<string, Mark> = {}
   const health: Record<string, Health> = {}
   const holders: Record<string, Holder> = {}
   for (const a of accounts) {
@@ -218,6 +255,10 @@ async function mergeStore($: Host): Promise<void> {
     if (r !== undefined) readings[a.id] = r
     const m = markFrom(await $.store.get(`mark:${a.id}`))
     if (m !== undefined) marks[a.id] = m
+    const n = await $.store.get(`no-five-hour:${a.id}`)
+    if (typeof n === 'boolean') noFiveHour[a.id] = n
+    const k = markFrom(await $.store.get(`week-mark:${a.id}`))
+    if (k !== undefined) weekMarks[a.id] = k
     const h = await $.store.get(`health:${a.id}`)
     if (typeof h === 'object' && h !== null && typeof (h as Health).kind === 'string') health[a.id] = h as Health
     const s = await $.store.get(`holder:${a.id}`)
@@ -237,6 +278,8 @@ async function mergeStore($: Host): Promise<void> {
   await setView($, v => {
     const nextReadings: Record<string, Reading> = {}
     const nextMarks: Record<string, Mark> = {}
+    const nextNoFiveHour: Record<string, boolean> = {}
+    const nextWeekMarks: Record<string, Mark> = {}
     const nextHealth: Record<string, Health> = {}
     const nextHolders: Record<string, Holder> = {}
     for (const a of accounts) {
@@ -244,16 +287,20 @@ async function mergeStore($: Host): Promise<void> {
       const theirs = readings[a.id]
       const mark = marks[a.id] ?? v.marks?.[a.id]
       if (mark !== undefined) nextMarks[a.id] = mark
+      const none = noFiveHour[a.id] ?? v.noFiveHour?.[a.id]
+      if (none !== undefined) nextNoFiveHour[a.id] = none
+      const weekMark = weekMarks[a.id] ?? v.weekMarks?.[a.id]
+      if (weekMark !== undefined) nextWeekMarks[a.id] = weekMark
       // On a tie the stored read wins: this session's copy is already counted, and may have lost a window.
       const reading = mine !== undefined && (theirs === undefined || mine.at > theirs.at) ? mine : theirs
-      if (reading !== undefined) nextReadings[a.id] = viewed(reading, mark, fiveHourLimit, now)
+      if (reading !== undefined) nextReadings[a.id] = viewed(reading, { mark, weekMark, noFiveHour: none }, fiveHourLimit, now)
       const own = v.health[a.id]
       const h = signingIn === a.id ? own : (health[a.id] ?? own)
       if (h !== undefined) nextHealth[a.id] = h
       const holder = holders[a.id] ?? v.holders[a.id]
       if (holder !== undefined) nextHolders[a.id] = holder
     }
-    return { ...v, accounts, readings: nextReadings, marks: nextMarks, health: nextHealth, holders: nextHolders, footer, rotateTo, fiveHourLimit, fableContinueText, chromeAccountId, chromeAccountIds }
+    return { ...v, accounts, readings: nextReadings, marks: nextMarks, noFiveHour: nextNoFiveHour, weekMarks: nextWeekMarks, health: nextHealth, holders: nextHolders, footer, rotateTo, fiveHourLimit, fableContinueText, chromeAccountId, chromeAccountIds }
   })
 }
 
@@ -282,7 +329,7 @@ async function setFiveHourLimit($: Host, fiveHourLimit: FiveHourLimit): Promise<
   await setView($, v => ({
     ...v,
     fiveHourLimit,
-    readings: Object.fromEntries(Object.entries(v.readings).map(([id, r]) => [id, viewed(stored[id] ?? r, v.marks?.[id], fiveHourLimit, now)])),
+    readings: Object.fromEntries(Object.entries(v.readings).map(([id, r]) => [id, viewed(stored[id] ?? r, besideOf(v, id), fiveHourLimit, now)])),
   }))
   await maybeRotate($)
 }
@@ -498,9 +545,14 @@ async function checkAccount($: Host, account: Account): Promise<void> {
       if (usage.kind === 'rejected') health = { kind: 'login-needed', why: 'sign-in rejected' }
       if (usage.kind === 'failed') await debug($, `usage for account ${account.id}: HTTP ${usage.status}`)
       if (usage.kind === 'ok') {
-        const reading = readingFromUsage(usage.body, now)
-        // A body with no Fable row leaves the week a stop marked spent as it is.
-        if (reading !== undefined) await saveReading($, account.id, keepFable(reading, (await getView($)).readings[account.id], now))
+        const read = readingFromUsage(usage.body, now)
+        if (read !== undefined) {
+          const { noFiveHour, ...reading } = read
+          // A body whose 5-hour window it cannot read leaves what the last one said.
+          if (reading.fiveHour !== undefined || noFiveHour === true) await saveNoFiveHour($, account.id, noFiveHour === true)
+          // A body with no Fable row leaves the week a stop marked spent as it is.
+          await saveReading($, account.id, keepFable(reading, (await getView($)).readings[account.id], now))
+        }
       }
     }
   }
@@ -694,6 +746,8 @@ async function onMeasure($: Host, limits: readonly SessionRateLimit[]): Promise<
   }
   const reading = readingFromLimits(limits, await $.clock.now())
   if (reading === undefined) return
+  // A response that reports a 5-hour window shows the account has one, whatever the last usage check said.
+  if (reading.fiveHour !== undefined && view.noFiveHour?.[view.activeId] === true) await saveNoFiveHour($, view.activeId, false)
   // A response never lists the Fable week: the one the last check read stays.
   const fable = view.readings[view.activeId]?.fable
   await saveReading($, view.activeId, { ...reading, ...(fable ? { fable } : {}) })
@@ -727,6 +781,16 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
     const before = await saveHealth($, active.id, { kind: 'login-needed', why: 'sign-in rejected' })
     if (before?.kind !== 'login-needed') await announceLockout($, active, 'sign-in rejected')
   } else {
+    // Claude Code reads the new login only once the switch lands: a turn that dies before then went out on the
+    // login being left, which the switch already leaves. Nothing is marked on the login moved to; the turn carries on there.
+    // A Connect visit and a Fable stop keep their own handling below.
+    const isSettling = view.pending !== undefined && (await $.clock.now()) - view.pending.since < SETTLE_MS
+    if (isSettling && !isConnectingChrome && !isFableStop(stop.last_assistant_message)) {
+      // One carry-on per switch, however many turns die before it lands.
+      if (carriedFor !== view.pending?.since) carryOnAfterSettle($, {})
+      carriedFor = view.pending?.since
+      return
+    }
     await checkAccount($, active)
     const now = await $.clock.now()
     const after = await getView($)
@@ -741,8 +805,13 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
       await setView($, v => ({ ...v, isFableStopped: true }))
       // The limit was hit before the usage call shows it: count the Fable week as full.
       if (!isFableSpent(r, now)) await saveReading($, active.id, { ...read, fable: fableMark(r?.fable, now), at: now })
+    } else if (!shouldLeave(after, now) && (isWeeklyStop(said) || reportsNoFiveHour(r))) {
+      // The week ran out before the usage call shows it, by Claude's words or as the only window the account has:
+      // count the week as full until its reset, never a 5-hour window.
+      const spent = spentMark(read?.sevenDay, now, WEEK_MS)
+      await saveWeekMark($, active.id, { pct: spent.pct, resetsAt: spent.resetsAt ?? new Date(now + WEEK_MS).toISOString(), at: now })
     } else if (!shouldLeave(after, now)) {
-      // The limit was hit before the usage call shows it: count the 5-hour window as full, five hours at most where none is reported.
+      // The limit was hit before the usage call shows it: count the 5-hour window as full, five hours at most where no reset is known.
       const spent = spentMark(read?.fiveHour, now, FIVE_HOUR_MS)
       await saveMark($, active.id, { pct: spent.pct, resetsAt: spent.resetsAt ?? new Date(now + FIVE_HOUR_MS).toISOString(), at: now })
     }
@@ -1111,6 +1180,8 @@ async function removeAccount($: Host, id: string): Promise<void> {
   await noteChromeAccount($, id, false)
   await $.store.delete(`reading:${id}`)
   await $.store.delete(`mark:${id}`)
+  await $.store.delete(`no-five-hour:${id}`)
+  await $.store.delete(`week-mark:${id}`)
   await $.store.delete(`health:${id}`)
   await $.store.delete(`holder:${id}`)
   await setView($, v => {
@@ -1122,7 +1193,9 @@ async function removeAccount($: Host, id: string): Promise<void> {
     delete marks[id]
     delete health[id]
     delete holders[id]
-    return { ...v, readings, marks, health, holders, removing: undefined }
+    const { [id]: _none, ...noFiveHour } = v.noFiveHour ?? {}
+    const { [id]: _week, ...weekMarks } = v.weekMarks ?? {}
+    return { ...v, readings, marks, noFiveHour, weekMarks, health, holders, removing: undefined }
   })
 }
 

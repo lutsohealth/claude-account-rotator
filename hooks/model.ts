@@ -124,6 +124,11 @@ export function isFableStop(text: string | undefined): boolean {
   return /reached your Fable limit/.test(text ?? '')
 }
 
+/** Whether the last message of a turn that died on a limit says the limit was the week. */
+export function isWeeklyStop(text: string | undefined): boolean {
+  return /hit your weekly limit/.test(text ?? '')
+}
+
 export function shouldLeave(view: View, now: number, need?: Need): boolean {
   const r = view.readings[view.activeId]
   return view.health[view.activeId]?.kind === 'login-needed' || isSpent(r, now) || (need === 'fable' && isFableSpent(r, now))
@@ -264,7 +269,9 @@ export function readingFromUsage(body: unknown, now: number): Reading | undefine
   const sevenDay = windowFrom(seven_day)
   const fable = fableFrom(limits)
   if (fiveHour === undefined && sevenDay === undefined && fable === undefined) return undefined
-  return { ...(fiveHour ? { fiveHour } : {}), ...(sevenDay ? { sevenDay } : {}), ...(fable ? { fable } : {}), at: now }
+  // Only a body that lists no 5-hour window at all says the account has none; one it cannot read says nothing.
+  const isNone = five_hour === null || five_hour === undefined
+  return { ...(fiveHour ? { fiveHour } : isNone ? { noFiveHour: true } : {}), ...(sevenDay ? { sevenDay } : {}), ...(fable ? { fable } : {}), at: now }
 }
 
 /**
@@ -280,12 +287,37 @@ export function keepFable(fresh: Reading, stored: Reading | undefined, now: numb
 }
 
 /**
+ * Whether the usage endpoint says the account has no 5-hour window, as a
+ * verified Ultra account's does, with no window read since: such an account has
+ * no 5-hour window to mark. A response that lists none says nothing of it.
+ */
+export function reportsNoFiveHour(r: Reading | undefined): boolean {
+  return r?.noFiveHour === true && r.fiveHour === undefined
+}
+
+/** Two reads whose week resets lie within this of each other read the same week. */
+const SAME_WEEK_MS = 3600_000
+
+/**
+ * A reading with the week a stop marked spent, until that week's reset: the
+ * usage read can lag the stop, so no read of the same week ends the mark. A
+ * read of a week that resets at another time is a new week, and the mark was
+ * the old one's.
+ */
+export function withWeekMark(r: Reading | undefined, mark: Mark | undefined, now: number): Reading | undefined {
+  if (mark === undefined || Date.parse(mark.resetsAt) <= now) return r
+  const reset = r?.sevenDay?.resetsAt
+  if (reset !== undefined && Math.abs(Date.parse(reset) - Date.parse(mark.resetsAt)) > SAME_WEEK_MS) return r
+  return { ...(r ?? { at: mark.at }), sevenDay: { pct: mark.pct, resetsAt: mark.resetsAt, isStop: true } }
+}
+
+/**
  * A reading with the 5-hour window a stop marked spent, until the mark's reset
  * time and no sooner: no read ends a mark, so no order between a reading and a
- * mark matters.
+ * mark matters. A read that reports no 5-hour window takes no mark.
  */
 export function withMark(r: Reading | undefined, mark: Mark | undefined, now: number): Reading | undefined {
-  if (mark === undefined || Date.parse(mark.resetsAt) <= now) return r
+  if (mark === undefined || Date.parse(mark.resetsAt) <= now || reportsNoFiveHour(r)) return r
   return { ...(r ?? { at: mark.at }), fiveHour: { pct: mark.pct, resetsAt: mark.resetsAt, isStop: true } }
 }
 
@@ -306,8 +338,9 @@ export function markFrom(value: unknown): Mark | undefined {
   return isMark ? { pct: v.pct as number, resetsAt: v.resetsAt as string, at: v.at as number } : undefined
 }
 
-/** How long a Fable week runs: a mark with no reset time of its own stands this long. */
-export const FABLE_WEEK_MS = 7 * 24 * 3600_000
+/** How long a week, the Fable week among them, runs: a mark with no reset time of its own stands this long. */
+export const WEEK_MS = 7 * 24 * 3600_000
+export const FABLE_WEEK_MS = WEEK_MS
 
 /**
  * The mark a Fable stop leaves on a login: its Fable week spent, until the
