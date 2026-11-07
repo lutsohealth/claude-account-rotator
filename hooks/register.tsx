@@ -150,6 +150,16 @@ let provisionalStop: ProvisionalStop | undefined
  */
 const PROCESS_ENDS: ReadonlySet<string> = new Set(['prompt_input_exit', 'logout', 'other'])
 
+/**
+ * The one way a switch to `id` ends proven, by a response's week or a browser answering as the account: it settles,
+ * and a stop marked on it provisionally is kept, so no later end of anything reverts it.
+ */
+async function proveSwitch($: Host, id: string): Promise<void> {
+  untaken.delete(id)
+  if (provisionalStop?.id === id) provisionalStop = undefined
+  await setView($, v => (v.pending?.id === id ? { ...v, pending: undefined } : v))
+}
+
 /** The keys a stop writes for a login, every session's: its marks, its reading, its `no-five-hour`. */
 const STOP_KEYS = (id: string) => [`mark:${id}`, `week-mark:${id}`, `usage:${id}`, `no-five-hour:${id}`]
 
@@ -983,18 +993,14 @@ async function settlePending($: Host, isResponse: boolean): Promise<void> {
   // A response whose week the login left shares tells nothing: confirmed on it, the old login's next responses
   // would be stored as the new one's.
   if (isTarget(await getView($)) && !isSource(await getView($))) {
-    untaken.delete(pending.id)
-    provisionalStop = undefined
-    await setView($, v => ({ ...v, pending: undefined }))
+    await proveSwitch($, pending.id)
   } else if (isResponse && now - pending.since > CONFIRM_GIVE_UP_MS) {
     const from = accounts.find(a => a.id === pending.from)
     if (from !== undefined) await checkAccount($, from, { since: pending.since })
     const after = await getView($)
     // Minutes on, a switch has landed if it ever will: only a response that is the old login's alone points back.
     if (isTarget(after) && isSource(after)) {
-      untaken.delete(pending.id)
-      provisionalStop = undefined
-      await setView($, v => ({ ...v, pending: undefined }))
+      await proveSwitch($, pending.id)
       return
     }
     if (from === undefined || !isSource(after)) {
@@ -1389,8 +1395,7 @@ async function connectingChrome(
   if (!isTrial || answer === 'paired') hasChromeMissed = answer === 'unpaired'
   if (answer === 'paired') {
     // A browser answering as the account shows the switch took: the rotation need not wait for a response to say so.
-    untaken.delete(target.id)
-    await setView($, v => (v.pending?.id === target.id ? { ...v, pending: undefined } : v))
+    await proveSwitch($, target.id)
   }
   if (isVisit) await leaveVisit($, from)
   if (!isQuiet && answer === 'paired') tell($, `Claude in Chrome is connected as Claude account ${label(target)}.`)
