@@ -2,6 +2,12 @@
 
 What each version of the account rotator changed. To get each one as Claude Code starts, turn on auto-update: in `/plugin`, open **Marketplaces**, pick **claude-account-rotator** and choose **Enable auto-update**. To update by hand, run `claude plugin marketplace update claude-account-rotator`, then `claude plugin update account-rotator@claude-account-rotator`, and start a new session.
 
+## 0.5.6-lutso.1 - 2026-11-07
+
+- **A usage-limit stop while a switch is still unproven no longer leaves a guess behind.** When the switch ends with no response showing it took (it gives up, you switch again, or you quit Claude Code), the mark it put on the account moved to is dropped, with the 5-hour window and Fable state the stop changed. A mark another session made since stays, and so does one whose switch a response later proves. A switch the stop itself makes at once keeps it.
+- **An account a session on an older version keeps reading is read on this version's schedule too**, so its row shows this version's own usage instead of "no reading yet" until that session restarts. Until then both versions read it, each on its own schedule. A wait an older session set after a failed read still stands.
+- **A new session no longer reads an account early** just because its schedule came from this version and the account shows no reading yet.
+
 ## 0.5.5-lutso.1 - 2026-11-07
 
 - **Each account shows only its own usage.** A response counts for the account in use only when its week resets at that account's time, which each account has of its own. Accounts whose weeks reset together are read from the usage check alone, so two accounts no longer show one account's numbers.
