@@ -737,8 +737,9 @@ test('a settling switch reads a login once: not past a good read since the switc
 })
 
 /**
- * Sessions sharing one store, on a clock of the test's: each checks at its boot and every 10 minutes, claiming
- * what is due, as `checkAll` does, and reads the logins its claims hold. Answers the calls per login.
+ * Sessions sharing one store, on a clock of the test's: each checks at its boot and every minute, claiming what is
+ * due, as `checkAll` does, and reads the logins its claims hold. Scheduled reads only: no stop, /login or sign-in.
+ * Answers the calls per login.
  */
 async function simulate(boots: readonly number[], inUse: ReadonlySet<string>, span: number): Promise<Record<string, number>> {
   const store = new Map<string, unknown>()
@@ -757,7 +758,7 @@ async function simulate(boots: readonly number[], inUse: ReadonlySet<string>, sp
       store.set(`usage-due:${id}`, afterUsage(due, { kind: 'ok', hasResponded: inUse.has(id) }, now))
     }
   }
-  const checks = boots.flatMap((boot, i) => Array.from({ length: Math.ceil(span / (10 * MIN)) + 1 }, (_, k) => ({ at: NOW + boot + k * 10 * MIN, sid: `session-${i}` })))
+  const checks = boots.flatMap((boot, i) => Array.from({ length: Math.ceil(span / MIN) + 1 }, (_, k) => ({ at: NOW + boot + k * MIN, sid: `session-${i}` })))
   // From event to event, in time order: checks due at one time start together, as sessions do, then the claim waits.
   for (;;) {
     const t = Math.min(...checks.map(c => c.at), ...waits.map(w => w.at))
