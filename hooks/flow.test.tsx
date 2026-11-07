@@ -1211,6 +1211,27 @@ test('a switch is confirmed once a response reports the new login usage, and an 
   await pane.unmount()
 })
 
+// puma-eslxj.2 (C1): a typed command is the person's, so an agent can open the pane without a mouse.
+test('/accounts is listed, opens the accounts pane, and a second /accounts closes it', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.usage['tok-1'] = [20, 30]
+  const clock = world(on, w, TWO_LOGINS)
+  const registered: string[] = []
+  on('command.register', (_$, e) => {
+    registered.push(e.name)
+    return { value: { command: e.name } }
+  })
+  await start($, clock)
+  expect(registered).toEqual(['accounts'])
+  await $.command.run({ command: 'accounts' })
+  await clock.settle()
+  expect(w.panes).toEqual(['claude-accounts'])
+  await $.command.run({ command: 'accounts' })
+  await clock.settle()
+  expect(w.panes).toEqual([])
+})
+
 test('one press on the footer opens the accounts pane, the next closes it', async ($, on) => {
   const w = fresh()
   w.keychain['Claude Code-credentials'] = blob('tok-1')
