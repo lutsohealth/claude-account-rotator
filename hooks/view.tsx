@@ -1,21 +1,21 @@
 import type { Elements, RenderChildren, RenderSurface } from 'claude-code'
 
-import type { Account, Fill, FiveHourLimit, FooterRun, FooterStyle, Glyphs, Highlight, RotateTo, UsageWindow, View } from '../types'
+import type { Account, Fill, FiveHourLimit, FooterRun, FooterStyle, Glyphs, Highlight, LaunchOn, RotateTo, UsageWindow, View } from '../types'
 import {
+  DEFAULT_LAUNCH_ON,
+  DEFAULT_WEEK_LEAVE,
   GLYPHS,
-  LEAVE_FIVE_HOUR,
-  LEAVE_SEVEN_DAY,
   SIGN_IN_WARN_MS,
+  WEEK_LEAVE_MAX,
   availableNow,
   blockedAdvice,
   canConnectChrome,
   fableSpentNotice,
   glyph,
   isOnNormalLogin,
-  isSeatPlan,
+  isSpent,
   longBar,
   nextReset,
-  planText,
   resumeCommand,
   roomColor,
   roomLeft,
@@ -39,6 +39,8 @@ export type Actions = {
   setFooter: (change: Partial<FooterStyle>) => void
   setRotateTo: (rotateTo: RotateTo) => void
   setFiveHourLimit: (limit: FiveHourLimit) => void
+  setWeekLeave: (weekLeave: number) => void
+  setLaunchOn: (launchOn: LaunchOn) => void
   tryChromeAccount: (id: string) => void
   toggleChromeOthers: () => void
   connectChrome: () => void
@@ -339,11 +341,46 @@ function FooterSettings(ui: Ui, view: View, act: Actions) {
   ])
 }
 
-/** Which login the rotation moves to, and whether the 5-hour window counts. */
+/** The week left at which the session leaves: its percent between a - and a + press, each one step, stopping at 0 and at the most. */
+function weekLeaveRow(ui: Ui, view: View, act: Actions) {
+  const { Box, Text, Button } = ui
+  // A view kept from before a hot reload lacks the setting: it reads as the default.
+  const at = view.weekLeave ?? DEFAULT_WEEK_LEAVE
+  return (
+    <Box key="week-leave" flexDirection="row">
+      <Box width={NAME_WIDTH} flexShrink={0}>
+        <Text dimColor>Week</Text>
+      </Box>
+      <Box flexDirection="row" columnGap={1}>
+        <Button key="week-leave-down" plain onPress={() => act.setWeekLeave(Math.max(0, at - 1))}>
+          <Text dimColor={at === 0}>[-]</Text>
+        </Button>
+        <Text>leave at {at}% left</Text>
+        <Button key="week-leave-up" plain onPress={() => act.setWeekLeave(Math.min(WEEK_LEAVE_MAX, at + 1))}>
+          <Text dimColor={at === WEEK_LEAVE_MAX}>[+]</Text>
+        </Button>
+      </Box>
+    </Box>
+  )
+}
+
+/** The login new sessions start on: by a rule over the logins with room, or one account, each listed by number. */
+function launchChoices(view: View): readonly (readonly [LaunchOn, string])[] {
+  const rules = [
+    ['room', 'most room'],
+    ['nonzero', 'first with room'],
+    ['reset', 'soonest reset'],
+  ] as const
+  return [...rules, ...view.accounts.map(a => [`account:${a.id}` as LaunchOn, `account ${a.id}`] as const)]
+}
+
+/** Which login the rotation moves to, whether the 5-hour window counts, at what week left it leaves, and where new sessions start. */
 function RotationSettings(ui: Ui, view: View, act: Actions) {
   return section(ui, 'rotation', 'Usage based rotation', [
     choice(ui, 'rotate-to', 'Move to', ROTATE_CHOICES, view.rotateTo, act.setRotateTo),
     choice(ui, 'five-hour-limit', '5h limit', FIVE_HOUR_CHOICES, view.fiveHourLimit, act.setFiveHourLimit),
+    weekLeaveRow(ui, view, act),
+    choice(ui, 'launch-on', 'New on', launchChoices(view), view.launchOn ?? DEFAULT_LAUNCH_ON, act.setLaunchOn),
   ])
 }
 
@@ -508,10 +545,7 @@ export function Band(ui: Ui, view: View, now: number, act: Actions) {
   }
   const chrome = ChromeBand(ui, view, act)
   if (chrome !== undefined) return chrome
-  const spent = view.accounts.every(a => {
-    const r = view.readings[a.id]
-    return (windowPct(r?.fiveHour, now) ?? 0) >= LEAVE_FIVE_HOUR || (windowPct(r?.sevenDay, now) ?? 0) >= LEAVE_SEVEN_DAY
-  })
+  const spent = view.accounts.every(a => isSpent(view.readings[a.id], now, view.weekLeave))
   if (view.accounts.length > 0 && spent) {
     const at = nextReset(view, now)
     return (
@@ -653,22 +687,8 @@ function accountRows(ui: Ui, view: View, a: Account, now: number, act: Actions) 
   )
 }
 
-/** Where the rotation moves to, as its setting picks. */
-const RULE_TARGETS: Record<Exclude<RotateTo, 'off'>, string> = {
-  reset: 'the account whose 5-hour window, or else week, resets soonest',
-  room: 'the account with the most room right now',
-  order: 'the next account in the list with room',
-}
-
-/** When the rotation moves on, counted the way the footer shows it (room left, or what is used), and where to; with the 5-hour limit off, by the week alone. */
-function rule(fill: Fill, rotateTo: RotateTo, limit: FiveHourLimit): string {
-  if (rotateTo === 'off') return 'Rotation is disabled: the session stays on the account in use until you pick another.'
-  const [five, week] = fill === 'left' ? [100 - LEAVE_FIVE_HOUR, 100 - LEAVE_SEVEN_DAY] : [LEAVE_FIVE_HOUR, LEAVE_SEVEN_DAY]
-  const windows = limit === 'off' ? `${week}% of its week` : `${five}% of its 5-hour window, where it reports one, or ${week}% of its week`
-  const when = fill === 'left' ? `Once the account in use has ${windows} left` : `Once the account in use has used ${windows}`
-  const target = limit === 'off' && rotateTo === 'reset' ? 'the account whose week resets soonest' : RULE_TARGETS[rotateTo]
-  return `${when}, moves to ${target}.`
-}
+/** The pane's first line while the rotation is off. */
+const ROTATION_OFF = 'Rotation is disabled: the session stays on the account in use until you pick another.'
 
 /** The pane's first line while Claude Code's security policy refuses every switch. */
 function blockedRule(view: View): string {
@@ -678,33 +698,7 @@ function blockedRule(view: View): string {
 }
 
 /**
- * Claude Code's own login, the one new sessions start on, as its sign-in
- * says: whose account it is, and its plan, a Team or Enterprise one keeping
- * those sessions from switching. In a session on another login, /login signs
- * in that one instead.
- */
-function LoginLine({ Text }: Ui, view: View) {
-  const normal = view.accounts.find(a => a.slot === '')
-  if (normal === undefined) return undefined
-  const who = view.holders[normal.id]?.who ?? normal
-  const isSeat = isSeatPlan(who.plan)
-  const text = [
-    `Claude Code's login: account ${normal.id}${who.email === undefined ? '' : ` (${who.email})`}${who.plan === undefined ? '' : `, ${planText(who.plan)}`}.`,
-    isSeat
-      ? "New sessions start on it, and can't switch accounts: /login with your personal (Pro or Max) account in a session on it, then restart Claude."
-      : 'New sessions start on it.',
-    ...(view.activeId === normal.id ? [] : [`/login in this session signs in account ${view.activeId} instead.`]),
-  ]
-  return (
-    <Text key="login" color={isSeat ? 'warning' : undefined} dimColor={!isSeat}>
-      {text.join(' ')}
-    </Text>
-  )
-}
-
-/**
- * The pane: when the rotation moves on (or that it can't), and Claude Code's
- * own login, then every account, its usage and what can be done with it, then
+ * The pane: that the rotation is off or can't switch, where so, then every account, its usage and what can be done with it, then
  * Claude in Chrome in a session that has it, where the rotation moves to, and
  * the footer's settings, each group in its box.
  */
@@ -720,8 +714,7 @@ export function Pane(ui: Ui, view: View, now: number, act: Actions) {
   ]
   return (
     <Box flexDirection="column" rowGap={1}>
-      {view.isSwitchBlocked ? <Text color="warning">{blockedRule(view)}</Text> : <Text dimColor>{rule(view.footer.fill, view.rotateTo, view.fiveHourLimit)}</Text>}
-      {LoginLine(ui, view)}
+      {view.isSwitchBlocked ? <Text color="warning">{blockedRule(view)}</Text> : view.rotateTo === 'off' && <Text dimColor>{ROTATION_OFF}</Text>}
       {section(ui, 'accounts', 'Accounts', accounts)}
       {(view.hasChrome === true || view.chromeAccountId !== undefined || (view.chromeAccountIds?.length ?? 0) > 0) && ChromeSettings(ui, view, act)}
       {RotationSettings(ui, view, act)}

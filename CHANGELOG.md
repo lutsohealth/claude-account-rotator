@@ -2,6 +2,12 @@
 
 What each version of the account rotator changed. To get each one as Claude Code starts, turn on auto-update: in `/plugin`, open **Marketplaces**, pick **claude-account-rotator** and choose **Enable auto-update**. To update by hand, run `claude plugin marketplace update claude-account-rotator`, then `claude plugin update account-rotator@claude-account-rotator`, and start a new session.
 
+## 0.5.0-lutso.1 - 2026-11-07
+
+- **Week** in the panel's **Usage based rotation** box sets how much of its week the account in use has left when the session moves: 0% by default, so only a spent week moves it; **-** and **+** step it from 0 to 99. The line at the top of the panel that stated the rule is gone.
+- **New on** in the same box picks the account a launcher starts new sessions on: the most room, the first with room, the soonest reset, or one account, else the next with room. An account with any limit at 0% left is skipped. `account-rotator-launch` prints that account's slot for a launcher. The panel no longer names Claude Code's login.
+- **A session-limit stop marks the 5-hour window.** A turn that dies with Claude saying the session or 5-hour limit was hit counts that account's 5-hour window spent, even where its usage reported none.
+
 ## 0.4.3-lutso.1 - 2026-11-07
 
 - **A switch no longer overwrites the account it moves to.** A session that started on an account whose sign-in token had run out was moved at once, and the refresh Claude Code then made was saved under the account moved to, which afterwards held the first account's sign-in and asked for its own again. The switch now waits until the token has refreshed, as it already did in the token's last minutes; an account whose sign-in itself has run out is still left at once.

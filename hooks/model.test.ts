@@ -1,6 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import type { RotateTo, View } from '../types'
+import { weekLeaveFrom, launchOnFrom, pickLaunch, isSessionStop } from './model'
 import { DEFAULT_FOOTER, availableNow, braille, browsersFrom, chromeNote, continueTextFrom, counted, fiveHourLimitFrom, credentialFrom, credentialsFile, fableMark, fableSpentNotice, fableStay, footerStyleFrom, healthOf, identityFromProfile, isFableSpent, isFableStop, isNoBrowser, isPolicyRefusal, keepFable, keychainItem, legacyMark, markFrom, nextReset, pickTarget, pie, readingFromUsage, rotateToFrom, shouldLeave, roomColor, windowPct, withMark, withWeekMark } from './model'
 
 const NOW = Date.parse('2026-10-12T10:00:00Z')
@@ -38,6 +39,8 @@ function view(
     footer: DEFAULT_FOOTER,
     rotateTo,
     fiveHourLimit: 'on',
+    weekLeave: 0,
+    launchOn: 'room',
     hasFontBlocks: false,
   }
 }
@@ -60,7 +63,7 @@ test('logins that report no 5-hour window rank by their week: soonest reset by i
   expect(pickTarget(v, NOW)?.id).toBe('2')
   expect(pickTarget({ ...v, rotateTo: 'room' }, NOW)?.id).toBe('3')
   // Spent by its week, a login with no 5-hour window is never a target.
-  v.readings['2'] = weekOnly(96, '2026-10-12T20:00:00Z')
+  v.readings['2'] = weekOnly(100, '2026-10-12T20:00:00Z')
   expect(pickTarget(v, NOW)?.id).toBe('4')
 })
 
@@ -110,11 +113,43 @@ test('a 5-hour window read with no reset time and room left is a read, not a sto
   expect(counted(unstarted, 'off', NOW)).toEqual({ sevenDay: { pct: 10, resetsAt: WEEK_END }, at: NOW })
 })
 
-test('leaves at 90% of the 5-hour window or 95% of the week, and not before', () => {
-  expect(shouldLeave(view({ '1': [89, 94] }), NOW)).toBe(false)
+// puma-4q7j2.4: the week left at which the session leaves is the pane's setting, 0 to 99, by default 0.
+test('leaves at 90% of the 5-hour window, or once its week has no more left than the setting: by default only when spent', () => {
+  expect(shouldLeave(view({ '1': [89, 99] }), NOW)).toBe(false)
+  expect(shouldLeave(view({ '1': [10, 100] }), NOW)).toBe(true)
   expect(shouldLeave(view({ '1': [90, 10] }), NOW)).toBe(true)
-  expect(shouldLeave(view({ '1': [10, 95] }), NOW)).toBe(true)
+  expect(shouldLeave({ ...view({ '1': [10, 94] }), weekLeave: 5 }, NOW)).toBe(false)
+  expect(shouldLeave({ ...view({ '1': [10, 95] }), weekLeave: 5 }, NOW)).toBe(true)
+  expect(shouldLeave({ ...view({ '1': [10, 0] }), weekLeave: 99 }, NOW)).toBe(false)
+  expect(shouldLeave({ ...view({ '1': [10, 1] }), weekLeave: 99 }, NOW)).toBe(true)
   expect(shouldLeave(view({ '1': [0, 0] }, { '1': { kind: 'login-needed', why: 'x' } }), NOW)).toBe(true)
+})
+
+// puma-4q7j2.5: the login new sessions start on, by each rule, skipping any with a limit at 0% left.
+test('new sessions start on the login the setting picks among those with room on every limit, the named one or the next after it', () => {
+  // Login 1 has its week spent; 2 the most room; 3 the soonest reset; 4 its Fable week spent.
+  const v = view({ '1': [10, 100], '2': [10, 20], '3': [60, 50], '4': [5, 5, 100] })
+  v.readings['3'] = { ...v.readings['3'], fiveHour: { pct: 60, resetsAt: '2026-10-12T10:30:00Z' }, at: NOW }
+  const on = (launchOn: View['launchOn']) => pickLaunch({ ...v, launchOn }, NOW)
+  expect(on('room')).toMatchObject({ id: '2', slot: '/h/.claude/accounts/2' })
+  expect(on('nonzero')?.id).toBe('2')
+  expect(on('reset')?.id).toBe('3')
+  expect(on('account:3')).toMatchObject({ id: '3', why: 'you picked it' })
+  expect(on('account:4')).toMatchObject({ id: '2', why: 'account 4 has no room, and it is the next with room' })
+  expect(on('account:1')?.id).toBe('2')
+  expect(pickLaunch(view({ '1': [100, 10], '2': [10, 100] }), NOW)).toBeUndefined()
+  expect(['room', 'nonzero', 'reset', 'account:3', 'account:', 'other', 7].map(launchOnFrom)).toEqual(['room', 'nonzero', 'reset', 'account:3', 'room', 'room', 'room'])
+})
+
+// RULING 4230: Claude's words naming the 5-hour window, or the session's limit, mean the account has one.
+test('a stop names the 5-hour window by "session limit" or "5-hour limit", never by the week or Fable', () => {
+  expect(["You've hit your session limit · resets 3pm", '5-hour limit reached'].map(isSessionStop)).toEqual([true, true])
+  expect(["You've hit your weekly limit · resets Nov 10", "You've reached your Fable limit.", undefined].map(isSessionStop)).toEqual([false, false, false])
+})
+
+test('a stored week-leave is kept when it is a whole number 0 to 99, else it reads as 0', () => {
+  expect([0, 5, 99].map(weekLeaveFrom)).toEqual([0, 5, 99])
+  expect([100, -1, 5.5, '5', undefined, null].map(weekLeaveFrom)).toEqual([0, 0, 0, 0, 0, 0])
 })
 
 test('picks the signed-in login with the most room, never a spent or locked one', () => {
@@ -130,7 +165,8 @@ test('ranks logins by what they can serve now: the 5-hour room, nothing once the
   // A fresh session with a busy week beats a half-used session with a fresh week.
   expect(pickTarget(view({ '1': [95, 50], '2': [10, 80], '3': [50, 0] }), NOW)?.id).toBe('2')
   expect(availableNow({ fiveHour: { pct: 10, resetsAt: LATER }, sevenDay: { pct: 80, resetsAt: WEEK_END }, at: NOW }, NOW)).toBe(90)
-  expect(availableNow({ fiveHour: { pct: 10, resetsAt: LATER }, sevenDay: { pct: 96, resetsAt: WEEK_END }, at: NOW }, NOW)).toBe(0)
+  expect(availableNow({ fiveHour: { pct: 10, resetsAt: LATER }, sevenDay: { pct: 100, resetsAt: WEEK_END }, at: NOW }, NOW)).toBe(0)
+  expect(availableNow({ fiveHour: { pct: 10, resetsAt: LATER }, sevenDay: { pct: 96, resetsAt: WEEK_END }, at: NOW }, NOW, 5)).toBe(0)
   expect(availableNow({ fiveHour: { pct: 97, resetsAt: LATER }, at: NOW }, Date.parse(LATER) + 1)).toBe(100)
 })
 
@@ -530,7 +566,7 @@ const STAYS: { name: string; reason: string; view: View; isConnecting?: boolean;
   { name: 'a switch is still pending', reason: 'pending', view: { ...CAN_MOVE(), pending: { id: '2', from: '1', since: NOW } } },
   { name: 'every Fable week spent', reason: 'fable-spent', view: view({ '1': [20, 30, 100], '2': [10, 30, 100] }) },
   { name: 'the other account has its 5-hour window full', reason: 'no-room', view: view({ '1': [20, 30, 100], '2': [95, 30, 10] }) },
-  { name: 'the other account has its week full', reason: 'no-room', view: view({ '1': [20, 30, 100], '2': [10, 96, 10] }) },
+  { name: 'the other account has its week full', reason: 'no-room', view: view({ '1': [20, 30, 100], '2': [10, 100, 10] }) },
   { name: 'the other account needs a sign-in', reason: 'no-room', view: view({ '1': [20, 30, 100], '2': [10, 30, 10] }, { '2': { kind: 'login-needed', why: 'not signed in yet' } }) },
   { name: 'the other account was tried and did not take', reason: 'no-room', view: CAN_MOVE(), skip: ['2'] },
 ]

@@ -1,0 +1,59 @@
+#!/usr/bin/env python3
+"""account-rotator-launch: print the Claude account slot a new Claude Code session should start on.
+
+The account-rotator mod picks it by the panel's "New on" setting, among the accounts with room on every
+limit, and stores it as `launch-slot`. This reads that pick, so a launcher can start a session there:
+
+    CLAUDE_SECURESTORAGE_CONFIG_DIR="$(account-rotator-launch)" claude
+
+Prints the slot on stdout (an empty line for Claude Code's own login) and one line naming the account on
+stderr. Exit 0 with a pick, 1 when no account has room or no session has picked one yet, 2 on a usage error.
+"""
+
+import argparse
+import glob
+import json
+import os
+import sys
+import time
+
+STORE_GLOB = "account-rotator_claude-account-rotator-*.json"
+
+
+def default_store() -> str | None:
+    config = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(os.path.expanduser("~"), ".claude")
+    found = sorted(glob.glob(os.path.join(config, "plugins", "store", STORE_GLOB)), key=os.path.getmtime)
+    return found[-1] if found else None
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        prog="account-rotator-launch",
+        description="Print the Claude account slot a new Claude Code session should start on, as the account-rotator mod picked it.",
+        epilog="Exit 0 with a pick, 1 when none is stored (no account has room, or no session has run yet), 2 on a usage error.",
+    )
+    parser.add_argument("--store", help="the mod's store file (default: the newest " + STORE_GLOB + " under the Claude config folder)")
+    args = parser.parse_args()
+    store = args.store or default_store()
+    if store is None or not os.path.isfile(store):
+        print(f"account-rotator-launch: no account-rotator store found ({store or STORE_GLOB}); start one Claude Code session with the mod first, or pass --store", file=sys.stderr)
+        return 1
+    try:
+        with open(store, encoding="utf-8") as f:
+            pick = json.load(f).get("launch-slot")
+    except (OSError, ValueError) as error:
+        print(f"account-rotator-launch: cannot read {store}: {error}", file=sys.stderr)
+        return 1
+    if not isinstance(pick, dict) or not isinstance(pick.get("slot"), str) or not isinstance(pick.get("id"), str):
+        print("account-rotator-launch: no pick stored (no account has room on every limit, or no session of this version has run); a new session starts on Claude Code's login", file=sys.stderr)
+        return 1
+    age = ""
+    if isinstance(pick.get("at"), (int, float)):
+        age = f", picked {round((time.time() * 1000 - pick['at']) / 60000)} min ago"
+    print(f"account-rotator: new session starts on account {pick['id']} ({pick.get('why', 'the setting picked it')}{age})", file=sys.stderr)
+    print(pick["slot"])
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

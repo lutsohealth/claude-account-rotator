@@ -1,4 +1,4 @@
-import type { Account, Fill, FiveHourLimit, FooterStyle, Glyphs, Health, Highlight, Mark, Reading, RotateTo, UsageWindow, View } from '../types'
+import type { Account, Fill, FiveHourLimit, FooterStyle, Glyphs, Health, Highlight, LaunchOn, LaunchPick, Mark, Reading, RotateTo, UsageWindow, View } from '../types'
 
 /** Leave a login once its 5-hour window is this full (percent). */
 export const LEAVE_FIVE_HOUR = 90
@@ -14,6 +14,14 @@ export const DEFAULT_ROTATE_TO: RotateTo = 'reset'
 /** On: a 5-hour window counts where the usage read reports one. Off: only the week and the Fable week count. */
 export const DEFAULT_FIVE_HOUR_LIMIT: FiveHourLimit = 'on'
 
+/** The session leaves the login in use once this much of its week is left (percent): by default, only once it is spent. */
+export const DEFAULT_WEEK_LEAVE = 0
+/** The most of its week a login may have left when the session leaves it (percent). */
+export const WEEK_LEAVE_MAX = 99
+
+/** New sessions start on the login with the most room, unless the pane picks another rule or an account. */
+export const DEFAULT_LAUNCH_ON: LaunchOn = 'room'
+
 export const EMPTY_VIEW: View = {
   accounts: [],
   readings: {},
@@ -23,6 +31,8 @@ export const EMPTY_VIEW: View = {
   footer: DEFAULT_FOOTER,
   rotateTo: DEFAULT_ROTATE_TO,
   fiveHourLimit: DEFAULT_FIVE_HOUR_LIMIT,
+  weekLeave: DEFAULT_WEEK_LEAVE,
+  launchOn: DEFAULT_LAUNCH_ON,
   hasFontBlocks: false,
 }
 
@@ -43,6 +53,19 @@ export function rotateToFrom(value: unknown): RotateTo {
 /** Whether the 5-hour window counts, as stored; unknown is the default's. */
 export function fiveHourLimitFrom(value: unknown): FiveHourLimit {
   return isOneOf(value, FIVE_HOUR_LIMITS) ? value : DEFAULT_FIVE_HOUR_LIMIT
+}
+
+/** The week left at which the session leaves, as stored: a whole number 0 to 99, else the default. */
+export function weekLeaveFrom(value: unknown): number {
+  return Number.isInteger(value) && (value as number) >= 0 && (value as number) <= WEEK_LEAVE_MAX ? (value as number) : DEFAULT_WEEK_LEAVE
+}
+
+const LAUNCH_RULES: readonly LaunchOn[] = ['room', 'nonzero', 'reset']
+
+/** Which login new sessions start on, as stored: a rule, or `account:<id>`; else the default. */
+export function launchOnFrom(value: unknown): LaunchOn {
+  if (isOneOf(value, LAUNCH_RULES)) return value
+  return typeof value === 'string' && /^account:[^\s]+$/.test(value) ? (value as LaunchOn) : DEFAULT_LAUNCH_ON
 }
 
 /** How long a 5-hour window runs: a stop's mark with no reset time of its own stands this long. */
@@ -94,17 +117,19 @@ export function windowPct(w: UsageWindow | undefined, now: number): number | und
  * percent is a far bigger budget, so the session decides until the week is
  * spent, and then nothing is. Undefined before any 5-hour reading.
  */
-export function availableNow(r: Reading | undefined, now: number): number | undefined {
+export function availableNow(r: Reading | undefined, now: number, weekLeave = DEFAULT_WEEK_LEAVE): number | undefined {
   const five = roomLeft(r?.fiveHour, now)
   if (five === undefined) return undefined
-  return (windowPct(r?.sevenDay, now) ?? 0) >= LEAVE_SEVEN_DAY ? 0 : five
+  return isWeekSpent(r, now, weekLeave) ? 0 : five
 }
 
-export function isSpent(r: Reading | undefined, now: number): boolean {
-  return (
-    (windowPct(r?.fiveHour, now) ?? 0) >= LEAVE_FIVE_HOUR ||
-    (windowPct(r?.sevenDay, now) ?? 0) >= LEAVE_SEVEN_DAY
-  )
+/** Whether a login's week has no more left than the session leaves it at, `weekLeave` percent. */
+export function isWeekSpent(r: Reading | undefined, now: number, weekLeave = DEFAULT_WEEK_LEAVE): boolean {
+  return (windowPct(r?.sevenDay, now) ?? 0) >= 100 - weekLeave
+}
+
+export function isSpent(r: Reading | undefined, now: number, weekLeave = DEFAULT_WEEK_LEAVE): boolean {
+  return (windowPct(r?.fiveHour, now) ?? 0) >= LEAVE_FIVE_HOUR || isWeekSpent(r, now, weekLeave)
 }
 
 /** Whether a login's Fable week is as full as the week is when the rotation leaves it. */
@@ -124,6 +149,11 @@ export function isFableStop(text: string | undefined): boolean {
   return /reached your Fable limit/.test(text ?? '')
 }
 
+/** Whether the last message of a turn that died on a limit says the limit was the session's, the 5-hour window. */
+export function isSessionStop(text: string | undefined): boolean {
+  return /hit your session limit|5-hour limit/i.test(text ?? '')
+}
+
 /** Whether the last message of a turn that died on a limit says the limit was the week. */
 export function isWeeklyStop(text: string | undefined): boolean {
   return /hit your weekly limit/.test(text ?? '')
@@ -131,7 +161,7 @@ export function isWeeklyStop(text: string | undefined): boolean {
 
 export function shouldLeave(view: View, now: number, need?: Need): boolean {
   const r = view.readings[view.activeId]
-  return view.health[view.activeId]?.kind === 'login-needed' || isSpent(r, now) || (need === 'fable' && isFableSpent(r, now))
+  return view.health[view.activeId]?.kind === 'login-needed' || isSpent(r, now, view.weekLeave) || (need === 'fable' && isFableSpent(r, now))
 }
 
 /** When a login's 5-hour window resets, or its week where it reports no 5-hour window, epoch ms; Infinity while none is running. */
@@ -157,14 +187,14 @@ export function pickTarget(view: View, now: number, need?: Need): Account | unde
     a =>
       a.id !== view.activeId &&
       view.health[a.id]?.kind === 'ok' &&
-      !isSpent(view.readings[a.id], now) &&
+      !isSpent(view.readings[a.id], now, view.weekLeave) &&
       !(isFable && isFableSpent(view.readings[a.id], now)),
   )
   // A login never read for the Fable week may have none: it is taken only when no read one has room.
   const read = open.filter(a => view.readings[a.id]?.fable !== undefined)
   const ready = isFable && read.length > 0 ? read : open
   // A login with no 5-hour window serves what its week has left.
-  const available = (a: Account) => availableNow(view.readings[a.id], now) ?? roomLeft(view.readings[a.id]?.sevenDay, now) ?? 100
+  const available = (a: Account) => availableNow(view.readings[a.id], now, view.weekLeave) ?? roomLeft(view.readings[a.id]?.sevenDay, now) ?? 100
   const fableRoom = (a: Account) => 100 - (windowPct(view.readings[a.id]?.fable, now) ?? 0)
   const byRoom = (a: Account, b: Account) => (isFable && fableRoom(a) !== fableRoom(b) ? fableRoom(b) - fableRoom(a) : available(b) - available(a))
   switch (view.rotateTo) {
@@ -181,6 +211,44 @@ export function pickTarget(view: View, now: number, need?: Need): Account | unde
       return after.find(a => ready.includes(a))
     }
   }
+}
+
+/** Whether a login has room on every limit it reports: none of its windows, the Fable week among them, is at 100%. */
+export function hasRoom(r: Reading | undefined, now: number): boolean {
+  return [r?.fiveHour, r?.sevenDay, r?.fable].every(w => (windowPct(w, now) ?? 0) < 100)
+}
+
+const LAUNCH_WHY: Record<'room' | 'nonzero' | 'reset', string> = {
+  room: 'it has the most room',
+  nonzero: 'it is the first in the list with room',
+  reset: 'its window resets soonest',
+}
+
+/**
+ * The login new sessions start on, as `launchOn` picks among the signed-in
+ * logins with room on every limit: the most room, the first in the list, the
+ * soonest reset, or the one account named, else the next in the list after it
+ * with room. Undefined while no login has room.
+ */
+export function pickLaunch(view: View, now: number): Omit<LaunchPick, 'at'> | undefined {
+  const ready = view.accounts.filter(a => view.health[a.id]?.kind === 'ok' && hasRoom(view.readings[a.id], now))
+  const pick = (a: Account | undefined, why: string) => (a === undefined ? undefined : { id: a.id, slot: a.slot, why })
+  const room = (a: Account) => availableNow(view.readings[a.id], now, 0) ?? roomLeft(view.readings[a.id]?.sevenDay, now) ?? 100
+  // A view kept from before a hot reload lacks the setting: it reads as the default.
+  const on = view.launchOn ?? DEFAULT_LAUNCH_ON
+  if (on.startsWith('account:')) {
+    const id = on.slice('account:'.length)
+    const at = view.accounts.findIndex(a => a.id === id)
+    if (at === -1) return pick(ready[0], `account ${id} is not on the list, and it is the first with room`)
+    const after = [...view.accounts.slice(at), ...view.accounts.slice(0, at)]
+    const found = after.find(a => ready.includes(a))
+    return pick(found, found?.id === id ? 'you picked it' : `account ${id} has no room, and it is the next with room`)
+  }
+  const rule = on as 'room' | 'nonzero' | 'reset'
+  if (rule === 'nonzero') return pick(ready[0], LAUNCH_WHY.nonzero)
+  if (rule === 'room') return pick([...ready].sort((a, b) => room(b) - room(a))[0], LAUNCH_WHY.room)
+  const reset = (a: Account) => resetOf(view.readings[a.id], now)
+  return pick([...ready].sort((a, b) => (reset(a) === reset(b) ? room(b) - room(a) : reset(a) < reset(b) ? -1 : 1))[0], LAUNCH_WHY.reset)
 }
 
 /**
