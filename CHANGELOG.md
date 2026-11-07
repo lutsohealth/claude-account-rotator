@@ -2,6 +2,12 @@
 
 What each version of the account rotator changed. To get each one as Claude Code starts, turn on auto-update: in `/plugin`, open **Marketplaces**, pick **claude-account-rotator** and choose **Enable auto-update**. To update by hand, run `claude plugin marketplace update claude-account-rotator`, then `claude plugin update account-rotator@claude-account-rotator`, and start a new session.
 
+## 0.5.1-lutso.1 - 2026-11-07
+
+- **Each account shows its own usage.** A session no longer records its usage under another account: not in its first moments, before it knows which account it is on, and not after a switch whose first answers still came from the account it left. An account no longer shows another account's week, and **New on** no longer names a spent account as having the most room.
+- **A reading saved by an older version is set aside.** It cannot show which account it belongs to, so the panel shows that account's usage again once its own session or usage check reads it; a 5-hour stop or a spent week marked on it still counts.
+- **An account whose usage check fails and that has no reading of its own is never where new sessions start or where the rotation moves.**
+
 ## 0.5.0-lutso.1 - 2026-11-07
 
 - **Week** in the panel's **Usage based rotation** box sets how much of its week the account in use has left when the session moves: 0% by default, so only a spent week moves it; **-** and **+** step it from 0 to 99. The line at the top of the panel that stated the rule is gone.
