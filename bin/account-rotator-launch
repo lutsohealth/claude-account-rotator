@@ -40,10 +40,14 @@ def main() -> int:
         return 1
     try:
         with open(store, encoding="utf-8") as f:
-            pick = json.load(f).get("launch-slot")
+            data = json.load(f)
     except (OSError, ValueError) as error:
         print(f"account-rotator-launch: cannot read {store}: {error}", file=sys.stderr)
         return 1
+    if not isinstance(data, dict):
+        print(f"account-rotator-launch: {store} is not a store (its JSON is not an object)", file=sys.stderr)
+        return 1
+    pick = data.get("launch-slot")
     if not isinstance(pick, dict) or not isinstance(pick.get("slot"), str) or not isinstance(pick.get("id"), str):
         print("account-rotator-launch: no pick stored (no account has room on every limit, or no session of this version has run); a new session starts on Claude Code's login", file=sys.stderr)
         return 1

@@ -2222,6 +2222,40 @@ test('the login new sessions start on is stored for a launcher, by the New on se
   await pane.unmount()
 })
 
+// Review R1 of 181dc8e, removed_pick: a launcher must never start a session on an account just removed.
+test('removing the account the launcher would start on picks another at once', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [null, 40]
+  w.usage['tok-2'] = [null, 30]
+  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off', 'launch-on': 'account:2' }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  expect(store.get('launch-slot')).toMatchObject({ id: '2' })
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  await pane.press({ key: 'ask-remove-2' })
+  await clock.settle()
+  await pane.redraw()
+  await pane.press({ key: 'remove-2' })
+  await clock.settle()
+  expect(store.get('launch-slot')).toMatchObject({ id: '1' })
+  await pane.unmount()
+})
+
+// Review R1 of 181dc8e, footer_week_leave: the footer counts the week by the same setting the rotation does.
+test('the footer shows no room now on a login whose week is down to the Week setting, as the rotation counts it', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.usage['tok-1'] = [10, 96]
+  const clock = world(on, w, { accounts: [TWO_LOGINS.accounts[0]], 'rotate-to': 'off', 'week-leave': 5 })
+  await start($, clock)
+  const footer = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'SessionMode', props: { modes: [] } })
+  // 4% of its week left, at a Week setting of 5: nothing to serve now, so 0% where 90% of the 5-hour window would show.
+  expect((await footer.find(GLYPHS))?.text).toMatch(/ 0% /)
+  await footer.unmount()
+})
+
 // puma-4q7j2.5: the pane no longer names Claude Code's login; New on picks where new sessions start.
 test('the pane names no "Claude Code\'s login" line, on the login or after a move off it', async ($, on) => {
   const w = fresh()

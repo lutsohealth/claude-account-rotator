@@ -1279,6 +1279,8 @@ async function removeAccount($: Host, id: string): Promise<void> {
     const { [id]: _error, ...checkErrors } = v.checkErrors ?? {}
     return { ...v, readings, marks, noFiveHour, weekMarks, checkErrors, health, holders, removing: undefined }
   })
+  // A launcher must never start a session on the account just removed.
+  await saveLaunchPick($)
 }
 
 // ---------------------------------------------------------------- wiring

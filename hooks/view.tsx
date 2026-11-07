@@ -56,7 +56,7 @@ const DEMO: readonly (readonly [number, number])[] = [[85, 70], [60, 40], [35, 9
 function rooms(view: View, a: Account, i: number, now: number): readonly [number | undefined, number | undefined] {
   if (view.demo) return DEMO[i % DEMO.length] ?? [undefined, undefined]
   const r = view.readings[a.id]
-  return [availableNow(r, now), roomLeft(r?.sevenDay, now)]
+  return [availableNow(r, now, view.weekLeave ?? DEFAULT_WEEK_LEAVE), roomLeft(r?.sevenDay, now)]
 }
 
 /** A percent's room color, lighter while the pointer is over the footer. */
