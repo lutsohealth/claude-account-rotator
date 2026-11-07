@@ -160,9 +160,20 @@ async function storedReading($: Host, id: string): Promise<Reading | undefined> 
   return typeof r === 'object' && r !== null && typeof (r as Reading).at === 'number' ? (r as Reading) : undefined
 }
 
-/** A login's reading as the rules count it: the stored read with its stop mark, under the 5-hour limit. */
-function viewed(read: Reading, mark: Mark | undefined, limit: FiveHourLimit, now: number): Reading {
-  return counted(withMark(read, mark, now) ?? read, limit, now)
+/**
+ * A login's reading as the rules count it: the stored read with whether its usage endpoint
+ * reports no 5-hour window, then its stop mark, under the 5-hour limit.
+ */
+function viewed(read: Reading, mark: Mark | undefined, limit: FiveHourLimit, now: number, hasNoFiveHour: boolean | undefined): Reading {
+  const { noFiveHour: _stored, ...bare } = read
+  const r: Reading = hasNoFiveHour === true ? { ...bare, noFiveHour: true } : bare
+  return counted(withMark(r, mark, now) ?? r, limit, now)
+}
+
+/** Stores whether a login's usage endpoint said it has no 5-hour window, for every session. */
+async function saveNoFiveHour($: Host, id: string, hasNoFiveHour: boolean): Promise<void> {
+  await $.store.set(`no-five-hour:${id}`, hasNoFiveHour)
+  await setView($, v => ({ ...v, noFiveHour: { ...v.noFiveHour, [id]: hasNoFiveHour } }))
 }
 
 /**
@@ -178,7 +189,7 @@ async function saveReading($: Host, id: string, read: Reading): Promise<void> {
   if (legacy !== undefined) await keepLegacyMark($, id, legacy)
   const kept = keepWeek(read, stored, now)
   await $.store.set(`reading:${id}`, kept)
-  await setView($, v => ({ ...v, readings: { ...v.readings, [id]: viewed(kept, v.marks?.[id], v.fiveHourLimit, now) } }))
+  await setView($, v => ({ ...v, readings: { ...v.readings, [id]: viewed(kept, v.marks?.[id], v.fiveHourLimit, now, v.noFiveHour?.[id]) } }))
 }
 
 /** Moves an older version's mark to the mark's own key, unless the mark there already stands longer. */
@@ -197,7 +208,7 @@ async function saveMark($: Host, id: string, mark: Mark): Promise<void> {
   await setView($, v => ({
     ...v,
     marks: { ...v.marks, [id]: mark },
-    readings: { ...v.readings, [id]: viewed(read, mark, v.fiveHourLimit, now) },
+    readings: { ...v.readings, [id]: viewed(read, mark, v.fiveHourLimit, now, v.noFiveHour?.[id]) },
   }))
 }
 
@@ -219,6 +230,7 @@ async function mergeStore($: Host): Promise<void> {
   const accounts = await loadAccounts($)
   const readings: Record<string, Reading> = {}
   const marks: Record<string, Mark> = {}
+  const noFiveHour: Record<string, boolean> = {}
   const health: Record<string, Health> = {}
   const holders: Record<string, Holder> = {}
   for (const a of accounts) {
@@ -226,6 +238,8 @@ async function mergeStore($: Host): Promise<void> {
     if (r !== undefined) readings[a.id] = r
     const m = markFrom(await $.store.get(`mark:${a.id}`))
     if (m !== undefined) marks[a.id] = m
+    const n = await $.store.get(`no-five-hour:${a.id}`)
+    if (typeof n === 'boolean') noFiveHour[a.id] = n
     const h = await $.store.get(`health:${a.id}`)
     if (typeof h === 'object' && h !== null && typeof (h as Health).kind === 'string') health[a.id] = h as Health
     const s = await $.store.get(`holder:${a.id}`)
@@ -245,6 +259,7 @@ async function mergeStore($: Host): Promise<void> {
   await setView($, v => {
     const nextReadings: Record<string, Reading> = {}
     const nextMarks: Record<string, Mark> = {}
+    const nextNoFiveHour: Record<string, boolean> = {}
     const nextHealth: Record<string, Health> = {}
     const nextHolders: Record<string, Holder> = {}
     for (const a of accounts) {
@@ -252,16 +267,18 @@ async function mergeStore($: Host): Promise<void> {
       const theirs = readings[a.id]
       const mark = marks[a.id] ?? v.marks?.[a.id]
       if (mark !== undefined) nextMarks[a.id] = mark
+      const none = noFiveHour[a.id] ?? v.noFiveHour?.[a.id]
+      if (none !== undefined) nextNoFiveHour[a.id] = none
       // On a tie the stored read wins: this session's copy is already counted, and may have lost a window.
       const reading = mine !== undefined && (theirs === undefined || mine.at > theirs.at) ? mine : theirs
-      if (reading !== undefined) nextReadings[a.id] = viewed(reading, mark, fiveHourLimit, now)
+      if (reading !== undefined) nextReadings[a.id] = viewed(reading, mark, fiveHourLimit, now, none)
       const own = v.health[a.id]
       const h = signingIn === a.id ? own : (health[a.id] ?? own)
       if (h !== undefined) nextHealth[a.id] = h
       const holder = holders[a.id] ?? v.holders[a.id]
       if (holder !== undefined) nextHolders[a.id] = holder
     }
-    return { ...v, accounts, readings: nextReadings, marks: nextMarks, health: nextHealth, holders: nextHolders, footer, rotateTo, fiveHourLimit, fableContinueText, chromeAccountId, chromeAccountIds }
+    return { ...v, accounts, readings: nextReadings, marks: nextMarks, noFiveHour: nextNoFiveHour, health: nextHealth, holders: nextHolders, footer, rotateTo, fiveHourLimit, fableContinueText, chromeAccountId, chromeAccountIds }
   })
 }
 
@@ -290,7 +307,7 @@ async function setFiveHourLimit($: Host, fiveHourLimit: FiveHourLimit): Promise<
   await setView($, v => ({
     ...v,
     fiveHourLimit,
-    readings: Object.fromEntries(Object.entries(v.readings).map(([id, r]) => [id, viewed(stored[id] ?? r, v.marks?.[id], fiveHourLimit, now)])),
+    readings: Object.fromEntries(Object.entries(v.readings).map(([id, r]) => [id, viewed(stored[id] ?? r, v.marks?.[id], fiveHourLimit, now, v.noFiveHour?.[id])])),
   }))
   await maybeRotate($)
 }
@@ -506,9 +523,13 @@ async function checkAccount($: Host, account: Account): Promise<void> {
       if (usage.kind === 'rejected') health = { kind: 'login-needed', why: 'sign-in rejected' }
       if (usage.kind === 'failed') await debug($, `usage for account ${account.id}: HTTP ${usage.status}`)
       if (usage.kind === 'ok') {
-        const reading = readingFromUsage(usage.body, now)
-        // A body with no Fable row leaves the week a stop marked spent as it is.
-        if (reading !== undefined) await saveReading($, account.id, keepFable(reading, (await getView($)).readings[account.id], now))
+        const read = readingFromUsage(usage.body, now)
+        if (read !== undefined) {
+          const { noFiveHour, ...reading } = read
+          await saveNoFiveHour($, account.id, noFiveHour === true)
+          // A body with no Fable row leaves the week a stop marked spent as it is.
+          await saveReading($, account.id, keepFable(reading, (await getView($)).readings[account.id], now))
+        }
       }
     }
   }
@@ -702,11 +723,11 @@ async function onMeasure($: Host, limits: readonly SessionRateLimit[]): Promise<
   }
   const reading = readingFromLimits(limits, await $.clock.now())
   if (reading === undefined) return
-  // A response never lists the Fable week, nor says an account has no 5-hour window: what the last check read stays.
-  const last = view.readings[view.activeId]
-  const fable = last?.fable
-  const hasNoFiveHour = reading.fiveHour === undefined && last?.noFiveHour === true
-  await saveReading($, view.activeId, { ...reading, ...(fable ? { fable } : {}), ...(hasNoFiveHour ? { noFiveHour: true as const } : {}) })
+  // A response that reports a 5-hour window shows the account has one, whatever the last usage check said.
+  if (reading.fiveHour !== undefined && view.noFiveHour?.[view.activeId] === true) await saveNoFiveHour($, view.activeId, false)
+  // A response never lists the Fable week: the one the last check read stays.
+  const fable = view.readings[view.activeId]?.fable
+  await saveReading($, view.activeId, { ...reading, ...(fable ? { fable } : {}) })
   await maybeRotate($)
 }
 
@@ -761,7 +782,7 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
       await setView($, v => ({ ...v, isFableStopped: true }))
       // The limit was hit before the usage call shows it: count the Fable week as full.
       if (!isFableSpent(r, now)) await saveReading($, active.id, { ...read, fable: fableMark(r?.fable, now), at: now })
-    } else if (!shouldLeave(after, now) && (isWeeklyStop(said) || reportsNoFiveHour(read))) {
+    } else if (!shouldLeave(after, now) && (isWeeklyStop(said) || reportsNoFiveHour(r))) {
       // The week ran out before the usage call shows it, by Claude's words or as the only window the account has:
       // count the week as full until its reset, never a 5-hour window.
       await saveReading($, active.id, { ...read, sevenDay: { ...spentMark(read?.sevenDay, now, WEEK_MS), isStop: true }, at: now })
@@ -1135,6 +1156,7 @@ async function removeAccount($: Host, id: string): Promise<void> {
   await noteChromeAccount($, id, false)
   await $.store.delete(`reading:${id}`)
   await $.store.delete(`mark:${id}`)
+  await $.store.delete(`no-five-hour:${id}`)
   await $.store.delete(`health:${id}`)
   await $.store.delete(`holder:${id}`)
   await setView($, v => {
@@ -1146,7 +1168,8 @@ async function removeAccount($: Host, id: string): Promise<void> {
     delete marks[id]
     delete health[id]
     delete holders[id]
-    return { ...v, readings, marks, health, holders, removing: undefined }
+    const { [id]: _none, ...noFiveHour } = v.noFiveHour ?? {}
+    return { ...v, readings, marks, noFiveHour, health, holders, removing: undefined }
   })
 }
 

@@ -1365,13 +1365,20 @@ test('a 5-hour stop mark already stored on a login whose usage reports no 5-hour
   w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
   w.usage['tok-1'] = [null, 100]
   w.usage['tok-2'] = [null, 7]
-  const store = { ...TWO_LOGINS, 'mark:2': { pct: 100, resetsAt: '2026-10-12T14:00:00Z', at: NOW - HOUR } }
+  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'mark:2': { pct: 100, resetsAt: '2026-10-12T14:00:00Z', at: NOW - HOUR } }))
   const clock = world(on, w, store)
   await start($, clock)
   expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
-  expect(await pane.findAll({ type: 'Text', text: /none reported$/ })).toHaveLength(2)
-  expect(await pane.find({ text: /^resets in [0-9]+h/ })).toBeUndefined()
+  const isClear = async () => {
+    await pane.redraw()
+    return (await pane.findAll({ type: 'Text', text: /none reported$/ })).length === 2 && (await pane.find({ text: /^resets in [0-9]+h/ })) === undefined
+  }
+  expect(await isClear()).toBe(true)
+  // A session on an older version saves login 2's reading as it reads it, knowing nothing of the 5-hour window it lacks.
+  store.set('reading:2', { sevenDay: { pct: 7, resetsAt: '2026-10-18T03:00:00Z' }, at: NOW + 60_000 })
+  await clock.advance(61_000)
+  expect(await isClear()).toBe(true)
   await pane.unmount()
 })
 

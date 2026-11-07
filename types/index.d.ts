@@ -5,7 +5,8 @@ export type UsageWindow = { pct: number; resetsAt?: string; isStop?: true }
  * A login's usage as last read, `at` in epoch milliseconds. `fable` is the
  * Fable week, which only the usage endpoint lists: a response never reports it.
  * `noFiveHour` where the usage endpoint listed no 5-hour window: the account
- * has none, as a verified Ultra account, so no stop marks one on it.
+ * has none, as a verified Ultra account, so no stop marks one on it. A view's
+ * reading carries it from `View.noFiveHour`; a stored one does not.
  */
 export type Reading = { fiveHour?: UsageWindow; sevenDay?: UsageWindow; fable?: UsageWindow; noFiveHour?: true; at: number }
 
@@ -90,6 +91,11 @@ export type View = {
   readings: Record<string, Reading>
   /** Each login's stop mark as last read from the store; absent in a view kept from before marks had their own key. */
   marks?: Record<string, Mark>
+  /**
+   * Whether each login's usage endpoint last said it has no 5-hour window, kept under its own key,
+   * `no-five-hour:<id>`, which only a usage check writes, so no older version's save of a reading drops it.
+   */
+  noFiveHour?: Record<string, boolean>
   health: Record<string, Health>
   /** Who each login's sign-in belongs to: a /login in a session on a login signs in there, whoever it signs in. */
   holders: Record<string, Holder>
