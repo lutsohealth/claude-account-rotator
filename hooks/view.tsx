@@ -72,16 +72,20 @@ function hasNoFiveHour(view: View, id: string): boolean {
 /** Whether a login has no session row in the footer: a demo shows one for every login. */
 const hasNoSession = (view: View, a: Account) => !view.demo && hasNoFiveHour(view, a.id)
 
+/** The health a footer glyph shows as a mark in place of the login's room. */
+const MARKED: readonly string[] = ['login-needed', 'logging-in']
+
 /**
  * A login's glyph in a footer row, green with all of its room left to red with
- * none. The first row drawn says when a login needs a sign-in; a login without
- * the room (a plan with no 5-hour window or no weekly limit) leaves its place
- * blank, and one with no reading yet shows a dot in the session row.
+ * none. The row that carries the marks says when a login needs a sign-in; a
+ * login without the room (a plan with no 5-hour window or no weekly limit)
+ * leaves its place blank, and one with no reading yet shows a dot in the
+ * session row.
  */
-function glyphOf(view: View, a: Account, style: Glyphs, row: 0 | 1, room: number | undefined, isFirst: boolean): FooterRun {
+function glyphOf(view: View, a: Account, style: Glyphs, row: 0 | 1, room: number | undefined, carriesMark: boolean): FooterRun {
   const health = view.health[a.id]?.kind
-  if (health === 'login-needed') return isFirst ? { text: '⚠', color: 'error' } : { text: ' ' }
-  if (health === 'logging-in') return isFirst ? { text: '◌', color: 'warning' } : { text: ' ' }
+  if (health === 'login-needed') return carriesMark ? { text: '⚠', color: 'error' } : { text: ' ' }
+  if (health === 'logging-in') return carriesMark ? { text: '◌', color: 'warning' } : { text: ' ' }
   if (room === undefined) return { text: row === 0 && !hasNoSession(view, a) ? '·' : ' ' }
   return { text: glyph(style, shown(view.footer.fill, room)), ...roomRun(room) }
 }
@@ -137,7 +141,7 @@ function edge(view: View, i: number, inGaps: boolean): FooterRun[] {
  * row with its own off keeps their columns blank, so its percent lines up
  * under the other's.
  */
-function footerRow(view: View, now: number, row: 0 | 1, style: Glyphs, showPercent: boolean, hasColumns: boolean, isFirst: boolean): FooterRun[] {
+function footerRow(view: View, now: number, row: 0 | 1, style: Glyphs, showPercent: boolean, hasColumns: boolean, carriesMark: boolean): FooterRun[] {
   const pct = activeRoom(view, now, row)
   const inGaps = hasColumns && IN_GAPS.includes(view.footer.active)
   const columns = hasColumns
@@ -145,7 +149,7 @@ function footerRow(view: View, now: number, row: 0 | 1, style: Glyphs, showPerce
         ...view.accounts.flatMap((a, i) => [
           ...edge(view, i, inGaps),
           {
-            ...(style === 'none' ? { text: ' ' } : glyphOf(view, a, style, row, rooms(view, a, i, now)[row], isFirst)),
+            ...(style === 'none' ? { text: ' ' } : glyphOf(view, a, style, row, rooms(view, a, i, now)[row], carriesMark)),
             ...marked(view.footer.active, a.id === view.activeId),
           },
         ]),
@@ -200,24 +204,27 @@ const ROW_NAMES = ['Session:', 'Weekly:'] as const
  * off, as one control that opens the pane, or closes it while it shows. Under
  * the pointer the glyphs light up on a shade, and each row's name shows at its
  * left. A week row with nothing to show is left out, and so is the session row
- * when no login has a 5-hour window; with both rows off, a word keeps the
- * control.
+ * when no login has a 5-hour window, unless it is the one row whose glyphs can
+ * say a login needs a sign-in; with both rows off, a word keeps the control.
  */
 export function Footer(ui: Ui, view: View, modes: readonly string[], now: number, act: Actions) {
   const { Box, Text, Button } = ui
   const { session, week, sessionPercent, weekPercent } = view.footer
-  const hasSession = view.accounts.some(a => !hasNoSession(view, a))
   const hasWeek = view.accounts.some((a, i) => rooms(view, a, i, now)[1] !== undefined)
-  const sessionGlyphs = session !== 'none' && hasSession
   const weekGlyphs = week !== 'none' && hasWeek
+  const needsMark = view.accounts.some(a => MARKED.includes(view.health[a.id]?.kind ?? 'ok'))
+  const hasSession = view.accounts.some(a => !hasNoSession(view, a)) || (needsMark && !weekGlyphs && session !== 'none')
+  const sessionGlyphs = session !== 'none' && hasSession
   const hasColumns = sessionGlyphs || weekGlyphs
   const sessionShown = sessionGlyphs || (sessionPercent && hasSession)
   const weekShown = weekGlyphs || (weekPercent && activeRoom(view, now, 1) !== undefined)
   const shownRows = [...(sessionShown ? [0 as const] : []), ...(weekShown ? [1 as const] : [])]
-  const rows = shownRows.map((row, i) =>
+  // The sign-in marks go on the first row drawn with glyphs: a row of percents alone has no place for them.
+  const markRow = sessionGlyphs ? 0 : weekGlyphs ? 1 : undefined
+  const rows = shownRows.map(row =>
     row === 0
-      ? footerRow(view, now, 0, session, sessionPercent, hasColumns, i === 0)
-      : footerRow(view, now, 1, week, weekPercent, hasColumns, i === 0),
+      ? footerRow(view, now, 0, session, sessionPercent, hasColumns, markRow === 0)
+      : footerRow(view, now, 1, week, weekPercent, hasColumns, markRow === 1),
   )
   return (
     <Box flexDirection="row" columnGap={1}>
