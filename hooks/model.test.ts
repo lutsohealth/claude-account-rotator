@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import type { RotateTo, View } from '../types'
-import { DEFAULT_FOOTER, availableNow, braille, browsersFrom, chromeNote, continueTextFrom, counted, fiveHourLimitFrom, credentialFrom, credentialsFile, fableMark, fableSpentNotice, fableStay, footerStyleFrom, healthOf, identityFromProfile, isFableSpent, isFableStop, isNoBrowser, isPolicyRefusal, keepFable, keychainItem, nextReset, pickTarget, pie, readingFromUsage, rotateToFrom, shouldLeave, roomColor, windowPct } from './model'
+import { DEFAULT_FOOTER, availableNow, braille, browsersFrom, chromeNote, continueTextFrom, counted, fiveHourLimitFrom, credentialFrom, credentialsFile, fableMark, fableSpentNotice, fableStay, footerStyleFrom, healthOf, identityFromProfile, isFableSpent, isFableStop, isNoBrowser, isPolicyRefusal, keepFable, keepFiveHourMark, keychainItem, nextReset, pickTarget, pie, readingFromUsage, rotateToFrom, shouldLeave, roomColor, windowPct } from './model'
 
 const NOW = Date.parse('2026-10-12T10:00:00Z')
 const LATER = '2026-10-12T12:00:00Z'
@@ -77,6 +77,23 @@ test('with the 5-hour limit off a reported 5-hour window is dropped and a stop\'
   const old = { fiveHour: { pct: 100 }, at: NOW }
   expect(counted(old, 'on', NOW + 5 * HOUR - 1).fiveHour).toEqual({ pct: 100, resetsAt: new Date(NOW + 5 * HOUR).toISOString(), isStop: true })
   expect(counted(old, 'on', NOW + 5 * HOUR)).toEqual({ at: NOW })
+})
+
+test('a stop\'s 5-hour mark stands through a read that lists no 5-hour window until its reset; a read window replaces it', () => {
+  const fresh = { sevenDay: { pct: 20, resetsAt: WEEK_END }, at: NOW + HOUR }
+  const mark = { pct: 100, resetsAt: LATER, isStop: true as const }
+  const stored = { fiveHour: mark, sevenDay: { pct: 10, resetsAt: WEEK_END }, at: NOW }
+  expect(keepFiveHourMark(fresh, stored, NOW + HOUR)).toEqual({ ...fresh, fiveHour: mark })
+  expect(keepFiveHourMark(fresh, stored, Date.parse(LATER))).toEqual(fresh)
+  const read = { ...fresh, fiveHour: { pct: 30, resetsAt: LATER } }
+  expect(keepFiveHourMark(read, stored, NOW + HOUR)).toBe(read)
+  // A read window, not a stop's, is not carried: the fresh read says the account reports none now.
+  expect(keepFiveHourMark(fresh, { ...stored, fiveHour: { pct: 30, resetsAt: LATER } }, NOW + HOUR)).toBe(fresh)
+  // The old mark with no reset time stands five hours from its read.
+  const old = { fiveHour: { pct: 100 }, at: NOW }
+  expect(keepFiveHourMark(fresh, old, NOW + HOUR).fiveHour).toEqual({ pct: 100, resetsAt: new Date(NOW + 5 * HOUR).toISOString(), isStop: true })
+  expect(keepFiveHourMark(fresh, old, NOW + 5 * HOUR)).toBe(fresh)
+  expect(keepFiveHourMark(fresh, undefined, NOW)).toBe(fresh)
 })
 
 test('a 5-hour window read with no reset time and room left is a read, not a stop\'s mark: off drops it, on keeps it as read', () => {

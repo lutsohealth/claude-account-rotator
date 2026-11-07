@@ -98,10 +98,25 @@ const ran = (exitCode: number, stdout: string): ProcessRunResult => ({
   isStderrTruncated: false,
 })
 
+/** `$.store` over `entries`, which the test writes mid-run as another session on the Mac would. */
+function sharedStore(on: On, entries: Map<string, unknown>): void {
+  on('store.get', (_$, e) => ({ value: entries.get(e.key) }))
+  on('store.set', (_$, e) => {
+    entries.set(e.key, e.value)
+    return { value: undefined }
+  })
+  on('store.delete', (_$, e) => {
+    entries.delete(e.key)
+    return { value: undefined }
+  })
+  on('store.keys', () => ({ value: [...entries.keys()] }))
+}
+
 /** Everything beneath the plugin: keychain or credentials files, `claude auth`, the usage API, the UI sinks. */
-function world(on: On, w: World, store: Record<string, unknown>): MockClock {
+function world(on: On, w: World, store: Record<string, unknown> | Map<string, unknown>): MockClock {
   const clock = mock.clock(on, { now: NOW })
-  mock.store(on, store)
+  if (store instanceof Map) sharedStore(on, store)
+  else mock.store(on, store)
   mock.env(on, { USER: 'tester', HOME, ...w.env })
   let slot = w.env.CLAUDE_SECURESTORAGE_CONFIG_DIR ?? ''
   on('env.set', (_$, e) => {
@@ -1364,6 +1379,188 @@ test('a stop\'s mark on a login that reports a 5-hour window stands when the 5-h
   // Login 2's read window is dropped; login 1's mark stays until its reset.
   expect(await pane.findAll({ type: 'Text', text: /none reported$/ })).toHaveLength(1)
   await pane.unmount()
+})
+
+// Review R1 mark_lifetime: a check or response whose read lists no 5-hour window ended a stop's mark early.
+test('a plain stop\'s mark on an account that reports no 5-hour window stands through the next account check', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [null, 40]
+  w.usage['tok-2'] = [null, 30]
+  const clock = world(on, w, { ...TWO_LOGINS, 'five-hour-limit': 'off' })
+  await start($, clock)
+  await $.classic.StopFailure({ error: 'rate_limit', last_assistant_message: 'Claude usage limit reached.' })
+  await clock.settle()
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  expect(await pane.find({ text: /^▱{10} 0% left$/ })).toBeDefined()
+  await clock.advance(11 * 60_000)
+  await pane.redraw()
+  expect(await pane.find({ text: /^▱{10} 0% left$/ })).toBeDefined()
+  await pane.unmount()
+})
+
+// Review R1 mark_lifetime, the class: every writer of a reading, under every rotation choice and both switch values.
+test('a stop\'s 5-hour mark on an account that reports none stands through every reading writer, under every setting', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [null, 40]
+  w.usage['tok-2'] = [null, 96]
+  w.limits = [{ kind: 'seven_day', percentUsed: 40, resetsAt: '2026-10-18T03:00:00Z' }]
+  const clock = world(on, w, TWO_LOGINS)
+  await start($, clock)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  const markVisible = async () => {
+    await pane.redraw()
+    return (await pane.find({ text: /^▱{10} 0% left$/ })) !== undefined
+  }
+  const offenders: string[] = []
+  for (const rotateTo of ['reset', 'room', 'order', 'off'] as const) {
+    await pane.press({ key: `rotate-to-${rotateTo}` })
+    for (const limit of ['on', 'off'] as const) {
+      await pane.press({ key: `five-hour-limit-${limit}` })
+      await clock.settle()
+      await $.classic.StopFailure({ error: 'rate_limit', last_assistant_message: 'Claude usage limit reached.' })
+      await clock.settle()
+      if (!(await markVisible())) offenders.push(`stop / ${rotateTo} / ${limit}`)
+      await $.session.measure({ context: { window: 200_000 }, rateLimits: w.limits, changed: ['rateLimits'] })
+      await clock.settle()
+      if (!(await markVisible())) offenders.push(`response / ${rotateTo} / ${limit}`)
+      await $.classic.StopFailure({ error: 'rate_limit', last_assistant_message: 'Claude usage limit reached.' })
+      await clock.settle()
+      if (!(await markVisible())) offenders.push(`restop / ${rotateTo} / ${limit}`)
+      await clock.advance(11 * 60_000)
+      if (!(await markVisible())) offenders.push(`account check / ${rotateTo} / ${limit}`)
+    }
+  }
+  await pane.unmount()
+  expect(offenders).toEqual([])
+})
+
+// Review R1 toggle_restore: the store kept the counted reading, so turning the limit back on could not restore a window.
+test('turning the 5-hour limit off and back on restores a reported 5-hour window at once', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [80, 40]
+  w.usage['tok-2'] = [10, 30]
+  const clock = world(on, w, TWO_LOGINS)
+  await start($, clock)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  expect(await pane.find({ text: /^▰{2}▱{8} 20% left$/ })).toBeDefined()
+  await pane.press({ key: 'five-hour-limit-off' })
+  await clock.settle()
+  await pane.press({ key: 'five-hour-limit-on' })
+  await clock.settle()
+  await pane.redraw()
+  expect(await pane.find({ text: /^▰{2}▱{8} 20% left$/ })).toBeDefined()
+  await pane.unmount()
+})
+
+test('a read saved while the 5-hour limit is off keeps its 5-hour window in the store, shown at once when turned on', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [80, 40]
+  w.usage['tok-2'] = [10, 30]
+  const clock = world(on, w, { ...TWO_LOGINS, 'five-hour-limit': 'off' })
+  await start($, clock)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  expect(await pane.find({ text: /^▰{2}▱{8} 20% left$/ })).toBeUndefined()
+  await pane.press({ key: 'five-hour-limit-on' })
+  await clock.settle()
+  await pane.redraw()
+  expect(await pane.find({ text: /^▰{2}▱{8} 20% left$/ })).toBeDefined()
+  await pane.unmount()
+})
+
+test('another session turning the 5-hour limit on shows this session\'s reported windows at its next store merge', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [80, 40]
+  w.usage['tok-2'] = [10, 30]
+  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'five-hour-limit': 'off' }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  expect(await pane.find({ text: /^▰{2}▱{8} 20% left$/ })).toBeUndefined()
+  // Another session's press.
+  store.set('five-hour-limit', 'on')
+  await clock.advance(61_000)
+  await clock.settle()
+  await pane.redraw()
+  expect(await pane.find({ text: /^▰{2}▱{8} 20% left$/ })).toBeDefined()
+  await pane.unmount()
+})
+
+test('with the 5-hour limit off, a plain stop on a login that reports a 5-hour window marks it until that window\'s reset', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [50, 40]
+  w.usage['tok-2'] = [10, 30]
+  const clock = world(on, w, { ...TWO_LOGINS, 'five-hour-limit': 'off' })
+  await start($, clock)
+  await $.classic.StopFailure({ error: 'rate_limit', last_assistant_message: 'Claude usage limit reached.' })
+  await clock.settle()
+  expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  expect(await pane.find({ text: /^resets in 2h 0m$/ })).toBeDefined()
+  await pane.unmount()
+})
+
+test('a Fable stop while the 5-hour limit is off keeps the login\'s reported 5-hour window for when it is turned on', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [50, 40, 50]
+  w.usage['tok-2'] = [10, 30, 10]
+  const clock = world(on, w, { ...TWO_LOGINS, 'five-hour-limit': 'off' })
+  await start($, clock)
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  await pane.press({ key: 'five-hour-limit-on' })
+  await clock.settle()
+  await pane.redraw()
+  expect(await pane.find({ text: /^▰{5}▱{5} 50% left$/ })).toBeDefined()
+  await pane.unmount()
+})
+
+// Review R1 toggle_restore, the class: a reported window through a save, off, on and a store merge, under every rotation choice.
+test('a reported 5-hour window survives a save, the limit off and on, and a store merge, under every rotation choice', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [80, 40]
+  w.usage['tok-2'] = [10, 30]
+  const clock = world(on, w, TWO_LOGINS)
+  await start($, clock)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  const visible = async () => {
+    await pane.redraw()
+    return (await pane.find({ text: /^▰{2}▱{8} 20% left$/ })) !== undefined
+  }
+  const offenders: string[] = []
+  for (const rotateTo of ['reset', 'room', 'order', 'off'] as const) {
+    await pane.press({ key: `rotate-to-${rotateTo}` })
+    await clock.settle()
+    await clock.advance(11 * 60_000)
+    if (!(await visible())) offenders.push(`saveReading / ${rotateTo} / on`)
+    await pane.press({ key: 'five-hour-limit-off' })
+    await clock.settle()
+    if (await visible()) offenders.push(`setFiveHourLimit / ${rotateTo} / off`)
+    await pane.press({ key: 'five-hour-limit-on' })
+    await clock.settle()
+    if (!(await visible())) offenders.push(`setFiveHourLimit / ${rotateTo} / on`)
+    await clock.advance(61_000)
+    if (!(await visible())) offenders.push(`mergeStore / ${rotateTo} / on`)
+  }
+  await pane.unmount()
+  expect(offenders).toEqual([])
 })
 
 test('a switch held back for a token about to refresh is said once and made once, when the refresh lands', async ($, on) => {

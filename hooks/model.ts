@@ -279,6 +279,18 @@ export function keepFable(fresh: Reading, stored: Reading | undefined, now: numb
   return { ...fresh, fable: kept }
 }
 
+/**
+ * A fresh read with the 5-hour mark a stop left on the stored one, where the
+ * read lists no 5-hour window and the mark has not reached its reset time: a
+ * check or a response that lists none cannot end the mark early. A 5-hour
+ * window in the read replaces it.
+ */
+export function keepFiveHourMark(fresh: Reading, stored: Reading | undefined, now: number): Reading {
+  if (fresh.fiveHour !== undefined || stored === undefined) return fresh
+  const mark = counted(stored, 'on', now).fiveHour
+  return mark?.isStop === true ? { ...fresh, fiveHour: mark } : fresh
+}
+
 /** How long a Fable week runs: a mark with no reset time of its own stands this long. */
 export const FABLE_WEEK_MS = 7 * 24 * 3600_000
 
