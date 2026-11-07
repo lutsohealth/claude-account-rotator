@@ -96,6 +96,8 @@ export type View = {
    * `no-five-hour:<id>`, which only a usage check writes, so no older version's save of a reading drops it.
    */
   noFiveHour?: Record<string, boolean>
+  /** Each login's week a stop marked spent, under its own key, `week-mark:<id>`, for the reason `Mark` gives. */
+  weekMarks?: Record<string, Mark>
   health: Record<string, Health>
   /** Who each login's sign-in belongs to: a /login in a session on a login signs in there, whoever it signs in. */
   holders: Record<string, Holder>

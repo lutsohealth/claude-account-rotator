@@ -1402,6 +1402,28 @@ test('two turns that die before one switch lands carry on once', async ($, on) =
   expect(w.submitted).toHaveLength(1)
 })
 
+// Review R2 of #6 mixed_writer: a session on an older version saved a reading over the week a stop marked.
+test('a stop\'s week mark stands when a session on an older version saves the login\'s reading as the usage endpoint still lags', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [null, 90]
+  w.usage['tok-2'] = [null, 30]
+  const store = new Map<string, unknown>(Object.entries(TWO_LOGINS))
+  const clock = world(on, w, store)
+  await start($, clock)
+  await $.classic.StopFailure(WEEKLY_STOP)
+  await clock.settle()
+  expect(w.envSets).toHaveLength(1)
+  store.set('reading:1', { sevenDay: { pct: 90, resetsAt: '2026-10-18T03:00:00Z' }, at: NOW + 60_000 })
+  await clock.advance(61_000)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  await pane.press({ key: 'rotate' })
+  await clock.settle()
+  expect(w.envSets).toHaveLength(1)
+  await pane.unmount()
+})
+
 test('a turn that dies on the weekly limit marks the week spent, never a 5-hour window, and moves', async ($, on) => {
   const w = fresh()
   w.keychain['Claude Code-credentials'] = blob('tok-1')

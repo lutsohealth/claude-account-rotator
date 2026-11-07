@@ -269,7 +269,9 @@ export function readingFromUsage(body: unknown, now: number): Reading | undefine
   const sevenDay = windowFrom(seven_day)
   const fable = fableFrom(limits)
   if (fiveHour === undefined && sevenDay === undefined && fable === undefined) return undefined
-  return { ...(fiveHour ? { fiveHour } : { noFiveHour: true }), ...(sevenDay ? { sevenDay } : {}), ...(fable ? { fable } : {}), at: now }
+  // Only a body that lists no 5-hour window at all says the account has none; one it cannot read says nothing.
+  const isNone = five_hour === null || five_hour === undefined
+  return { ...(fiveHour ? { fiveHour } : isNone ? { noFiveHour: true } : {}), ...(sevenDay ? { sevenDay } : {}), ...(fable ? { fable } : {}), at: now }
 }
 
 /**
@@ -293,15 +295,20 @@ export function reportsNoFiveHour(r: Reading | undefined): boolean {
   return r?.noFiveHour === true && r.fiveHour === undefined
 }
 
+/** Two reads whose week resets lie within this of each other read the same week. */
+const SAME_WEEK_MS = 3600_000
+
 /**
- * A fresh reading with the week a stop marked spent, which the stored one
- * holds, until that week's reset: the usage read can lag the stop. A week the
- * fresh reading itself marks replaces it.
+ * A reading with the week a stop marked spent, until that week's reset: the
+ * usage read can lag the stop, so no read of the same week ends the mark. A
+ * read of a week that resets at another time is a new week, and the mark was
+ * the old one's.
  */
-export function keepWeek(fresh: Reading, stored: Reading | undefined, now: number): Reading {
-  const kept = stored?.sevenDay
-  if (fresh.sevenDay?.isStop === true || kept?.isStop !== true || kept.resetsAt === undefined || Date.parse(kept.resetsAt) <= now) return fresh
-  return { ...fresh, sevenDay: kept }
+export function withWeekMark(r: Reading | undefined, mark: Mark | undefined, now: number): Reading | undefined {
+  if (mark === undefined || Date.parse(mark.resetsAt) <= now) return r
+  const reset = r?.sevenDay?.resetsAt
+  if (reset !== undefined && Math.abs(Date.parse(reset) - Date.parse(mark.resetsAt)) > SAME_WEEK_MS) return r
+  return { ...(r ?? { at: mark.at }), sevenDay: { pct: mark.pct, resetsAt: mark.resetsAt, isStop: true } }
 }
 
 /**

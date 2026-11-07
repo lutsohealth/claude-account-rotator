@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import type { RotateTo, View } from '../types'
-import { DEFAULT_FOOTER, availableNow, braille, browsersFrom, chromeNote, continueTextFrom, counted, fiveHourLimitFrom, credentialFrom, credentialsFile, fableMark, fableSpentNotice, fableStay, footerStyleFrom, healthOf, identityFromProfile, isFableSpent, isFableStop, isNoBrowser, isPolicyRefusal, keepFable, keychainItem, legacyMark, markFrom, nextReset, pickTarget, pie, readingFromUsage, rotateToFrom, shouldLeave, roomColor, windowPct, withMark } from './model'
+import { DEFAULT_FOOTER, availableNow, braille, browsersFrom, chromeNote, continueTextFrom, counted, fiveHourLimitFrom, credentialFrom, credentialsFile, fableMark, fableSpentNotice, fableStay, footerStyleFrom, healthOf, identityFromProfile, isFableSpent, isFableStop, isNoBrowser, isPolicyRefusal, keepFable, keychainItem, legacyMark, markFrom, nextReset, pickTarget, pie, readingFromUsage, rotateToFrom, shouldLeave, roomColor, windowPct, withMark, withWeekMark } from './model'
 
 const NOW = Date.parse('2026-10-12T10:00:00Z')
 const LATER = '2026-10-12T12:00:00Z'
@@ -212,6 +212,27 @@ test('reads the Fable week from the usage body\'s limits rows: Fable and its num
 test('a usage body with only limits answers a reading holding the Fable week alone', () => {
   expect(readingFromUsage({ limits: [fableRow('Fable 5.1', 62)] }, NOW)).toEqual({ fable: { pct: 62, resetsAt: FABLE_END }, noFiveHour: true, at: NOW })
   expect(readingFromUsage({ limits: [fableRow('Sonnet', 62)] }, NOW)).toBeUndefined()
+})
+
+// Review R2 of #6 partial_body: only a body that lists no 5-hour window says the account has none.
+test('a usage body says an account has no 5-hour window only where it lists none, never where it lists one it cannot read', () => {
+  const week = { utilization: 7, resets_at: WEEK_END }
+  expect(readingFromUsage({ five_hour: null, seven_day: week }, NOW)?.noFiveHour).toBe(true)
+  expect(readingFromUsage({ seven_day: week }, NOW)?.noFiveHour).toBe(true)
+  expect(readingFromUsage({ five_hour: { resets_at: LATER }, seven_day: week }, NOW)?.noFiveHour).toBeUndefined()
+  expect(readingFromUsage({ five_hour: { utilization: 30, resets_at: LATER }, seven_day: week }, NOW)?.noFiveHour).toBeUndefined()
+})
+
+// Review R2 of #6 changed_reset: a week mark is the week it was made in, and a new week ends it.
+test('a stop\'s week mark counts until its reset through any read of the same week, and not through a read of another week', () => {
+  const mark = { pct: 100, resetsAt: WEEK_END, at: NOW }
+  const marked = { pct: 100, resetsAt: WEEK_END, isStop: true }
+  const sameWeek = { sevenDay: { pct: 60, resetsAt: new Date(Date.parse(WEEK_END) + 1000).toISOString() }, at: NOW + HOUR }
+  expect(withWeekMark(sameWeek, mark, NOW + HOUR)).toEqual({ ...sameWeek, sevenDay: marked })
+  expect(withWeekMark(undefined, mark, NOW)).toEqual({ sevenDay: marked, at: NOW })
+  const freshWeek = { sevenDay: { pct: 6, resetsAt: new Date(Date.parse(WEEK_END) + 3 * 24 * HOUR).toISOString() }, at: NOW + HOUR }
+  expect(withWeekMark(freshWeek, mark, NOW + HOUR)).toBe(freshWeek)
+  expect(withWeekMark(sameWeek, mark, Date.parse(WEEK_END))).toBe(sameWeek)
 })
 
 test('the Fable week is spent at 95% and not before, and not once its reset time has passed', () => {

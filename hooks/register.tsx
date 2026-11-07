@@ -42,7 +42,7 @@ import {
   isFableSpent,
   isFableStop,
   isWeeklyStop,
-  keepWeek,
+  withWeekMark,
   reportsNoFiveHour,
   isLoginOf,
   isNoBrowser,
@@ -160,20 +160,37 @@ async function storedReading($: Host, id: string): Promise<Reading | undefined> 
   return typeof r === 'object' && r !== null && typeof (r as Reading).at === 'number' ? (r as Reading) : undefined
 }
 
+/** What the store holds beside a login's reading, each under its own key: its stop marks, and whether it has no 5-hour window. */
+type Beside = { mark?: Mark; weekMark?: Mark; noFiveHour?: boolean }
+
+const besideOf = (v: View, id: string): Beside => ({ mark: v.marks?.[id], weekMark: v.weekMarks?.[id], noFiveHour: v.noFiveHour?.[id] })
+
 /**
  * A login's reading as the rules count it: the stored read with whether its usage endpoint
- * reports no 5-hour window, then its stop mark, under the 5-hour limit.
+ * reports no 5-hour window, then its stop marks, under the 5-hour limit.
  */
-function viewed(read: Reading, mark: Mark | undefined, limit: FiveHourLimit, now: number, hasNoFiveHour: boolean | undefined): Reading {
+function viewed(read: Reading, beside: Beside, limit: FiveHourLimit, now: number): Reading {
   const { noFiveHour: _stored, ...bare } = read
-  const r: Reading = hasNoFiveHour === true ? { ...bare, noFiveHour: true } : bare
-  return counted(withMark(r, mark, now) ?? r, limit, now)
+  const r: Reading = beside.noFiveHour === true ? { ...bare, noFiveHour: true } : bare
+  const weekly = withWeekMark(r, beside.weekMark, now) ?? r
+  return counted(withMark(weekly, beside.mark, now) ?? weekly, limit, now)
 }
 
 /** Stores whether a login's usage endpoint said it has no 5-hour window, for every session. */
 async function saveNoFiveHour($: Host, id: string, hasNoFiveHour: boolean): Promise<void> {
   await $.store.set(`no-five-hour:${id}`, hasNoFiveHour)
   await setView($, v => ({ ...v, noFiveHour: { ...v.noFiveHour, [id]: hasNoFiveHour } }))
+}
+
+/** Marks a login's week spent for every session, under its own key, which no save of a reading writes. */
+async function saveWeekMark($: Host, id: string, weekMark: Mark): Promise<void> {
+  await $.store.set(`week-mark:${id}`, weekMark)
+  const now = await $.clock.now()
+  const read = (await storedReading($, id)) ?? { at: weekMark.at }
+  await setView($, v => {
+    const weekMarks = { ...v.weekMarks, [id]: weekMark }
+    return { ...v, weekMarks, readings: { ...v.readings, [id]: viewed(read, { ...besideOf(v, id), weekMark }, v.fiveHourLimit, now) } }
+  })
 }
 
 /**
@@ -187,9 +204,8 @@ async function saveReading($: Host, id: string, read: Reading): Promise<void> {
   const stored = await storedReading($, id)
   const legacy = legacyMark(stored, now)
   if (legacy !== undefined) await keepLegacyMark($, id, legacy)
-  const kept = keepWeek(read, stored, now)
-  await $.store.set(`reading:${id}`, kept)
-  await setView($, v => ({ ...v, readings: { ...v.readings, [id]: viewed(kept, v.marks?.[id], v.fiveHourLimit, now, v.noFiveHour?.[id]) } }))
+  await $.store.set(`reading:${id}`, read)
+  await setView($, v => ({ ...v, readings: { ...v.readings, [id]: viewed(read, besideOf(v, id), v.fiveHourLimit, now) } }))
 }
 
 /** Moves an older version's mark to the mark's own key, unless the mark there already stands longer. */
@@ -208,7 +224,7 @@ async function saveMark($: Host, id: string, mark: Mark): Promise<void> {
   await setView($, v => ({
     ...v,
     marks: { ...v.marks, [id]: mark },
-    readings: { ...v.readings, [id]: viewed(read, mark, v.fiveHourLimit, now, v.noFiveHour?.[id]) },
+    readings: { ...v.readings, [id]: viewed(read, { ...besideOf(v, id), mark }, v.fiveHourLimit, now) },
   }))
 }
 
@@ -231,6 +247,7 @@ async function mergeStore($: Host): Promise<void> {
   const readings: Record<string, Reading> = {}
   const marks: Record<string, Mark> = {}
   const noFiveHour: Record<string, boolean> = {}
+  const weekMarks: Record<string, Mark> = {}
   const health: Record<string, Health> = {}
   const holders: Record<string, Holder> = {}
   for (const a of accounts) {
@@ -240,6 +257,8 @@ async function mergeStore($: Host): Promise<void> {
     if (m !== undefined) marks[a.id] = m
     const n = await $.store.get(`no-five-hour:${a.id}`)
     if (typeof n === 'boolean') noFiveHour[a.id] = n
+    const k = markFrom(await $.store.get(`week-mark:${a.id}`))
+    if (k !== undefined) weekMarks[a.id] = k
     const h = await $.store.get(`health:${a.id}`)
     if (typeof h === 'object' && h !== null && typeof (h as Health).kind === 'string') health[a.id] = h as Health
     const s = await $.store.get(`holder:${a.id}`)
@@ -260,6 +279,7 @@ async function mergeStore($: Host): Promise<void> {
     const nextReadings: Record<string, Reading> = {}
     const nextMarks: Record<string, Mark> = {}
     const nextNoFiveHour: Record<string, boolean> = {}
+    const nextWeekMarks: Record<string, Mark> = {}
     const nextHealth: Record<string, Health> = {}
     const nextHolders: Record<string, Holder> = {}
     for (const a of accounts) {
@@ -269,16 +289,18 @@ async function mergeStore($: Host): Promise<void> {
       if (mark !== undefined) nextMarks[a.id] = mark
       const none = noFiveHour[a.id] ?? v.noFiveHour?.[a.id]
       if (none !== undefined) nextNoFiveHour[a.id] = none
+      const weekMark = weekMarks[a.id] ?? v.weekMarks?.[a.id]
+      if (weekMark !== undefined) nextWeekMarks[a.id] = weekMark
       // On a tie the stored read wins: this session's copy is already counted, and may have lost a window.
       const reading = mine !== undefined && (theirs === undefined || mine.at > theirs.at) ? mine : theirs
-      if (reading !== undefined) nextReadings[a.id] = viewed(reading, mark, fiveHourLimit, now, none)
+      if (reading !== undefined) nextReadings[a.id] = viewed(reading, { mark, weekMark, noFiveHour: none }, fiveHourLimit, now)
       const own = v.health[a.id]
       const h = signingIn === a.id ? own : (health[a.id] ?? own)
       if (h !== undefined) nextHealth[a.id] = h
       const holder = holders[a.id] ?? v.holders[a.id]
       if (holder !== undefined) nextHolders[a.id] = holder
     }
-    return { ...v, accounts, readings: nextReadings, marks: nextMarks, noFiveHour: nextNoFiveHour, health: nextHealth, holders: nextHolders, footer, rotateTo, fiveHourLimit, fableContinueText, chromeAccountId, chromeAccountIds }
+    return { ...v, accounts, readings: nextReadings, marks: nextMarks, noFiveHour: nextNoFiveHour, weekMarks: nextWeekMarks, health: nextHealth, holders: nextHolders, footer, rotateTo, fiveHourLimit, fableContinueText, chromeAccountId, chromeAccountIds }
   })
 }
 
@@ -307,7 +329,7 @@ async function setFiveHourLimit($: Host, fiveHourLimit: FiveHourLimit): Promise<
   await setView($, v => ({
     ...v,
     fiveHourLimit,
-    readings: Object.fromEntries(Object.entries(v.readings).map(([id, r]) => [id, viewed(stored[id] ?? r, v.marks?.[id], fiveHourLimit, now, v.noFiveHour?.[id])])),
+    readings: Object.fromEntries(Object.entries(v.readings).map(([id, r]) => [id, viewed(stored[id] ?? r, besideOf(v, id), fiveHourLimit, now)])),
   }))
   await maybeRotate($)
 }
@@ -526,7 +548,8 @@ async function checkAccount($: Host, account: Account): Promise<void> {
         const read = readingFromUsage(usage.body, now)
         if (read !== undefined) {
           const { noFiveHour, ...reading } = read
-          await saveNoFiveHour($, account.id, noFiveHour === true)
+          // A body whose 5-hour window it cannot read leaves what the last one said.
+          if (reading.fiveHour !== undefined || noFiveHour === true) await saveNoFiveHour($, account.id, noFiveHour === true)
           // A body with no Fable row leaves the week a stop marked spent as it is.
           await saveReading($, account.id, keepFable(reading, (await getView($)).readings[account.id], now))
         }
@@ -785,7 +808,8 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
     } else if (!shouldLeave(after, now) && (isWeeklyStop(said) || reportsNoFiveHour(r))) {
       // The week ran out before the usage call shows it, by Claude's words or as the only window the account has:
       // count the week as full until its reset, never a 5-hour window.
-      await saveReading($, active.id, { ...read, sevenDay: { ...spentMark(read?.sevenDay, now, WEEK_MS), isStop: true }, at: now })
+      const spent = spentMark(read?.sevenDay, now, WEEK_MS)
+      await saveWeekMark($, active.id, { pct: spent.pct, resetsAt: spent.resetsAt ?? new Date(now + WEEK_MS).toISOString(), at: now })
     } else if (!shouldLeave(after, now)) {
       // The limit was hit before the usage call shows it: count the 5-hour window as full, five hours at most where no reset is known.
       const spent = spentMark(read?.fiveHour, now, FIVE_HOUR_MS)
@@ -1157,6 +1181,7 @@ async function removeAccount($: Host, id: string): Promise<void> {
   await $.store.delete(`reading:${id}`)
   await $.store.delete(`mark:${id}`)
   await $.store.delete(`no-five-hour:${id}`)
+  await $.store.delete(`week-mark:${id}`)
   await $.store.delete(`health:${id}`)
   await $.store.delete(`holder:${id}`)
   await setView($, v => {
@@ -1169,7 +1194,8 @@ async function removeAccount($: Host, id: string): Promise<void> {
     delete health[id]
     delete holders[id]
     const { [id]: _none, ...noFiveHour } = v.noFiveHour ?? {}
-    return { ...v, readings, marks, noFiveHour, health, holders, removing: undefined }
+    const { [id]: _week, ...weekMarks } = v.weekMarks ?? {}
+    return { ...v, readings, marks, noFiveHour, weekMarks, health, holders, removing: undefined }
   })
 }
 
