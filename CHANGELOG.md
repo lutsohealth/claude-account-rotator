@@ -2,6 +2,11 @@
 
 What each version of the account rotator changed. To get each one as Claude Code starts, turn on auto-update: in `/plugin`, open **Marketplaces**, pick **claude-account-rotator** and choose **Enable auto-update**. To update by hand, run `claude plugin marketplace update claude-account-rotator`, then `claude plugin update account-rotator@claude-account-rotator`, and start a new session.
 
+## 0.4.1-lutso.1 - 2026-11-07
+
+- **A usage-limit stop is no longer lost between two sessions.** A session saving an account's usage could erase the stop another session had just recorded on it, and that account then rejoined the rotation early. The stop now has its own record, which no save of usage touches, and it counts until its reset: the 5-hour window's, or five hours where the account reports none.
+- **Updating while older sessions still run keeps their stops.** A stop an older version recorded is carried over the first time this version saves that account's usage.
+
 ## 0.4.0-lutso.1 - 2026-11-07
 
 - **5h limit** in the panel's **Usage based rotation** box. **where reported**, the default, counts an account's 5-hour window where its usage reports one; **off** counts none, so only the week and the Fable week move the session. The panel's first line says which is in force, and a press applies to every session on the Mac.
