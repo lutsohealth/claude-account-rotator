@@ -222,6 +222,7 @@ function world(on: On, w: World, store: Record<string, unknown> | Map<string, un
     return { text: e.text }
   })
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  on('session.end', (_$, e) => ({ sessionId: e.sessionId }))
   on('session.id', () => ({ value: 'session-1' }))
   on('tool.check', () => ({ decision: 'allow' as const }))
   on('session.usage', () => ({ value: { startedAt: NOW, context: { window: 200_000 }, rateLimits: w.limits } }))
@@ -4273,12 +4274,19 @@ async function paneText($: Engine): Promise<string> {
  * A switch to login 2 by Use now, unproven by any response, with a turn dying on a limit `delay` after it; `last`,
  * where given, the response measured between, by whose week it says which login it spent.
  */
-async function stopDuringSwitch($: Engine, on: On, delay: number, said: string, last?: SessionRateLimit[]): Promise<{ w: World; store: Map<string, unknown>; clock: MockClock }> {
+async function stopDuringSwitch(
+  $: Engine,
+  on: On,
+  delay: number,
+  said: string,
+  last?: SessionRateLimit[],
+  usage: Partial<World['usage']> = {},
+): Promise<{ w: World; store: Map<string, unknown>; clock: MockClock }> {
   const w = fresh()
   w.keychain['Claude Code-credentials'] = blob('tok-1')
   w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
-  w.usage['tok-1'] = [10, 40]
-  w.usage['tok-2'] = [10, 41]
+  w.usage['tok-1'] = usage['tok-1'] ?? [10, 40]
+  w.usage['tok-2'] = usage['tok-2'] ?? [10, 41]
   w.weekResets = { 'tok-2': OTHER_WEEK }
   const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off' }))
   const clock = world(on, w, store)
@@ -4392,3 +4400,101 @@ async function bandText($: Engine): Promise<string> {
     throw error
   }
 }
+
+// puma-eslxj.17: every path that ends an unproven switch without proof reverts the stop it marked provisionally.
+
+/** A week reset neither login has: within no hour, and no whole number of weeks, of either. */
+const STRANGE_WEEK = '2026-10-15T20:00:00Z'
+
+/** Presses Use now on `id` in the pane. */
+async function useNow($: Engine, clock: MockClock, id: string): Promise<void> {
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  await pane.press({ key: `use-${id}` })
+  await clock.settle()
+  await pane.unmount()
+}
+
+/** Ends the session as an exit does. */
+async function endSession($: Engine, clock: MockClock): Promise<void> {
+  await $.session.end({ reason: 'exit', sessionId: 'session-1', resume: { id: 'session-1' } } as Parameters<Engine['session']['end']>[0])
+  await clock.settle()
+}
+
+test('a stop before any response proves a switch, when a press replaces the switch, leaves the login moved to unmarked', async ($, on) => {
+  const { store, clock } = await stopDuringSwitch($, on, 40_000, 'Claude usage limit reached.')
+  expect(store.get('mark:2')).toBeDefined()
+  await useNow($, clock, '1')
+  expect(store.get('mark:2')).toBeUndefined()
+})
+
+test('a stop before any response proves a switch, when the switch gives up unproven, leaves the login moved to unmarked', async ($, on) => {
+  const { w, store, clock } = await stopDuringSwitch($, on, 40_000, 'Claude usage limit reached.')
+  w.limits = [{ kind: 'seven_day', percentUsed: 42, resetsAt: STRANGE_WEEK }]
+  await clock.advance(4 * 60_000 + 10_000)
+  await respond($, clock, w)
+  expect(w.toasts.some(t => /has not shown/.test(t))).toBe(true)
+  expect(store.get('mark:2')).toBeUndefined()
+})
+
+test('a stop before any response proves a switch, when the session ends first, leaves the login moved to unmarked', async ($, on) => {
+  const { store, clock } = await stopDuringSwitch($, on, 40_000, 'Claude usage limit reached.')
+  await endSession($, clock)
+  expect(store.get('mark:2')).toBeUndefined()
+})
+
+test('a 5-hour stop the revert drops leaves the login as having no 5-hour window again, as its usage said', async ($, on) => {
+  const { store, clock } = await stopDuringSwitch($, on, 40_000, "You've hit your session limit", undefined, { 'tok-2': [null, 41] })
+  expect(store.get('no-five-hour:2')).toBe(false)
+  await endSession($, clock)
+  expect([store.get('mark:2'), store.get('no-five-hour:2')]).toEqual([undefined, true])
+})
+
+test('a Fable stop the revert drops is no Fable stop of this session: a later read that finds every Fable week spent draws no notice', async ($, on) => {
+  const { w, clock } = await stopDuringSwitch($, on, 40_000, FABLE_STOP.last_assistant_message, undefined, { 'tok-1': [10, 40, 100], 'tok-2': [10, 41, 30] })
+  await useNow($, clock, '1')
+  w.usage['tok-2'] = [10, 41, 100]
+  await clock.advance(USAGE_IDLE_MS + 60_000)
+  expect(await bandText($)).not.toMatch(/has used its Fable week/)
+})
+
+test('a login whose schedule this version wrote is not read at boot before its time, though it has no reading of this version', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [10, 20]
+  w.usage['tok-2'] = [10, 30]
+  w.weekResets = { 'tok-2': OTHER_WEEK }
+  const store = new Map<string, unknown>(Object.entries({
+    ...TWO_LOGINS,
+    'usage-due:2': { next: NOW + 20 * 60_000, fails: 0, at: NOW - 60_000, v: 1 },
+  }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  expect(callsWith(w, 'tok-2')).toBe(0)
+  expect(store.get('usage-due:2')).toMatchObject({ next: NOW + 20 * 60_000, v: 1 })
+})
+
+test('a schedule an older version writes after boot does not hold off a login with no reading of this version', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [10, 20]
+  w.usage['tok-2'] = [10, 30]
+  w.weekResets = { 'tok-2': OTHER_WEEK }
+  const store = new Map<string, unknown>(Object.entries({
+    ...TWO_LOGINS,
+    'rotate-to': 'off',
+    'usage-due:2': { next: NOW + 12 * 60_000, fails: 1, retryAfter: 720_000, v: 1 },
+  }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  await clock.advance(10 * 60_000 + 10_000)
+  expect(callsWith(w, 'tok-2')).toBe(0)
+  // An older version read login 2 before its back-off ended, into its own key, and scheduled the next in 30 minutes.
+  store.set('reading:2', { sevenDay: { pct: 30, resetsAt: OTHER_WEEK }, at: clock.now() })
+  store.set('usage-due:2', { next: clock.now() + USAGE_IDLE_MS, fails: 0, at: clock.now() })
+  const before = callsWith(w, 'tok-2')
+  await clock.advance(61_000)
+  expect(callsWith(w, 'tok-2')).toBe(before + 1)
+  expect((store.get('usage:2') as { sevenDay?: { pct?: number } } | undefined)?.sevenDay?.pct).toBe(30)
+})
