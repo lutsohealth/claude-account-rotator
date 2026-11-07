@@ -582,6 +582,8 @@ export function Band(ui: Ui, view: View, now: number, act: Actions) {
   // Only a session that hit the Fable week says so: Claude with another model works on these accounts.
   const fableSpent = view.isFableStopped ? fableSpentNotice(view, now) : undefined
   if (fableSpent !== undefined) return <Text color="warning">{fableSpent}</Text>
+  // An older version reads usage on its own schedule and stores readings this one cannot trust.
+  if (view.hasOlderWriter) return <Text color="warning">An older account-rotator still runs in another session; restart it.</Text>
   return undefined
 }
 

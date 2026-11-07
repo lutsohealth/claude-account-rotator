@@ -9,7 +9,14 @@ export type UsageWindow = { pct: number; resetsAt?: string; isStop?: true }
  * reading carries it from `View.noFiveHour`; a stored one does not. `by` is the login whose sign-in produced the
  * read; a stored reading without it, or naming another login, is no login's and is not read back.
  */
-export type Reading = { fiveHour?: UsageWindow; sevenDay?: UsageWindow; fable?: UsageWindow; noFiveHour?: true; at: number; by?: string }
+export type Reading = { fiveHour?: UsageWindow; sevenDay?: UsageWindow; fable?: UsageWindow; noFiveHour?: true; at: number; by?: string; v?: number; src?: ReadingSource }
+
+/**
+ * Where a stored reading came from: a usage body (`body`), a response's rate limits (`response`), or a stop that
+ * marked a window spent (`stop`). Stored under `usage:<id>` with `v`, the writer's version; `reading:<id>` is an
+ * older version's, read only for the stop marks it may carry and to tell that an older version still runs.
+ */
+export type ReadingSource = 'body' | 'response' | 'stop'
 
 /**
  * The 5-hour window a stop marked spent, kept in the store under its own key,
@@ -146,6 +153,8 @@ export type View = {
   isFableStopped?: boolean
   /** This session only: Claude Code's security default refuses switching, as on a Team or Enterprise account. */
   isSwitchBlocked?: boolean
+  /** This session only: an older version of the mod wrote a reading after this session started, so it still runs somewhere. */
+  hasOlderWriter?: boolean
   /**
    * The account the Chrome extension is signed in to, the only one it answers:
    * picked in the pane, or learned when Claude in Chrome paired; kept across sessions.

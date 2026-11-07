@@ -2,6 +2,7 @@ import { expect, test } from 'claude-code/testing'
 
 import type { RotateTo, View } from '../types'
 import { weekLeaveFrom, launchOnFrom, pickLaunch, isSessionStop } from './model'
+import { isSameWeek, whoseWeek } from './model'
 import { USAGE_BACKOFF_MAX_MS, USAGE_CLAIM_MS, USAGE_CLAIM_WAIT_MS, USAGE_EARLY_MS, afterUsage, claimDueReads, isUsageDue, mayForceUsage, mayReadSince, renewClaim, retryAfterFrom, usageDueFrom } from './model'
 import { DEFAULT_FOOTER, availableNow, braille, browsersFrom, chromeNote, continueTextFrom, counted, fiveHourLimitFrom, credentialFrom, credentialsFile, fableMark, fableSpentNotice, fableStay, footerStyleFrom, healthOf, identityFromProfile, isFableSpent, isFableStop, isNoBrowser, isPolicyRefusal, keepFable, keychainItem, legacyMark, markFrom, nextReset, pickTarget, pie, readingFromUsage, rotateToFrom, shouldLeave, roomColor, windowPct, withMark, withWeekMark } from './model'
 
@@ -571,7 +572,6 @@ const STAYS: { name: string; reason: string; view: View; isConnecting?: boolean;
   { name: 'Connect holds the session', reason: 'chrome', view: CAN_MOVE(), isConnecting: true },
   { name: 'rotation off', reason: 'off', view: { ...CAN_MOVE(), rotateTo: 'off' } },
   { name: 'Claude Code refuses switching', reason: 'blocked', view: { ...CAN_MOVE(), isSwitchBlocked: true } },
-  { name: 'a switch is still pending', reason: 'pending', view: { ...CAN_MOVE(), pending: { id: '2', from: '1', since: NOW } } },
   { name: 'every Fable week spent', reason: 'fable-spent', view: view({ '1': [20, 30, 100], '2': [10, 30, 100] }) },
   { name: 'the other account has its 5-hour window full', reason: 'no-room', view: view({ '1': [20, 30, 100], '2': [95, 30, 10] }) },
   { name: 'the other account has its week full', reason: 'no-room', view: view({ '1': [20, 30, 100], '2': [10, 100, 10] }) },
@@ -581,6 +581,8 @@ const STAYS: { name: string; reason: string; view: View; isConnecting?: boolean;
 
 test('a Fable stop that did not move gives the reason, one per cause the rotation can stay for', () => {
   expect(fableStay(CAN_MOVE(), NOW, false, new Set())).toBeUndefined()
+  // A stop moves the session on from a switch still settling (maybeRotate lets it through), so that is no reason.
+  expect(fableStay({ ...CAN_MOVE(), pending: { id: '2', from: '1', since: NOW } }, NOW, false, new Set())).toBeUndefined()
   for (const { name, reason, view: v, isConnecting = false, skip = [] } of STAYS) {
     expect([name, fableStay(v, NOW, isConnecting, new Set(skip))?.reason]).toEqual([name, reason])
   }
@@ -594,8 +596,6 @@ test('the reasons are told in the order maybeRotate checks them', () => {
   v = { ...v, rotateTo: 'room' }
   expect(fableStay(v, NOW, false, new Set())?.reason).toBe('blocked')
   v = { ...v, isSwitchBlocked: false }
-  expect(fableStay(v, NOW, false, new Set())?.reason).toBe('pending')
-  v = { ...v, pending: undefined }
   expect(fableStay(v, NOW, false, new Set())?.reason).toBe('fable-spent')
   v = { ...v, readings: { ...v.readings, '2': { ...v.readings['2'], fable: { pct: 10, resetsAt: FABLE_END }, at: NOW } } }
   expect(fableStay(v, NOW, false, new Set())?.reason).toBe('no-room')
@@ -617,9 +617,8 @@ test('every reason has its own words, naming the account and ending on Claude Co
     texts.set(reason, text)
   }
   // One text per reason, whatever stages it.
-  expect([...texts.keys()].sort()).toEqual(['blocked', 'chrome', 'no-room', 'off', 'pending'])
-  expect(new Set(texts.values()).size).toBe(5)
-  expect(texts.get('pending')).toMatch(/switch to account 2 is still settling/)
+  expect([...texts.keys()].sort()).toEqual(['blocked', 'chrome', 'no-room', 'off'])
+  expect(new Set(texts.values()).size).toBe(4)
 })
 
 // ---------------------------------------------------------------- one usage schedule per store
@@ -675,6 +674,26 @@ test('a stored schedule is read field by field; one with no time is none', () =>
   expect(usageDueFrom({ next: NOW, fails: -1 })).toEqual({ next: NOW, fails: 0 })
   expect(usageDueFrom({ fails: 0 })).toBeUndefined()
   expect(usageDueFrom('x')).toBeUndefined()
+})
+
+test('two week resets are one week within an hour of each other or a whole number of weeks apart, and not otherwise', () => {
+  expect(isSameWeek(WEEK_END, WEEK_END)).toBe(true)
+  expect(isSameWeek(WEEK_END, new Date(Date.parse(WEEK_END) + 59 * 60_000).toISOString())).toBe(true)
+  expect(isSameWeek(WEEK_END, new Date(Date.parse(WEEK_END) - 7 * 24 * HOUR).toISOString())).toBe(true)
+  expect(isSameWeek(WEEK_END, new Date(Date.parse(WEEK_END) + 2 * HOUR).toISOString())).toBe(false)
+  expect(isSameWeek(WEEK_END, new Date(Date.parse(WEEK_END) - 24 * HOUR).toISOString())).toBe(false)
+  expect(isSameWeek(undefined, WEEK_END)).toBe(false)
+})
+
+test('a response\'s week is every login whose stored week resets with it: one, none, or two that share a reset', () => {
+  const at = NOW
+  const week = (resetsAt: string) => ({ sevenDay: { pct: 10, resetsAt }, at })
+  const other = '2026-10-17T05:00:00Z'
+  const readings = { '1': week(WEEK_END), '2': week(other), '3': week(other) }
+  expect(whoseWeek(week(WEEK_END), readings)).toEqual(['1'])
+  expect(whoseWeek(week(other), readings)).toEqual(['2', '3'])
+  expect(whoseWeek(week('2026-10-15T00:00:00Z'), readings)).toEqual([])
+  expect(whoseWeek({ fiveHour: { pct: 10, resetsAt: LATER }, at }, readings)).toEqual([])
 })
 
 /** A store in memory, as the sessions on one Mac share it. */

@@ -32,6 +32,10 @@ type World = {
   usageCalls: string[]
   /** Access tokens whose usage call throws, as a dropped connection does. */
   throwing?: string[]
+  /** access token -> when its week resets, as its usage body says; `WEEK_RESET` where unset */
+  weekResets?: Record<string, string>
+  /** access token -> the HTTP status the profile endpoint fails with, where it fails */
+  profileFailing?: Record<string, number>
   /** access token -> the email of the account it signs in, as the profile endpoint answers */
   owners: Record<string, string>
   /** The token a /login signs in, where the session reads its sign-in, and its plan. */
@@ -85,6 +89,12 @@ const blob = (token: string, expiresAt = NOW + 6 * HOUR, plan = 'max') =>
       subscriptionType: plan,
     },
   })
+
+/** Who each login's token signs in, as the profile endpoint answers, where the test names no owner. */
+const OWNER_BY_NUMBER = ['one@example.com', 'two@example.com', 'three@example.com', 'four@example.com', 'five@example.com']
+
+/** When the week of every login resets, unless the world names another for its token. */
+const WEEK_RESET = '2026-10-18T03:00:00Z'
 
 /** When the Fable week of every login resets. */
 const FABLE_RESET = '2026-10-17T03:00:00Z'
@@ -152,11 +162,15 @@ function world(on: On, w: World, store: Record<string, unknown> | Map<string, un
   on('http.fetch', (_$, e) => {
     const token = (e.init?.headers?.Authorization ?? '').replace('Bearer ', '')
     if (e.url === 'https://api.anthropic.com/api/oauth/profile') {
-      const email = w.owners[token]
+      const profileFailing = w.profileFailing?.[token]
+      if (profileFailing !== undefined) return { value: { status: profileFailing, ok: false, headers: {}, text: '' } }
+      // A token the test names no owner for signs in the login its number says: tok-2 is two@example.com's.
+      const email = w.owners[token] ?? OWNER_BY_NUMBER[Number(/^tok-(\d)$/.exec(token)?.[1] ?? 0) - 1]
       if (email === undefined) return { value: { status: 404, ok: false, headers: {}, text: '' } }
+      // A named owner's profile names its organization; a default owner's names none, so its login keeps its label.
       const profile = {
         account: { uuid: `account-${email}`, email },
-        organization: { uuid: `org-${email}`, name: 'Org', organization_type: 'claude_max' },
+        organization: { uuid: `org-${email}`, ...(w.owners[token] === undefined ? {} : { name: 'Org' }), organization_type: 'claude_max' },
       }
       return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(profile) } }
     }
@@ -170,7 +184,7 @@ function world(on: On, w: World, store: Record<string, unknown> | Map<string, un
     const [five, week, fable] = usage
     const body = {
       five_hour: five === null ? null : { utilization: five, resets_at: '2026-10-12T12:00:00Z' },
-      seven_day: week === null ? null : { utilization: week, resets_at: '2026-10-18T03:00:00Z' },
+      seven_day: week === null ? null : { utilization: week, resets_at: w.weekResets?.[token] ?? WEEK_RESET },
       // A row for another model beside the Fable one, spent: read as Fable's, it would show.
       ...(fable === undefined ? {} : { limits: [limitRow('Sonnet', 100), limitRow('Fable 5.1', fable, w.fableResets)] }),
     }
@@ -549,10 +563,11 @@ test('a switch that does not take, its responses still the old login\'s minutes 
   w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
   w.usage['tok-1'] = [93, 40]
   w.usage['tok-2'] = [10, 30]
+  w.weekResets = { 'tok-2': OTHER_WEEK }
   const clock = world(on, w, TWO_LOGINS)
   await start($, clock)
   expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
-  // Responses go on reporting login 1's usage.
+  // Responses go on reporting login 1's usage, its week among it.
   w.limits = [
     { kind: 'five_hour', percentUsed: 93, resetsAt: '2026-10-12T12:00:00Z' },
     { kind: 'seven_day', percentUsed: 40, resetsAt: '2026-10-18T03:00:00Z' },
@@ -1209,6 +1224,8 @@ test('a switch is confirmed once a response reports the new login usage, and an 
   w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
   w.usage['tok-1'] = [93, 40]
   w.usage['tok-2'] = [10, 30]
+  // Login 1's week resets at another time than login 2's, whose week the responses below carry.
+  w.weekResets = { 'tok-1': OTHER_WEEK }
   const clock = world(on, w, TWO_LOGINS)
   await start($, clock)
   // Minutes with no response: the last one is still login 1's, which says nothing of the switch.
@@ -1602,8 +1619,8 @@ test('a stored stop mark with no reset time, on an account whose token is not li
   // Login 2's access token has run out: no check reads its usage again.
   w.keychain[await keychainItem(SLOT2)] = blob('tok-2', NOW - HOUR)
   w.usage['tok-1'] = [null, 40]
-  const stale = { fiveHour: { pct: 100 }, sevenDay: { pct: 10, resetsAt: '2026-10-18T03:00:00Z' }, at: NOW - 6 * HOUR, by: '2' }
-  const clock = world(on, w, { ...TWO_LOGINS, 'reading:2': stale })
+  const stale = { fiveHour: { pct: 100 }, sevenDay: { pct: 10, resetsAt: '2026-10-18T03:00:00Z' }, at: NOW - 6 * HOUR, by: '2', v: 1, src: 'body' }
+  const clock = world(on, w, { ...TWO_LOGINS, 'usage:2': stale })
   await start($, clock)
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
   // Login 1 reports no 5-hour window, so it has no 5h row; login 2's dropped 5-hour reading leaves its row with none reported.
@@ -1813,7 +1830,7 @@ class OtherSessionStore extends Map<string, unknown> {
   site = ''
   injected: string[] = []
   set(key: string, value: unknown): this {
-    if (this.site !== '' && key === 'reading:1') {
+    if (this.site !== '' && key === 'usage:1') {
       super.set('mark:1', OTHER_MARK)
       this.injected.push(this.site)
       this.site = ''
@@ -1830,6 +1847,7 @@ test('another session\'s stop mark, landing as a response saves the reading, sta
   // Logins that report a 5-hour window: one with none takes no 5-hour mark.
   w.usage['tok-1'] = [30, 40]
   w.usage['tok-2'] = [30, 30]
+  w.weekResets = { 'tok-2': OTHER_WEEK }
   const store = new OtherSessionStore(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off' }))
   const clock = world(on, w, store)
   await start($, clock)
@@ -1853,6 +1871,7 @@ test('another session\'s stop mark stands through every save of a reading on the
   w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
   w.usage['tok-1'] = [30, 40, 40]
   w.usage['tok-2'] = [30, 30, 30]
+  w.weekResets = { 'tok-2': OTHER_WEEK }
   w.limits = [{ kind: 'seven_day', percentUsed: 40, resetsAt: '2026-10-18T03:00:00Z' }]
   const store = new OtherSessionStore(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off' }))
   const clock = world(on, w, store)
@@ -2007,7 +2026,7 @@ test('a session that starts on a spent login whose token has run out holds the s
   w.usage['tok-1'] = [null, 100]
   w.usage['tok-2'] = [null, 30]
   // Another session read login 1's spent week while its token was live.
-  const clock = world(on, w, { ...TWO_LOGINS, 'reading:1': { sevenDay: { pct: 100, resetsAt: '2026-10-18T03:00:00Z' }, at: NOW - 2 * HOUR, by: '1' } })
+  const clock = world(on, w, { ...TWO_LOGINS, 'usage:1': { sevenDay: { pct: 100, resetsAt: '2026-10-18T03:00:00Z' }, at: NOW - 2 * HOUR, by: '1', v: 1, src: 'body' } })
   await start($, clock)
   await clock.advance(2 * 60_000)
   expect(w.envSets).toEqual([])
@@ -2473,7 +2492,9 @@ test('a response that reports a 5-hour window clears no-five-hour, and Remove de
   w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
   w.usage['tok-1'] = [null, 40]
   w.usage['tok-2'] = [null, 30]
-  const week = { pct: 100, resetsAt: '2026-10-18T03:00:00Z', at: NOW }
+  // Login 2's week resets at its own time, so a response with login 1's week proves login 1.
+  w.weekResets = { 'tok-2': OTHER_WEEK }
+  const week = { pct: 100, resetsAt: OTHER_WEEK, at: NOW }
   const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off', 'week-mark:2': week, 'check-error:2': { why: 'x', at: NOW } }))
   const clock = world(on, w, store)
   await start($, clock)
@@ -2487,10 +2508,10 @@ test('a response that reports a 5-hour window clears no-five-hour, and Remove de
   await clock.settle()
   await pane.redraw()
   // Its schedule goes too: a login added later under the number 2 is read at once.
-  expect(store.has('usage-due:2')).toBe(true)
+  expect([store.has('usage-due:2'), store.has('usage:2')]).toEqual([true, true])
   await pane.press({ key: 'remove-2' })
   await clock.settle()
-  expect(['no-five-hour:2', 'week-mark:2', 'check-error:2', 'usage-due:2'].filter(k => store.has(k))).toEqual([])
+  expect(['no-five-hour:2', 'week-mark:2', 'check-error:2', 'usage-due:2', 'usage:2'].filter(k => store.has(k))).toEqual([])
   await pane.unmount()
 })
 
@@ -2684,6 +2705,8 @@ test('before the rotation moves the session off Claude Code\'s login, Claude in 
   const w = fresh()
   w.chrome = { extensions: [''] }
   w.emails = { '': 'one@example.com', [SLOT2]: 'two@example.com' }
+  // Named owners, whose profiles name the organization the pane shows.
+  w.owners = { 'tok-1': 'one@example.com', 'tok-2': 'two@example.com' }
   await spentOne(w)
   const clock = world(on, w, TWO_LOGINS)
   await start($, clock)
@@ -3654,11 +3677,13 @@ test('a stop\'s mark stands until its reset through a newer reported 5-hour wind
   w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
   w.usage['tok-1'] = [null, 40]
   w.usage['tok-2'] = [null, 30]
+  w.weekResets = { 'tok-2': OTHER_WEEK }
   const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off', 'mark:1': { pct: 100, resetsAt: '2026-10-12T15:00:00Z', at: NOW - HOUR } }))
   const clock = world(on, w, store)
   await start($, clock)
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
-  w.limits = [{ kind: 'five_hour', percentUsed: 30, resetsAt: '2026-10-12T12:00:00Z' }]
+  // A response proves its login by its week: this one reports login 1's, and a 5-hour window.
+  w.limits = [{ kind: 'five_hour', percentUsed: 30, resetsAt: '2026-10-12T12:00:00Z' }, { kind: 'seven_day', percentUsed: 40, resetsAt: '2026-10-18T03:00:00Z' }]
   await $.session.measure({ context: { window: 200_000 }, rateLimits: w.limits, changed: ['rateLimits'] })
   await clock.settle()
   await pane.redraw()
@@ -3726,7 +3751,7 @@ for (const [name, one, two, first, second, kept] of [
     w.limits = [{ kind: 'seven_day', percentUsed: second, resetsAt: '2026-10-18T03:00:00Z' }]
     await $.session.measure({ context: { window: 200_000 }, rateLimits: w.limits, changed: ['rateLimits'] })
     await clock.settle()
-    expect((store.get('reading:2') as { sevenDay?: { pct?: number } }).sevenDay?.pct).toBe(kept)
+    expect((store.get('usage:2') as { sevenDay?: { pct?: number } }).sevenDay?.pct).toBe(kept)
     await pane.unmount()
   })
 }
@@ -3745,7 +3770,10 @@ for (const [name, by] of [['no owner', undefined], ['another login as owner', '2
     await start($, clock)
     await $.classic.StopFailure({ error: 'rate_limit', last_assistant_message: 'You have reached your Fable limit' })
     await clock.settle()
-    expect((store.get('reading:1') as { sevenDay?: unknown }).sevenDay).toBeUndefined()
+    // The stop stores its Fable mark under usage:1, and takes no week from the reading no login owns.
+    const stored = store.get('usage:1') as { sevenDay?: unknown; src?: string } | undefined
+    expect(stored?.src).toBe('stop')
+    expect(stored?.sevenDay).toBeUndefined()
   })
 }
 
@@ -3788,8 +3816,8 @@ test('a response measured before the session knows its login is stored under no 
   await started
   await clock.settle()
   await clock.advance(USAGE_CLAIM_WAIT_MS)
-  expect(store.get('reading:1')).toBeUndefined()
-  expect((store.get('reading:2') as { sevenDay?: { pct?: number } } | undefined)?.sevenDay?.pct).toBe(11)
+  expect(store.get('usage:1')).toBeUndefined()
+  expect((store.get('usage:2') as { sevenDay?: { pct?: number } } | undefined)?.sevenDay?.pct).toBe(11)
 })
 
 test('a stored reading no login can be shown to own is dropped, and a login whose usage check fails with no reading of its own is never the launch pick', async ($, on) => {
@@ -3824,7 +3852,11 @@ test('boot makes no usage call for a login another session has scheduled, and ca
   w.usage['tok-1'] = [10, 20]
   w.usage['tok-2'] = [10, 30]
   // Another session read account 2 a minute ago: its next read is due in nine minutes.
-  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'usage-due:2': { next: NOW + 9 * 60_000, fails: 0, at: NOW - 60_000 } }))
+  const store = new Map<string, unknown>(Object.entries({
+    ...TWO_LOGINS,
+    'usage-due:2': { next: NOW + 9 * 60_000, fails: 0, at: NOW - 60_000 },
+    'usage:2': { sevenDay: { pct: 30, resetsAt: '2026-10-18T03:00:00Z' }, at: NOW - 60_000, by: '2', v: 1, src: 'body' },
+  }))
   const clock = world(on, w, store)
   await start($, clock)
   expect(callsWith(w, 'tok-1')).toBe(1)
@@ -3905,7 +3937,7 @@ test('a login no response read is read every 30 minutes, and once responses come
   await clock.advance(25 * 60_000)
   expect(callsWith(w, 'tok-1')).toBe(1)
   // A response stored after the boot's read: the login is in use from the next read on.
-  w.limits = [{ kind: 'five_hour', percentUsed: 12, resetsAt: '2026-10-12T12:00:00Z' }]
+  w.limits = [{ kind: 'five_hour', percentUsed: 12, resetsAt: '2026-10-12T12:00:00Z' }, { kind: 'seven_day', percentUsed: 21, resetsAt: '2026-10-18T03:00:00Z' }]
   await $.session.measure({ context: { window: 200_000 }, rateLimits: w.limits, changed: ['rateLimits'] })
   await clock.advance(6 * 60_000)
   expect(callsWith(w, 'tok-1')).toBe(2)
@@ -3948,10 +3980,10 @@ test('a usage call that throws backs off as a failed one, for every session', as
   expect(callsWith(w, 'tok-1')).toBe(1)
 })
 
-/** A response's rate limits: the 5-hour window and the week, in percent used. */
-const limitsOf = (five: number, week: number): SessionRateLimit[] => [
+/** A response's rate limits: the 5-hour window and the week, in percent used, and when the week resets. */
+const limitsOf = (five: number, week: number, weekReset = '2026-10-18T03:00:00Z'): SessionRateLimit[] => [
   { kind: 'five_hour', percentUsed: five, resetsAt: '2026-10-12T12:00:00Z' },
-  { kind: 'seven_day', percentUsed: week, resetsAt: '2026-10-18T03:00:00Z' },
+  { kind: 'seven_day', percentUsed: week, resetsAt: weekReset },
 ]
 
 /** A response measured with the world's limits, and what it set off run out. */
@@ -3967,6 +3999,7 @@ test('a switch that took is confirmed though its login was spent elsewhere since
   w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
   w.usage['tok-1'] = [50, 40]
   w.usage['tok-2'] = [10, 30]
+  w.weekResets = { 'tok-2': OTHER_WEEK }
   const clock = world(on, w, TWO_LOGINS)
   await start($, clock)
   expect(w.envSets).toEqual([])
@@ -3977,8 +4010,8 @@ test('a switch that took is confirmed though its login was spent elsewhere since
   w.limits = limitsOf(93, 40)
   await respond($, clock, w)
   expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
-  // The switch took: responses report login 2's real usage, before its schedule reads it.
-  w.limits = limitsOf(30, 32)
+  // The switch took: responses report login 2's real usage and week, before its schedule reads it.
+  w.limits = limitsOf(30, 32, OTHER_WEEK)
   await clock.advance(60_000)
   await respond($, clock, w)
   await clock.advance(3 * 60_000 + 10_000)
@@ -4000,13 +4033,14 @@ for (const c of SETTLE_CASES) {
     w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
     w.usage['tok-1'] = [93, 40]
     w.usage['tok-2'] = [10, 30]
+    w.weekResets = { 'tok-2': OTHER_WEEK }
     const clock = world(on, w, TWO_LOGINS)
     await start($, clock)
     expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
     const before = w.usageCalls.length
-    // The login the responses report spends on; the usage endpoint agrees with them.
+    // The login the responses report spends on, its week among it; the usage endpoint agrees with them.
     w.usage[c.landed === 'confirmed' ? 'tok-2' : 'tok-1'] = c.spent
-    w.limits = limitsOf(...c.spent)
+    w.limits = limitsOf(...c.spent, c.landed === 'confirmed' ? OTHER_WEEK : '2026-10-18T03:00:00Z')
     await clock.advance(60_000)
     await respond($, clock, w)
     await clock.advance(4 * 60_000)
@@ -4031,7 +4065,7 @@ test('a /login that signs another person in reads the new sign-in at once', asyn
   await $.command.run({ command: 'login', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 120 } })
   await clock.settle()
   expect(w.toasts.filter(t => /is nine@example.com/.test(t))).toHaveLength(1)
-  const five = (store.get('reading:1') as { fiveHour?: { pct?: number } } | undefined)?.fiveHour?.pct
+  const five = (store.get('usage:1') as { fiveHour?: { pct?: number } } | undefined)?.fiveHour?.pct
   expect([callsWith(w, 'tok-9'), five]).toEqual([1, 5])
 })
 
@@ -4056,4 +4090,305 @@ for (const c of SIGN_IN_GATES) {
     await clock.settle()
     expect([c.name, callsWith(w, 'tok-9')]).toEqual([c.name, 1])
   })
+}
+
+// ---------------------------------------------------------------- readings that cannot cross (C4)
+
+/** What the store holds as a login's reading, under either key: the current one or the legacy one. */
+const storedOf = (store: Map<string, unknown>, id: string) => (store.get(`usage:${id}`) ?? store.get(`reading:${id}`)) as { sevenDay?: { pct?: number; resetsAt?: string }; by?: string } | undefined
+
+/** Account 2's week resets a day before account 1's, so a response tells by its reset whose week it is. */
+const OTHER_WEEK = '2026-10-17T05:00:00Z'
+
+test('a usage body for a token whose holder is unknown, its profile call answering 429, is stored for no login', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [10, 20]
+  w.usage['tok-2'] = [10, 30]
+  w.owners = { 'tok-1': 'one@example.com' }
+  w.profileFailing = { 'tok-2': 429 }
+  const store = new Map<string, unknown>(Object.entries(TWO_LOGINS))
+  const clock = world(on, w, store)
+  await start($, clock)
+  expect(storedOf(store, '1')?.sevenDay?.pct).toBe(20)
+  expect(storedOf(store, '2')).toBeUndefined()
+})
+
+test('a response whose week resets with another login\'s, not the login in use\'s, is stored for no login', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [10, 20]
+  w.usage['tok-2'] = [10, 30]
+  w.weekResets = { 'tok-2': OTHER_WEEK }
+  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off' }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  // Login 1 is in use, but the response carries login 2's week: it went out on login 2's sign-in.
+  w.limits = [{ kind: 'seven_day', percentUsed: 77, resetsAt: OTHER_WEEK }]
+  await respond($, clock, w)
+  expect(storedOf(store, '1')?.sevenDay?.pct).toBe(20)
+  expect(storedOf(store, '2')?.sevenDay?.pct).toBe(30)
+})
+
+test('a response whose week resets with two logins at once is stored for neither: its reset cannot tell them apart', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [10, 20]
+  w.usage['tok-2'] = [10, 30]
+  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off' }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  w.limits = [{ kind: 'seven_day', percentUsed: 31, resetsAt: WEEK_RESET }]
+  await respond($, clock, w)
+  expect(storedOf(store, '1')?.sevenDay?.pct).toBe(20)
+})
+
+test('a switch whose responses still carry the week of the login left, within 3 points of both, is not confirmed and stores nothing under the login moved to', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [10, 40]
+  w.usage['tok-2'] = [10, 41]
+  w.weekResets = { 'tok-2': OTHER_WEEK }
+  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off' }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  await pane.press({ key: 'use-2' })
+  await clock.settle()
+  await pane.unmount()
+  expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
+  // The switch did not take: responses still carry login 1's week, within 3 points of both logins' weeks.
+  w.limits = [{ kind: 'seven_day', percentUsed: 42, resetsAt: WEEK_RESET }]
+  await clock.advance(60_000)
+  await respond($, clock, w)
+  await clock.advance(4 * 60_000)
+  await respond($, clock, w)
+  expect(w.toasts.filter(t => /did not take/.test(t))).toHaveLength(1)
+  expect(storedOf(store, '2')?.sevenDay?.resetsAt).toBe(OTHER_WEEK)
+})
+
+test('a stop that moves nothing leaves a settling switch settling: responses still judge it', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [10, 40]
+  w.usage['tok-2'] = [10, 41]
+  w.weekResets = { 'tok-2': OTHER_WEEK }
+  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off' }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  await pane.press({ key: 'use-2' })
+  await clock.settle()
+  await pane.unmount()
+  // Past the settle window, a turn dies on a limit; the rotation is off, so nothing moves.
+  await clock.advance(40_000)
+  await $.classic.StopFailure({ error: 'rate_limit', last_assistant_message: 'Claude usage limit reached.' })
+  await clock.settle()
+  w.limits = [{ kind: 'seven_day', percentUsed: 42, resetsAt: WEEK_RESET }]
+  await clock.advance(20_000)
+  await respond($, clock, w)
+  await clock.advance(4 * 60_000)
+  await respond($, clock, w)
+  expect(w.toasts.filter(t => /did not take/.test(t))).toHaveLength(1)
+})
+
+test('a reading an older version writes after this session started says, once, to restart that session', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.usage['tok-1'] = [10, 20]
+  const store = new Map<string, unknown>(Object.entries({ accounts: [{ id: '1', slot: '', email: 'one@example.com' }] }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  expect(await bandText($)).not.toMatch(/older account-rotator/)
+  // An older version writes only reading:<id>, never usage:<id>.
+  store.set('reading:1', { sevenDay: { pct: 50, resetsAt: WEEK_RESET }, at: NOW + 30_000, by: '1' })
+  await clock.advance(61_000)
+  expect(await bandText($)).toMatch(/^An older account-rotator still runs in another session; restart it\.$/)
+})
+
+// Regression guard (passes at the base): the crossed pair the operator saw, reading:3 and reading:5 with no `by`.
+test('readings stored with no owner, as an older version left accounts 3 and 5, are never drawn', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.usage['tok-1'] = [10, 20]
+  const store = new Map<string, unknown>(Object.entries({
+    ...THREE_LOGINS,
+    'reading:2': { sevenDay: { pct: 13, resetsAt: WEEK_RESET }, at: NOW - 60_000 },
+    'reading:3': { sevenDay: { pct: 11, resetsAt: WEEK_RESET }, at: NOW - 59_720 },
+  }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  expect(await pane.find({ text: /8[79]% left/ })).toBeUndefined()
+  await pane.unmount()
+})
+
+test('a login whose only reading is an older version\'s is read at boot, though its schedule says later; a back-off still holds', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [10, 20]
+  w.usage['tok-2'] = [10, 30]
+  const store = new Map<string, unknown>(Object.entries({
+    ...TWO_LOGINS,
+    'reading:1': { sevenDay: { pct: 50, resetsAt: WEEK_RESET }, at: NOW - 60_000, by: '1' },
+    'usage-due:1': { next: NOW + 20 * 60_000, fails: 0, at: NOW - 60_000 },
+    'usage-due:2': { next: NOW + 20 * 60_000, fails: 2, at: NOW - HOUR },
+  }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  expect([callsWith(w, 'tok-1'), callsWith(w, 'tok-2')]).toEqual([1, 0])
+  expect(storedOf(store, '1')?.sevenDay?.pct).toBe(20)
+})
+
+test('a session records the version it writes as, and drops the records of sessions gone a day', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.usage['tok-1'] = [10, 20]
+  const store = new Map<string, unknown>(Object.entries({
+    accounts: [{ id: '1', slot: '', email: 'one@example.com' }],
+    'writer:gone': { version: 1, at: NOW - 25 * HOUR },
+    'writer:recent': { version: 1, at: NOW - HOUR },
+  }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  expect(store.get('writer:session-1')).toEqual({ version: 1, at: NOW })
+  expect([store.has('writer:gone'), store.has('writer:recent')]).toEqual([false, true])
+})
+
+/** Every text the pane draws, one per line. */
+async function paneText($: Engine): Promise<string> {
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  const texts = (await pane.findAll({ type: 'Text' })).map(t => t.text ?? '')
+  await pane.unmount()
+  return texts.join('\n')
+}
+
+/**
+ * A switch to login 2 by Use now, unproven by any response, with a turn dying on a limit `delay` after it; `last`,
+ * where given, the response measured between, by whose week it says which login it spent.
+ */
+async function stopDuringSwitch($: Engine, on: On, delay: number, said: string, last?: SessionRateLimit[]): Promise<{ w: World; store: Map<string, unknown>; clock: MockClock }> {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [10, 40]
+  w.usage['tok-2'] = [10, 41]
+  w.weekResets = { 'tok-2': OTHER_WEEK }
+  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off' }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  await pane.press({ key: 'use-2' })
+  await clock.settle()
+  await pane.unmount()
+  if (last !== undefined) {
+    await clock.advance(SETTLE_WAIT)
+    w.limits = last
+    await respond($, clock, w)
+  }
+  await clock.advance(delay)
+  await $.classic.StopFailure({ error: 'rate_limit', last_assistant_message: said })
+  await clock.settle()
+  return { w, store, clock }
+}
+
+/** Past the 35 s a switch takes to land. */
+const SETTLE_WAIT = 36_000
+
+// Review codex-c4 STOP-OWNER-CROSS [STOP-CROSSING], the instance: a stop with no response since an unproven switch
+// marks the login moved to provisionally, and the settle that finds the switch did not take drops it.
+test('a stop before any response proves a switch, when the switch then proves not to have taken, leaves the login moved to unmarked', async ($, on) => {
+  const { w, store, clock } = await stopDuringSwitch($, on, 40_000, 'Claude usage limit reached.')
+  w.limits = [{ kind: 'seven_day', percentUsed: 42, resetsAt: WEEK_RESET }]
+  await clock.advance(4 * 60_000 + 10_000)
+  await respond($, clock, w)
+  expect(w.toasts.some(t => /did not take/.test(t))).toBe(true)
+  expect(store.get('mark:2')).toBeUndefined()
+})
+
+// Review codex-c4 STOP-OWNER-CROSS [STOP-CROSSING], the class: every moment after the settle window, every kind of stop.
+const UNPROVEN_STOPS: [string, string, string][] = [
+  ['5-hour', "You've hit your session limit", 'mark:2'],
+  ['weekly', "You've hit your weekly limit", 'week-mark:2'],
+  ['plain', 'Claude usage limit reached.', 'mark:2'],
+]
+for (const delay of [36_000, 50_000]) {
+  for (const [kind, said, key] of UNPROVEN_STOPS) {
+    test(`a ${kind} stop ${delay / 1000} s into a switch that proves not to have taken leaves no ${key}`, async ($, on) => {
+      const { w, store, clock } = await stopDuringSwitch($, on, delay, said)
+      w.limits = [{ kind: 'seven_day', percentUsed: 42, resetsAt: WEEK_RESET }]
+      await clock.advance(4 * 60_000 + 10_000)
+      await respond($, clock, w)
+      expect([kind, delay, store.get(key)]).toEqual([kind, delay, undefined])
+    })
+  }
+}
+
+// Review opus-c4 F3 [STOP-CROSSING]: a response since the switch names the stop's login by its week.
+for (const [kind, said, key] of UNPROVEN_STOPS) {
+  test(`a ${kind} stop whose last response since an unproven switch carries the login left's week marks that login, not the one moved to`, async ($, on) => {
+    const last = [{ kind: 'five_hour', percentUsed: 100, resetsAt: '2026-10-12T12:00:00Z' }, { kind: 'seven_day', percentUsed: 41, resetsAt: WEEK_RESET }]
+    const { store } = await stopDuringSwitch($, on, 61_000, said, last)
+    expect([kind, store.get(key), store.get(key.replace(':2', ':1')) !== undefined]).toEqual([kind, undefined, true])
+  })
+}
+
+// Review opus-c4 F1 [STICKY-NOTICE]: the line stands while an older version writes, and falls once it has stopped.
+test('the older-session line falls once no older version has written for half an hour, on any login', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [10, 20]
+  w.usage['tok-2'] = [10, 30]
+  w.weekResets = { 'tok-2': OTHER_WEEK }
+  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off' }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  const offenders: string[] = []
+  for (const id of ['1', '2']) {
+    store.set(`reading:${id}`, { sevenDay: { pct: 50, resetsAt: WEEK_RESET }, at: clock.now() + 1, by: id })
+    await clock.advance(61_000)
+    if (!/older account-rotator still runs/.test(await bandText($))) offenders.push(`reading:${id} just written: no line`)
+    await clock.advance(31 * 60_000)
+    if (/older account-rotator still runs/.test(await bandText($))) offenders.push(`reading:${id} quiet half an hour: line still up`)
+  }
+  expect(offenders).toEqual([])
+})
+
+// Review opus-c4 F2 [SILENT-UNREAD]: a login no profile call names is unread, and the pane says why, whatever the failure.
+for (const status of [429, 500, 401]) {
+  test(`a login whose profile call answers ${status} is not read, and its check error says why`, async ($, on) => {
+    const w = fresh()
+    w.keychain['Claude Code-credentials'] = blob('tok-1')
+    w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+    w.usage['tok-1'] = [10, 20]
+    w.usage['tok-2'] = [10, 30]
+    w.profileFailing = { 'tok-2': status }
+    const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off' }))
+    const clock = world(on, w, store)
+    await start($, clock)
+    await clock.advance(10 * 60_000)
+    expect(callsWith(w, 'tok-2')).toBe(0)
+    expect((store.get('check-error:2') as { why?: string } | undefined)?.why).toMatch(new RegExp(`profile call answered HTTP ${status}`))
+    expect(await paneText($)).toMatch(new RegExp(`profile call answered HTTP ${status}`))
+  })
+}
+
+/** The band's text above the prompt, or '' where no band is drawn. */
+async function bandText($: Engine): Promise<string> {
+  try {
+    const band = await mountBand($)
+    const texts = (await band.findAll({ type: 'Text' })).map(t => t.text ?? '')
+    await band.unmount()
+    return texts.join('\n')
+  } catch (error) {
+    if (/no implementation for ui\.render/.test(String(error))) return ''
+    throw error
+  }
 }

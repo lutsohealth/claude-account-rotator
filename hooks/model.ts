@@ -282,14 +282,14 @@ export function fableSpentNotice(view: View, now: number): string | undefined {
 }
 
 /** Why a turn that died on the Fable week left the session where it was. */
-export type StayReason = 'chrome' | 'off' | 'blocked' | 'pending' | 'fable-spent' | 'no-room'
+export type StayReason = 'chrome' | 'off' | 'blocked' | 'fable-spent' | 'no-room'
 
 /** Claude Code's own way out of the Fable limit. */
 const FABLE_WAY_OUT = 'Run /usage-credits to continue or switch models with /model.'
 
 /**
  * For a Fable stop the rotation did not act on: why, in the order the rotation
- * checks (Connect, rotation off, Claude Code's policy, a switch pending), then
+ * checks for a stop (Connect, rotation off, Claude Code's policy), then
  * no account with Fable room, then no account ready at all, and the words that
  * say it with the way out. Undefined where the session can move. `skip` holds
  * the accounts a switch did not take.
@@ -299,7 +299,6 @@ export function fableStay(view: View, now: number, isConnecting: boolean, skip: 
   if (isConnecting) return stay('chrome', ' while Claude in Chrome connects, so the session stays.')
   if (view.rotateTo === 'off') return stay('off', ', and usage based rotation is disabled, so the session stays. Pick another Move to in the accounts pane.')
   if (view.isSwitchBlocked) return stay('blocked', ", and Claude Code's policy stops this session from switching accounts.")
-  if (view.pending !== undefined) return stay('pending', ` while the switch to account ${view.pending.id} is still settling.`)
   const spent = fableSpentNotice(view, now)
   if (spent !== undefined) return { reason: 'fable-spent', text: spent }
   if (pickTarget({ ...view, accounts: view.accounts.filter(a => !skip.has(a.id)) }, now, 'fable') !== undefined) return undefined
@@ -454,18 +453,29 @@ export function readingFromLimits(
   return { ...(fiveHour ? { fiveHour } : {}), ...(sevenDay ? { sevenDay } : {}), at: now }
 }
 
-/** True when two readings agree within a few points on every shared window. */
-export function sameUsage(a: Reading | undefined, b: Reading | undefined, now: number): boolean {
+/** The version of the store's shapes this mod writes, stamped on `usage:<id>` and `writer:<sessionId>`. */
+export const WRITER_VERSION = 1
+
+/**
+ * Two week resets name one account's week: within an hour of each other, or a whole number of weeks apart (a
+ * reading from before a reset against one after it). Each account's week resets at a time of its own.
+ */
+export function isSameWeek(a: string | undefined, b: string | undefined): boolean {
   if (a === undefined || b === undefined) return false
-  const pairs: [UsageWindow | undefined, UsageWindow | undefined][] = [
-    [a.fiveHour, b.fiveHour],
-    [a.sevenDay, b.sevenDay],
-  ]
-  const shared = pairs.filter(([x, y]) => x !== undefined && y !== undefined)
-  return (
-    shared.length > 0 &&
-    shared.every(([x, y]) => Math.abs((windowPct(x, now) ?? 0) - (windowPct(y, now) ?? 0)) <= 3)
-  )
+  const gap = Math.abs(Date.parse(a) - Date.parse(b)) % WEEK_MS
+  return Number.isFinite(gap) && (gap <= SAME_WEEK_MS || WEEK_MS - gap <= SAME_WEEK_MS)
+}
+
+/**
+ * Whose week a response's reading is: every login whose stored week resets with it. A response proves its login
+ * only when this is that one login; one with no week, or whose week two logins share, proves none.
+ */
+export function whoseWeek(reading: Reading | undefined, readings: Readonly<Record<string, Reading | undefined>>): string[] {
+  const reset = reading?.sevenDay?.resetsAt
+  if (reset === undefined) return []
+  return Object.entries(readings)
+    .filter(([, r]) => isSameWeek(r?.sevenDay?.resetsAt, reset))
+    .map(([id]) => id)
 }
 
 /** The part of a stored login Claude Code keeps in the keychain (on Linux, a file) that matters here. */
