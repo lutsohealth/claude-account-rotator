@@ -4457,6 +4457,24 @@ test('a stop before any response proves a switch keeps its mark once a response 
   expect(store.get('mark:2')).toBeDefined()
 })
 
+test('a 5-hour stop the revert drops leaves the 5-hour window a usage read since reported', async ($, on) => {
+  const { w, store, clock } = await stopDuringSwitch($, on, 40_000, "You've hit your session limit", undefined, { 'tok-2': [null, 41] })
+  // The settle reads login 2 at the response: its usage now reports a 5-hour window, and the response is login 1's.
+  w.usage['tok-2'] = [20, 41]
+  w.limits = [{ kind: 'seven_day', percentUsed: 42, resetsAt: WEEK_RESET }]
+  await clock.advance(4 * 60_000 + 10_000)
+  await respond($, clock, w)
+  expect(w.toasts.some(t => /did not take/.test(t))).toBe(true)
+  expect([store.get('mark:2'), store.get('no-five-hour:2')]).toEqual([undefined, false])
+})
+
+test('a stop that left a login\'s 5-hour window as it was changes nothing there when it is reverted', async ($, on) => {
+  const { store, clock } = await stopDuringSwitch($, on, 40_000, 'Claude usage limit reached.', undefined, { 'tok-2': [null, 41] })
+  store.set('no-five-hour:2', false)
+  await endSession($, clock)
+  expect(store.get('no-five-hour:2')).toBe(false)
+})
+
 test('two 5-hour stops on one unproven switch revert to what was there before the first', async ($, on) => {
   const { store, clock } = await stopDuringSwitch($, on, 40_000, "You've hit your session limit", undefined, { 'tok-2': [null, 41] })
   await $.classic.StopFailure({ error: 'rate_limit', last_assistant_message: "You've hit your session limit" })

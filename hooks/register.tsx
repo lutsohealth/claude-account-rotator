@@ -130,11 +130,20 @@ const OLDER_WRITER_MS = 30 * 60_000
 let lastMeasured: { at: number; reading: Reading | undefined } | undefined
 /**
  * A stop marked on the login moved to before any response proved the switch (`since`, its start), with what the stop
- * changed beside its marks: the login's `no-five-hour` before it (undefined: none stored) and whether this session had
- * already stopped on the Fable week. Kept only when a settle proves the switch, or a stop's own move leaves it; undone
- * by every other end of the switch: a settle that finds it did not take, a give-up, another switch, the session's end.
+ * changed beside its marks: the login's `no-five-hour`, where the stop changed it (`before`, undefined when none was
+ * stored, and what it `written`), and whether this session had already stopped on the Fable week. Kept only when a
+ * settle proves the switch, or a stop's own move leaves it; undone by every other end of the switch: a settle that
+ * finds it did not take, a give-up, another switch, the session's end.
  */
-let provisionalStop: { id: string; since: number; noFiveHour: boolean | undefined; wasFableStopped: boolean } | undefined
+let provisionalStop:
+  | { id: string; since: number; wasFableStopped: boolean; noFiveHour?: { before: boolean | undefined; written: boolean | undefined } }
+  | undefined
+
+/** A login's stored `no-five-hour`; undefined when none is stored. */
+async function storedNoFiveHour($: Host, id: string): Promise<boolean | undefined> {
+  const value = await $.store.get(`no-five-hour:${id}`)
+  return typeof value === 'boolean' ? value : undefined
+}
 /** The `claude auth login` child of the sign-in under way, so Cancel can end it. */
 let running: HookStream<ProcessSpawnChunk, ProcessSpawnResult> | undefined
 /** The login this session is signing in; a stored 'logging-in' from a session that died is checked again. */
@@ -1055,13 +1064,16 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
     const since = view.pending?.since
     const hasResponseSince = since !== undefined && lastMeasured !== undefined && lastMeasured.at > since
     const owner = since === undefined || !hasResponseSince ? active : provenStopper(view, lastMeasured?.reading)
-    // A second stop on the same unproven switch keeps what the first found before it.
-    if (since !== undefined && !hasResponseSince && provisionalStop?.since !== since) {
-      const before = await $.store.get(`no-five-hour:${active.id}`)
-      provisionalStop = { id: active.id, since, noFiveHour: typeof before === 'boolean' ? before : undefined, wasFableStopped: view.isFableStopped === true }
-    }
+    const isProvisional = since !== undefined && !hasResponseSince
+    const before = isProvisional ? await storedNoFiveHour($, active.id) : undefined
     if (owner === undefined) await debug($, `a stop while the switch to account ${view.pending?.id} is unproven marks no account`)
     else need = await markStop($, owner, stop.last_assistant_message)
+    if (isProvisional) {
+      // A second stop on the same unproven switch keeps what the first found before it.
+      const kept = provisionalStop?.since === since ? provisionalStop : { id: active.id, since, wasFableStopped: view.isFableStopped === true }
+      const written = await storedNoFiveHour($, active.id)
+      provisionalStop = kept.noFiveHour === undefined && written !== before ? { ...kept, noFiveHour: { before, written } } : kept
+    }
   }
   // A switch still settling stays settling: only a new switch, or a response that proves one, ends it. The stop may
   // move the session meanwhile (maybeRotate lets a stop through a settling switch), and that switch settles anew.
@@ -1081,12 +1093,21 @@ async function undoProvisionalStop($: Host, pending?: { id: string; since: numbe
   const p = provisionalStop
   provisionalStop = undefined
   if (p === undefined || (pending !== undefined && (p.id !== pending.id || p.since !== pending.since))) return
-  if (p.noFiveHour === undefined) await $.store.delete(`no-five-hour:${p.id}`)
-  else await saveNoFiveHour($, p.id, p.noFiveHour)
-  await setView($, v => {
-    const { [p.id]: _gone, ...noFiveHour } = v.noFiveHour ?? {}
-    return { ...v, isFableStopped: p.wasFableStopped, ...(p.noFiveHour === undefined ? { noFiveHour } : {}) }
-  })
+  // Only what the stop wrote goes back, and only while no usage read since has said more than the stop did.
+  const n = p.noFiveHour
+  const read = await storedReading($, p.id)
+  const isReadSince = read?.src === 'body' && read.at > p.since
+  if (n !== undefined && !isReadSince && (await storedNoFiveHour($, p.id)) === n.written) {
+    if (n.before !== undefined) await saveNoFiveHour($, p.id, n.before)
+    else {
+      await $.store.delete(`no-five-hour:${p.id}`)
+      await setView($, v => {
+        const { [p.id]: _gone, ...noFiveHour } = v.noFiveHour ?? {}
+        return { ...v, noFiveHour }
+      })
+    }
+  }
+  await setView($, v => ({ ...v, isFableStopped: p.wasFableStopped }))
   const dropped: string[] = []
   for (const key of [`mark:${p.id}`, `week-mark:${p.id}`]) {
     const m = markFrom(await $.store.get(key))
