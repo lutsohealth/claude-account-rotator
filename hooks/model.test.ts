@@ -854,3 +854,23 @@ test('the sign-in\'s tier comes from its rateLimitTier, and claude auth status\'
   const profile = { account: { email: 'a@b.c' }, organization: { uuid: 'o', name: 'N', plan_display_name: 'Ultra' } }
   expect(identityFromProfile(profile)?.planName).toBe('Ultra')
 })
+
+// Review codex-c5 CROSS-PLAN-TIER (Opus advisory TEAM-TIER-PRECEDENCE): a Max-shaped tier names only a max plan, or one with no word.
+test('a Max tier never renames a Pro, Team, Enterprise or unknown plan', () => {
+  const expected = { pro: 'Pro', team: 'Team', enterprise: 'Enterprise', galaxy: 'galaxy' } as const
+  const bad = Object.entries(expected).flatMap(([plan, want]) =>
+    ['default_claude_max_20x', 'default_claude_max_5x', 'max_20x', 'max_5x'].flatMap(tier => {
+      const got = planName({ plan, tier }, false)
+      return got === want ? [] : [`${plan}/${tier}: ${got}`]
+    }))
+  expect(bad).toEqual([])
+  expect(planName({ tier: 'default_claude_max_20x' }, false)).toBe('Ultra')
+})
+
+// Review codex-c5 OWN-COMPANY-MATCH (Opus advisory COMPANY-EXACT-MATCH): the own organization matches whatever its spaces and the email's case.
+test('the organization named for the account\'s own email is no Company, whatever its outer spaces or the email\'s case', () => {
+  const names = [" a@b.c's Organization ", "A@B.C's Organization", "a@b.c's Organization ", "a@b.c's Organization"]
+  expect(names.filter(orgName => companyOf({ email: 'a@b.c', orgName }) !== undefined)).toEqual([])
+  expect(companyOf({ email: 'A@b.c', orgName: "a@b.c's Organization" })).toBeUndefined()
+  expect(companyOf({ email: 'a@b.c', orgName: "a@b.c's Organization Team" })).toBe("a@b.c's Organization Team")
+})

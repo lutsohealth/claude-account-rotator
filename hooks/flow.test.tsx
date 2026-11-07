@@ -4745,3 +4745,83 @@ test('an account in another organization draws it as its Company, before the pla
   w.orgNames = { 'tok-1': 'Lutso Health' }
   expect(await aboutOne(on, $, w)).toEqual(['Lutso Health · Max'])
 })
+
+// #21 round 1, [SIGN-IN-OWNED-STATE]: what a sign-in owns (its plan's name, its tier, its usage and no-five-hour) goes
+// with it when a new sign-in takes the account.
+
+/** The text the pane draws under `email`: its Company, plan and Chrome. */
+async function aboutOf($: Engine, email: string): Promise<string | undefined> {
+  const pane = await mountPane($)
+  const texts = (await pane.findAll({ type: 'Text' })).map(t => t.text ?? '')
+  await pane.unmount()
+  const at = texts.indexOf(email)
+  return at < 0 ? `(no row for ${email})` : texts[at + 1]
+}
+
+// Review codex-c5 STALE-PLAN-NAME and STALE-TIER: a stored account another sign-in now holds keeps neither.
+for (const [plan, tier, want] of [
+  ['max', 'default_claude_max_5x', 'Max'],
+  ['pro', undefined, 'Pro'],
+  ['team', undefined, 'Team'],
+  ['enterprise', undefined, 'Enterprise'],
+] as const) {
+  for (const [kept, field] of [[{ planName: 'Ultra' }, 'planName'], [{ tier: 'default_claude_max_20x' }, 'tier']] as const) {
+    test(`a new ${plan} sign-in on an account whose old one left ${field} keeps none of it`, async ($, on) => {
+      const w = planWorld(blob('tok-1', NOW + 6 * HOUR, plan, tier), [10, 30])
+      const store = new Map<string, unknown>(Object.entries({ accounts: [{ id: '1', slot: '', email: 'old@example.com', ...kept }], 'rotate-to': 'off' }))
+      const clock = world(on, w, store)
+      await start($, clock)
+      const stored = (store.get('accounts') as Record<string, unknown>[])[0]
+      expect([plan, field, field === 'tier' && tier !== undefined ? undefined : stored[field]]).toEqual([plan, field, undefined])
+      expect([plan, field, await paneText($)]).toEqual([plan, field, expect.stringMatching(new RegExp(`^${want}$`, 'm'))])
+    })
+  }
+}
+
+// Review opus-c5 F1: a /login that brings another sign-in replaces the plan the old one named.
+type SignInCase = { name: string; first: string; firstNames: Record<string, string>; second: string; owner: string; secondNames?: Record<string, string>; want: string }
+const SIGN_IN_CASES: SignInCase[] = [
+  { name: 'another person on Max 5x, after a profile named Ultra', first: blob('tok-1'), firstNames: { 'tok-1': 'Ultra' }, second: blob('tok-9', NOW + 6 * HOUR, 'max', 'default_claude_max_5x'), owner: 'nine@example.com', want: 'Org · Max' },
+  { name: 'another person on Pro, after a Max 20x tier', first: blob('tok-1', NOW + 6 * HOUR, 'max', 'default_claude_max_20x'), firstNames: {}, second: blob('tok-9', NOW + 6 * HOUR, 'pro'), owner: 'nine@example.com', want: 'Org · Pro' },
+  { name: 'the same person, now on Pro, after a profile named Ultra', first: blob('tok-1'), firstNames: { 'tok-1': 'Ultra' }, second: blob('tok-1b', NOW + 6 * HOUR, 'pro'), owner: 'one@example.com', want: 'Org · Pro' },
+  { name: 'the same person, now on Pro, after a Max 20x tier', first: blob('tok-1', NOW + 6 * HOUR, 'max', 'default_claude_max_20x'), firstNames: {}, second: blob('tok-1b', NOW + 6 * HOUR, 'pro'), owner: 'one@example.com', want: 'Org · Pro' },
+  { name: 'another person whose profile names Max, after a profile named Ultra', first: blob('tok-1'), firstNames: { 'tok-1': 'Ultra' }, second: blob('tok-9', NOW + 6 * HOUR, 'max'), owner: 'nine@example.com', secondNames: { 'tok-9': 'Max' }, want: 'Org · Max' },
+]
+for (const c of SIGN_IN_CASES) {
+  test(`a /login as ${c.name} draws the new sign-in's plan`, async ($, on) => {
+    const w = fresh()
+    const secondToken = (JSON.parse(c.second) as { claudeAiOauth: { accessToken: string } }).claudeAiOauth.accessToken
+    w.keychain['Claude Code-credentials'] = c.first
+    w.usage['tok-1'] = [10, 30]
+    w.usage[secondToken] = [5, 5]
+    w.owners = { 'tok-1': 'one@example.com', [secondToken]: c.owner }
+    w.planNames = { ...c.firstNames, ...(c.secondNames ?? {}) }
+    const clock = world(on, w, { accounts: [{ id: '1', slot: '', email: 'one@example.com' }], 'rotate-to': 'off' })
+    await start($, clock)
+    expect([c.name, 'before', await aboutOf($, 'one@example.com')]).toEqual([c.name, 'before', 'Org · Ultra'])
+    w.keychain['Claude Code-credentials'] = c.second
+    await $.command.run(LOGIN)
+    await clock.settle()
+    expect([c.name, 'after', await aboutOf($, c.owner)]).toEqual([c.name, 'after', c.want])
+  })
+}
+
+// Review opus-c5 F2: the old sign-in's no-five-hour and reading infer nothing about the new one.
+for (const status of [503, 429, 500]) {
+  test(`a /login as another max login whose first usage read answers ${status} is not drawn Ultra by the old one's usage`, async ($, on) => {
+    const w = fresh()
+    w.keychain['Claude Code-credentials'] = blob('tok-1')
+    w.usage['tok-1'] = [null, 30]
+    w.usage['tok-9'] = [10, 5]
+    w.owners = { 'tok-1': 'one@example.com', 'tok-9': 'nine@example.com' }
+    w.loginToken = 'tok-9'
+    w.loginPlan = 'max'
+    const clock = world(on, w, { accounts: [{ id: '1', slot: '', email: 'one@example.com' }], 'rotate-to': 'off' })
+    await start($, clock)
+    expect([status, 'before', await aboutOf($, 'one@example.com')]).toEqual([status, 'before', 'Org · Ultra'])
+    w.failing = { 'tok-9': status }
+    await $.command.run(LOGIN)
+    await clock.settle()
+    expect([status, 'after', await aboutOf($, 'nine@example.com')]).toEqual([status, 'after', 'Org · Max'])
+  })
+}
