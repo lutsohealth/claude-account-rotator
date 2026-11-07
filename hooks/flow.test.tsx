@@ -3770,7 +3770,10 @@ for (const [name, by] of [['no owner', undefined], ['another login as owner', '2
     await start($, clock)
     await $.classic.StopFailure({ error: 'rate_limit', last_assistant_message: 'You have reached your Fable limit' })
     await clock.settle()
-    expect((store.get('usage:1') as { sevenDay?: unknown } | undefined)?.sevenDay).toBeUndefined()
+    // The stop stores its Fable mark under usage:1, and takes no week from the reading no login owns.
+    const stored = store.get('usage:1') as { sevenDay?: unknown; src?: string } | undefined
+    expect(stored?.src).toBe('stop')
+    expect(stored?.sevenDay).toBeUndefined()
   })
 }
 

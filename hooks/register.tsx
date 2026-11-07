@@ -583,7 +583,8 @@ async function holderOf($: Host, account: Account, credential: Credential, isLiv
   const { who, status } = await fetchIdentity($, credential.accessToken)
   if (who?.email === undefined) {
     // No usage is read for a sign-in nobody has named: the pane says why, until a check names it.
-    await saveCheckError($, account.id, `the profile call answered HTTP ${status}, so its usage is not read until it names the sign-in`)
+    const what = status >= 200 && status < 300 ? 'the profile answer named no email' : `the profile call answered HTTP ${status}`
+    await saveCheckError($, account.id, `${what}, so its usage is not read until it names the sign-in`)
     return undefined
   }
   const holder = { token, who: { ...who, email: who.email, ...(credential.plan === undefined ? {} : { plan: credential.plan }) } }
