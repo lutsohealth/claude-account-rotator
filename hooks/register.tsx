@@ -168,6 +168,12 @@ async function storedReading($: Host, id: string): Promise<Reading | undefined> 
   return typeof r === 'object' && r !== null && typeof (r as Reading).at === 'number' ? (r as Reading) : undefined
 }
 
+/** A login's stored reading when that login produced it; one with no owner, or another's, is no one's to build on. */
+async function ownedReading($: Host, id: string): Promise<Reading | undefined> {
+  const r = await storedReading($, id)
+  return r?.by === id ? r : undefined
+}
+
 /** What the store holds beside a login's reading, each under its own key: its stop marks, and whether it has no 5-hour window. */
 type Beside = { mark?: Mark; weekMark?: Mark; noFiveHour?: boolean }
 
@@ -194,7 +200,7 @@ async function saveNoFiveHour($: Host, id: string, hasNoFiveHour: boolean): Prom
 async function saveWeekMark($: Host, id: string, weekMark: Mark): Promise<void> {
   await $.store.set(`week-mark:${id}`, weekMark)
   const now = await $.clock.now()
-  const read = (await storedReading($, id)) ?? { at: weekMark.at }
+  const read = (await ownedReading($, id)) ?? { at: weekMark.at }
   await setView($, v => {
     const weekMarks = { ...v.weekMarks, [id]: weekMark }
     return { ...v, weekMarks, readings: { ...v.readings, [id]: viewed(read, { ...besideOf(v, id), weekMark }, v.fiveHourLimit, now) } }
@@ -228,7 +234,7 @@ async function keepLegacyMark($: Host, id: string, legacy: Mark): Promise<void> 
 async function saveMark($: Host, id: string, mark: Mark): Promise<void> {
   await $.store.set(`mark:${id}`, mark)
   const now = await $.clock.now()
-  const read = (await storedReading($, id)) ?? { at: mark.at }
+  const read = (await ownedReading($, id)) ?? { at: mark.at }
   await setView($, v => ({
     ...v,
     marks: { ...v.marks, [id]: mark },
@@ -341,7 +347,7 @@ async function setFiveHourLimit($: Host, fiveHourLimit: FiveHourLimit): Promise<
   const now = await $.clock.now()
   const stored: Record<string, Reading> = {}
   for (const id of Object.keys((await getView($)).readings)) {
-    const r = await storedReading($, id)
+    const r = await ownedReading($, id)
     if (r !== undefined) stored[id] = r
   }
   await setView($, v => ({
@@ -792,13 +798,24 @@ async function settlePending($: Host, isResponse: boolean): Promise<void> {
   const reading = readingFromLimits((await $.session.usage()).rateLimits, now)
   const target = accounts.find(a => a.id === pending.id)
   if (target !== undefined) await checkAccount($, target)
-  if (sameUsage(reading, (await getView($)).readings[pending.id], now)) {
+  const isTarget = (v: View) => sameUsage(reading, v.readings[pending.id], now)
+  const isSource = (v: View) => sameUsage(reading, v.readings[pending.from], now)
+  // A response that matches the login left as well tells nothing: confirmed on it, the old login's next responses
+  // would be stored as the new one's.
+  if (isTarget(await getView($)) && !isSource(await getView($))) {
     untaken.delete(pending.id)
     await setView($, v => ({ ...v, pending: undefined }))
   } else if (isResponse && now - pending.since > CONFIRM_GIVE_UP_MS) {
     const from = accounts.find(a => a.id === pending.from)
     if (from !== undefined) await checkAccount($, from)
-    if (from === undefined || !sameUsage(reading, (await getView($)).readings[from.id], now)) {
+    const after = await getView($)
+    // Minutes on, a switch has landed if it ever will: only a response that is the old login's alone points back.
+    if (isTarget(after) && isSource(after)) {
+      untaken.delete(pending.id)
+      await setView($, v => ({ ...v, pending: undefined }))
+      return
+    }
+    if (from === undefined || !isSource(after)) {
       await setView($, v => ({ ...v, pending: undefined }))
       tell($, `The switch to Claude account ${pending.id} has not shown in responses.`)
       return
@@ -882,7 +899,7 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
     const after = await getView($)
     const r = after.readings[active.id]
     // A mark goes on the read as stored, so a 5-hour window the limit hides stays in it.
-    const read = (await storedReading($, active.id)) ?? r
+    const read = (await ownedReading($, active.id)) ?? r
     // Claude's own words tell the Fable week from any other limit; the usage read decides only where there are none.
     const said = stop.last_assistant_message
     const isFable = said === undefined || said === '' ? isFableSpent(r, now) : isFableStop(said)
