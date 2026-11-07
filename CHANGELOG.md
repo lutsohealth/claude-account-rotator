@@ -2,6 +2,11 @@
 
 What each version of the account rotator changed. To get each one as Claude Code starts, turn on auto-update: in `/plugin`, open **Marketplaces**, pick **claude-account-rotator** and choose **Enable auto-update**. To update by hand, run `claude plugin marketplace update claude-account-rotator`, then `claude plugin update account-rotator@claude-account-rotator`, and start a new session.
 
+## 0.5.2-lutso.1 - 2026-11-07
+
+- **No 5h row for an account with no 5-hour window.** An account whose usage reports none, such as a verified Ultra account, has no 5h row in the panel and leaves its place in the footer's top row blank. With no 5-hour window on any account, the footer's top row is left out.
+- **The footer always shows which account needs a sign-in.** Its mark goes on a row that draws glyphs, whichever rows the panel's **Display** turns off; when no other row would draw them, the top row stays for it.
+
 ## 0.5.1-lutso.1 - 2026-11-07
 
 - **Each account shows its own usage.** A session no longer records its usage under another account: not in its first moments, before it knows which account it is on, and not after a switch whose first answers still came from the account it left. An account no longer shows another account's week, and **New on** no longer names a spent account as having the most room.
