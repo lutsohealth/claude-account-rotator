@@ -222,6 +222,7 @@ function world(on: On, w: World, store: Record<string, unknown> | Map<string, un
     return { text: e.text }
   })
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  on('session.end', (_$, e) => ({ sessionId: e.sessionId }))
   on('session.id', () => ({ value: 'session-1' }))
   on('tool.check', () => ({ decision: 'allow' as const }))
   on('session.usage', () => ({ value: { startedAt: NOW, context: { window: 200_000 }, rateLimits: w.limits } }))
@@ -4273,12 +4274,19 @@ async function paneText($: Engine): Promise<string> {
  * A switch to login 2 by Use now, unproven by any response, with a turn dying on a limit `delay` after it; `last`,
  * where given, the response measured between, by whose week it says which login it spent.
  */
-async function stopDuringSwitch($: Engine, on: On, delay: number, said: string, last?: SessionRateLimit[]): Promise<{ w: World; store: Map<string, unknown>; clock: MockClock }> {
+async function stopDuringSwitch(
+  $: Engine,
+  on: On,
+  delay: number,
+  said: string,
+  last?: SessionRateLimit[],
+  usage: Partial<World['usage']> = {},
+): Promise<{ w: World; store: Map<string, unknown>; clock: MockClock }> {
   const w = fresh()
   w.keychain['Claude Code-credentials'] = blob('tok-1')
   w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
-  w.usage['tok-1'] = [10, 40]
-  w.usage['tok-2'] = [10, 41]
+  w.usage['tok-1'] = usage['tok-1'] ?? [10, 40]
+  w.usage['tok-2'] = usage['tok-2'] ?? [10, 41]
   w.weekResets = { 'tok-2': OTHER_WEEK }
   const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off' }))
   const clock = world(on, w, store)
@@ -4391,4 +4399,274 @@ async function bandText($: Engine): Promise<string> {
     if (/no implementation for ui\.render/.test(String(error))) return ''
     throw error
   }
+}
+
+// puma-eslxj.17: every path that ends an unproven switch without proof reverts the stop it marked provisionally.
+
+/** A week reset neither login has: within no hour, and no whole number of weeks, of either. */
+const STRANGE_WEEK = '2026-10-15T20:00:00Z'
+
+/** Presses Use now on `id` in the pane. */
+async function useNow($: Engine, clock: MockClock, id: string): Promise<void> {
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  await pane.press({ key: `use-${id}` })
+  await clock.settle()
+  await pane.unmount()
+}
+
+/** Ends the session with the engine's reason word: by default as /exit does. */
+async function endSession($: Engine, clock: MockClock, reason = 'prompt_input_exit'): Promise<void> {
+  await $.session.end({ reason, sessionId: 'session-1', resume: { id: 'session-1' } } as Parameters<Engine['session']['end']>[0])
+  await clock.settle()
+}
+
+test('a stop before any response proves a switch, when a press replaces the switch, leaves the login moved to unmarked', async ($, on) => {
+  const { store, clock } = await stopDuringSwitch($, on, 40_000, 'Claude usage limit reached.')
+  expect(store.get('mark:2')).toBeDefined()
+  await useNow($, clock, '1')
+  expect(store.get('mark:2')).toBeUndefined()
+})
+
+test('a stop before any response proves a switch, when the switch gives up unproven, leaves the login moved to unmarked', async ($, on) => {
+  const { w, store, clock } = await stopDuringSwitch($, on, 40_000, 'Claude usage limit reached.')
+  w.limits = [{ kind: 'seven_day', percentUsed: 42, resetsAt: STRANGE_WEEK }]
+  await clock.advance(4 * 60_000 + 10_000)
+  await respond($, clock, w)
+  expect(w.toasts.some(t => /has not shown/.test(t))).toBe(true)
+  expect(store.get('mark:2')).toBeUndefined()
+})
+
+test('a stop before any response proves a switch, when the session ends first, leaves the login moved to unmarked', async ($, on) => {
+  const { store, clock } = await stopDuringSwitch($, on, 40_000, 'Claude usage limit reached.')
+  await endSession($, clock)
+  expect(store.get('mark:2')).toBeUndefined()
+})
+
+test('a 5-hour stop the revert drops leaves the login as having no 5-hour window again, as its usage said', async ($, on) => {
+  const { store, clock } = await stopDuringSwitch($, on, 40_000, "You've hit your session limit", undefined, { 'tok-2': [null, 41] })
+  expect(store.get('no-five-hour:2')).toBe(false)
+  await endSession($, clock)
+  expect([store.get('mark:2'), store.get('no-five-hour:2')]).toEqual([undefined, true])
+})
+
+test('a stop before any response proves a switch keeps its mark once a response proves the switch, through the session\'s end', async ($, on) => {
+  const { w, store, clock } = await stopDuringSwitch($, on, 40_000, 'Claude usage limit reached.')
+  w.limits = [{ kind: 'seven_day', percentUsed: 41, resetsAt: OTHER_WEEK }]
+  await respond($, clock, w)
+  await endSession($, clock)
+  expect(store.get('mark:2')).toBeDefined()
+})
+
+test('a 5-hour stop the revert drops leaves the 5-hour window a usage read since reported', async ($, on) => {
+  const { w, store, clock } = await stopDuringSwitch($, on, 40_000, "You've hit your session limit", undefined, { 'tok-2': [null, 41] })
+  // The settle reads login 2 at the response: its usage now reports a 5-hour window, and the response is login 1's.
+  w.usage['tok-2'] = [20, 41]
+  w.limits = [{ kind: 'seven_day', percentUsed: 42, resetsAt: WEEK_RESET }]
+  await clock.advance(4 * 60_000 + 10_000)
+  await respond($, clock, w)
+  expect(w.toasts.some(t => /did not take/.test(t))).toBe(true)
+  expect([store.get('mark:2'), store.get('no-five-hour:2')]).toEqual([undefined, false])
+})
+
+test('a stop that left a login\'s 5-hour window as it was changes nothing there when it is reverted', async ($, on) => {
+  const { store, clock } = await stopDuringSwitch($, on, 40_000, 'Claude usage limit reached.', undefined, { 'tok-2': [null, 41] })
+  store.set('no-five-hour:2', false)
+  await endSession($, clock)
+  expect(store.get('no-five-hour:2')).toBe(false)
+})
+
+test('two 5-hour stops on one unproven switch revert to what was there before the first', async ($, on) => {
+  const { store, clock } = await stopDuringSwitch($, on, 40_000, "You've hit your session limit", undefined, { 'tok-2': [null, 41] })
+  await $.classic.StopFailure({ error: 'rate_limit', last_assistant_message: "You've hit your session limit" })
+  await clock.settle()
+  await endSession($, clock)
+  expect(store.get('no-five-hour:2')).toBe(true)
+})
+
+test('a Fable stop the revert drops is no Fable stop of this session: a later read that finds every Fable week spent draws no notice', async ($, on) => {
+  const { w, clock } = await stopDuringSwitch($, on, 40_000, FABLE_STOP.last_assistant_message, undefined, { 'tok-1': [10, 40, 100], 'tok-2': [10, 41, 30] })
+  await useNow($, clock, '1')
+  w.usage['tok-2'] = [10, 41, 100]
+  await clock.advance(USAGE_IDLE_MS + 60_000)
+  expect(await bandText($)).not.toMatch(/has used its Fable week/)
+})
+
+test('a login whose schedule this version wrote is not read at boot before its time, though it has no reading of this version', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [10, 20]
+  w.usage['tok-2'] = [10, 30]
+  w.weekResets = { 'tok-2': OTHER_WEEK }
+  const store = new Map<string, unknown>(Object.entries({
+    ...TWO_LOGINS,
+    'usage-due:2': { next: NOW + 20 * 60_000, fails: 0, at: NOW - 60_000, v: 1 },
+  }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  expect(callsWith(w, 'tok-2')).toBe(0)
+  expect(store.get('usage-due:2')).toMatchObject({ next: NOW + 20 * 60_000, v: 1 })
+})
+
+test('a schedule an older version writes after boot does not hold off a login with no reading of this version', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [10, 20]
+  w.usage['tok-2'] = [10, 30]
+  w.weekResets = { 'tok-2': OTHER_WEEK }
+  const store = new Map<string, unknown>(Object.entries({
+    ...TWO_LOGINS,
+    'rotate-to': 'off',
+    'usage-due:2': { next: NOW + 12 * 60_000, fails: 1, retryAfter: 720_000, v: 1 },
+  }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  await clock.advance(10 * 60_000 + 10_000)
+  expect(callsWith(w, 'tok-2')).toBe(0)
+  // An older version read login 2 before its back-off ended, into its own key, and scheduled the next in 30 minutes.
+  store.set('reading:2', { sevenDay: { pct: 30, resetsAt: OTHER_WEEK }, at: clock.now() })
+  store.set('usage-due:2', { next: clock.now() + USAGE_IDLE_MS, fails: 0, at: clock.now() })
+  const before = callsWith(w, 'tok-2')
+  await clock.advance(61_000)
+  expect(callsWith(w, 'tok-2')).toBe(before + 1)
+  expect((store.get('usage:2') as { sevenDay?: { pct?: number } } | undefined)?.sevenDay?.pct).toBe(30)
+})
+
+/** The unproven ends of a switch a revert follows: the session's end, a press of Use now on login 1, the give-up. */
+const UNPROVEN_ENDS: [string, ($: Engine, w: World, clock: MockClock) => Promise<void>][] = [
+  ['the session end', async ($, _w, clock) => endSession($, clock)],
+  ['Use now on login 1', async ($, _w, clock) => useNow($, clock, '1')],
+  ['the give-up', async ($, w, clock) => {
+    w.limits = [{ kind: 'seven_day', percentUsed: 42, resetsAt: STRANGE_WEEK }]
+    await clock.advance(4 * 60_000 + 10_000)
+    await respond($, clock, w)
+  }],
+]
+
+// Review codex-e17 SHARED-MARK-ERASURE [UNDO-OWNERSHIP]: a mark another session wrote since the stop is not the stop's to drop.
+for (const [kind, said, key] of UNPROVEN_STOPS) {
+  for (const [name, end] of UNPROVEN_ENDS) {
+    test(`${name} of an unproven switch keeps a ${kind} ${key} another session wrote after the stop`, async ($, on) => {
+      const { w, store, clock } = await stopDuringSwitch($, on, 40_000, said)
+      const later = { pct: 100, resetsAt: '2026-10-19T03:00:00Z', at: clock.now() + 1 }
+      store.set(key, later)
+      await end($, w, clock)
+      expect([kind, name, store.get(key)]).toEqual([kind, name, later])
+    })
+  }
+}
+
+// Review opus-e17 F1 [UNDO-OWNERSHIP]: the stop's own forced read is no read since the stop; it moves no-five-hour before the stop does.
+for (const delay of [40_000, 90_000, 150_000]) {
+  for (const [name, end] of UNPROVEN_ENDS) {
+    test(`${name} of a switch a 5-hour stop ${delay / 1000} s in left unproven gives back no-five-hour:2 true`, async ($, on) => {
+      const { w, store, clock } = await stopDuringSwitch($, on, delay, "You've hit your session limit", undefined, { 'tok-2': [null, 41] })
+      expect(store.get('no-five-hour:2')).toBe(false)
+      await end($, w, clock)
+      expect([name, delay, store.get('no-five-hour:2')]).toEqual([name, delay, true])
+    })
+  }
+}
+
+// Review opus-e17 F3 [UNDO-OWNERSHIP]: a Fable stop proven login 1's after the provisional one stands when the provisional one goes.
+const ONES_WEEK: SessionRateLimit[] = [{ kind: 'seven_day', percentUsed: 42, resetsAt: WEEK_RESET }]
+const F3_ENDS: [string, ($: Engine, w: World, clock: MockClock) => Promise<void>][] = [
+  ['the session end', async ($, _w, clock) => endSession($, clock)],
+  ['Use now on login 1', async ($, _w, clock) => useNow($, clock, '1')],
+  ['the did-not-take settle', async ($, w, clock) => {
+    await clock.advance(4 * 60_000 + 10_000)
+    await respond($, clock, w)
+  }],
+]
+for (const [name, end] of F3_ENDS) {
+  test(`${name} of an unproven switch keeps a proven Fable stop that came after the provisional one`, async ($, on) => {
+    const { w, clock } = await stopDuringSwitch($, on, 40_000, 'Claude usage limit reached.', undefined, { 'tok-1': [10, 40, 100], 'tok-2': [10, 41, 100] })
+    w.limits = ONES_WEEK
+    await respond($, clock, w)
+    await $.classic.StopFailure(FABLE_STOP)
+    await clock.settle()
+    expect([name, 'before', /has used its Fable week/.test(await bandText($))]).toEqual([name, 'before', true])
+    await end($, w, clock)
+    expect([name, 'after', /has used its Fable week/.test(await bandText($))]).toEqual([name, 'after', true])
+  })
+}
+
+// Review opus-e17 F2 [END-IS-NOT-EXIT]: an end the process outlives (a /clear, a resume) leaves the switch, and its stop, unsettled.
+for (const reason of ['clear', 'resume']) {
+  for (const [kind, said, key] of UNPROVEN_STOPS) {
+    test(`a session end for ${reason}, which the process outlives, keeps a ${kind} stop's ${key} for the proof that follows`, async ($, on) => {
+      const { w, store, clock } = await stopDuringSwitch($, on, 40_000, said)
+      await endSession($, clock, reason)
+      w.limits = [{ kind: 'seven_day', percentUsed: 41, resetsAt: OTHER_WEEK }]
+      await respond($, clock, w)
+      expect([reason, kind, store.get(key) !== undefined]).toEqual([reason, kind, true])
+    })
+  }
+}
+
+// [UNDO-OWNERSHIP]: what the stop's own usage read stored is the login's, not the stop's: it stands after the revert.
+test('the usage read a stop makes 90 s into an unproven switch stands once the stop is reverted', async ($, on) => {
+  const { store, clock } = await stopDuringSwitch($, on, 90_000, "You've hit your session limit", undefined, { 'tok-2': [null, 41] })
+  const read = store.get('usage:2') as { at?: number; src?: string } | undefined
+  expect(read?.src).toBe('body')
+  await endSession($, clock)
+  expect(store.get('usage:2')).toEqual(read)
+})
+
+// [UNDO-OWNERSHIP]: a move the stop itself makes is why the mark exists: the mark stays, whatever ends the switch after.
+test('a stop that moves the session on from an unproven switch keeps its mark through the session\'s end', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [10, 40]
+  w.usage['tok-2'] = [10, 41]
+  w.weekResets = { 'tok-2': OTHER_WEEK }
+  const store = new Map<string, unknown>(Object.entries(TWO_LOGINS))
+  const clock = world(on, w, store)
+  await start($, clock)
+  await useNow($, clock, '2')
+  await clock.advance(40_000)
+  await $.classic.StopFailure({ error: 'rate_limit', last_assistant_message: 'Claude usage limit reached.' })
+  await clock.settle()
+  expect(w.toasts.some(t => /^Switched to Claude account 1/.test(t))).toBe(true)
+  await endSession($, clock)
+  expect(store.get('mark:2')).toBeDefined()
+})
+
+// Review opus-e17 F3 [UNDO-OWNERSHIP]: a proven Fable stop after a provisional Fable stop keeps the session's Fable stop.
+test('a proven Fable stop after a provisional one keeps the every-Fable notice once the provisional one is reverted', async ($, on) => {
+  const { w, clock } = await stopDuringSwitch($, on, 40_000, FABLE_STOP.last_assistant_message, undefined, { 'tok-1': [10, 40, 100], 'tok-2': [10, 41, 100] })
+  w.limits = ONES_WEEK
+  await respond($, clock, w)
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  await endSession($, clock)
+  expect(await bandText($)).toMatch(/has used its Fable week/)
+})
+
+// [END-IS-NOT-EXIT]: a reason the engine may add later keeps the mark, as 0.5.5 did.
+test('a session end for a reason the mod does not know keeps an unproven stop\'s mark', async ($, on) => {
+  const { store, clock } = await stopDuringSwitch($, on, 40_000, 'Claude usage limit reached.')
+  await endSession($, clock, 'a-reason-to-come')
+  expect(store.get('mark:2')).toBeDefined()
+})
+
+// [UNDO-OWNERSHIP]: a second stop's mark on the same unproven switch is the stop's own too.
+test('two plain stops on one unproven switch leave no mark once the session ends', async ($, on) => {
+  const { store, clock } = await stopDuringSwitch($, on, 40_000, 'Claude usage limit reached.')
+  await clock.advance(70_000)
+  await $.classic.StopFailure({ error: 'rate_limit', last_assistant_message: 'Claude usage limit reached.' })
+  await clock.settle()
+  await endSession($, clock)
+  expect(store.get('mark:2')).toBeUndefined()
+})
+
+// Review opus-e17 F2 [END-IS-NOT-EXIT], the other half: every end the process does not outlive reverts.
+for (const reason of ['prompt_input_exit', 'logout', 'other']) {
+  test(`a session end for ${reason} reverts an unproven stop's mark`, async ($, on) => {
+    const { store, clock } = await stopDuringSwitch($, on, 40_000, 'Claude usage limit reached.')
+    await endSession($, clock, reason)
+    expect([reason, store.get('mark:2')]).toEqual([reason, undefined])
+  })
 }
