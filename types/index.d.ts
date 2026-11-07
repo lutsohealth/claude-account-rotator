@@ -21,6 +21,14 @@ export type Mark = { pct: number; resetsAt: string; at: number }
 /** A usage check that failed: what failed (a stage and an HTTP status, or the error), and when, in epoch milliseconds. */
 export type CheckError = { why: string; at: number }
 
+/**
+ * When a login's usage is next read, for every session, under `usage-due:<id>`: every usage call goes through it.
+ * `next` is when a read is due, `at` when the last good one came, both epoch milliseconds; `fails` counts the failed
+ * reads since; `claim` names the session whose read is under way; `retryAfter` is the wait the last failure's
+ * Retry-After asked for, in milliseconds.
+ */
+export type UsageDue = { next: number; fails: number; claim?: string; at?: number; retryAfter?: number }
+
 /** Whether a login can serve requests, or why not. */
 export type Health =
   | { kind: 'ok'; refreshExpiresAt?: number }
