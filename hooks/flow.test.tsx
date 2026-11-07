@@ -3374,3 +3374,43 @@ test('a stop\'s mark stands until its reset through every reading writer, whethe
   await pane.unmount()
   expect(offenders).toEqual([])
 })
+
+// puma-4q7j2.8: account 3's reading was stored under account 1, and the launch pick named spent account 1.
+test('a response measured before the session knows its login is stored under no other login', async ($, on) => {
+  const w = fresh()
+  w.env = { CLAUDE_SECURESTORAGE_CONFIG_DIR: SLOT2 }
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.failing = { 'tok-1': 429 }
+  w.usage['tok-2'] = [null, 11]
+  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off' }))
+  const clock = world(on, w, store)
+  w.limits = [{ kind: 'seven_day', percentUsed: 11, resetsAt: '2026-10-18T03:00:00Z' }]
+  // The first response can land while the session is still starting, before it has read its own login.
+  const started = $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+  await $.session.measure({ context: { window: 200_000 }, rateLimits: w.limits, changed: ['rateLimits'] })
+  await started
+  await clock.settle()
+  expect(store.get('reading:1')).toBeUndefined()
+  expect((store.get('reading:2') as { sevenDay?: { pct?: number } } | undefined)?.sevenDay?.pct).toBe(11)
+})
+
+test('a stored reading no login can be shown to own is dropped, and a login whose usage check fails with no reading of its own is never the launch pick', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.failing = { 'tok-1': 429 }
+  w.usage['tok-2'] = [null, 50]
+  // Left by an older version: another login's numbers under account 1, with no owner on them.
+  const store = new Map<string, unknown>(Object.entries({
+    ...TWO_LOGINS,
+    'rotate-to': 'off',
+    'reading:1': { sevenDay: { pct: 11, resetsAt: '2026-10-18T03:00:00.000Z' }, at: NOW - HOUR },
+  }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  expect((store.get('launch-slot') as { id?: string } | undefined)?.id).toBe('2')
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  expect(await pane.find({ text: /89% left/ })).toBeUndefined()
+  await pane.unmount()
+})
