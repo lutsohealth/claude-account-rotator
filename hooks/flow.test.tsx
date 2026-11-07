@@ -1330,6 +1330,42 @@ test('a stored stop mark with no reset time, on an account whose token is not li
   await pane.unmount()
 })
 
+test('turning the 5-hour limit off moves at once to a login held back only by its 5-hour window', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [10, 96]
+  w.usage['tok-2'] = [95, 30]
+  const clock = world(on, w, TWO_LOGINS)
+  await start($, clock)
+  expect(w.envSets).toEqual([])
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  await pane.press({ key: 'five-hour-limit-off' })
+  await clock.settle()
+  expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
+  await pane.unmount()
+})
+
+test('a stop\'s mark on a login that reports a 5-hour window stands when the 5-hour limit is turned off', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [50, 40]
+  w.usage['tok-2'] = [10, 30]
+  const clock = world(on, w, TWO_LOGINS)
+  await start($, clock)
+  await $.classic.StopFailure({ error: 'rate_limit', last_assistant_message: 'Claude usage limit reached.' })
+  await clock.settle()
+  expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  await pane.press({ key: 'five-hour-limit-off' })
+  await clock.settle()
+  await pane.redraw()
+  // Login 2's read window is dropped; login 1's mark stays until its reset.
+  expect(await pane.findAll({ type: 'Text', text: /none reported$/ })).toHaveLength(1)
+  await pane.unmount()
+})
+
 test('a switch held back for a token about to refresh is said once and made once, when the refresh lands', async ($, on) => {
   const w = fresh()
   w.keychain['Claude Code-credentials'] = blob('tok-1', NOW + 5 * 60_000)
