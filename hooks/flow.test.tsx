@@ -3375,6 +3375,53 @@ test('a stop\'s mark stands until its reset through every reading writer, whethe
   expect(offenders).toEqual([])
 })
 
+// Review R1 of #9, SWITCH-FALSE-CONFIRM: a response that matches both logins confirms no switch.
+for (const [name, one, two, first, second, kept] of [
+  ['equal weeks', [null, 40], [null, 40], { kind: 'seven_day', percentUsed: 40, resetsAt: '2026-10-18T03:00:00Z' }, 55, 40],
+  ['one shared 5-hour window', [30, 40], [32, 80], { kind: 'five_hour', percentUsed: 30, resetsAt: '2026-10-12T12:00:00Z' }, 45, 80],
+] as const) {
+  test(`a switch is not confirmed by a response that matches the login left as well (${name})`, async ($, on) => {
+    const w = fresh()
+    w.keychain['Claude Code-credentials'] = blob('tok-1')
+    w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+    w.usage['tok-1'] = [...one]
+    w.usage['tok-2'] = [...two]
+    const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off' }))
+    const clock = world(on, w, store)
+    await start($, clock)
+    const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+    await pane.press({ key: 'use-2' })
+    await clock.settle()
+    await clock.advance(36_000)
+    w.limits = [first]
+    await $.session.measure({ context: { window: 200_000 }, rateLimits: w.limits, changed: ['rateLimits'] })
+    await clock.settle()
+    w.limits = [{ kind: 'seven_day', percentUsed: second, resetsAt: '2026-10-18T03:00:00Z' }]
+    await $.session.measure({ context: { window: 200_000 }, rateLimits: w.limits, changed: ['rateLimits'] })
+    await clock.settle()
+    expect((store.get('reading:2') as { sevenDay?: { pct?: number } }).sevenDay?.pct).toBe(kept)
+    await pane.unmount()
+  })
+}
+
+// Review R1 of #9, UNOWNED-READING-REUSED: a reading no login owns is not re-stamped by a stop.
+for (const [name, by] of [['no owner', undefined], ['another login as owner', '2']] as const) {
+  test(`a Fable stop does not re-stamp a stored reading with ${name}`, async ($, on) => {
+    const w = fresh()
+    w.keychain['Claude Code-credentials'] = blob('tok-1')
+    w.failing = { 'tok-1': 429 }
+    const store = new Map<string, unknown>(Object.entries({
+      accounts: [TWO_LOGINS.accounts[0]], 'rotate-to': 'off',
+      'reading:1': { sevenDay: { pct: 11, resetsAt: '2026-10-18T03:00:00Z' }, at: NOW - HOUR, ...(by ? { by } : {}) },
+    }))
+    const clock = world(on, w, store)
+    await start($, clock)
+    await $.classic.StopFailure({ error: 'rate_limit', last_assistant_message: 'You have reached your Fable limit' })
+    await clock.settle()
+    expect((store.get('reading:1') as { sevenDay?: unknown }).sevenDay).toBeUndefined()
+  })
+}
+
 // puma-4q7j2.8: account 3's reading was stored under account 1, and the launch pick named spent account 1.
 test('a response measured before the session knows its login is stored under no other login', async ($, on) => {
   const w = fresh()
