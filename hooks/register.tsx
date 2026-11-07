@@ -75,6 +75,8 @@ type Host = EngineInterface
 
 const PANE = 'claude-accounts'
 const TITLE = 'Claude accounts'
+/** The slash command that opens and closes the pane. */
+const ACCOUNTS_COMMAND = 'accounts'
 /** The dock width the pane asks for: a login's line, its buttons and its usage rows fit on one line each. */
 const PANE_COLUMNS = 64
 /** Claude Code caches a keychain read for 30 s, so a switch lands within this. */
@@ -1425,7 +1427,16 @@ export const register: Register = on => {
     $.clock.every(10 * 60_000, () => {
       void checkAll($).catch(error => debug($, `check failed: ${String(error)}`))
     })
+    // A command typed at the prompt is the person's: it opens the pane as the footer's press does, with no mouse.
+    void $.command
+      .register({ name: ACCOUNTS_COMMAND, description: `Open or close the ${TITLE} panel`, immediate: true })
+      .catch(error => debug($, `/${ACCOUNTS_COMMAND} not registered: ${String(error)}`))
     return started
+  })
+
+  on('command.run', { command: ACCOUNTS_COMMAND }, async $ => {
+    await togglePane($)
+    return { text: '' }
   })
 
   on('session.measure', async ($, e, next) => {
