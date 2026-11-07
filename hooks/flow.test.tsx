@@ -2096,6 +2096,21 @@ test('a login with no reading yet whose store says it has no 5-hour window has n
 })
 
 // Review R2 UNPINNED-BRANCH: the demo previews every row.
+// Review R2 MARKLOST ledger row 5: the dot for a login with no reading yet rode row 0, which may be left out or draw no glyphs.
+test('with the session glyphs off, the week row shows the dot of a login with no reading yet', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [20, 40]
+  w.failing = { 'tok-2': 429 }
+  const clock = world(on, w, { ...TWO_LOGINS, footer: { ...DEFAULT_FOOTER, session: 'none' } })
+  await start($, clock)
+  const footer = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'SessionMode', props: { modes: [] } })
+  const [, week] = ((await footer.find(GLYPHS))?.text ?? '').split('\n')
+  expect(week).toContain('·')
+  await footer.unmount()
+})
+
 test('the demo keeps the session row when no login has a 5-hour window', async ($, on) => {
   const w = fresh()
   w.keychain['Claude Code-credentials'] = blob('tok-1')
