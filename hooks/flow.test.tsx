@@ -4449,6 +4449,22 @@ test('a 5-hour stop the revert drops leaves the login as having no 5-hour window
   expect([store.get('mark:2'), store.get('no-five-hour:2')]).toEqual([undefined, true])
 })
 
+test('a stop before any response proves a switch keeps its mark once a response proves the switch, through the session\'s end', async ($, on) => {
+  const { w, store, clock } = await stopDuringSwitch($, on, 40_000, 'Claude usage limit reached.')
+  w.limits = [{ kind: 'seven_day', percentUsed: 41, resetsAt: OTHER_WEEK }]
+  await respond($, clock, w)
+  await endSession($, clock)
+  expect(store.get('mark:2')).toBeDefined()
+})
+
+test('two 5-hour stops on one unproven switch revert to what was there before the first', async ($, on) => {
+  const { store, clock } = await stopDuringSwitch($, on, 40_000, "You've hit your session limit", undefined, { 'tok-2': [null, 41] })
+  await $.classic.StopFailure({ error: 'rate_limit', last_assistant_message: "You've hit your session limit" })
+  await clock.settle()
+  await endSession($, clock)
+  expect(store.get('no-five-hour:2')).toBe(true)
+})
+
 test('a Fable stop the revert drops is no Fable stop of this session: a later read that finds every Fable week spent draws no notice', async ($, on) => {
   const { w, clock } = await stopDuringSwitch($, on, 40_000, FABLE_STOP.last_assistant_message, undefined, { 'tok-1': [10, 40, 100], 'tok-2': [10, 41, 30] })
   await useNow($, clock, '1')
