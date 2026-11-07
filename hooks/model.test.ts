@@ -2,6 +2,7 @@ import { expect, test } from 'claude-code/testing'
 
 import type { RotateTo, View } from '../types'
 import { weekLeaveFrom, launchOnFrom, pickLaunch, isSessionStop } from './model'
+import { USAGE_BACKOFF_MAX_MS, USAGE_CLAIM_WAIT_MS, USAGE_EARLY_MS, afterUsage, claimDueReads, isUsageDue, mayForceUsage, retryAfterFrom, usageDueFrom } from './model'
 import { DEFAULT_FOOTER, availableNow, braille, browsersFrom, chromeNote, continueTextFrom, counted, fiveHourLimitFrom, credentialFrom, credentialsFile, fableMark, fableSpentNotice, fableStay, footerStyleFrom, healthOf, identityFromProfile, isFableSpent, isFableStop, isNoBrowser, isPolicyRefusal, keepFable, keychainItem, legacyMark, markFrom, nextReset, pickTarget, pie, readingFromUsage, rotateToFrom, shouldLeave, roomColor, windowPct, withMark, withWeekMark } from './model'
 
 const NOW = Date.parse('2026-10-12T10:00:00Z')
@@ -619,4 +620,104 @@ test('every reason has its own words, naming the account and ending on Claude Co
   expect([...texts.keys()].sort()).toEqual(['blocked', 'chrome', 'no-room', 'off', 'pending'])
   expect(new Set(texts.values()).size).toBe(5)
   expect(texts.get('pending')).toMatch(/switch to account 2 is still settling/)
+})
+
+// ---------------------------------------------------------------- one usage schedule per store
+
+const MIN = 60_000
+
+test('a read is due with no schedule, within the early window, and a back-off only once it has passed', () => {
+  expect(isUsageDue(undefined, NOW)).toBe(true)
+  expect(isUsageDue({ next: NOW + USAGE_EARLY_MS, fails: 0 }, NOW)).toBe(true)
+  expect(isUsageDue({ next: NOW + USAGE_EARLY_MS + 1, fails: 0 }, NOW)).toBe(false)
+  expect(isUsageDue({ next: NOW + 1, fails: 1 }, NOW)).toBe(false)
+  expect(isUsageDue({ next: NOW, fails: 1 }, NOW)).toBe(true)
+})
+
+test('after a body the next read is in 10 minutes for a login in use and 30 for one no response read', () => {
+  expect(afterUsage(undefined, { kind: 'ok', hasResponded: true }, NOW)).toEqual({ next: NOW + 10 * MIN, fails: 0, at: NOW })
+  expect(afterUsage({ next: NOW, fails: 3, at: NOW - HOUR, retryAfter: 5 }, { kind: 'ok', hasResponded: false }, NOW)).toEqual({ next: NOW + 30 * MIN, fails: 0, at: NOW })
+})
+
+test('a failure waits its Retry-After or 2 minutes doubled per failure before, whichever is longer, at most an hour, keeping the last good read', () => {
+  const at = NOW - HOUR
+  expect(afterUsage({ next: NOW, fails: 0, at }, { kind: 'failed' }, NOW)).toEqual({ next: NOW + 2 * MIN, fails: 1, at })
+  expect(afterUsage({ next: NOW, fails: 2, at }, { kind: 'failed' }, NOW)).toEqual({ next: NOW + 8 * MIN, fails: 3, at })
+  expect(afterUsage({ next: NOW, fails: 0, at }, { kind: 'failed', retryAfter: 30 * MIN }, NOW)).toEqual({ next: NOW + 30 * MIN, fails: 1, at, retryAfter: 30 * MIN })
+  expect(afterUsage({ next: NOW, fails: 9, at }, { kind: 'failed' }, NOW).next).toBe(NOW + USAGE_BACKOFF_MAX_MS)
+  expect(afterUsage({ next: NOW, fails: 0, at }, { kind: 'failed', retryAfter: 2 * HOUR }, NOW).next).toBe(NOW + USAGE_BACKOFF_MAX_MS)
+  // A rejected sign-in is no rate limit: no back-off, so a new sign-in reads at once.
+  expect(afterUsage({ next: NOW, fails: 2, at }, { kind: 'rejected' }, NOW)).toEqual({ next: NOW + 10 * MIN, fails: 0, at })
+})
+
+test('a stop, /login or sign-in reads only past a minute since the last good read and with no back-off standing', () => {
+  expect(mayForceUsage(undefined, NOW)).toBe(true)
+  expect(mayForceUsage({ next: NOW + 9 * MIN, fails: 0, at: NOW - 30_000 }, NOW)).toBe(false)
+  expect(mayForceUsage({ next: NOW + 9 * MIN, fails: 0, at: NOW - 2 * MIN }, NOW)).toBe(true)
+  expect(mayForceUsage({ next: NOW + 9 * MIN, fails: 1, at: NOW - HOUR }, NOW)).toBe(false)
+  expect(mayForceUsage({ next: NOW - 1, fails: 1, at: NOW - HOUR }, NOW)).toBe(true)
+})
+
+test('Retry-After is read in seconds or as an HTTP date; none, 0 or junk is none', () => {
+  expect(retryAfterFrom({ 'retry-after': '1800' }, NOW)).toBe(1800_000)
+  expect(retryAfterFrom({ 'retry-after': new Date(NOW + 90_000).toUTCString() }, NOW)).toBe(90_000)
+  expect(retryAfterFrom({ 'retry-after': '0' }, NOW)).toBeUndefined()
+  expect(retryAfterFrom({ 'retry-after': 'soon' }, NOW)).toBeUndefined()
+  expect(retryAfterFrom({}, NOW)).toBeUndefined()
+})
+
+test('a stored schedule is read field by field; one with no time is none', () => {
+  expect(usageDueFrom({ next: NOW, fails: 2, claim: 's', at: NOW - 1, retryAfter: 5 })).toEqual({ next: NOW, fails: 2, claim: 's', at: NOW - 1, retryAfter: 5 })
+  expect(usageDueFrom({ next: NOW, fails: -1 })).toEqual({ next: NOW, fails: 0 })
+  expect(usageDueFrom({ fails: 0 })).toBeUndefined()
+  expect(usageDueFrom('x')).toBeUndefined()
+})
+
+/**
+ * Sessions sharing one store, on a clock of the test's: each checks at its boot and every 10 minutes, claiming
+ * what is due, as `checkAll` does, and reads the logins its claims hold. Answers the calls per login.
+ */
+async function simulate(boots: readonly number[], inUse: ReadonlySet<string>, span: number): Promise<Record<string, number>> {
+  const store = new Map<string, unknown>()
+  const shared = { get: async (key: string) => store.get(key), set: async (key: string, value: unknown) => void store.set(key, value) }
+  const ids = ['1', '2', '3', '4', '5']
+  const calls: Record<string, number> = Object.fromEntries(ids.map(id => [id, 0]))
+  let now = NOW
+  const waits: { at: number; resolve: () => void }[] = []
+  const sleep = (ms: number) => new Promise<void>(resolve => waits.push({ at: now + ms, resolve }))
+  const drain = () => new Promise(resolve => setTimeout(resolve, 0))
+  const check = async (sid: string) => {
+    const ours = await claimDueReads(shared, ids, sid, now, () => sleep(USAGE_CLAIM_WAIT_MS))
+    for (const id of ours) {
+      calls[id] = (calls[id] ?? 0) + 1
+      const due = usageDueFrom(store.get(`usage-due:${id}`))
+      store.set(`usage-due:${id}`, afterUsage(due, { kind: 'ok', hasResponded: inUse.has(id) }, now))
+    }
+  }
+  const checks = boots.flatMap((boot, i) => Array.from({ length: Math.ceil(span / (10 * MIN)) + 1 }, (_, k) => ({ at: NOW + boot + k * 10 * MIN, sid: `session-${i}` })))
+  // From event to event, in time order: checks due at one time start together, as sessions do, then the claim waits.
+  for (;;) {
+    const t = Math.min(...checks.map(c => c.at), ...waits.map(w => w.at))
+    if (!(t < NOW + span)) return calls
+    now = t
+    for (const c of checks.filter(c => c.at === t)) {
+      checks.splice(checks.indexOf(c), 1)
+      void check(c.sid)
+    }
+    await drain()
+    for (const w of waits.filter(w => w.at <= t)) {
+      waits.splice(waits.indexOf(w), 1)
+      w.resolve()
+    }
+    await drain()
+  }
+}
+
+test('five sessions on one store for an hour, two of them launched together: at most 6 calls for the login in use and 2 for each idle one', async () => {
+  const calls = await simulate([0, 0, 1 * MIN, 3.5 * MIN, 7 * MIN], new Set(['1']), HOUR)
+  expect(calls['1']).toBeLessThanOrEqual(6)
+  expect(calls['1']).toBeGreaterThanOrEqual(5)
+  for (const id of ['2', '3', '4', '5']) {
+    expect([id, calls[id]]).toEqual([id, 2])
+  }
 })

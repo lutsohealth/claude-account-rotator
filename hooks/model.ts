@@ -1,4 +1,4 @@
-import type { Account, Fill, FiveHourLimit, FooterStyle, Glyphs, Health, Highlight, LaunchOn, LaunchPick, Mark, Reading, RotateTo, UsageWindow, View } from '../types'
+import type { Account, Fill, FiveHourLimit, FooterStyle, Glyphs, Health, Highlight, LaunchOn, LaunchPick, Mark, Reading, RotateTo, UsageDue, UsageWindow, View } from '../types'
 
 /** Leave a login once its 5-hour window is this full (percent). */
 export const LEAVE_FIVE_HOUR = 90
@@ -841,5 +841,111 @@ export function planText(plan: string): string {
     default:
       return plan
   }
+}
+
+// ---------------------------------------------------------------- one usage schedule per store
+// Every session reads every login's usage, so the calls grow as sessions times logins, and the usage endpoint
+// answers 429 to all of them. One key per login, shared by every session, says when it is next read.
+
+/** A login whose responses some session stored since its last read is read again after this long. */
+export const USAGE_IN_USE_MS = 10 * 60_000
+/** A login no response read since its last read is read again after this long. */
+export const USAGE_IDLE_MS = 30 * 60_000
+/** The wait after a first failed read; each failure since doubles it, up to `USAGE_BACKOFF_MAX_MS`. */
+export const USAGE_BACKOFF_MS = 2 * 60_000
+/** The longest wait a failure or its Retry-After sets. */
+export const USAGE_BACKOFF_MAX_MS = 60 * 60_000
+/**
+ * A read due this soon is made now: the check that made the last read comes round again a little before the next
+ * falls due, the last read having come after its check began, and a timer fires late as often as early.
+ */
+export const USAGE_EARLY_MS = 30_000
+/** How long a claim holds a read for the session that made it, early window included: one that died mid-read frees it after this. */
+export const USAGE_CLAIM_MS = 90_000
+/** How long a session waits before reading its claim back: a claim another session made meanwhile wins. */
+export const USAGE_CLAIM_WAIT_MS = 300
+/** A stop, a /login or a sign-in reads a login again only once its last good read is this old. */
+export const USAGE_FORCE_AFTER_MS = 60_000
+
+/** A login's schedule as stored; anything else is none, so the read is due. */
+export function usageDueFrom(value: unknown): UsageDue | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const { next, fails, claim, at, retryAfter } = value as Record<string, unknown>
+  if (typeof next !== 'number' || !Number.isFinite(next)) return undefined
+  return {
+    next,
+    fails: Number.isInteger(fails) && (fails as number) >= 0 ? (fails as number) : 0,
+    ...(typeof claim === 'string' ? { claim } : {}),
+    ...(typeof at === 'number' && Number.isFinite(at) ? { at } : {}),
+    ...(typeof retryAfter === 'number' && Number.isFinite(retryAfter) ? { retryAfter } : {}),
+  }
+}
+
+/** A read is due: no session has scheduled one, or its time comes within the early window; a back-off's, only once it has come. */
+export const isUsageDue = (due: UsageDue | undefined, now: number): boolean =>
+  due === undefined || due.next <= now + (due.fails > 0 ? 0 : USAGE_EARLY_MS)
+
+/** A failed read set a wait that has not passed. */
+export const isBackedOff = (due: UsageDue | undefined, now: number): boolean => due !== undefined && due.fails > 0 && due.next > now
+
+/** A stop, a /login or a sign-in may read the login now: no back-off stands, and its last good read is over a minute old. */
+export const mayForceUsage = (due: UsageDue | undefined, now: number): boolean =>
+  !isBackedOff(due, now) && (due?.at === undefined || now - due.at > USAGE_FORCE_AFTER_MS)
+
+/** The schedule with this session's claim on the read: every other session finds it not due until the claim runs out. */
+export const claimUsage = (due: UsageDue | undefined, sessionId: string, now: number): UsageDue => ({
+  ...(due ?? { fails: 0 }),
+  next: now + USAGE_CLAIM_MS,
+  claim: sessionId,
+})
+
+/** The store the schedule lives in: the mod's own, which every session of it shares. */
+export type DueStore = { get: (key: string) => Promise<unknown>; set: (key: string, value: unknown) => Promise<void> }
+
+/**
+ * Claims, for `sessionId`, the read of each login whose schedule says it is due: writes the claims, waits once
+ * (`wait`, the claim wait), and answers the logins whose claim still stands. Of sessions that claim one login at
+ * once, the last to write reads it; the store has no compare-and-set, so this is a re-read after a delay, not a lock.
+ */
+export async function claimDueReads(store: DueStore, ids: readonly string[], sessionId: string, now: number, wait: () => Promise<void>): Promise<Set<string>> {
+  const claimed: string[] = []
+  for (const id of ids) {
+    const due = usageDueFrom(await store.get(`usage-due:${id}`))
+    if (!isUsageDue(due, now)) continue
+    await store.set(`usage-due:${id}`, claimUsage(due, sessionId, now))
+    claimed.push(id)
+  }
+  const ours = new Set<string>()
+  if (claimed.length === 0) return ours
+  await wait()
+  for (const id of claimed) {
+    if (usageDueFrom(await store.get(`usage-due:${id}`))?.claim === sessionId) ours.add(id)
+  }
+  return ours
+}
+
+/** The Retry-After a failed call carries, in milliseconds: seconds or an HTTP date; none, 0 or unreadable is undefined. */
+export function retryAfterFrom(headers: Readonly<Record<string, string>>, now: number): number | undefined {
+  const raw = headers['retry-after']?.trim()
+  if (raw === undefined || raw === '') return undefined
+  const ms = /^\d+$/.test(raw) ? Number(raw) * 1000 : Date.parse(raw) - now
+  return Number.isFinite(ms) && ms > 0 ? ms : undefined
+}
+
+/** What a read came to, for the schedule: a body (and whether responses were stored since the last), a failure, a rejected sign-in. */
+export type UsageOutcome = { kind: 'ok'; hasResponded: boolean } | { kind: 'failed'; retryAfter?: number } | { kind: 'rejected' }
+
+/**
+ * The schedule after a read. A body: the next in 10 minutes for a login in use, else 30. A failure: the wait its
+ * Retry-After asks, or 2 minutes doubled for each failure before, whichever is longer, at most 60 minutes. A rejected
+ * sign-in is no rate limit: read again in 10 minutes, so a new sign-in is read at once.
+ */
+export function afterUsage(due: UsageDue | undefined, outcome: UsageOutcome, now: number): UsageDue {
+  const last = due?.at === undefined ? {} : { at: due.at }
+  if (outcome.kind === 'ok') return { next: now + (outcome.hasResponded ? USAGE_IN_USE_MS : USAGE_IDLE_MS), fails: 0, at: now }
+  if (outcome.kind === 'rejected') return { next: now + USAGE_IN_USE_MS, fails: 0, ...last }
+  const fails = due?.fails ?? 0
+  const wait = Math.min(USAGE_BACKOFF_MAX_MS, Math.max(outcome.retryAfter ?? 0, USAGE_BACKOFF_MS * 2 ** fails))
+  return { next: now + wait, fails: fails + 1, ...last, ...(outcome.retryAfter === undefined ? {} : { retryAfter: outcome.retryAfter }) }
 }
 

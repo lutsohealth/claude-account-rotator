@@ -66,6 +66,14 @@ import {
   shouldLeave,
   slotEnv,
   windowPct,
+  USAGE_CLAIM_WAIT_MS,
+  USAGE_IDLE_MS,
+  afterUsage,
+  claimDueReads,
+  claimUsage,
+  mayForceUsage,
+  retryAfterFrom,
+  usageDueFrom,
 } from './model'
 import type { Credential, Identity, Need, StayReason } from './model'
 import { Band, Footer, Pane } from './view'
@@ -440,7 +448,7 @@ async function readCredentialsFile($: Host, slot: string): Promise<Stored> {
   return text === undefined ? { state: 'absent' } : { state: 'present', credential: credentialFrom(text) }
 }
 
-type UsageAnswer = { kind: 'ok'; body: unknown } | { kind: 'rejected' } | { kind: 'failed'; status: number }
+type UsageAnswer = { kind: 'ok'; body: unknown } | { kind: 'rejected' } | { kind: 'failed'; status: number; retryAfter?: number }
 
 const oauthHeaders = (accessToken: string) => ({
   Authorization: `Bearer ${accessToken}`,
@@ -452,7 +460,10 @@ const oauthHeaders = (accessToken: string) => ({
 async function fetchUsage($: Host, accessToken: string): Promise<UsageAnswer> {
   const res = await $.http.fetch(USAGE_URL, { headers: oauthHeaders(accessToken) })
   if (res.status === 401 || res.status === 403) return { kind: 'rejected' }
-  if (!res.ok) return { kind: 'failed', status: res.status }
+  if (!res.ok) {
+    const retryAfter = retryAfterFrom(res.headers ?? {}, await $.clock.now())
+    return { kind: 'failed', status: res.status, ...(retryAfter === undefined ? {} : { retryAfter }) }
+  }
   try {
     return { kind: 'ok', body: JSON.parse(res.text) }
   } catch {
@@ -581,12 +592,58 @@ async function followSignIn($: Host, account: Account, who: Identity): Promise<A
   return undefined
 }
 
+/** This session's name on a usage claim, when the engine names no session. */
+const SELF = `module-${Math.random().toString(36).slice(2, 10)}`
+
+/**
+ * How a check may read a login's usage. `claimed`: the schedule says it is due and this session's claim on it
+ * stands. `force`: a stop, a /login or a sign-in asks, so it reads unless a back-off stands or the last good read
+ * is under a minute old. `none`: the sign-in only, no usage call.
+ */
+type UsageGate = 'claimed' | 'force' | 'none'
+
+/** Claims, for this session, the read of each login whose schedule says it is due; answers those whose claim stands. */
+async function claimDue($: Host, ids: readonly string[]): Promise<Set<string>> {
+  const sessionId = (await getView($)).sessionId ?? SELF
+  // The engine reads `$` only as `$.noun.event(...)` at the call site: the store goes over as two calls.
+  const store = { get: (key: string) => $.store.get(key), set: (key: string, value: unknown) => $.store.set(key, value) }
+  return claimDueReads(store, ids, sessionId, await $.clock.now(), () => $.clock.sleep(USAGE_CLAIM_WAIT_MS))
+}
+
+/**
+ * The one way to the usage endpoint: reads a login's usage when its gate lets it, and stores, for every session,
+ * when it is next read. Undefined when the gate says no.
+ */
+async function requestUsage($: Host, account: Account, accessToken: string, gate: UsageGate): Promise<UsageAnswer | undefined> {
+  if (gate === 'none') return undefined
+  const key = `usage-due:${account.id}`
+  const due = usageDueFrom(await $.store.get(key))
+  const now = await $.clock.now()
+  if (gate === 'force') {
+    if (!mayForceUsage(due, now)) return undefined
+    // Claimed while it reads, so no other session's check reads it meanwhile.
+    await $.store.set(key, claimUsage(due, (await getView($)).sessionId ?? SELF, now))
+  }
+  // A response some session stored since the last good read: the login is in use.
+  const stored = await storedReading($, account.id)
+  const hasResponded = stored?.by === account.id && stored.at > (due?.at ?? now - USAGE_IDLE_MS)
+  const usage = await fetchUsage($, accessToken)
+  const at = await $.clock.now()
+  const outcome = usage.kind === 'ok' ? { kind: 'ok' as const, hasResponded } : usage.kind === 'rejected' ? usage : { kind: 'failed' as const, retryAfter: usage.retryAfter }
+  await $.store.set(key, afterUsage(due, outcome, at))
+  return usage
+}
+
+/** Why a failed usage call failed, as the pane says it: its status, and the wait its Retry-After asked for. */
+const failedWhy = (usage: { status: number; retryAfter?: number }): string =>
+  `the usage call answered HTTP ${usage.status}${usage.retryAfter === undefined ? '' : ` (retry after ${Math.round(usage.retryAfter / 1000)} s)`}`
+
 /**
  * Re-reads one login's stored sign-in: who it belongs to and, while its token
- * is live, its usage. One that is another login's on the list leaves this
- * login needing its own, its usage that other's.
+ * is live and its gate lets it, its usage. One that is another login's on the
+ * list leaves this login needing its own, its usage that other's.
  */
-async function checkAccount($: Host, account: Account): Promise<void> {
+async function checkAccount($: Host, account: Account, gate: UsageGate): Promise<void> {
   const now = await $.clock.now()
   if (signingIn === account.id) return
   const stored = await readStored($, account.slot)
@@ -602,10 +659,10 @@ async function checkAccount($: Host, account: Account): Promise<void> {
     const twin = holder === undefined ? undefined : await followSignIn($, account, holder.who)
     if (twin !== undefined) health = { kind: 'login-needed', why: `signed in as account ${twin.id} now` }
     else if (isLive) {
-      const usage = await fetchUsage($, credential.accessToken)
-      if (usage.kind === 'rejected') health = { kind: 'login-needed', why: 'sign-in rejected' }
-      if (usage.kind === 'failed') await saveCheckError($, account.id, `the usage call answered HTTP ${usage.status}`)
-      if (usage.kind === 'ok') {
+      const usage = await requestUsage($, account, credential.accessToken, gate)
+      if (usage?.kind === 'rejected') health = { kind: 'login-needed', why: 'sign-in rejected' }
+      if (usage?.kind === 'failed') await saveCheckError($, account.id, failedWhy(usage))
+      if (usage?.kind === 'ok') {
         await saveCheckError($, account.id, undefined)
         const read = readingFromUsage(usage.body, now)
         if (read !== undefined) {
@@ -624,10 +681,13 @@ async function checkAccount($: Host, account: Account): Promise<void> {
   }
 }
 
+/** Checks every login's sign-in, and reads the usage of each one the schedule says is due and this session claims. */
 async function checkAll($: Host): Promise<void> {
-  for (const account of (await getView($)).accounts) {
+  const { accounts } = await getView($)
+  const ours = await claimDue($, accounts.map(a => a.id))
+  for (const account of accounts) {
     try {
-      await checkAccount($, account)
+      await checkAccount($, account, ours.has(account.id) ? 'claimed' : 'none')
     } catch (error) {
       await debug($, `checking account ${account.id} failed: ${String(error)}`)
       // The error's own text can carry anything a call returned: only its kind leaves the debug log.
@@ -793,7 +853,8 @@ async function switchTo($: Host, target: Account, why: string, isQuiet = false, 
  * (confirmed), or too soon to say. Only a response still answered by the old
  * login minutes later is reported: an idle session has no new response to tell.
  * Then the session is pointed back at the old login, and the footer and pane
- * mark it in use again, as it is the one spending.
+ * mark it in use again, as it is the one spending. It compares with the stored
+ * readings and makes no usage call: the schedule reads each login.
  */
 async function settlePending($: Host, isResponse: boolean): Promise<void> {
   const { pending, accounts } = await getView($)
@@ -801,8 +862,6 @@ async function settlePending($: Host, isResponse: boolean): Promise<void> {
   const now = await $.clock.now()
   if (now - pending.since < SETTLE_MS) return
   const reading = readingFromLimits((await $.session.usage()).rateLimits, now)
-  const target = accounts.find(a => a.id === pending.id)
-  if (target !== undefined) await checkAccount($, target)
   const isTarget = (v: View) => sameUsage(reading, v.readings[pending.id], now)
   const isSource = (v: View) => sameUsage(reading, v.readings[pending.from], now)
   // A response that matches the login left as well tells nothing: confirmed on it, the old login's next responses
@@ -812,7 +871,6 @@ async function settlePending($: Host, isResponse: boolean): Promise<void> {
     await setView($, v => ({ ...v, pending: undefined }))
   } else if (isResponse && now - pending.since > CONFIRM_GIVE_UP_MS) {
     const from = accounts.find(a => a.id === pending.from)
-    if (from !== undefined) await checkAccount($, from)
     const after = await getView($)
     // Minutes on, a switch has landed if it ever will: only a response that is the old login's alone points back.
     if (isTarget(after) && isSource(after)) {
@@ -899,7 +957,7 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
       carriedFor = view.pending?.since
       return
     }
-    await checkAccount($, active)
+    await checkAccount($, active, 'force')
     const now = await $.clock.now()
     const after = await getView($)
     const r = after.readings[active.id]
@@ -1240,7 +1298,7 @@ async function adoptSignIn($: Host, account: Account): Promise<void> {
   await saveAccounts($, updated)
   await saveHealth($, account.id, { kind: 'ok' })
   const fresh = updated.find(a => a.id === account.id) ?? account
-  await checkAccount($, fresh)
+  await checkAccount($, fresh, 'force')
   await maybeRotate($)
 }
 
@@ -1298,6 +1356,7 @@ async function removeAccount($: Host, id: string): Promise<void> {
   await $.store.delete(`check-error:${id}`)
   await $.store.delete(`health:${id}`)
   await $.store.delete(`holder:${id}`)
+  await $.store.delete(`usage-due:${id}`)
   await setView($, v => {
     const readings = { ...v.readings }
     const marks = { ...v.marks }
@@ -1357,7 +1416,7 @@ async function registerAccounts($: Host): Promise<void> {
 async function checkActive($: Host): Promise<void> {
   const view = await getView($)
   const active = view.accounts.find(a => a.id === view.activeId)
-  if (active !== undefined) await checkAccount($, active)
+  if (active !== undefined) await checkAccount($, active, 'force')
   await maybeRotate($)
 }
 

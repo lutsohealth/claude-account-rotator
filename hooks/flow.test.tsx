@@ -2,7 +2,7 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { Engine, MockClock } from 'claude-code/testing'
 import type { On, ProcessRunResult, SessionRateLimit, ToolCallArgs } from 'claude-code'
 
-import { DEFAULT_FOOTER, keychainItem, roomColor } from './model'
+import { DEFAULT_FOOTER, USAGE_CLAIM_WAIT_MS, USAGE_FORCE_AFTER_MS, USAGE_IDLE_MS, keychainItem, roomColor } from './model'
 
 const NOW = Date.parse('2026-10-12T10:00:00Z')
 const HOUR = 3600_000
@@ -281,9 +281,17 @@ const PANE_PROPS = {
   view: {},
 } as const
 
+/** Lets the last usage read pass a minute old: a stop, a /login or a sign-in reads the usage again only then. */
+const pastLastRead = (clock: MockClock) => clock.advance(USAGE_FORCE_AFTER_MS + 1000)
+
+/** Lets the schedule come round for a login no response read: the 10-minute check reads it again. */
+const pastNextRead = (clock: MockClock) => clock.advance(USAGE_IDLE_MS)
+
+/** Starts the session and lets boot finish, its usage claims' wait included. */
 async function start($: Engine, clock: MockClock): Promise<void> {
   await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
   await clock.settle()
+  await clock.advance(USAGE_CLAIM_WAIT_MS)
 }
 
 test('a login with nothing in the keychain shows as needing a sign-in, with one button for it', async ($, on) => {
@@ -669,8 +677,9 @@ test('a rate-limit stop whose fresh usage read shows the Fable week spent is a F
   const clock = world(on, w, TWO_LOGINS)
   await start($, clock)
   expect(w.envSets).toEqual([])
-  // The week is spent by the time the stop's own read comes in.
+  // The week is spent by the time the stop's own read comes in, a minute after the boot's.
   w.usage['tok-1'] = [20, 30, 100]
+  await pastLastRead(clock)
   await $.classic.StopFailure({ error: 'rate_limit' })
   await clock.settle()
   expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
@@ -727,6 +736,7 @@ for (const stop of WORDLESS_STOPS) {
     const clock = world(on, w, TWO_LOGINS)
     await start($, clock)
     w.usage['tok-1'] = [20, 30, 100]
+    await pastLastRead(clock)
     await $.classic.StopFailure(stop)
     await clock.settle()
     // Login 2's Fable week is spent too: a Fable stop has nowhere to go.
@@ -734,6 +744,7 @@ for (const stop of WORDLESS_STOPS) {
     expect(await hasFableBand($)).toBe(true)
     // The read shows the 5-hour window spent instead: a plain stop, which moves.
     w.usage['tok-1'] = [100, 30, 60]
+    await pastLastRead(clock)
     await $.classic.StopFailure(stop)
     await clock.settle()
     expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
@@ -831,6 +842,7 @@ for (const { name, start: at, atStop, stop, band } of ONE_LOGIN_STOPS) {
     const clock = world(on, w, { accounts: [TWO_LOGINS.accounts[0]] })
     await start($, clock)
     w.usage['tok-1'] = atStop
+    await pastLastRead(clock)
     await $.classic.StopFailure(stop)
     await clock.settle()
     await clock.advance(36_000)
@@ -929,7 +941,7 @@ async function markedThenReread($: Engine, on: On, w: World, store: Record<strin
   expect(w.submitted).toHaveLength(1)
   w.usage['tok-1'] = [20, 30]
   w.usage['tok-2'] = [10, 30, 100]
-  await clock.advance(11 * 60_000)
+  await pastNextRead(clock)
   return clock
 }
 
@@ -949,7 +961,7 @@ test('a check whose usage lists a Fable week replaces the mark a stop left, so t
   const w = fresh()
   const clock = await markedThenReread($, on, w, {})
   w.usage['tok-1'] = [20, 30, 40]
-  await clock.advance(11 * 60_000)
+  await pastNextRead(clock)
   await $.classic.StopFailure(FABLE_STOP)
   await clock.settle()
   await clock.advance(36_000)
@@ -986,7 +998,7 @@ async function markedWithNoRow($: Engine, on: On, w: World, store: Record<string
   await clock.settle()
   expect(slots(w)).toEqual([SLOT2])
   expect(w.submitted).toHaveLength(1)
-  await clock.advance(11 * 60_000)
+  await pastNextRead(clock)
   return clock
 }
 
@@ -1006,7 +1018,7 @@ test('a Fable mark with no reset time from the usage is replaced by a check that
   const w = fresh()
   const clock = await markedWithNoRow($, on, w, {})
   w.usage['tok-1'] = [20, 30, 40]
-  await clock.advance(11 * 60_000)
+  await pastNextRead(clock)
   await $.classic.StopFailure(FABLE_STOP)
   await clock.settle()
   await clock.advance(36_000)
@@ -1059,6 +1071,7 @@ for (const { name, logins, atStop, stop, notice } of FABLE_NOTICE_CASES) {
     const clock = world(on, w, { accounts: Object.keys(logins).map((_, i) => TWO_LOGINS.accounts[i]) })
     await start($, clock)
     Object.assign(w.usage, atStop)
+    await pastLastRead(clock)
     for (let i = 0; i < 3; i++) {
       await $.classic.StopFailure(stop)
       await clock.settle()
@@ -1087,11 +1100,13 @@ test('a Fable stop that moves to a login with room tells the terminal nothing of
   expect(w.notices.filter(t => /Fable week/.test(t))).toEqual([])
   // A plain stop with every Fable week spent is the 5-hour window's, not told as the Fable week.
   w.usage['tok-2'] = [100, 30, 100]
+  await pastLastRead(clock)
   await $.classic.StopFailure({ error: 'rate_limit', last_assistant_message: "You've hit your session limit" })
   await clock.settle()
   await clock.advance(36_000)
   expect(w.notices.filter(t => /Fable week/.test(t))).toEqual([])
   w.usage['tok-2'] = [10, 30, 100]
+  await pastLastRead(clock)
   await $.classic.StopFailure(FABLE_STOP)
   await clock.settle()
   await $.classic.StopFailure(FABLE_STOP)
@@ -1843,7 +1858,7 @@ test('another session\'s stop mark stands through every save of a reading on the
   const offenders: string[] = []
   const writers: [string, () => Promise<unknown>][] = [
     ['response', () => $.session.measure({ context: { window: 200_000 }, rateLimits: w.limits, changed: ['rateLimits'] })],
-    ['usage check', () => clock.advance(10 * 60_000)],
+    ['usage check', () => pastNextRead(clock)],
     ['Fable stop', () => $.classic.StopFailure(FABLE_STOP)],
   ]
   for (const [site, write] of writers) {
@@ -2012,7 +2027,7 @@ test('a usage check that fails shows its HTTP status on the login\'s line and in
   await start($, clock)
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
   expect((await pane.findAll({ type: 'Text', text: /its last usage check failed: the usage call answered HTTP 429$/ })).length).toBe(1)
-  expect(store.get('check-error:2')).toEqual({ why: 'the usage call answered HTTP 429', at: NOW })
+  expect(store.get('check-error:2')).toEqual({ why: 'the usage call answered HTTP 429', at: NOW + USAGE_CLAIM_WAIT_MS })
   w.failing = {}
   await clock.advance(10 * 60_000)
   await pane.redraw()
@@ -2045,6 +2060,8 @@ test('a usage check that succeeds clears the failure another session stored, tho
   const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off' }))
   const clock = world(on, w, store)
   await start($, clock)
+  // A minute on, past the minute's merge, so the stop reads the usage again.
+  await pastLastRead(clock)
   // Another session's check of login 1 failed; this session's next check of it, the stop's own, succeeds before any merge.
   store.set('check-error:1', { why: 'the usage call answered HTTP 429', at: NOW })
   await $.classic.StopFailure({ error: 'rate_limit', last_assistant_message: 'Claude usage limit reached.' })
@@ -2650,6 +2667,7 @@ async function spentTwo(w: World): Promise<void> {
 async function startHeadless($: Engine, clock: MockClock): Promise<void> {
   await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: false })
   await clock.settle()
+  await clock.advance(USAGE_CLAIM_WAIT_MS)
 }
 
 const mountPane = ($: Engine) =>
@@ -3673,7 +3691,7 @@ test('a stop\'s mark stands until its reset through every reading writer, whethe
   if (!(await marked())) offenders.push('response without one')
   // Bug puma-4q7j2.3: the usage endpoint saying the account has no 5-hour window is the one read that ends the mark.
   w.usage['tok-1'] = [null, 40]
-  await clock.advance(10 * 60_000)
+  await pastNextRead(clock)
   if (await marked()) offenders.push('usage check reporting none')
   await pane.unmount()
   expect(offenders).toEqual([])
@@ -3764,6 +3782,7 @@ test('a response measured before the session knows its login is stored under no 
   await $.session.measure({ context: { window: 200_000 }, rateLimits: w.limits, changed: ['rateLimits'] })
   await started
   await clock.settle()
+  await clock.advance(USAGE_CLAIM_WAIT_MS)
   expect(store.get('reading:1')).toBeUndefined()
   expect((store.get('reading:2') as { sevenDay?: { pct?: number } } | undefined)?.sevenDay?.pct).toBe(11)
 })
