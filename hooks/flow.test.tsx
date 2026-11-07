@@ -1888,6 +1888,37 @@ test('a usage check that fails shows its HTTP status on the login\'s line and in
   await pane.unmount()
 })
 
+// Review R1 of the slot-4 fix, stuck_hold: a rejected sign-in whose token has run out refreshes nothing, so nothing holds the switch.
+test('a rejected sign-in on a login whose token has run out moves off it at once, not held for a refresh that will not come', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1', NOW - HOUR)
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-2'] = [null, 30]
+  const clock = world(on, w, TWO_LOGINS)
+  await start($, clock)
+  expect(w.envSets).toEqual([])
+  await $.classic.StopFailure({ error: 'authentication_failed' })
+  await clock.settle()
+  expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
+})
+
+// Review R1 of the slot-4 fix, cross_session_clear: a good check clears a failure another session stored.
+test('a usage check that succeeds clears the failure another session stored, though this session never saw it', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [null, 30]
+  w.usage['tok-2'] = [null, 40]
+  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off' }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  // Another session's check of login 1 failed; this session's next check of it, the stop's own, succeeds before any merge.
+  store.set('check-error:1', { why: 'the usage call answered HTTP 429', at: NOW })
+  await $.classic.StopFailure({ error: 'rate_limit', last_assistant_message: 'Claude usage limit reached.' })
+  await clock.settle()
+  expect(store.has('check-error:1')).toBe(false)
+})
+
 test('a session on a login whose sign-in has run out, token and all, moves off it at once: nothing will refresh there', async ($, on) => {
   const w = fresh()
   w.keychain['Claude Code-credentials'] = JSON.stringify({

@@ -572,7 +572,9 @@ async function checkAll($: Host): Promise<void> {
       await checkAccount($, account)
     } catch (error) {
       await debug($, `checking account ${account.id} failed: ${String(error)}`)
-      await saveCheckError($, account.id, `the check failed: ${String(error)}`).catch(() => undefined)
+      // The error's own text can carry anything a call returned: only its kind leaves the debug log.
+      const kind = error instanceof Error ? error.name : 'an error'
+      await saveCheckError($, account.id, `the check failed (${kind}); the debug log has the rest`).catch(() => undefined)
     }
   }
   await maybeRotate($)
@@ -584,7 +586,8 @@ const CHECK_ERROR_MAX = 200
 /** Records, for every session, that a login's usage check failed and why; undefined clears it once a check succeeds. */
 async function saveCheckError($: Host, id: string, why: string | undefined): Promise<void> {
   if (why === undefined) {
-    if ((await getView($)).checkErrors?.[id] === undefined) return
+    // Another session's failure counts too: the store, not this session's view, says whether one stands.
+    if ((await getView($)).checkErrors?.[id] === undefined && (await $.store.get(`check-error:${id}`)) === undefined) return
     await $.store.delete(`check-error:${id}`)
     await setView($, v => {
       const { [id]: _cleared, ...checkErrors } = v.checkErrors ?? {}
@@ -640,8 +643,11 @@ async function refreshingSoon($: Host, view: View, target: Account, now: number)
   const stored = await readStored($, active.slot)
   const credential = stored.state === 'present' ? stored.credential : undefined
   // A token that has already run out is refreshed first of all, at the session's next request: the switch waits for it too.
-  // A sign-in whose refresh token has run out refreshes nothing, so nothing holds the switch off it.
-  const canRefresh = credential !== undefined && healthOf(credential, now).kind === 'ok'
+  // A sign-in whose refresh token has run out refreshes nothing, and nor does one already rejected with its token run out:
+  // nothing holds the switch off either.
+  const isExpired = credential !== undefined && credential.expiresAt <= now
+  const isRejected = isExpired && view.health[active.id]?.kind === 'login-needed'
+  const canRefresh = credential !== undefined && healthOf(credential, now).kind === 'ok' && !isRejected
   const isSoon = canRefresh && credential.expiresAt - now < REFRESH_GUARD_MS
   return isSoon ? active : undefined
 }
