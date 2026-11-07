@@ -4827,6 +4827,25 @@ test('a minute after a /login as another max login whose read fails, the row sho
   expect([/70% left/.test(text), await aboutOf($, 'nine@example.com')]).toEqual([false, 'Org · Max'])
 })
 
+// [SIGN-IN-OWNED-STATE], RULING 4455: a refresh of the same account (a new refresh token, the profile naming the same
+// account) is no new sign-in: the account keeps its reading and no-five-hour, and only its schedule goes.
+test('a token refresh that brings a new refresh token keeps the account\'s reading and its no-five-hour', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.usage['tok-1'] = [null, 30]
+  w.owners = { 'tok-1': 'one@example.com', 'tok-1r': 'one@example.com' }
+  const store = new Map<string, unknown>(Object.entries({ accounts: [{ id: '1', slot: '', email: 'one@example.com' }], 'rotate-to': 'off' }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  const read = (key: string) => store.get(key)
+  expect([read('usage:1') !== undefined, read('no-five-hour:1')]).toEqual([true, true])
+  // Claude Code refreshed the token: a new access token and a new refresh token, the same account. Its next read fails.
+  w.keychain['Claude Code-credentials'] = blob('tok-1r')
+  w.failing = { 'tok-1r': 503 }
+  await clock.advance(10 * 60_000 + 1000)
+  expect([read('usage:1') !== undefined, read('no-five-hour:1')]).toEqual([true, true])
+})
+
 // Review opus-c5 F2: the old sign-in's no-five-hour and reading infer nothing about the new one.
 for (const status of [503, 429, 500]) {
   test(`a /login as another max login whose first usage read answers ${status} is not drawn Ultra by the old one's usage`, async ($, on) => {
