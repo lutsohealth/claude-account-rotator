@@ -4605,6 +4605,23 @@ for (const reason of ['clear', 'resume']) {
   }
 }
 
+// [END-IS-NOT-EXIT]: a reason the engine may add later keeps the mark, as 0.5.5 did.
+test('a session end for a reason the mod does not know keeps an unproven stop\'s mark', async ($, on) => {
+  const { store, clock } = await stopDuringSwitch($, on, 40_000, 'Claude usage limit reached.')
+  await endSession($, clock, 'a-reason-to-come')
+  expect(store.get('mark:2')).toBeDefined()
+})
+
+// [UNDO-OWNERSHIP]: a second stop's mark on the same unproven switch is the stop's own too.
+test('two plain stops on one unproven switch leave no mark once the session ends', async ($, on) => {
+  const { store, clock } = await stopDuringSwitch($, on, 40_000, 'Claude usage limit reached.')
+  await clock.advance(70_000)
+  await $.classic.StopFailure({ error: 'rate_limit', last_assistant_message: 'Claude usage limit reached.' })
+  await clock.settle()
+  await endSession($, clock)
+  expect(store.get('mark:2')).toBeUndefined()
+})
+
 // Review opus-e17 F2 [END-IS-NOT-EXIT], the other half: every end the process does not outlive reverts.
 for (const reason of ['prompt_input_exit', 'logout', 'other']) {
   test(`a session end for ${reason} reverts an unproven stop's mark`, async ($, on) => {

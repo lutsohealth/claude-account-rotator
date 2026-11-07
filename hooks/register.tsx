@@ -144,6 +144,12 @@ type ProvisionalStop = {
 }
 let provisionalStop: ProvisionalStop | undefined
 
+/**
+ * The session ends whose process ends with them, by the engine's SessionEndReason: /exit and its keys, a logout, a
+ * `-p` run done or a signal. A reason not named here keeps the stop's marks.
+ */
+const PROCESS_ENDS: ReadonlySet<string> = new Set(['prompt_input_exit', 'logout', 'other'])
+
 /** The keys a stop writes for a login, every session's: its marks, its reading, its `no-five-hour`. */
 const STOP_KEYS = (id: string) => [`mark:${id}`, `week-mark:${id}`, `usage:${id}`, `no-five-hour:${id}`]
 
@@ -1754,9 +1760,10 @@ export const register: Register = on => {
     return next(e)
   })
 
-  // A stop marked on a switch no response has proven is a guess: it goes with the session, within the end's budget.
+  // A stop marked on a switch no response has proven is a guess: it goes when the process does, within the end's
+  // budget. A /clear or a resume ends the conversation, not the process: the switch, and its proof, go on.
   on('session.end', async ($, e, next) => {
-    await undoProvisionalStop($).catch(error => debug($, `undo at session end failed: ${String(error)}`))
+    if (PROCESS_ENDS.has(e.reason)) await undoProvisionalStop($).catch(error => debug($, `undo at session end failed: ${String(error)}`))
     return next(e)
   })
 
