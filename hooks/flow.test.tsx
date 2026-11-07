@@ -1324,14 +1324,14 @@ test('a plain usage-limit stop on an account that reports no 5-hour window moves
   const clock = world(on, w, { ...TWO_LOGINS, 'five-hour-limit': 'off' })
   await start($, clock)
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
-  expect(await pane.findAll({ type: 'Text', text: /none reported$/ })).toHaveLength(2)
+  expect(await pane.findAll({ type: 'Text', text: /^5h$/ })).toHaveLength(0)
   await $.classic.StopFailure({ error: 'rate_limit', last_assistant_message: 'Claude usage limit reached.' })
   await clock.settle()
   expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
   expect(w.toasts.filter(t => /: account 1 has 0% of its week left\.$/.test(t))).toHaveLength(1)
   await pane.redraw()
   expect(await pane.find({ text: /^resets in 5h/ })).toBeUndefined()
-  expect(await pane.findAll({ type: 'Text', text: /none reported$/ })).toHaveLength(2)
+  expect(await pane.findAll({ type: 'Text', text: /^5h$/ })).toHaveLength(0)
   await pane.unmount()
 })
 
@@ -1351,7 +1351,7 @@ test('a session that starts on a login whose week is spent moves at once; a turn
   await $.classic.StopFailure(WEEKLY_STOP)
   await clock.settle()
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
-  expect(await pane.findAll({ type: 'Text', text: /none reported$/ })).toHaveLength(2)
+  expect(await pane.findAll({ type: 'Text', text: /^5h$/ })).toHaveLength(0)
   expect(await pane.find({ text: /^resets in 5h/ })).toBeUndefined()
   await pane.unmount()
   expect(w.envSets).toHaveLength(1)
@@ -1378,7 +1378,7 @@ test('a 5-hour stop mark already stored on a login whose usage reports no 5-hour
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
   const isClear = async () => {
     await pane.redraw()
-    return (await pane.findAll({ type: 'Text', text: /none reported$/ })).length === 3 && (await pane.find({ text: /^resets in [0-9]+h/ })) === undefined
+    return (await pane.findAll({ type: 'Text', text: /^5h$/ })).length === 0 && (await pane.find({ text: /^resets in [0-9]+h/ })) === undefined
   }
   expect(await isClear()).toBe(true)
   // A session on an older version saves login 3's reading as it reads it, knowing nothing of the 5-hour window it lacks.
@@ -1441,7 +1441,7 @@ test('a turn that dies on the weekly limit marks the week spent, never a 5-hour 
   expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
   expect(w.toasts.filter(t => /^Switched to Claude account 2.*: account 1 has 0% of its week left\.$/.test(t))).toHaveLength(1)
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
-  expect(await pane.findAll({ type: 'Text', text: /none reported$/ })).toHaveLength(2)
+  expect(await pane.findAll({ type: 'Text', text: /^5h$/ })).toHaveLength(0)
   expect(await pane.find({ text: /^resets in 5h/ })).toBeUndefined()
   await pane.unmount()
 })
@@ -1456,7 +1456,9 @@ test('a stored stop mark with no reset time, on an account whose token is not li
   const clock = world(on, w, { ...TWO_LOGINS, 'reading:2': stale })
   await start($, clock)
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
-  expect(await pane.findAll({ type: 'Text', text: /none reported$/ })).toHaveLength(2)
+  // Login 1 reports no 5-hour window, so it has no 5h row; login 2's dropped 5-hour reading leaves its row with none reported.
+  expect(await pane.findAll({ type: 'Text', text: /none reported$/ })).toHaveLength(1)
+  expect(await pane.findAll({ type: 'Text', text: /^5h$/ })).toHaveLength(1)
   await pane.press({ key: 'rotate' })
   await clock.settle()
   expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
