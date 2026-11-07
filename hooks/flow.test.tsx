@@ -1324,14 +1324,14 @@ test('a plain usage-limit stop on an account that reports no 5-hour window moves
   const clock = world(on, w, { ...TWO_LOGINS, 'five-hour-limit': 'off' })
   await start($, clock)
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
-  expect(await pane.findAll({ type: 'Text', text: /none reported$/ })).toHaveLength(2)
+  expect(await pane.findAll({ type: 'Text', text: /^5h$/ })).toHaveLength(0)
   await $.classic.StopFailure({ error: 'rate_limit', last_assistant_message: 'Claude usage limit reached.' })
   await clock.settle()
   expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
   expect(w.toasts.filter(t => /: account 1 has 0% of its week left\.$/.test(t))).toHaveLength(1)
   await pane.redraw()
   expect(await pane.find({ text: /^resets in 5h/ })).toBeUndefined()
-  expect(await pane.findAll({ type: 'Text', text: /none reported$/ })).toHaveLength(2)
+  expect(await pane.findAll({ type: 'Text', text: /^5h$/ })).toHaveLength(0)
   await pane.unmount()
 })
 
@@ -1351,7 +1351,7 @@ test('a session that starts on a login whose week is spent moves at once; a turn
   await $.classic.StopFailure(WEEKLY_STOP)
   await clock.settle()
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
-  expect(await pane.findAll({ type: 'Text', text: /none reported$/ })).toHaveLength(2)
+  expect(await pane.findAll({ type: 'Text', text: /^5h$/ })).toHaveLength(0)
   expect(await pane.find({ text: /^resets in 5h/ })).toBeUndefined()
   await pane.unmount()
   expect(w.envSets).toHaveLength(1)
@@ -1378,7 +1378,7 @@ test('a 5-hour stop mark already stored on a login whose usage reports no 5-hour
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
   const isClear = async () => {
     await pane.redraw()
-    return (await pane.findAll({ type: 'Text', text: /none reported$/ })).length === 3 && (await pane.find({ text: /^resets in [0-9]+h/ })) === undefined
+    return (await pane.findAll({ type: 'Text', text: /^5h$/ })).length === 0 && (await pane.find({ text: /^resets in [0-9]+h/ })) === undefined
   }
   expect(await isClear()).toBe(true)
   // A session on an older version saves login 3's reading as it reads it, knowing nothing of the 5-hour window it lacks.
@@ -1441,7 +1441,7 @@ test('a turn that dies on the weekly limit marks the week spent, never a 5-hour 
   expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
   expect(w.toasts.filter(t => /^Switched to Claude account 2.*: account 1 has 0% of its week left\.$/.test(t))).toHaveLength(1)
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
-  expect(await pane.findAll({ type: 'Text', text: /none reported$/ })).toHaveLength(2)
+  expect(await pane.findAll({ type: 'Text', text: /^5h$/ })).toHaveLength(0)
   expect(await pane.find({ text: /^resets in 5h/ })).toBeUndefined()
   await pane.unmount()
 })
@@ -1456,7 +1456,9 @@ test('a stored stop mark with no reset time, on an account whose token is not li
   const clock = world(on, w, { ...TWO_LOGINS, 'reading:2': stale })
   await start($, clock)
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
-  expect(await pane.findAll({ type: 'Text', text: /none reported$/ })).toHaveLength(2)
+  // Login 1 reports no 5-hour window, so it has no 5h row; login 2's dropped 5-hour reading leaves its row with none reported.
+  expect(await pane.findAll({ type: 'Text', text: /none reported$/ })).toHaveLength(1)
+  expect(await pane.findAll({ type: 'Text', text: /^5h$/ })).toHaveLength(1)
   await pane.press({ key: 'rotate' })
   await clock.settle()
   expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
@@ -1955,6 +1957,176 @@ test('with no weekly limit on any login, the footer leaves the week row out', as
   const footer = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'SessionMode', props: { modes: [] } })
   expect((await footer.find(GLYPHS))?.text).toBe('│⣷│⣷   80% ')
   await footer.unmount()
+})
+
+// Bug puma-4q7j2.9: a plan with no 5-hour window (Ultra) drew a 5h row in the pane and a session glyph in the footer.
+test('a login whose usage reports no 5-hour window has no 5h row in the pane; a login that reports one keeps it', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [null, 40]
+  w.usage['tok-2'] = [10, 30]
+  const clock = world(on, w, TWO_LOGINS)
+  await start($, clock)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  expect(await pane.findAll({ type: 'Text', text: /^5h$/ })).toHaveLength(1)
+  expect(await pane.findAll({ type: 'Text', text: /^week$/ })).toHaveLength(2)
+  expect(await pane.find({ text: /none reported$/ })).toBeUndefined()
+  expect(await pane.find({ text: /^▰{9}▱ 90% left$/ })).toBeDefined()
+  await pane.unmount()
+})
+
+test('a login whose usage reports no 5-hour window leaves its session place blank in the footer', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [null, 40]
+  w.usage['tok-2'] = [10, 30]
+  const clock = world(on, w, TWO_LOGINS)
+  await start($, clock)
+  const footer = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'SessionMode', props: { modes: [] } })
+  // Login 1, in use, has no 5-hour window: blank above its week, and no session percent at the right.
+  expect((await footer.find(GLYPHS))?.text).toBe('│ │⣷       \n│▅│▆   60% ')
+  await footer.unmount()
+})
+
+test('with no 5-hour window on any login, the footer leaves the session row out', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [null, 40]
+  w.usage['tok-2'] = [null, 30]
+  const clock = world(on, w, TWO_LOGINS)
+  await start($, clock)
+  const footer = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'SessionMode', props: { modes: [] } })
+  expect(await footer.find({ text: 'Session:' })).toBeUndefined()
+  expect(await footer.find({ text: 'Weekly:' })).toBeDefined()
+  expect((await footer.find(GLYPHS))?.text).toBe('│▅│▆   60% ')
+  await footer.unmount()
+})
+
+test('with the session row left out, the week row says which login needs a sign-in', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.usage['tok-1'] = [null, 40]
+  const clock = world(on, w, { ...TWO_LOGINS, 'no-five-hour:2': true })
+  await start($, clock)
+  const footer = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'SessionMode', props: { modes: [] } })
+  expect((await footer.find(GLYPHS))?.text).toBe('│▅│⚠   60% ')
+  await footer.unmount()
+})
+
+// Review R2 MARKLOST: the sign-in mark rode the first row drawn, which may draw no glyph columns.
+test('with no 5-hour window on any login and the week glyphs off, the footer still says which login needs a sign-in', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.usage['tok-1'] = [null, 40]
+  const clock = world(on, w, { ...TWO_LOGINS, 'no-five-hour:2': true, footer: { ...DEFAULT_FOOTER, week: 'none' } })
+  await start($, clock)
+  const footer = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'SessionMode', props: { modes: [] } })
+  // The session row stays for the mark, blank but for it.
+  expect((await footer.find(GLYPHS))?.text).toBe('│ │⚠       \n│ │    60% ')
+  await footer.unmount()
+})
+
+// Review R1 PREEXISTING-MARK-VISIBILITY, folded into R2 MARKLOST: a session row drawn for its percent alone took the mark.
+test('with the session glyphs off and its percent on, the week row says which login needs a sign-in', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.usage['tok-1'] = [20, 40]
+  const clock = world(on, w, { ...TWO_LOGINS, footer: { ...DEFAULT_FOOTER, session: 'none' } })
+  await start($, clock)
+  const footer = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'SessionMode', props: { modes: [] } })
+  const [, week] = ((await footer.find(GLYPHS))?.text ?? '').split('\n')
+  expect(week).toContain('⚠')
+  await footer.unmount()
+})
+
+// Review R2 MARKLOST, the class: every footer setting that picks glyphs for some row, with the session row left out.
+test('with the session row left out, every footer setting that picks glyphs for a row shows the sign-in mark', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.usage['tok-1'] = [null, 40]
+  const clock = world(on, w, { ...TWO_LOGINS, 'no-five-hour:2': true })
+  await start($, clock)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  const footer = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'SessionMode', props: { modes: [] } })
+  const glyphs = ['bars', 'pie', 'braille', 'none'] as const
+  const percents = [true, false] as const
+  const actives = ['lines', 'tile', 'dim'] as const
+  const fills = ['left', 'used'] as const
+  let sessionPercent: boolean = DEFAULT_FOOTER.sessionPercent
+  let weekPercent: boolean = DEFAULT_FOOTER.weekPercent
+  const offenders: string[] = []
+  let swept = 0
+  for (const session of glyphs) for (const week of glyphs) for (const sp of percents) for (const wp of percents) for (const active of actives) for (const fill of fills) {
+    if (session === 'none' && week === 'none') continue
+    await pane.press({ key: `footer-session-${session}` })
+    await pane.press({ key: `footer-week-${week}` })
+    if (sessionPercent !== sp) await pane.press({ key: 'footer-percent-session' })
+    if (weekPercent !== wp) await pane.press({ key: 'footer-percent-week' })
+    sessionPercent = sp
+    weekPercent = wp
+    await pane.press({ key: `footer-active-${active}` })
+    await pane.press({ key: `footer-fill-${fill}` })
+    await clock.settle()
+    await footer.redraw()
+    await pane.redraw()
+    swept += 1
+    const text = (await footer.find(GLYPHS))?.text ?? ''
+    if (!text.includes('⚠')) offenders.push(`session=${session} week=${week} sessionPercent=${sp} weekPercent=${wp} active=${active} fill=${fill}: ${JSON.stringify(text)}`)
+  }
+  // 15 glyph pairs with a row's glyphs picked, each with every percent, highlight and fill.
+  expect(swept).toBe(15 * 2 * 2 * 3 * 2)
+  expect(offenders.length === 0 ? 'none' : `${offenders.length} settings lose login 2's ⚠ (draw the mark on the first row that keeps glyph columns):\n${offenders.join('\n')}`).toBe('none')
+  await footer.unmount()
+  await pane.unmount()
+})
+
+// Review R2 UNPINNED-BRANCH: the store's flag decides the pane's 5h row while a login has no reading yet.
+test('a login with no reading yet whose store says it has no 5-hour window has no 5h row in the pane', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.usage['tok-1'] = [10, 40]
+  const clock = world(on, w, { ...TWO_LOGINS, 'no-five-hour:2': true })
+  await start($, clock)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  expect(await pane.findAll({ type: 'Text', text: /^5h$/ })).toHaveLength(1)
+  await pane.unmount()
+})
+
+// Review R2 UNPINNED-BRANCH: the demo previews every row.
+// Review R2 MARKLOST ledger row 5: the dot for a login with no reading yet rode row 0, which may be left out or draw no glyphs.
+test('with the session glyphs off, the week row shows the dot of a login with no reading yet', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [20, 40]
+  w.failing = { 'tok-2': 429 }
+  const clock = world(on, w, { ...TWO_LOGINS, footer: { ...DEFAULT_FOOTER, session: 'none' } })
+  await start($, clock)
+  const footer = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'SessionMode', props: { modes: [] } })
+  const [, week] = ((await footer.find(GLYPHS))?.text ?? '').split('\n')
+  expect(week).toContain('·')
+  await footer.unmount()
+})
+
+test('the demo keeps the session row when no login has a 5-hour window', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [null, 40]
+  w.usage['tok-2'] = [null, 30]
+  const clock = world(on, w, TWO_LOGINS)
+  await start($, clock)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  const footer = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'SessionMode', props: { modes: [] } })
+  await pane.press({ key: 'footer-preview-demo' })
+  await clock.settle()
+  await footer.redraw()
+  expect(await footer.find({ text: 'Session:' })).toBeDefined()
+  await footer.unmount()
+  await pane.unmount()
 })
 
 test('the pane picks each footer row\'s style for every session, and previews it with demo values', async ($, on) => {
