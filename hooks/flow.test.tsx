@@ -4414,9 +4414,9 @@ async function useNow($: Engine, clock: MockClock, id: string): Promise<void> {
   await pane.unmount()
 }
 
-/** Ends the session as an exit does. */
-async function endSession($: Engine, clock: MockClock): Promise<void> {
-  await $.session.end({ reason: 'exit', sessionId: 'session-1', resume: { id: 'session-1' } } as Parameters<Engine['session']['end']>[0])
+/** Ends the session with the engine's reason word: by default as /exit does. */
+async function endSession($: Engine, clock: MockClock, reason = 'prompt_input_exit'): Promise<void> {
+  await $.session.end({ reason, sessionId: 'session-1', resume: { id: 'session-1' } } as Parameters<Engine['session']['end']>[0])
   await clock.settle()
 }
 
@@ -4532,3 +4532,84 @@ test('a schedule an older version writes after boot does not hold off a login wi
   expect(callsWith(w, 'tok-2')).toBe(before + 1)
   expect((store.get('usage:2') as { sevenDay?: { pct?: number } } | undefined)?.sevenDay?.pct).toBe(30)
 })
+
+/** The unproven ends of a switch a revert follows: the session's end, a press of Use now on login 1, the give-up. */
+const UNPROVEN_ENDS: [string, ($: Engine, w: World, clock: MockClock) => Promise<void>][] = [
+  ['the session end', async ($, _w, clock) => endSession($, clock)],
+  ['Use now on login 1', async ($, _w, clock) => useNow($, clock, '1')],
+  ['the give-up', async ($, w, clock) => {
+    w.limits = [{ kind: 'seven_day', percentUsed: 42, resetsAt: STRANGE_WEEK }]
+    await clock.advance(4 * 60_000 + 10_000)
+    await respond($, clock, w)
+  }],
+]
+
+// Review codex-e17 SHARED-MARK-ERASURE [UNDO-OWNERSHIP]: a mark another session wrote since the stop is not the stop's to drop.
+for (const [kind, said, key] of UNPROVEN_STOPS) {
+  for (const [name, end] of UNPROVEN_ENDS) {
+    test(`${name} of an unproven switch keeps a ${kind} ${key} another session wrote after the stop`, async ($, on) => {
+      const { w, store, clock } = await stopDuringSwitch($, on, 40_000, said)
+      const later = { pct: 100, resetsAt: '2026-10-19T03:00:00Z', at: clock.now() + 1 }
+      store.set(key, later)
+      await end($, w, clock)
+      expect([kind, name, store.get(key)]).toEqual([kind, name, later])
+    })
+  }
+}
+
+// Review opus-e17 F1 [UNDO-OWNERSHIP]: the stop's own forced read is no read since the stop; it moves no-five-hour before the stop does.
+for (const delay of [40_000, 90_000, 150_000]) {
+  for (const [name, end] of UNPROVEN_ENDS) {
+    test(`${name} of a switch a 5-hour stop ${delay / 1000} s in left unproven gives back no-five-hour:2 true`, async ($, on) => {
+      const { w, store, clock } = await stopDuringSwitch($, on, delay, "You've hit your session limit", undefined, { 'tok-2': [null, 41] })
+      expect(store.get('no-five-hour:2')).toBe(false)
+      await end($, w, clock)
+      expect([name, delay, store.get('no-five-hour:2')]).toEqual([name, delay, true])
+    })
+  }
+}
+
+// Review opus-e17 F3 [UNDO-OWNERSHIP]: a Fable stop proven login 1's after the provisional one stands when the provisional one goes.
+const ONES_WEEK: SessionRateLimit[] = [{ kind: 'seven_day', percentUsed: 42, resetsAt: WEEK_RESET }]
+const F3_ENDS: [string, ($: Engine, w: World, clock: MockClock) => Promise<void>][] = [
+  ['the session end', async ($, _w, clock) => endSession($, clock)],
+  ['Use now on login 1', async ($, _w, clock) => useNow($, clock, '1')],
+  ['the did-not-take settle', async ($, w, clock) => {
+    await clock.advance(4 * 60_000 + 10_000)
+    await respond($, clock, w)
+  }],
+]
+for (const [name, end] of F3_ENDS) {
+  test(`${name} of an unproven switch keeps a proven Fable stop that came after the provisional one`, async ($, on) => {
+    const { w, clock } = await stopDuringSwitch($, on, 40_000, 'Claude usage limit reached.', undefined, { 'tok-1': [10, 40, 100], 'tok-2': [10, 41, 100] })
+    w.limits = ONES_WEEK
+    await respond($, clock, w)
+    await $.classic.StopFailure(FABLE_STOP)
+    await clock.settle()
+    expect([name, 'before', /has used its Fable week/.test(await bandText($))]).toEqual([name, 'before', true])
+    await end($, w, clock)
+    expect([name, 'after', /has used its Fable week/.test(await bandText($))]).toEqual([name, 'after', true])
+  })
+}
+
+// Review opus-e17 F2 [END-IS-NOT-EXIT]: an end the process outlives (a /clear, a resume) leaves the switch, and its stop, unsettled.
+for (const reason of ['clear', 'resume']) {
+  for (const [kind, said, key] of UNPROVEN_STOPS) {
+    test(`a session end for ${reason}, which the process outlives, keeps a ${kind} stop's ${key} for the proof that follows`, async ($, on) => {
+      const { w, store, clock } = await stopDuringSwitch($, on, 40_000, said)
+      await endSession($, clock, reason)
+      w.limits = [{ kind: 'seven_day', percentUsed: 41, resetsAt: OTHER_WEEK }]
+      await respond($, clock, w)
+      expect([reason, kind, store.get(key) !== undefined]).toEqual([reason, kind, true])
+    })
+  }
+}
+
+// Review opus-e17 F2 [END-IS-NOT-EXIT], the other half: every end the process does not outlive reverts.
+for (const reason of ['prompt_input_exit', 'logout', 'other']) {
+  test(`a session end for ${reason} reverts an unproven stop's mark`, async ($, on) => {
+    const { store, clock } = await stopDuringSwitch($, on, 40_000, 'Claude usage limit reached.')
+    await endSession($, clock, reason)
+    expect([reason, store.get('mark:2')]).toEqual([reason, undefined])
+  })
+}
