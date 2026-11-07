@@ -3,7 +3,7 @@ import { expect, test } from 'claude-code/testing'
 import type { RotateTo, View } from '../types'
 import { weekLeaveFrom, launchOnFrom, pickLaunch, isSessionStop } from './model'
 import { isSameWeek, whoseWeek } from './model'
-import { USAGE_BACKOFF_MAX_MS, USAGE_CLAIM_MS, USAGE_CLAIM_WAIT_MS, USAGE_EARLY_MS, afterUsage, claimDueReads, isUsageDue, mayForceUsage, mayReadSince, renewClaim, retryAfterFrom, usageDueFrom } from './model'
+import { USAGE_BACKOFF_MAX_MS, USAGE_CLAIM_MS, USAGE_CLAIM_WAIT_MS, USAGE_EARLY_MS, WRITER_VERSION, afterUsage, claimDueReads, gatingDue, isUsageDue, mayForceUsage, mayReadSince, renewClaim, retryAfterFrom, usageDueFrom } from './model'
 import { DEFAULT_FOOTER, availableNow, braille, browsersFrom, chromeNote, continueTextFrom, counted, fiveHourLimitFrom, credentialFrom, credentialsFile, fableMark, fableSpentNotice, fableStay, footerStyleFrom, healthOf, identityFromProfile, isFableSpent, isFableStop, isNoBrowser, isPolicyRefusal, keepFable, keychainItem, legacyMark, markFrom, nextReset, pickTarget, pie, readingFromUsage, rotateToFrom, shouldLeave, roomColor, windowPct, withMark, withWeekMark } from './model'
 
 const NOW = Date.parse('2026-10-12T10:00:00Z')
@@ -634,19 +634,31 @@ test('a read is due with no schedule, within the early window, and a back-off on
 })
 
 test('after a body the next read is in 10 minutes for a login in use and 30 for one no response read', () => {
-  expect(afterUsage(undefined, { kind: 'ok', hasResponded: true }, NOW)).toEqual({ next: NOW + 10 * MIN, fails: 0, at: NOW })
-  expect(afterUsage({ next: NOW, fails: 3, at: NOW - HOUR, retryAfter: 5 }, { kind: 'ok', hasResponded: false }, NOW)).toEqual({ next: NOW + 30 * MIN, fails: 0, at: NOW })
+  expect(afterUsage(undefined, { kind: 'ok', hasResponded: true }, NOW)).toEqual({ next: NOW + 10 * MIN, fails: 0, at: NOW, v })
+  expect(afterUsage({ next: NOW, fails: 3, at: NOW - HOUR, retryAfter: 5 }, { kind: 'ok', hasResponded: false }, NOW)).toEqual({ next: NOW + 30 * MIN, fails: 0, at: NOW, v })
 })
 
 test('a failure waits its Retry-After or 2 minutes doubled per failure before, whichever is longer, at most an hour, keeping the last good read', () => {
   const at = NOW - HOUR
-  expect(afterUsage({ next: NOW, fails: 0, at }, { kind: 'failed' }, NOW)).toEqual({ next: NOW + 2 * MIN, fails: 1, at })
-  expect(afterUsage({ next: NOW, fails: 2, at }, { kind: 'failed' }, NOW)).toEqual({ next: NOW + 8 * MIN, fails: 3, at })
-  expect(afterUsage({ next: NOW, fails: 0, at }, { kind: 'failed', retryAfter: 30 * MIN }, NOW)).toEqual({ next: NOW + 30 * MIN, fails: 1, at, retryAfter: 30 * MIN })
+  expect(afterUsage({ next: NOW, fails: 0, at }, { kind: 'failed' }, NOW)).toEqual({ next: NOW + 2 * MIN, fails: 1, at, v })
+  expect(afterUsage({ next: NOW, fails: 2, at }, { kind: 'failed' }, NOW)).toEqual({ next: NOW + 8 * MIN, fails: 3, at, v })
+  expect(afterUsage({ next: NOW, fails: 0, at }, { kind: 'failed', retryAfter: 30 * MIN }, NOW)).toEqual({ next: NOW + 30 * MIN, fails: 1, at, retryAfter: 30 * MIN, v })
   expect(afterUsage({ next: NOW, fails: 9, at }, { kind: 'failed' }, NOW).next).toBe(NOW + USAGE_BACKOFF_MAX_MS)
   expect(afterUsage({ next: NOW, fails: 0, at }, { kind: 'failed', retryAfter: 2 * HOUR }, NOW).next).toBe(NOW + USAGE_BACKOFF_MAX_MS)
   // A rejected sign-in is no rate limit: no back-off, so a new sign-in reads at once.
-  expect(afterUsage({ next: NOW, fails: 2, at }, { kind: 'rejected' }, NOW)).toEqual({ next: NOW + 10 * MIN, fails: 0, at })
+  expect(afterUsage({ next: NOW, fails: 2, at }, { kind: 'rejected' }, NOW)).toEqual({ next: NOW + 10 * MIN, fails: 0, at, v })
+})
+
+/** The version every schedule this one writes carries. */
+const v = WRITER_VERSION
+
+test('an older version\'s schedule with no back-off gates no login this version holds no reading of; its back-off, and every schedule of this version, does', () => {
+  const older = { next: NOW + 20 * MIN, fails: 0, at: NOW }
+  expect(gatingDue(older, false)).toBeUndefined()
+  expect(gatingDue(older, true)).toEqual(older)
+  expect(gatingDue({ ...older, fails: 1 }, false)).toEqual({ ...older, fails: 1 })
+  expect(gatingDue({ ...older, v }, false)).toEqual({ ...older, v })
+  expect(usageDueFrom({ ...older, v })?.v).toBe(v)
 })
 
 test('a stop, /login or sign-in reads only past a minute since the last good read, with no back-off and no other session\'s read under way', () => {

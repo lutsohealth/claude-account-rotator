@@ -880,7 +880,7 @@ export const USAGE_FORCE_AFTER_MS = 60_000
 /** A login's schedule as stored; anything else is none, so the read is due. */
 export function usageDueFrom(value: unknown): UsageDue | undefined {
   if (typeof value !== 'object' || value === null) return undefined
-  const { next, fails, claim, at, retryAfter } = value as Record<string, unknown>
+  const { next, fails, claim, at, retryAfter, v } = value as Record<string, unknown>
   if (typeof next !== 'number' || !Number.isFinite(next)) return undefined
   return {
     next,
@@ -888,7 +888,17 @@ export function usageDueFrom(value: unknown): UsageDue | undefined {
     ...(typeof claim === 'string' ? { claim } : {}),
     ...(typeof at === 'number' && Number.isFinite(at) ? { at } : {}),
     ...(typeof retryAfter === 'number' && Number.isFinite(retryAfter) ? { retryAfter } : {}),
+    ...(Number.isInteger(v) ? { v: v as number } : {}),
   }
+}
+
+/**
+ * The schedule that gates a login's read. An older version's (no `v`) with no back-off gates no login this version
+ * holds no `usage:` reading of: that version reads on its own schedule into its own key, which this one cannot trust,
+ * so the login is read here too until the older sessions restart. Its back-off still stands.
+ */
+export function gatingDue(due: UsageDue | undefined, hasOwnReading: boolean): UsageDue | undefined {
+  return due !== undefined && due.v === undefined && due.fails === 0 && !hasOwnReading ? undefined : due
 }
 
 /** A read is due: no session has scheduled one, or its time comes within the early window; a back-off's, only once it has come. */
@@ -929,6 +939,7 @@ export const claimUsage = (due: UsageDue | undefined, sessionId: string, now: nu
   ...(due ?? { fails: 0 }),
   next: now + USAGE_CLAIM_MS,
   claim: sessionId,
+  v: WRITER_VERSION,
 })
 
 /** The store the schedule lives in: the mod's own, which every session of it shares. */
@@ -938,11 +949,19 @@ export type DueStore = { get: (key: string) => Promise<unknown>; set: (key: stri
  * Claims, for `sessionId`, the read of each login whose schedule says it is due: writes the claims, waits once
  * (`wait`, the claim wait), and answers the logins whose claim still stands. Of sessions that claim one login at
  * once, the last to write reads it; the store has no compare-and-set, so this is a re-read after a delay, not a lock.
+ * `hasOwnReading`: whether this version holds a `usage:` reading of the login (`gatingDue`).
  */
-export async function claimDueReads(store: DueStore, ids: readonly string[], sessionId: string, now: number, wait: () => Promise<void>): Promise<Set<string>> {
+export async function claimDueReads(
+  store: DueStore,
+  ids: readonly string[],
+  sessionId: string,
+  now: number,
+  wait: () => Promise<void>,
+  hasOwnReading: (id: string) => Promise<boolean> = async () => true,
+): Promise<Set<string>> {
   const claimed: string[] = []
   for (const id of ids) {
-    const due = usageDueFrom(await store.get(`usage-due:${id}`))
+    const due = gatingDue(usageDueFrom(await store.get(`usage-due:${id}`)), await hasOwnReading(id))
     if (!isUsageDue(due, now)) continue
     await store.set(`usage-due:${id}`, claimUsage(due, sessionId, now))
     claimed.push(id)
@@ -974,10 +993,11 @@ export type UsageOutcome = { kind: 'ok'; hasResponded: boolean } | { kind: 'fail
  */
 export function afterUsage(due: UsageDue | undefined, outcome: UsageOutcome, now: number): UsageDue {
   const last = due?.at === undefined ? {} : { at: due.at }
-  if (outcome.kind === 'ok') return { next: now + (outcome.hasResponded ? USAGE_IN_USE_MS : USAGE_IDLE_MS), fails: 0, at: now }
-  if (outcome.kind === 'rejected') return { next: now + USAGE_IN_USE_MS, fails: 0, ...last }
+  const v = WRITER_VERSION
+  if (outcome.kind === 'ok') return { next: now + (outcome.hasResponded ? USAGE_IN_USE_MS : USAGE_IDLE_MS), fails: 0, at: now, v }
+  if (outcome.kind === 'rejected') return { next: now + USAGE_IN_USE_MS, fails: 0, ...last, v }
   const fails = due?.fails ?? 0
   const wait = Math.min(USAGE_BACKOFF_MAX_MS, Math.max(outcome.retryAfter ?? 0, USAGE_BACKOFF_MS * 2 ** fails))
-  return { next: now + wait, fails: fails + 1, ...last, ...(outcome.retryAfter === undefined ? {} : { retryAfter: outcome.retryAfter }) }
+  return { next: now + wait, fails: fails + 1, ...last, ...(outcome.retryAfter === undefined ? {} : { retryAfter: outcome.retryAfter }), v }
 }
 

@@ -72,6 +72,7 @@ import {
   afterUsage,
   claimDueReads,
   claimUsage,
+  gatingDue,
   mayForceUsage,
   mayReadSince,
   renewClaim,
@@ -127,8 +128,13 @@ let bootedAt: number | undefined
 const OLDER_WRITER_MS = 30 * 60_000
 /** The last response this session measured, and when: it names the login a stop during an unproven switch belongs to. */
 let lastMeasured: { at: number; reading: Reading | undefined } | undefined
-/** A stop marked on the login moved to before any response proved the switch: undone if the switch did not take. */
-let provisionalStop: { id: string; since: number } | undefined
+/**
+ * A stop marked on the login moved to before any response proved the switch (`since`, its start), with what the stop
+ * changed beside its marks: the login's `no-five-hour` before it (undefined: none stored) and whether this session had
+ * already stopped on the Fable week. Kept only when a settle proves the switch, or a stop's own move leaves it; undone
+ * by every other end of the switch: a settle that finds it did not take, a give-up, another switch, the session's end.
+ */
+let provisionalStop: { id: string; since: number; noFiveHour: boolean | undefined; wasFableStopped: boolean } | undefined
 /** The `claude auth login` child of the sign-in under way, so Cancel can end it. */
 let running: HookStream<ProcessSpawnChunk, ProcessSpawnResult> | undefined
 /** The login this session is signing in; a stored 'logging-in' from a session that died is checked again. */
@@ -639,7 +645,8 @@ async function claimDue($: Host, ids: readonly string[]): Promise<Set<string>> {
   const sessionId = (await getView($)).sessionId ?? SELF
   // The engine reads `$` only as `$.noun.event(...)` at the call site: the store goes over as two calls.
   const store = { get: (key: string) => $.store.get(key), set: (key: string, value: unknown) => $.store.set(key, value) }
-  return claimDueReads(store, ids, sessionId, await $.clock.now(), () => $.clock.sleep(USAGE_CLAIM_WAIT_MS))
+  const hasOwnReading = async (id: string) => (await storedReading($, id)) !== undefined
+  return claimDueReads(store, ids, sessionId, await $.clock.now(), () => $.clock.sleep(USAGE_CLAIM_WAIT_MS), hasOwnReading)
 }
 
 /** The schedule a read leaves when its gate lets it start: this session's claim, from now; undefined when it may not. */
@@ -657,13 +664,13 @@ function startRead(gate: Exclude<UsageGate, 'none'>, due: UsageDue | undefined, 
 async function requestUsage($: Host, account: Account, accessToken: string, gate: UsageGate): Promise<UsageAnswer | undefined> {
   if (gate === 'none') return undefined
   const key = `usage-due:${account.id}`
-  const due = usageDueFrom(await $.store.get(key))
+  const stored = await storedReading($, account.id)
+  const due = gatingDue(usageDueFrom(await $.store.get(key)), stored !== undefined)
   const now = await $.clock.now()
   const claim = startRead(gate, due, (await getView($)).sessionId ?? SELF, now)
   if (claim === undefined) return undefined
   await $.store.set(key, claim)
   // A response some session stored since the last good read: the login is in use.
-  const stored = await storedReading($, account.id)
   const hasResponded = stored?.by === account.id && stored.at > (due?.at ?? now - USAGE_IDLE_MS)
   let usage: UsageAnswer
   try {
@@ -892,6 +899,11 @@ async function switchTo($: Host, target: Account, why: string, isQuiet = false, 
     if (!(await blocked($))) tell($, blockedText(isOnNormalLogin(await getView($))))
     return false
   }
+  // A switch that replaces an unproven one ends it unproven. A stop's own move (it carries on) keeps what the stop
+  // marked: the mark is why it moves. Any other drops it.
+  const replaced = (await getView($)).pending
+  if (carry !== undefined) provisionalStop = undefined
+  else if (replaced !== undefined) await undoProvisionalStop($, replaced)
   const now = await $.clock.now()
   movedAt = now
   moves += 1
@@ -932,6 +944,7 @@ async function settlePending($: Host, isResponse: boolean): Promise<void> {
   // would be stored as the new one's.
   if (isTarget(await getView($)) && !isSource(await getView($))) {
     untaken.delete(pending.id)
+    provisionalStop = undefined
     await setView($, v => ({ ...v, pending: undefined }))
   } else if (isResponse && now - pending.since > CONFIRM_GIVE_UP_MS) {
     const from = accounts.find(a => a.id === pending.from)
@@ -940,10 +953,13 @@ async function settlePending($: Host, isResponse: boolean): Promise<void> {
     // Minutes on, a switch has landed if it ever will: only a response that is the old login's alone points back.
     if (isTarget(after) && isSource(after)) {
       untaken.delete(pending.id)
+      provisionalStop = undefined
       await setView($, v => ({ ...v, pending: undefined }))
       return
     }
     if (from === undefined || !isSource(after)) {
+      // No response proved either login: a stop marked on the one moved to is a guess, and every session reads marks.
+      await undoProvisionalStop($, pending)
       await setView($, v => ({ ...v, pending: undefined }))
       tell($, `The switch to Claude account ${pending.id} has not shown in responses.`)
       return
@@ -1039,7 +1055,11 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
     const since = view.pending?.since
     const hasResponseSince = since !== undefined && lastMeasured !== undefined && lastMeasured.at > since
     const owner = since === undefined || !hasResponseSince ? active : provenStopper(view, lastMeasured?.reading)
-    if (since !== undefined && !hasResponseSince) provisionalStop = { id: active.id, since }
+    // A second stop on the same unproven switch keeps what the first found before it.
+    if (since !== undefined && !hasResponseSince && provisionalStop?.since !== since) {
+      const before = await $.store.get(`no-five-hour:${active.id}`)
+      provisionalStop = { id: active.id, since, noFiveHour: typeof before === 'boolean' ? before : undefined, wasFableStopped: view.isFableStopped === true }
+    }
     if (owner === undefined) await debug($, `a stop while the switch to account ${view.pending?.id} is unproven marks no account`)
     else need = await markStop($, owner, stop.last_assistant_message)
   }
@@ -1053,13 +1073,20 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
 }
 
 /**
- * Drops what a stop marked on the login moved to before any response proved the switch, once a settle finds the
- * switch did not take: the stop went out on the login left. Marks from before the switch stay.
+ * Drops what a stop marked on the login moved to before any response proved the switch `pending` (any switch, when
+ * none is given), once the switch ends with no proof it took: the stop may have gone out on the login left. Marks
+ * from before the switch stay; the login's `no-five-hour` and this session's Fable stop go back to what they were.
  */
-async function undoProvisionalStop($: Host, pending: { id: string; since: number }): Promise<void> {
+async function undoProvisionalStop($: Host, pending?: { id: string; since: number }): Promise<void> {
   const p = provisionalStop
   provisionalStop = undefined
-  if (p === undefined || p.id !== pending.id || p.since !== pending.since) return
+  if (p === undefined || (pending !== undefined && (p.id !== pending.id || p.since !== pending.since))) return
+  if (p.noFiveHour === undefined) await $.store.delete(`no-five-hour:${p.id}`)
+  else await saveNoFiveHour($, p.id, p.noFiveHour)
+  await setView($, v => {
+    const { [p.id]: _gone, ...noFiveHour } = v.noFiveHour ?? {}
+    return { ...v, isFableStopped: p.wasFableStopped, ...(p.noFiveHour === undefined ? { noFiveHour } : {}) }
+  })
   const dropped: string[] = []
   for (const key of [`mark:${p.id}`, `week-mark:${p.id}`]) {
     const m = markFrom(await $.store.get(key))
@@ -1601,18 +1628,6 @@ async function noteWriter($: Host, sessionId: string, now: number): Promise<void
   }
 }
 
-/**
- * A login with no `usage:<id>` yet (its reading was an older version's) is read at boot, not when the older
- * schedule comes round, so the pane shows it at once. A back-off still stands.
- */
-async function readUnreadLogins($: Host, accounts: readonly Account[]): Promise<void> {
-  for (const a of accounts) {
-    if ((await storedReading($, a.id)) !== undefined) continue
-    const due = usageDueFrom(await $.store.get(`usage-due:${a.id}`))
-    if (due !== undefined && due.fails === 0) await $.store.delete(`usage-due:${a.id}`)
-  }
-}
-
 /** First run makes the normal login number 1; then: which login this session uses, and Claude in Chrome connected as the extension's account. */
 async function boot($: Host, isInteractive: boolean): Promise<void> {
   // Terminal.app is the terminal that names itself so and draws block characters from its font.
@@ -1635,7 +1650,6 @@ async function boot($: Host, isInteractive: boolean): Promise<void> {
   const sessionId = await $.session.id().catch(() => undefined)
   bootedAt = await $.clock.now()
   await noteWriter($, sessionId ?? SELF, bootedAt)
-  await readUnreadLogins($, accounts)
   await mergeStore($)
   await setView($, v => ({ ...v, activeId, ...(sessionId === undefined ? {} : { sessionId }) }))
   isBooted = true
@@ -1688,6 +1702,12 @@ export const register: Register = on => {
     if (e.changed.includes('rateLimits')) {
       void onMeasure($, e.rateLimits).catch(error => debug($, `measure failed: ${String(error)}`))
     }
+    return next(e)
+  })
+
+  // A stop marked on a switch no response has proven is a guess: it goes with the session, within the end's budget.
+  on('session.end', async ($, e, next) => {
+    await undoProvisionalStop($).catch(error => debug($, `undo at session end failed: ${String(error)}`))
     return next(e)
   })
 
