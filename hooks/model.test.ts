@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import type { RotateTo, View } from '../types'
-import { DEFAULT_FOOTER, availableNow, braille, browsersFrom, chromeNote, continueTextFrom, counted, fiveHourLimitFrom, credentialFrom, credentialsFile, fableMark, fableSpentNotice, fableStay, footerStyleFrom, healthOf, identityFromProfile, isFableSpent, isFableStop, isNoBrowser, isPolicyRefusal, keepFable, keepFiveHourMark, keychainItem, nextReset, pickTarget, pie, readingFromUsage, rotateToFrom, shouldLeave, roomColor, windowPct } from './model'
+import { DEFAULT_FOOTER, availableNow, braille, browsersFrom, chromeNote, continueTextFrom, counted, fiveHourLimitFrom, credentialFrom, credentialsFile, fableMark, fableSpentNotice, fableStay, footerStyleFrom, healthOf, identityFromProfile, isFableSpent, isFableStop, isNoBrowser, isPolicyRefusal, keepFable, keychainItem, legacyMark, markFrom, nextReset, pickTarget, pie, readingFromUsage, rotateToFrom, shouldLeave, roomColor, windowPct, withMark } from './model'
 
 const NOW = Date.parse('2026-10-12T10:00:00Z')
 const LATER = '2026-10-12T12:00:00Z'
@@ -79,21 +79,29 @@ test('with the 5-hour limit off a reported 5-hour window is dropped and a stop\'
   expect(counted(old, 'on', NOW + 5 * HOUR)).toEqual({ at: NOW })
 })
 
-test('a stop\'s 5-hour mark stands through a read that lists no 5-hour window until its reset; a read window replaces it', () => {
+test('a stop\'s mark counts until its reset and no read ends it; an older version\'s mark inside a reading reads as a mark', () => {
+  const mark = { pct: 100, resetsAt: LATER, at: NOW }
+  const marked = { pct: 100, resetsAt: LATER, isStop: true }
   const fresh = { sevenDay: { pct: 20, resetsAt: WEEK_END }, at: NOW + HOUR }
-  const mark = { pct: 100, resetsAt: LATER, isStop: true as const }
-  const stored = { fiveHour: mark, sevenDay: { pct: 10, resetsAt: WEEK_END }, at: NOW }
-  expect(keepFiveHourMark(fresh, stored, NOW + HOUR)).toEqual({ ...fresh, fiveHour: mark })
-  expect(keepFiveHourMark(fresh, stored, Date.parse(LATER))).toEqual(fresh)
-  const read = { ...fresh, fiveHour: { pct: 30, resetsAt: LATER } }
-  expect(keepFiveHourMark(read, stored, NOW + HOUR)).toBe(read)
-  // A read window, not a stop's, is not carried: the fresh read says the account reports none now.
-  expect(keepFiveHourMark(fresh, { ...stored, fiveHour: { pct: 30, resetsAt: LATER } }, NOW + HOUR)).toBe(fresh)
-  // The old mark with no reset time stands five hours from its read.
-  const old = { fiveHour: { pct: 100 }, at: NOW }
-  expect(keepFiveHourMark(fresh, old, NOW + HOUR).fiveHour).toEqual({ pct: 100, resetsAt: new Date(NOW + 5 * HOUR).toISOString(), isStop: true })
-  expect(keepFiveHourMark(fresh, old, NOW + 5 * HOUR)).toBe(fresh)
-  expect(keepFiveHourMark(fresh, undefined, NOW)).toBe(fresh)
+  expect(withMark(fresh, mark, NOW + HOUR)).toEqual({ ...fresh, fiveHour: marked })
+  expect(withMark(fresh, mark, Date.parse(LATER))).toBe(fresh)
+  expect(withMark(undefined, mark, NOW)).toEqual({ fiveHour: marked, at: NOW })
+  expect(withMark(fresh, undefined, NOW)).toBe(fresh)
+  // No read ends a mark, whenever it was read: the mark stands until its reset.
+  const after = { ...fresh, fiveHour: { pct: 30, resetsAt: LATER } }
+  expect(withMark(after, mark, NOW + HOUR)).toEqual({ ...after, fiveHour: marked })
+  const before = { ...after, at: NOW - HOUR }
+  expect(withMark(before, mark, NOW + HOUR)).toEqual({ ...before, fiveHour: marked })
+  // An older version's mark inside a reading, as a mark: isStop, or full with no reset time (five hours from its read).
+  expect(legacyMark({ fiveHour: { pct: 100, resetsAt: LATER, isStop: true }, at: NOW }, NOW)).toEqual({ pct: 100, resetsAt: LATER, at: NOW })
+  expect(legacyMark({ fiveHour: { pct: 100 }, at: NOW }, NOW + HOUR)).toEqual({ pct: 100, resetsAt: new Date(NOW + 5 * HOUR).toISOString(), at: NOW })
+  expect(legacyMark({ fiveHour: { pct: 100 }, at: NOW }, NOW + 5 * HOUR)).toBeUndefined()
+  expect(legacyMark({ fiveHour: { pct: 30, resetsAt: LATER }, at: NOW }, NOW)).toBeUndefined()
+  expect(legacyMark(undefined, NOW)).toBeUndefined()
+  // The store's value is a mark only in a mark's shape.
+  expect(markFrom(mark)).toEqual(mark)
+  expect(markFrom({ pct: 100, at: NOW })).toBeUndefined()
+  expect(markFrom('mark')).toBeUndefined()
 })
 
 test('a 5-hour window read with no reset time and room left is a read, not a stop\'s mark: off drops it, on keeps it as read', () => {

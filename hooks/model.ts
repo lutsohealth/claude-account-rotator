@@ -1,4 +1,4 @@
-import type { Account, Fill, FiveHourLimit, FooterStyle, Glyphs, Health, Highlight, Reading, RotateTo, UsageWindow, View } from '../types'
+import type { Account, Fill, FiveHourLimit, FooterStyle, Glyphs, Health, Highlight, Mark, Reading, RotateTo, UsageWindow, View } from '../types'
 
 /** Leave a login once its 5-hour window is this full (percent). */
 export const LEAVE_FIVE_HOUR = 90
@@ -280,15 +280,30 @@ export function keepFable(fresh: Reading, stored: Reading | undefined, now: numb
 }
 
 /**
- * A fresh read with the 5-hour mark a stop left on the stored one, where the
- * read lists no 5-hour window and the mark has not reached its reset time: a
- * check or a response that lists none cannot end the mark early. A 5-hour
- * window in the read replaces it.
+ * A reading with the 5-hour window a stop marked spent, until the mark's reset
+ * time and no sooner: no read ends a mark, so no order between a reading and a
+ * mark matters.
  */
-export function keepFiveHourMark(fresh: Reading, stored: Reading | undefined, now: number): Reading {
-  if (fresh.fiveHour !== undefined || stored === undefined) return fresh
-  const mark = counted(stored, 'on', now).fiveHour
-  return mark?.isStop === true ? { ...fresh, fiveHour: mark } : fresh
+export function withMark(r: Reading | undefined, mark: Mark | undefined, now: number): Reading | undefined {
+  if (mark === undefined || Date.parse(mark.resetsAt) <= now) return r
+  return { ...(r ?? { at: mark.at }), fiveHour: { pct: mark.pct, resetsAt: mark.resetsAt, isStop: true } }
+}
+
+/**
+ * The stop mark an older version of the mod left inside a stored reading, as a
+ * mark: a window `isStop` marks, or a full one with no reset time, which stands
+ * five hours from its read. Undefined when there is none or it has passed.
+ */
+export function legacyMark(stored: Reading | undefined, now: number): Mark | undefined {
+  const w = stored === undefined ? undefined : counted(stored, 'on', now).fiveHour
+  return w?.isStop === true && w.resetsAt !== undefined ? { pct: w.pct, resetsAt: w.resetsAt, at: stored?.at ?? now } : undefined
+}
+
+/** A stored mark, as the store holds it; anything else is no mark. */
+export function markFrom(value: unknown): Mark | undefined {
+  const v = typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : {}
+  const isMark = typeof v.pct === 'number' && typeof v.resetsAt === 'string' && typeof v.at === 'number'
+  return isMark ? { pct: v.pct as number, resetsAt: v.resetsAt as string, at: v.at as number } : undefined
 }
 
 /** How long a Fable week runs: a mark with no reset time of its own stands this long. */

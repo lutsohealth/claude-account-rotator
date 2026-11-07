@@ -10,7 +10,7 @@ import type {
   Timer,
 } from 'claude-code'
 
-import type { Account, FiveHourLimit, FooterStyle, Health, Holder, Reading, RotateTo, View } from '../types'
+import type { Account, FiveHourLimit, FooterStyle, Health, Holder, Mark, Reading, RotateTo, View } from '../types'
 import {
   CHROME_SERVER,
   CHROME_TOOL,
@@ -19,8 +19,10 @@ import {
   LEAVE_FIVE_HOUR,
   counted,
   fiveHourLimitFrom,
-  keepFiveHourMark,
+  legacyMark,
+  markFrom,
   spentMark,
+  withMark,
   blockedText,
   browsersFrom,
   canConnectChrome,
@@ -152,17 +154,43 @@ async function storedReading($: Host, id: string): Promise<Reading | undefined> 
   return typeof r === 'object' && r !== null && typeof (r as Reading).at === 'number' ? (r as Reading) : undefined
 }
 
+/** A login's reading as the rules count it: the stored read with its stop mark, under the 5-hour limit. */
+function viewed(read: Reading, mark: Mark | undefined, limit: FiveHourLimit, now: number): Reading {
+  return counted(withMark(read, mark, now) ?? read, limit, now)
+}
+
 /**
- * Stores a read as read, keeping a stop's 5-hour mark it does not replace, so
- * turning the 5-hour limit back on finds the windows off hid; the view gets it
- * as the limit counts it.
+ * Stores a read as read, so turning the 5-hour limit back on finds the windows
+ * off hid. A stop's mark lives under its own key, which no save of a reading
+ * writes; a mark an older version of the mod left inside the stored reading
+ * moves to that key first, so a session still on that version keeps its stop.
  */
 async function saveReading($: Host, id: string, read: Reading): Promise<void> {
   const now = await $.clock.now()
-  const kept = keepFiveHourMark(read, await storedReading($, id), now)
-  await $.store.set(`reading:${id}`, kept)
-  const reading = counted(kept, (await getView($)).fiveHourLimit, now)
-  await setView($, v => ({ ...v, readings: { ...v.readings, [id]: reading } }))
+  const legacy = legacyMark(await storedReading($, id), now)
+  if (legacy !== undefined) await keepLegacyMark($, id, legacy)
+  await $.store.set(`reading:${id}`, read)
+  await setView($, v => ({ ...v, readings: { ...v.readings, [id]: viewed(read, v.marks?.[id], v.fiveHourLimit, now) } }))
+}
+
+/** Moves an older version's mark to the mark's own key, unless the mark there already stands longer. */
+async function keepLegacyMark($: Host, id: string, legacy: Mark): Promise<void> {
+  const held = markFrom(await $.store.get(`mark:${id}`))
+  if (held !== undefined && Date.parse(held.resetsAt) >= Date.parse(legacy.resetsAt)) return
+  await $.store.set(`mark:${id}`, legacy)
+  await setView($, v => ({ ...v, marks: { ...v.marks, [id]: legacy } }))
+}
+
+/** Marks a login's 5-hour window spent for every session, under the mark's own key. */
+async function saveMark($: Host, id: string, mark: Mark): Promise<void> {
+  await $.store.set(`mark:${id}`, mark)
+  const now = await $.clock.now()
+  const read = (await storedReading($, id)) ?? { at: mark.at }
+  await setView($, v => ({
+    ...v,
+    marks: { ...v.marks, [id]: mark },
+    readings: { ...v.readings, [id]: viewed(read, mark, v.fiveHourLimit, now) },
+  }))
 }
 
 /** Stores a login's health; answers what it was before. */
@@ -182,11 +210,14 @@ async function saveHolder($: Host, id: string, holder: Holder): Promise<void> {
 async function mergeStore($: Host): Promise<void> {
   const accounts = await loadAccounts($)
   const readings: Record<string, Reading> = {}
+  const marks: Record<string, Mark> = {}
   const health: Record<string, Health> = {}
   const holders: Record<string, Holder> = {}
   for (const a of accounts) {
     const r = await storedReading($, a.id)
     if (r !== undefined) readings[a.id] = r
+    const m = markFrom(await $.store.get(`mark:${a.id}`))
+    if (m !== undefined) marks[a.id] = m
     const h = await $.store.get(`health:${a.id}`)
     if (typeof h === 'object' && h !== null && typeof (h as Health).kind === 'string') health[a.id] = h as Health
     const s = await $.store.get(`holder:${a.id}`)
@@ -205,21 +236,24 @@ async function mergeStore($: Host): Promise<void> {
   const chromeAccountIds = (Array.isArray(seen) ? seen : []).filter((id): id is string => typeof id === 'string' && accounts.some(a => a.id === id))
   await setView($, v => {
     const nextReadings: Record<string, Reading> = {}
+    const nextMarks: Record<string, Mark> = {}
     const nextHealth: Record<string, Health> = {}
     const nextHolders: Record<string, Holder> = {}
     for (const a of accounts) {
       const mine = v.readings[a.id]
       const theirs = readings[a.id]
+      const mark = marks[a.id] ?? v.marks?.[a.id]
+      if (mark !== undefined) nextMarks[a.id] = mark
       // On a tie the stored read wins: this session's copy is already counted, and may have lost a window.
       const reading = mine !== undefined && (theirs === undefined || mine.at > theirs.at) ? mine : theirs
-      if (reading !== undefined) nextReadings[a.id] = counted(reading, fiveHourLimit, now)
+      if (reading !== undefined) nextReadings[a.id] = viewed(reading, mark, fiveHourLimit, now)
       const own = v.health[a.id]
       const h = signingIn === a.id ? own : (health[a.id] ?? own)
       if (h !== undefined) nextHealth[a.id] = h
       const holder = holders[a.id] ?? v.holders[a.id]
       if (holder !== undefined) nextHolders[a.id] = holder
     }
-    return { ...v, accounts, readings: nextReadings, health: nextHealth, holders: nextHolders, footer, rotateTo, fiveHourLimit, fableContinueText, chromeAccountId, chromeAccountIds }
+    return { ...v, accounts, readings: nextReadings, marks: nextMarks, health: nextHealth, holders: nextHolders, footer, rotateTo, fiveHourLimit, fableContinueText, chromeAccountId, chromeAccountIds }
   })
 }
 
@@ -248,7 +282,7 @@ async function setFiveHourLimit($: Host, fiveHourLimit: FiveHourLimit): Promise<
   await setView($, v => ({
     ...v,
     fiveHourLimit,
-    readings: Object.fromEntries(Object.entries(v.readings).map(([id, r]) => [id, counted(stored[id] ?? r, fiveHourLimit, now)])),
+    readings: Object.fromEntries(Object.entries(v.readings).map(([id, r]) => [id, viewed(stored[id] ?? r, v.marks?.[id], fiveHourLimit, now)])),
   }))
   await maybeRotate($)
 }
@@ -709,7 +743,8 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
       if (!isFableSpent(r, now)) await saveReading($, active.id, { ...read, fable: fableMark(r?.fable, now), at: now })
     } else if (!shouldLeave(after, now)) {
       // The limit was hit before the usage call shows it: count the 5-hour window as full, five hours at most where none is reported.
-      await saveReading($, active.id, { ...read, fiveHour: { ...spentMark(read?.fiveHour, now, FIVE_HOUR_MS), isStop: true }, at: now })
+      const spent = spentMark(read?.fiveHour, now, FIVE_HOUR_MS)
+      await saveMark($, active.id, { pct: spent.pct, resetsAt: spent.resetsAt ?? new Date(now + FIVE_HOUR_MS).toISOString(), at: now })
     }
   }
   await setView($, v => ({ ...v, pending: undefined }))
@@ -1075,16 +1110,19 @@ async function removeAccount($: Host, id: string): Promise<void> {
   if (view.chromeAccountId === id) await setChromeAccount($, undefined)
   await noteChromeAccount($, id, false)
   await $.store.delete(`reading:${id}`)
+  await $.store.delete(`mark:${id}`)
   await $.store.delete(`health:${id}`)
   await $.store.delete(`holder:${id}`)
   await setView($, v => {
     const readings = { ...v.readings }
+    const marks = { ...v.marks }
     const health = { ...v.health }
     const holders = { ...v.holders }
     delete readings[id]
+    delete marks[id]
     delete health[id]
     delete holders[id]
-    return { ...v, readings, health, holders, removing: undefined }
+    return { ...v, readings, marks, health, holders, removing: undefined }
   })
 }
 

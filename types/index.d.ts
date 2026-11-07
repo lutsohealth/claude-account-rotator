@@ -7,6 +7,13 @@ export type UsageWindow = { pct: number; resetsAt?: string; isStop?: true }
  */
 export type Reading = { fiveHour?: UsageWindow; sevenDay?: UsageWindow; fable?: UsageWindow; at: number }
 
+/**
+ * The 5-hour window a stop marked spent, kept in the store under its own key,
+ * `mark:<id>`, which only a stop writes, so no session's save of a reading can
+ * erase it. `at` is when the stop came, in epoch milliseconds.
+ */
+export type Mark = { pct: number; resetsAt: string; at: number }
+
 /** Whether a login can serve requests, or why not. */
 export type Health =
   | { kind: 'ok'; refreshExpiresAt?: number }
@@ -79,6 +86,8 @@ export type FooterRun = { text: string; color?: string; lit?: string; background
 export type View = {
   accounts: Account[]
   readings: Record<string, Reading>
+  /** Each login's stop mark as last read from the store; absent in a view kept from before marks had their own key. */
+  marks?: Record<string, Mark>
   health: Record<string, Health>
   /** Who each login's sign-in belongs to: a /login in a session on a login signs in there, whoever it signs in. */
   holders: Record<string, Holder>
