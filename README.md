@@ -27,7 +27,7 @@ The [changelog](CHANGELOG.md) says what each version changed.
 
 ## The footer
 
-A column per account. The top row is the room it has right now (its 5-hour window, or none once its week is spent), the bottom row its week: green with plenty left, red with little. The percents are the account in use's. An account whose usage reports no 5-hour window, such as a verified Ultra account, leaves its top place blank and has no 5h row in the panel; with no 5-hour window on any account, the top row is left out.
+A column per account. The top row is the room it has right now (its 5-hour window, or none once its week is spent), the bottom row its week: green with plenty left, red with little. The percents are the account in use's. An account whose usage reports no 5-hour window, such as a verified Ultra account, leaves its top place blank and has no 5h row in the panel; with no 5-hour window on any account, the top row is left out, unless it is the one row with glyphs to show that an account needs a sign-in. The demo shows both rows.
 
 Click it for the panel: each account's usage and reset times, **Sign in**, **Use now** and **Remove**, **+ Add an account**, **Rotate now**, **Chrome**, which picks the account Claude in Chrome uses, **Usage based rotation**, which picks the account the rotation moves to, and **Display**, which picks the footer's look:
 
