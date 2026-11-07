@@ -130,14 +130,12 @@ const OLDER_WRITER_MS = 30 * 60_000
 let lastMeasured: { at: number; reading: Reading | undefined } | undefined
 /**
  * A stop marked on the login moved to before any response proved the switch (`since`, its start), with what the stop
- * changed beside its marks: the login's `no-five-hour`, where the stop changed it (`before`, undefined when none was
- * stored, and what it `written`), and whether this session had already stopped on the Fable week. Kept only when a
- * settle proves the switch, or a stop's own move leaves it; undone by every other end of the switch: a settle that
- * finds it did not take, a give-up, another switch, the session's end.
+ * changed beside its marks: the login's `no-five-hour` where the stop changed it (`before`, undefined when none was
+ * stored), and whether this session had already stopped on the Fable week. Kept only when a settle proves the switch,
+ * or a stop's own move leaves it; undone by every other end of the switch: a settle that finds it did not take, a
+ * give-up, another switch, the session's end.
  */
-let provisionalStop:
-  | { id: string; since: number; wasFableStopped: boolean; noFiveHour?: { before: boolean | undefined; written: boolean | undefined } }
-  | undefined
+let provisionalStop: { id: string; since: number; wasFableStopped: boolean; noFiveHour?: { before: boolean | undefined } } | undefined
 
 /** A login's stored `no-five-hour`; undefined when none is stored. */
 async function storedNoFiveHour($: Host, id: string): Promise<boolean | undefined> {
@@ -1072,7 +1070,7 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
       // A second stop on the same unproven switch keeps what the first found before it.
       const kept = provisionalStop?.since === since ? provisionalStop : { id: active.id, since, wasFableStopped: view.isFableStopped === true }
       const written = await storedNoFiveHour($, active.id)
-      provisionalStop = kept.noFiveHour === undefined && written !== before ? { ...kept, noFiveHour: { before, written } } : kept
+      provisionalStop = kept.noFiveHour === undefined && written !== before ? { ...kept, noFiveHour: { before } } : kept
     }
   }
   // A switch still settling stays settling: only a new switch, or a response that proves one, ends it. The stop may
@@ -1097,7 +1095,7 @@ async function undoProvisionalStop($: Host, pending?: { id: string; since: numbe
   const n = p.noFiveHour
   const read = await storedReading($, p.id)
   const isReadSince = read?.src === 'body' && read.at > p.since
-  if (n !== undefined && !isReadSince && (await storedNoFiveHour($, p.id)) === n.written) {
+  if (n !== undefined && !isReadSince) {
     if (n.before !== undefined) await saveNoFiveHour($, p.id, n.before)
     else {
       await $.store.delete(`no-five-hour:${p.id}`)
