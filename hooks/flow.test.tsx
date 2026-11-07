@@ -1957,6 +1957,63 @@ test('with no weekly limit on any login, the footer leaves the week row out', as
   await footer.unmount()
 })
 
+// Bug puma-4q7j2.9: a plan with no 5-hour window (Ultra) drew a 5h row in the pane and a session glyph in the footer.
+test('a login whose usage reports no 5-hour window has no 5h row in the pane; a login that reports one keeps it', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [null, 40]
+  w.usage['tok-2'] = [10, 30]
+  const clock = world(on, w, TWO_LOGINS)
+  await start($, clock)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  expect(await pane.findAll({ type: 'Text', text: /^5h$/ })).toHaveLength(1)
+  expect(await pane.findAll({ type: 'Text', text: /^week$/ })).toHaveLength(2)
+  expect(await pane.find({ text: /none reported$/ })).toBeUndefined()
+  expect(await pane.find({ text: /^▰{9}▱ 90% left$/ })).toBeDefined()
+  await pane.unmount()
+})
+
+test('a login whose usage reports no 5-hour window leaves its session place blank in the footer', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [null, 40]
+  w.usage['tok-2'] = [10, 30]
+  const clock = world(on, w, TWO_LOGINS)
+  await start($, clock)
+  const footer = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'SessionMode', props: { modes: [] } })
+  // Login 1, in use, has no 5-hour window: blank above its week, and no session percent at the right.
+  expect((await footer.find(GLYPHS))?.text).toBe('│ │⣷       \n│▅│▆   60% ')
+  await footer.unmount()
+})
+
+test('with no 5-hour window on any login, the footer leaves the session row out', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [null, 40]
+  w.usage['tok-2'] = [null, 30]
+  const clock = world(on, w, TWO_LOGINS)
+  await start($, clock)
+  const footer = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'SessionMode', props: { modes: [] } })
+  expect(await footer.find({ text: 'Session:' })).toBeUndefined()
+  expect(await footer.find({ text: 'Weekly:' })).toBeDefined()
+  expect((await footer.find(GLYPHS))?.text).toBe('│▅│▆   60% ')
+  await footer.unmount()
+})
+
+test('with the session row left out, the week row says which login needs a sign-in', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.usage['tok-1'] = [null, 40]
+  const clock = world(on, w, { ...TWO_LOGINS, 'no-five-hour:2': true })
+  await start($, clock)
+  const footer = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'SessionMode', props: { modes: [] } })
+  expect((await footer.find(GLYPHS))?.text).toBe('│▅│⚠   60% ')
+  await footer.unmount()
+})
+
 test('the pane picks each footer row\'s style for every session, and previews it with demo values', async ($, on) => {
   const w = fresh()
   w.keychain['Claude Code-credentials'] = blob('tok-1')
