@@ -2483,9 +2483,11 @@ test('a response that reports a 5-hour window clears no-five-hour, and Remove de
   await pane.press({ key: 'ask-remove-2' })
   await clock.settle()
   await pane.redraw()
+  // Its schedule goes too: a login added later under the number 2 is read at once.
+  expect(store.has('usage-due:2')).toBe(true)
   await pane.press({ key: 'remove-2' })
   await clock.settle()
-  expect(['no-five-hour:2', 'week-mark:2', 'check-error:2'].filter(k => store.has(k))).toEqual([])
+  expect(['no-five-hour:2', 'week-mark:2', 'check-error:2', 'usage-due:2'].filter(k => store.has(k))).toEqual([])
   await pane.unmount()
 })
 
@@ -3878,10 +3880,49 @@ test('a usage-limit stop calls again only when the last read is over a minute ol
   await $.classic.StopFailure({ error: 'rate_limit' })
   await clock.settle()
   expect(callsWith(w, 'tok-1')).toBe(2)
-  // A back-off another session stored holds a stop's call too.
+  // A back-off another session stored holds a stop's call too, and a /login's.
   store.set('usage-due:1', { next: NOW + HOUR, fails: 2, at: NOW })
   await clock.advance(2 * 60_000)
   await $.classic.StopFailure({ error: 'rate_limit' })
+  await clock.settle()
+  await $.command.run({ command: 'login', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 120 } })
+  await clock.settle()
+  expect(callsWith(w, 'tok-1')).toBe(2)
+})
+
+test('a login no response read is read every 30 minutes, and once responses come, every 10', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.usage['tok-1'] = [10, 20]
+  const clock = world(on, w, { accounts: [{ id: '1', slot: '', email: 'one@example.com' }] })
+  await start($, clock)
+  expect(callsWith(w, 'tok-1')).toBe(1)
+  await clock.advance(25 * 60_000)
+  expect(callsWith(w, 'tok-1')).toBe(1)
+  // A response stored after the boot's read: the login is in use from the next read on.
+  w.limits = [{ kind: 'five_hour', percentUsed: 12, resetsAt: '2026-10-12T12:00:00Z' }]
+  await $.session.measure({ context: { window: 200_000 }, rateLimits: w.limits, changed: ['rateLimits'] })
+  await clock.advance(6 * 60_000)
+  expect(callsWith(w, 'tok-1')).toBe(2)
+  await $.session.measure({ context: { window: 200_000 }, rateLimits: w.limits, changed: ['rateLimits'] })
+  await clock.advance(10 * 60_000)
+  expect(callsWith(w, 'tok-1')).toBe(3)
+})
+
+test('a /login reads the usage of the login in use again only past a minute since its last read', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.usage['tok-1'] = [50, 20]
+  w.owners = { 'tok-1': 'one@example.com' }
+  w.loginToken = 'tok-1'
+  const clock = world(on, w, { accounts: [{ id: '1', slot: '', email: 'one@example.com' }] })
+  await start($, clock)
+  const login = { command: 'login', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 120 } } as const
+  await $.command.run(login)
+  await clock.settle()
+  expect(callsWith(w, 'tok-1')).toBe(1)
+  await pastLastRead(clock)
+  await $.command.run(login)
   await clock.settle()
   expect(callsWith(w, 'tok-1')).toBe(2)
 })
