@@ -1211,6 +1211,131 @@ test('a switch is confirmed once a response reports the new login usage, and an 
   await pane.unmount()
 })
 
+// puma-eslxj.2 (C1): a typed command is the person's, so an agent can open the pane without a mouse.
+test('/accounts is listed, opens the accounts pane, and a second /accounts closes it', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.usage['tok-1'] = [20, 30]
+  const clock = world(on, w, TWO_LOGINS)
+  const registered: string[] = []
+  on('command.register', (_$, e) => {
+    registered.push(e.name)
+    return { value: { command: e.name } }
+  })
+  await start($, clock)
+  expect(registered).toEqual(['accounts'])
+  await $.command.run({ command: 'accounts' })
+  await clock.settle()
+  expect(w.panes).toEqual(['claude-accounts'])
+  await $.command.run({ command: 'accounts' })
+  await clock.settle()
+  expect(w.panes).toEqual([])
+})
+
+/** A world with tok-1 on login 1 and a `command.register` that records each spec it is given. */
+function commandWorld(on: On, specs: unknown[] = []): { clock: MockClock; w: World } {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.usage['tok-1'] = [20, 30]
+  const clock = world(on, w, TWO_LOGINS)
+  on('command.register', (_$, e) => {
+    specs.push(e)
+    return { value: { command: e.name } }
+  })
+  return { clock, w }
+}
+
+// Review C1 r2 F1 and r1 REFUSED-COMMAND-HIJACK, class REGISTRATION-LIFECYCLE: the command exists only once it is known to.
+test('/accounts is registered with its whole spec before the first session.start resolves', async ($, on) => {
+  const specs: unknown[] = []
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  world(on, w, TWO_LOGINS)
+  on('command.register', async (_$, e) => {
+    await new Promise(resolve => setTimeout(resolve, 20))
+    specs.push(e)
+    return { value: { command: e.name } }
+  })
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: false })
+  expect(specs).toEqual([{ name: 'accounts', description: 'Open or close the Claude accounts panel', immediate: true }])
+})
+
+test('a refused /accounts registration leaves the command to its owner and opens no pane', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.usage['tok-1'] = [20, 30]
+  const clock = world(on, w, TWO_LOGINS)
+  on('command.register', () => ({ deny: 'built-in name' }))
+  on('command.run', { command: 'accounts' }, () => ({ text: 'built-in accounts' }))
+  await start($, clock)
+  expect((await $.command.run({ command: 'accounts' })).text).toBe('built-in accounts')
+  expect(w.panes).toEqual([])
+})
+
+test('an accounts command of the person\'s own is left to them: /accounts is not registered over it', async ($, on) => {
+  const specs: unknown[] = []
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.usage['tok-1'] = [20, 30]
+  const clock = world(on, w, TWO_LOGINS)
+  on('command.list', () => ({ value: [{ name: 'accounts', description: 'mine', source: 'user' as const }] }))
+  on('command.register', (_$, e) => {
+    specs.push(e)
+    return { value: { command: e.name } }
+  })
+  on('command.run', { command: 'accounts' }, () => ({ text: 'my accounts' }))
+  await start($, clock)
+  expect(specs).toEqual([])
+  expect((await $.command.run({ command: 'accounts' })).text).toBe('my accounts')
+  expect(w.panes).toEqual([])
+})
+
+// Review C1 r1 PANE-COMMAND-EMPTY-OUTPUT and r2 CONTRACT-DRIFT: a command that only shows a pane prints no text.
+test('/accounts answers with no text', async ($, on) => {
+  const { clock } = commandWorld(on)
+  await start($, clock)
+  expect((await $.command.run({ command: 'accounts' })).text).toBeUndefined()
+})
+
+// Review C1 r2 F2, class STATE-BEFORE-EFFECT: the pane's state follows what open and close did.
+test('after a refused open, the next /accounts opens the accounts pane', async ($, on) => {
+  let refusals = 1
+  on('ui.open', { id: 'claude-accounts' }, (_$, e, next) => {
+    if (refusals === 0) return next(e)
+    refusals -= 1
+    return { deny: 'another plugin refused the open' }
+  })
+  const { clock, w } = commandWorld(on)
+  await start($, clock)
+  await $.command.run({ command: 'accounts' }).catch(() => undefined)
+  await clock.settle()
+  expect(w.panes).toEqual([])
+  await $.command.run({ command: 'accounts' }).catch(() => undefined)
+  await clock.settle()
+  expect(w.panes).toEqual(['claude-accounts'])
+})
+
+test('after a refused close, the next /accounts closes the accounts pane', async ($, on) => {
+  let refusals = 0
+  on('ui.close', { id: 'claude-accounts' }, (_$, e, next) => {
+    if (refusals === 0) return next(e)
+    refusals -= 1
+    return { deny: 'another plugin refused the close' }
+  })
+  const { clock, w } = commandWorld(on)
+  await start($, clock)
+  await $.command.run({ command: 'accounts' }).catch(() => undefined)
+  await clock.settle()
+  expect(w.panes).toEqual(['claude-accounts'])
+  refusals = 1
+  await $.command.run({ command: 'accounts' }).catch(() => undefined)
+  await clock.settle()
+  expect(w.panes).toEqual(['claude-accounts'])
+  await $.command.run({ command: 'accounts' }).catch(() => undefined)
+  await clock.settle()
+  expect(w.panes).toEqual([])
+})
+
 test('one press on the footer opens the accounts pane, the next closes it', async ($, on) => {
   const w = fresh()
   w.keychain['Claude Code-credentials'] = blob('tok-1')
