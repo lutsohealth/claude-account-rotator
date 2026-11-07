@@ -888,9 +888,16 @@ export const isUsageDue = (due: UsageDue | undefined, now: number): boolean =>
 /** A failed read set a wait that has not passed. */
 export const isBackedOff = (due: UsageDue | undefined, now: number): boolean => due !== undefined && due.fails > 0 && due.next > now
 
-/** A stop, a /login or a sign-in may read the login now: no back-off stands, and its last good read is over a minute old. */
-export const mayForceUsage = (due: UsageDue | undefined, now: number): boolean =>
-  !isBackedOff(due, now) && (due?.at === undefined || now - due.at > USAGE_FORCE_AFTER_MS)
+/** Another session's read is under way: its claim stands until the read stores the schedule, or the claim runs out. */
+const isClaimedElsewhere = (due: UsageDue | undefined, sessionId: string, now: number): boolean =>
+  due?.claim !== undefined && due.claim !== sessionId && due.next > now
+
+/**
+ * A stop, a /login or a sign-in may read the login now: no back-off stands, no other session's read is under way,
+ * and its last good read is over a minute old.
+ */
+export const mayForceUsage = (due: UsageDue | undefined, sessionId: string, now: number): boolean =>
+  !isBackedOff(due, now) && !isClaimedElsewhere(due, sessionId, now) && (due?.at === undefined || now - due.at > USAGE_FORCE_AFTER_MS)
 
 /** The schedule with this session's claim on the read: every other session finds it not due until the claim runs out. */
 export const claimUsage = (due: UsageDue | undefined, sessionId: string, now: number): UsageDue => ({

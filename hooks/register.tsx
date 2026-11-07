@@ -620,9 +620,10 @@ async function requestUsage($: Host, account: Account, accessToken: string, gate
   const due = usageDueFrom(await $.store.get(key))
   const now = await $.clock.now()
   if (gate === 'force') {
-    if (!mayForceUsage(due, now)) return undefined
+    const sessionId = (await getView($)).sessionId ?? SELF
+    if (!mayForceUsage(due, sessionId, now)) return undefined
     // Claimed while it reads, so no other session's check reads it meanwhile.
-    await $.store.set(key, claimUsage(due, (await getView($)).sessionId ?? SELF, now))
+    await $.store.set(key, claimUsage(due, sessionId, now))
   }
   // A response some session stored since the last good read: the login is in use.
   const stored = await storedReading($, account.id)

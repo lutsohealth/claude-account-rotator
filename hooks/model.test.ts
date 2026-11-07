@@ -650,12 +650,16 @@ test('a failure waits its Retry-After or 2 minutes doubled per failure before, w
   expect(afterUsage({ next: NOW, fails: 2, at }, { kind: 'rejected' }, NOW)).toEqual({ next: NOW + 10 * MIN, fails: 0, at })
 })
 
-test('a stop, /login or sign-in reads only past a minute since the last good read and with no back-off standing', () => {
-  expect(mayForceUsage(undefined, NOW)).toBe(true)
-  expect(mayForceUsage({ next: NOW + 9 * MIN, fails: 0, at: NOW - 30_000 }, NOW)).toBe(false)
-  expect(mayForceUsage({ next: NOW + 9 * MIN, fails: 0, at: NOW - 2 * MIN }, NOW)).toBe(true)
-  expect(mayForceUsage({ next: NOW + 9 * MIN, fails: 1, at: NOW - HOUR }, NOW)).toBe(false)
-  expect(mayForceUsage({ next: NOW - 1, fails: 1, at: NOW - HOUR }, NOW)).toBe(true)
+test('a stop, /login or sign-in reads only past a minute since the last good read, with no back-off and no other session\'s read under way', () => {
+  expect(mayForceUsage(undefined, 'me', NOW)).toBe(true)
+  expect(mayForceUsage({ next: NOW + 9 * MIN, fails: 0, at: NOW - 30_000 }, 'me', NOW)).toBe(false)
+  expect(mayForceUsage({ next: NOW + 9 * MIN, fails: 0, at: NOW - 2 * MIN }, 'me', NOW)).toBe(true)
+  expect(mayForceUsage({ next: NOW + 9 * MIN, fails: 1, at: NOW - HOUR }, 'me', NOW)).toBe(false)
+  expect(mayForceUsage({ next: NOW - 1, fails: 1, at: NOW - HOUR }, 'me', NOW)).toBe(true)
+  expect(mayForceUsage({ next: NOW + 60_000, fails: 0, claim: 'other', at: NOW - HOUR }, 'me', NOW)).toBe(false)
+  expect(mayForceUsage({ next: NOW + 60_000, fails: 0, claim: 'me', at: NOW - HOUR }, 'me', NOW)).toBe(true)
+  // A claim whose session died mid-read frees the read once it runs out.
+  expect(mayForceUsage({ next: NOW - 1, fails: 0, claim: 'other', at: NOW - HOUR }, 'me', NOW)).toBe(true)
 })
 
 test('Retry-After is read in seconds or as an HTTP date; none, 0 or junk is none', () => {
