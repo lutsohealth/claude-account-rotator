@@ -4806,6 +4806,27 @@ for (const c of SIGN_IN_CASES) {
   })
 }
 
+// [SIGN-IN-OWNED-STATE] (Opus advisory STALE-READING-ON-NEW-SIGN-IN): a minute on, past the merge that reads the store
+// back, the new sign-in still shows neither the last one's usage nor a plan inferred from it.
+test('a minute after a /login as another max login whose read fails, the row shows neither the old usage nor Ultra', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.usage['tok-1'] = [null, 30]
+  w.usage['tok-9'] = [10, 5]
+  w.owners = { 'tok-1': 'one@example.com', 'tok-9': 'nine@example.com' }
+  w.loginToken = 'tok-9'
+  w.loginPlan = 'max'
+  const clock = world(on, w, { accounts: [{ id: '1', slot: '', email: 'one@example.com' }], 'rotate-to': 'off' })
+  await start($, clock)
+  expect(await paneText($)).toMatch(/70% left/)
+  w.failing = { 'tok-9': 503 }
+  await $.command.run(LOGIN)
+  await clock.settle()
+  await clock.advance(61_000)
+  const text = await paneText($)
+  expect([/70% left/.test(text), await aboutOf($, 'nine@example.com')]).toEqual([false, 'Org · Max'])
+})
+
 // Review opus-c5 F2: the old sign-in's no-five-hour and reading infer nothing about the new one.
 for (const status of [503, 429, 500]) {
   test(`a /login as another max login whose first usage read answers ${status} is not drawn Ultra by the old one's usage`, async ($, on) => {
