@@ -2,6 +2,11 @@
 
 What each version of the account rotator changed. To get each one as Claude Code starts, turn on auto-update: in `/plugin`, open **Marketplaces**, pick **claude-account-rotator** and choose **Enable auto-update**. To update by hand, run `claude plugin marketplace update claude-account-rotator`, then `claude plugin update account-rotator@claude-account-rotator`, and start a new session.
 
+## 0.4.3-lutso.1 - 2026-11-07
+
+- **A switch no longer overwrites the account it moves to.** A session that started on an account whose sign-in token had run out was moved at once, and the refresh Claude Code then made was saved under the account moved to, which afterwards held the first account's sign-in and asked for its own again. The switch now waits until the token has refreshed, as it already did in the token's last minutes; an account whose sign-in itself has run out is still left at once.
+- **A usage check that fails says so.** The account's line in the panel shows why its last usage check failed, until one succeeds.
+
 ## 0.4.2-lutso.1 - 2026-11-07
 
 - **An account with no 5-hour window never shows one.** A verified Ultra account's usage reports only a week, and the panel showed it a 5-hour window at 0% left after a usage limit, so every account read near its limit and nothing could rotate. Such an account now takes no 5-hour mark, whatever **5h limit** is set to, and the marks earlier versions left on it count for nothing once this version loads.
