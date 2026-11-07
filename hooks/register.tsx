@@ -129,18 +129,46 @@ const OLDER_WRITER_MS = 30 * 60_000
 /** The last response this session measured, and when: it names the login a stop during an unproven switch belongs to. */
 let lastMeasured: { at: number; reading: Reading | undefined } | undefined
 /**
- * A stop marked on the login moved to before any response proved the switch (`since`, its start), with what the stop
- * changed beside its marks: the login's `no-five-hour` where the stop changed it (`before`, undefined when none was
- * stored), and whether this session had already stopped on the Fable week. Kept only when a settle proves the switch,
- * or a stop's own move leaves it; undone by every other end of the switch: a settle that finds it did not take, a
- * give-up, another switch, the session's end.
+ * A stop marked on the login moved to before any response proved the switch (`since`, its start). `writes`: each
+ * store key the stop changed, with what stood there once its own usage read was in (`before`, undefined for none)
+ * and what it `written`. `setFableStop`: the stop set this session's Fable stop. `readAt`: when its own read was in.
+ * Kept only when a settle proves the switch, or a stop's own move leaves it; undone by every other end of the
+ * switch: a settle that finds it did not take, a give-up, another switch, the end of the process.
  */
-let provisionalStop: { id: string; since: number; wasFableStopped: boolean; noFiveHour?: { before: boolean | undefined } } | undefined
+type ProvisionalStop = {
+  id: string
+  since: number
+  readAt: number
+  writes: Record<string, { before: unknown; written: unknown }>
+  setFableStop: boolean
+}
+let provisionalStop: ProvisionalStop | undefined
 
-/** A login's stored `no-five-hour`; undefined when none is stored. */
-async function storedNoFiveHour($: Host, id: string): Promise<boolean | undefined> {
-  const value = await $.store.get(`no-five-hour:${id}`)
-  return typeof value === 'boolean' ? value : undefined
+/** The keys a stop writes for a login, every session's: its marks, its reading, its `no-five-hour`. */
+const STOP_KEYS = (id: string) => [`mark:${id}`, `week-mark:${id}`, `usage:${id}`, `no-five-hour:${id}`]
+
+async function stopKeys($: Host, id: string): Promise<Record<string, unknown>> {
+  const values: Record<string, unknown> = {}
+  for (const key of STOP_KEYS(id)) values[key] = await $.store.get(key)
+  return values
+}
+
+const sameValue = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b)
+
+/**
+ * The record of a provisional stop on `id` just marked, from what stood before it (`before`, after its own read).
+ * A second stop on the same unproven switch adds what it wrote and keeps what stood before the first.
+ */
+async function recordStop($: Host, id: string, since: number, before: Record<string, unknown>, wasFableStopped: boolean, readAt: number): Promise<ProvisionalStop> {
+  const kept = provisionalStop?.since === since && provisionalStop.id === id ? provisionalStop : { id, since, readAt, writes: {}, setFableStop: false }
+  const after = await stopKeys($, id)
+  const writes = { ...kept.writes }
+  for (const key of STOP_KEYS(id)) {
+    if (!sameValue(after[key], before[key])) writes[key] = { before: writes[key]?.before ?? before[key], written: after[key] }
+    else if (writes[key] !== undefined) writes[key] = { ...writes[key], written: after[key] }
+  }
+  const setsFable = !wasFableStopped && (await getView($)).isFableStopped === true
+  return { ...kept, writes, setFableStop: kept.setFableStop || setsFable }
 }
 /** The `claude auth login` child of the sign-in under way, so Cancel can end it. */
 let running: HookStream<ProcessSpawnChunk, ProcessSpawnResult> | undefined
@@ -1063,15 +1091,19 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
     const hasResponseSince = since !== undefined && lastMeasured !== undefined && lastMeasured.at > since
     const owner = since === undefined || !hasResponseSince ? active : provenStopper(view, lastMeasured?.reading)
     const isProvisional = since !== undefined && !hasResponseSince
-    const before = isProvisional ? await storedNoFiveHour($, active.id) : undefined
-    if (owner === undefined) await debug($, `a stop while the switch to account ${view.pending?.id} is unproven marks no account`)
-    else need = await markStop($, owner, stop.last_assistant_message)
-    if (isProvisional) {
-      // A second stop on the same unproven switch keeps what the first found before it.
-      const kept = provisionalStop?.since === since ? provisionalStop : { id: active.id, since, wasFableStopped: view.isFableStopped === true }
-      const written = await storedNoFiveHour($, active.id)
-      provisionalStop = kept.noFiveHour === undefined && written !== before ? { ...kept, noFiveHour: { before } } : kept
+    let before: Record<string, unknown> = {}
+    let wasFableStopped = false
+    let readAt = 0
+    const snapshot = async () => {
+      before = await stopKeys($, active.id)
+      wasFableStopped = (await getView($)).isFableStopped === true
+      readAt = await $.clock.now()
     }
+    if (owner === undefined) await debug($, `a stop while the switch to account ${view.pending?.id} is unproven marks no account`)
+    else need = await markStop($, owner, stop.last_assistant_message, isProvisional ? snapshot : undefined)
+    if (isProvisional && owner !== undefined) provisionalStop = await recordStop($, active.id, since, before, wasFableStopped, readAt)
+    // A stop a response has proven sets this session's Fable stop of its own: no provisional one may take it back.
+    else if (need === 'fable' && provisionalStop !== undefined) provisionalStop = { ...provisionalStop, setFableStop: false }
   }
   // A switch still settling stays settling: only a new switch, or a response that proves one, ends it. The stop may
   // move the session meanwhile (maybeRotate lets a stop through a settling switch), and that switch settles anew.
@@ -1083,45 +1115,41 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
 }
 
 /**
- * Drops what a stop marked on the login moved to before any response proved the switch `pending` (any switch, when
- * none is given), once the switch ends with no proof it took: the stop may have gone out on the login left. Marks
- * from before the switch stay; the login's `no-five-hour` and this session's Fable stop go back to what they were.
+ * Gives back what a stop wrote on the login moved to before any response proved the switch `pending` (any switch,
+ * when none is given), once the switch ends with no proof it took: the stop may have gone out on the login left.
+ * A key goes back only while it still holds what the stop wrote (another session's write since stands), and its
+ * `no-five-hour` only while no usage read came after the stop's own; this session's Fable stop, only where the stop
+ * set it and no proven stop has since.
  */
 async function undoProvisionalStop($: Host, pending?: { id: string; since: number }): Promise<void> {
   const p = provisionalStop
   provisionalStop = undefined
   if (p === undefined || (pending !== undefined && (p.id !== pending.id || p.since !== pending.since))) return
-  // Only what the stop wrote goes back, and only while no usage read since has said more than the stop did.
-  const n = p.noFiveHour
   const read = await storedReading($, p.id)
-  const isReadSince = read?.src === 'body' && read.at > p.since
-  if (n !== undefined && !isReadSince) {
-    if (n.before !== undefined) await saveNoFiveHour($, p.id, n.before)
-    else {
-      await $.store.delete(`no-five-hour:${p.id}`)
-      await setView($, v => {
-        const { [p.id]: _gone, ...noFiveHour } = v.noFiveHour ?? {}
-        return { ...v, noFiveHour }
-      })
-    }
-  }
-  await setView($, v => ({ ...v, isFableStopped: p.wasFableStopped }))
-  const dropped: string[] = []
-  for (const key of [`mark:${p.id}`, `week-mark:${p.id}`]) {
-    const m = markFrom(await $.store.get(key))
-    if (m !== undefined && m.at >= p.since) {
+  const isReadSince = read?.src === 'body' && read.at > p.readAt
+  const gone: string[] = []
+  for (const [key, { before, written }] of Object.entries(p.writes)) {
+    if (key === `no-five-hour:${p.id}` && isReadSince) continue
+    if (!sameValue(await $.store.get(key), written)) continue
+    if (before === undefined) {
       await $.store.delete(key)
-      dropped.push(key)
-    }
+      gone.push(key)
+    } else await $.store.set(key, before)
   }
-  const r = await storedReading($, p.id)
-  if (r?.src === 'stop' && r.at >= p.since) await $.store.delete(`usage:${p.id}`)
-  await setView($, v => {
-    const { [p.id]: _mark, ...marks } = v.marks ?? {}
-    const { [p.id]: _week, ...weekMarks } = v.weekMarks ?? {}
-    const { [p.id]: _reading, ...readings } = v.readings
-    return { ...v, readings, marks: dropped.includes(`mark:${p.id}`) ? marks : v.marks, weekMarks: dropped.includes(`week-mark:${p.id}`) ? weekMarks : v.weekMarks }
-  })
+  if (p.setFableStop) await setView($, v => ({ ...v, isFableStopped: false }))
+  // The merge reads each key back; one now gone leaves nothing to read, so the view drops it here.
+  const drop = <T,>(entries: Record<string, T> | undefined, key: string): Record<string, T> | undefined => {
+    if (entries === undefined || !gone.includes(key)) return entries
+    const { [p.id]: _gone, ...rest } = entries
+    return rest
+  }
+  await setView($, v => ({
+    ...v,
+    marks: drop(v.marks, `mark:${p.id}`),
+    weekMarks: drop(v.weekMarks, `week-mark:${p.id}`),
+    readings: drop(v.readings, `usage:${p.id}`) ?? v.readings,
+    noFiveHour: drop(v.noFiveHour, `no-five-hour:${p.id}`),
+  }))
   await mergeStore($)
 }
 
@@ -1132,10 +1160,12 @@ function provenStopper(view: View, last: Reading | undefined): Account | undefin
 }
 
 /** Marks what a usage-limit stop on `active` spent, after reading its usage when the gate lets it; answers the need it names. */
-async function markStop($: Host, active: Account, said: string | undefined): Promise<Need | undefined> {
+async function markStop($: Host, active: Account, said: string | undefined, afterRead?: () => Promise<void>): Promise<Need | undefined> {
   let need: Need | undefined
   {
     await checkAccount($, active, 'force')
+    // What stands once the stop's own read is in: the stop's writes are judged against it.
+    await afterRead?.()
     const now = await $.clock.now()
     const after = await getView($)
     const r = after.readings[active.id]
