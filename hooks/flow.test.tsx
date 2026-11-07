@@ -38,6 +38,10 @@ type World = {
   profileFailing?: Record<string, number>
   /** access token -> the email of the account it signs in, as the profile endpoint answers */
   owners: Record<string, string>
+  /** access token -> the organization name its profile answers, where not 'Org' (a named owner's) */
+  orgNames?: Record<string, string>
+  /** access token -> the profile's `organization.plan_display_name`, where it names one */
+  planNames?: Record<string, string>
   /** The token a /login signs in, where the session reads its sign-in, and its plan. */
   loginToken?: string
   loginPlan?: string
@@ -78,7 +82,7 @@ const NO_BROWSER =
   'Browser extension is not connected: the OAuth token Claude Code is using belongs to a different claude.ai account than the one Claude Code is logged in as. ' +
   'If CLAUDE_CODE_OAUTH_TOKEN is set in your shell or CI profile, unset it (or re-mint it for this account), then run /logout and /login in Claude Code and make sure the browser extension is signed into the same claude.ai account.'
 
-const blob = (token: string, expiresAt = NOW + 6 * HOUR, plan = 'max') =>
+const blob = (token: string, expiresAt = NOW + 6 * HOUR, plan = 'max', tier?: string) =>
   JSON.stringify({
     claudeAiOauth: {
       accessToken: token,
@@ -87,6 +91,7 @@ const blob = (token: string, expiresAt = NOW + 6 * HOUR, plan = 'max') =>
       refreshTokenExpiresAt: NOW + 20 * 24 * HOUR,
       scopes: ['user:inference', 'user:profile'],
       subscriptionType: plan,
+      ...(tier === undefined ? {} : { rateLimitTier: tier }),
     },
   })
 
@@ -168,9 +173,16 @@ function world(on: On, w: World, store: Record<string, unknown> | Map<string, un
       const email = w.owners[token] ?? OWNER_BY_NUMBER[Number(/^tok-(\d)$/.exec(token)?.[1] ?? 0) - 1]
       if (email === undefined) return { value: { status: 404, ok: false, headers: {}, text: '' } }
       // A named owner's profile names its organization; a default owner's names none, so its login keeps its label.
+      const orgName = w.orgNames?.[token] ?? (w.owners[token] === undefined ? undefined : 'Org')
+      const planName = w.planNames?.[token]
       const profile = {
         account: { uuid: `account-${email}`, email },
-        organization: { uuid: `org-${email}`, ...(w.owners[token] === undefined ? {} : { name: 'Org' }), organization_type: 'claude_max' },
+        organization: {
+          uuid: `org-${email}`,
+          ...(orgName === undefined ? {} : { name: orgName }),
+          organization_type: 'claude_max',
+          ...(planName === undefined ? {} : { plan_display_name: planName }),
+        },
       }
       return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(profile) } }
     }
@@ -4670,3 +4682,57 @@ for (const reason of ['prompt_input_exit', 'logout', 'other']) {
     expect([reason, store.get('mark:2')]).toEqual([reason, undefined])
   })
 }
+
+// puma-eslxj.6 (C5): the plan by its name, and the Company only where it is not the account's own.
+
+/** The texts the pane draws for login 1, `one@example.com`'s, under its email: its organization and plan. */
+async function aboutOne(on: On, $: Engine, w: World): Promise<string[]> {
+  const clock = world(on, w, { ...TWO_LOGINS, 'rotate-to': 'off' })
+  await start($, clock)
+  const pane = await mountPane($)
+  const texts = (await pane.findAll({ type: 'Text' })).map(t => t.text ?? '')
+  await pane.unmount()
+  const at = texts.indexOf('one@example.com')
+  return at < 0 ? texts : texts.slice(at + 1, at + 2)
+}
+
+/** Login 1 signed in by `blobOne`, its usage `usage`; login 2 not signed in. */
+function planWorld(blobOne: string, usage: [number | null, number | null, number?]): World {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blobOne
+  w.usage['tok-1'] = usage
+  return w
+}
+
+const PLAN_CASES: [string, () => World, string][] = [
+  ['max whose usage reports no 5-hour window', () => planWorld(blob('tok-1'), [null, 30]), 'Ultra'],
+  ['max with a 5-hour window', () => planWorld(blob('tok-1'), [10, 30]), 'Max'],
+  ['a sign-in whose tier is Max 20x, with a 5-hour window', () => planWorld(blob('tok-1', NOW + 6 * HOUR, 'max', 'default_claude_max_20x'), [10, 30]), 'Ultra'],
+  ['a sign-in whose tier is Max 5x', () => planWorld(blob('tok-1', NOW + 6 * HOUR, 'max', 'default_claude_max_5x'), [null, 30]), 'Max'],
+  ['a profile that names the plan', () => {
+    const w = planWorld(blob('tok-1'), [10, 30])
+    w.planNames = { 'tok-1': 'Ultra' }
+    return w
+  }, 'Ultra'],
+  ['a pro sign-in', () => planWorld(blob('tok-1', NOW + 6 * HOUR, 'pro'), [10, 30]), 'Pro'],
+  ['a team sign-in', () => planWorld(blob('tok-1', NOW + 6 * HOUR, 'team'), [10, 30]), 'Team'],
+  ['an enterprise sign-in', () => planWorld(blob('tok-1', NOW + 6 * HOUR, 'enterprise'), [10, 30]), 'Enterprise'],
+  ['a plan word the mod does not know', () => planWorld(blob('tok-1', NOW + 6 * HOUR, 'galaxy'), [10, 30]), 'galaxy'],
+]
+for (const [name, make, expected] of PLAN_CASES) {
+  test(`the pane names ${name} "${expected}"`, async ($, on) => {
+    expect([name, await aboutOne(on, $, make())]).toEqual([name, [expected]])
+  })
+}
+
+test('an account in the organization named for its own email draws no Company', async ($, on) => {
+  const w = planWorld(blob('tok-1'), [10, 30])
+  w.orgNames = { 'tok-1': "one@example.com's Organization" }
+  expect(await aboutOne(on, $, w)).toEqual(['Max'])
+})
+
+test('an account in another organization draws it as its Company, before the plan', async ($, on) => {
+  const w = planWorld(blob('tok-1'), [10, 30])
+  w.orgNames = { 'tok-1': 'Lutso Health' }
+  expect(await aboutOne(on, $, w)).toEqual(['Lutso Health · Max'])
+})
