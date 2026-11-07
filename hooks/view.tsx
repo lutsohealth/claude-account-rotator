@@ -86,7 +86,9 @@ function glyphOf(view: View, a: Account, style: Glyphs, row: 0 | 1, room: number
   const health = view.health[a.id]?.kind
   if (health === 'login-needed') return carriesMark ? { text: '⚠', color: 'error' } : { text: ' ' }
   if (health === 'logging-in') return carriesMark ? { text: '◌', color: 'warning' } : { text: ' ' }
-  if (room === undefined) return { text: row === 0 && !hasNoSession(view, a) ? '·' : ' ' }
+  // The session row dots a login without a 5-hour reading it should have; the week row, carrying the marks, one with none.
+  const isDot = row === 0 ? !hasNoSession(view, a) : carriesMark && view.readings[a.id] === undefined
+  if (room === undefined) return { text: isDot ? '·' : ' ' }
   return { text: glyph(style, shown(view.footer.fill, room)), ...roomRun(room) }
 }
 
