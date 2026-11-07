@@ -849,8 +849,10 @@ const PLAN_WORDS: Readonly<Record<string, PlanTier>> = { max: 'Max', pro: 'Pro',
  */
 export function planName(account: Pick<Account, 'plan' | 'planName' | 'tier'>, hasNoFiveHour: boolean): PlanTier | string | undefined {
   if (account.planName !== undefined && account.planName !== '') return account.planName
-  if (account.tier !== undefined && /(^|_)max_20x$/.test(account.tier)) return 'Ultra'
-  if (account.tier !== undefined && /(^|_)max_5x$/.test(account.tier)) return 'Max'
+  // A Max tier names a max plan, or one with no word: a Team or Enterprise seat on such a tier is still its seat.
+  const isMaxLike = account.plan === undefined || account.plan === 'max'
+  if (isMaxLike && account.tier !== undefined && /(^|_)max_20x$/.test(account.tier)) return 'Ultra'
+  if (isMaxLike && account.tier !== undefined && /(^|_)max_5x$/.test(account.tier)) return 'Max'
   if (account.plan === undefined) return undefined
   if (account.plan === 'max' && hasNoFiveHour) return 'Ultra'
   return PLAN_WORDS[account.plan] ?? account.plan
@@ -859,8 +861,10 @@ export function planName(account: Pick<Account, 'plan' | 'planName' | 'tier'>, h
 /** The Company a login's row names: its organization, unless that is the one named for its own email. */
 export function companyOf(account: Pick<Account, 'email' | 'orgName'>): string | undefined {
   const { email, orgName } = account
-  if (orgName === undefined || orgName === '') return undefined
-  return email !== undefined && orgName === `${email}'s Organization` ? undefined : orgName
+  if (orgName === undefined || orgName.trim() === '') return undefined
+  // Emails match whatever their case, and a name's outer spaces are no part of it.
+  const isOwn = email !== undefined && orgName.trim().toLowerCase() === `${email.trim().toLowerCase()}'s organization`
+  return isOwn ? undefined : orgName.trim()
 }
 
 // ---------------------------------------------------------------- one usage schedule per store
