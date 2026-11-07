@@ -4225,6 +4225,39 @@ test('readings stored with no owner, as an older version left accounts 3 and 5, 
   await pane.unmount()
 })
 
+test('a login whose only reading is an older version\'s is read at boot, though its schedule says later; a back-off still holds', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [10, 20]
+  w.usage['tok-2'] = [10, 30]
+  const store = new Map<string, unknown>(Object.entries({
+    ...TWO_LOGINS,
+    'reading:1': { sevenDay: { pct: 50, resetsAt: WEEK_RESET }, at: NOW - 60_000, by: '1' },
+    'usage-due:1': { next: NOW + 20 * 60_000, fails: 0, at: NOW - 60_000 },
+    'usage-due:2': { next: NOW + 20 * 60_000, fails: 2, at: NOW - HOUR },
+  }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  expect([callsWith(w, 'tok-1'), callsWith(w, 'tok-2')]).toEqual([1, 0])
+  expect(storedOf(store, '1')?.sevenDay?.pct).toBe(20)
+})
+
+test('a session records the version it writes as, and drops the records of sessions gone a day', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.usage['tok-1'] = [10, 20]
+  const store = new Map<string, unknown>(Object.entries({
+    accounts: [{ id: '1', slot: '', email: 'one@example.com' }],
+    'writer:gone': { version: 1, at: NOW - 25 * HOUR },
+    'writer:recent': { version: 1, at: NOW - HOUR },
+  }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  expect(store.get('writer:session-1')).toEqual({ version: 1, at: NOW })
+  expect([store.has('writer:gone'), store.has('writer:recent')]).toEqual([false, true])
+})
+
 /** The band's text above the prompt, or '' where no band is drawn. */
 async function bandText($: Engine): Promise<string> {
   try {

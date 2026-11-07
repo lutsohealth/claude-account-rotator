@@ -2,6 +2,7 @@ import { expect, test } from 'claude-code/testing'
 
 import type { RotateTo, View } from '../types'
 import { weekLeaveFrom, launchOnFrom, pickLaunch, isSessionStop } from './model'
+import { isSameWeek, whoseWeek } from './model'
 import { USAGE_BACKOFF_MAX_MS, USAGE_CLAIM_MS, USAGE_CLAIM_WAIT_MS, USAGE_EARLY_MS, afterUsage, claimDueReads, isUsageDue, mayForceUsage, mayReadSince, renewClaim, retryAfterFrom, usageDueFrom } from './model'
 import { DEFAULT_FOOTER, availableNow, braille, browsersFrom, chromeNote, continueTextFrom, counted, fiveHourLimitFrom, credentialFrom, credentialsFile, fableMark, fableSpentNotice, fableStay, footerStyleFrom, healthOf, identityFromProfile, isFableSpent, isFableStop, isNoBrowser, isPolicyRefusal, keepFable, keychainItem, legacyMark, markFrom, nextReset, pickTarget, pie, readingFromUsage, rotateToFrom, shouldLeave, roomColor, windowPct, withMark, withWeekMark } from './model'
 
@@ -673,6 +674,26 @@ test('a stored schedule is read field by field; one with no time is none', () =>
   expect(usageDueFrom({ next: NOW, fails: -1 })).toEqual({ next: NOW, fails: 0 })
   expect(usageDueFrom({ fails: 0 })).toBeUndefined()
   expect(usageDueFrom('x')).toBeUndefined()
+})
+
+test('two week resets are one week within an hour of each other or a whole number of weeks apart, and not otherwise', () => {
+  expect(isSameWeek(WEEK_END, WEEK_END)).toBe(true)
+  expect(isSameWeek(WEEK_END, new Date(Date.parse(WEEK_END) + 59 * 60_000).toISOString())).toBe(true)
+  expect(isSameWeek(WEEK_END, new Date(Date.parse(WEEK_END) - 7 * 24 * HOUR).toISOString())).toBe(true)
+  expect(isSameWeek(WEEK_END, new Date(Date.parse(WEEK_END) + 2 * HOUR).toISOString())).toBe(false)
+  expect(isSameWeek(WEEK_END, new Date(Date.parse(WEEK_END) - 24 * HOUR).toISOString())).toBe(false)
+  expect(isSameWeek(undefined, WEEK_END)).toBe(false)
+})
+
+test('a response\'s week is every login whose stored week resets with it: one, none, or two that share a reset', () => {
+  const at = NOW
+  const week = (resetsAt: string) => ({ sevenDay: { pct: 10, resetsAt }, at })
+  const other = '2026-10-17T05:00:00Z'
+  const readings = { '1': week(WEEK_END), '2': week(other), '3': week(other) }
+  expect(whoseWeek(week(WEEK_END), readings)).toEqual(['1'])
+  expect(whoseWeek(week(other), readings)).toEqual(['2', '3'])
+  expect(whoseWeek(week('2026-10-15T00:00:00Z'), readings)).toEqual([])
+  expect(whoseWeek({ fiveHour: { pct: 10, resetsAt: LATER }, at }, readings)).toEqual([])
 })
 
 /** A store in memory, as the sessions on one Mac share it. */
