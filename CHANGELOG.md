@@ -2,6 +2,13 @@
 
 What each version of the account rotator changed. To get each one as Claude Code starts, turn on auto-update: in `/plugin`, open **Marketplaces**, pick **claude-account-rotator** and choose **Enable auto-update**. To update by hand, run `claude plugin marketplace update claude-account-rotator`, then `claude plugin update account-rotator@claude-account-rotator`, and start a new session.
 
+## 0.4.0-lutso.1 - 2026-11-07
+
+- **5h limit** in the panel's **Usage based rotation** box. **where reported**, the default, counts an account's 5-hour window where its usage reports one; **off** counts none, so only the week and the Fable week move the session. The panel's first line says which is in force, and a press applies to every session on the Mac.
+- **Accounts that report no 5-hour window, such as verified Ultra accounts, are ranked by their week:** **soonest reset** by the week's reset, **most room** by the week's room. Before, they ranked as if they had all their room, behind every account with a running 5-hour window.
+- **A usage limit no longer keeps an account out for good.** An account a plain usage limit stopped counts as spent until its 5-hour window resets, or for five hours where it reports none, and then rejoins the rotation, though no session reads it again.
+- **A Fable stop moves only to an account with Fable room**, and leaves the 5-hour window alone. The Fable week it marked spent stands through checks that list no Fable week, until its reset. With every Fable week spent, the session stays put and says when the next one frees up, once through the terminal's notice. After a Fable switch the mod sends `fable-continue-text` from its store, as your own words, where one is kept.
+
 ## 0.3.0 - 2026-10-16
 
 - **Other accounts** at the top of the panel's **Chrome** box lists the accounts no Chrome extension is known to answer as, each with **Try to connect**: for a Chrome opened on another account after the window started. The accounts that answer have **Use for Chrome**.
