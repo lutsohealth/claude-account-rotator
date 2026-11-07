@@ -4146,6 +4146,32 @@ test('a switch whose responses still carry the week of the login left, within 3 
   expect(storedOf(store, '2')?.sevenDay?.resetsAt).toBe(OTHER_WEEK)
 })
 
+test('a stop that moves nothing leaves a settling switch settling: responses still judge it', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [10, 40]
+  w.usage['tok-2'] = [10, 41]
+  w.weekResets = { 'tok-2': OTHER_WEEK }
+  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off' }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  await pane.press({ key: 'use-2' })
+  await clock.settle()
+  await pane.unmount()
+  // Past the settle window, a turn dies on a limit; the rotation is off, so nothing moves.
+  await clock.advance(40_000)
+  await $.classic.StopFailure({ error: 'rate_limit', last_assistant_message: 'Claude usage limit reached.' })
+  await clock.settle()
+  w.limits = [{ kind: 'seven_day', percentUsed: 42, resetsAt: WEEK_RESET }]
+  await clock.advance(20_000)
+  await respond($, clock, w)
+  await clock.advance(4 * 60_000)
+  await respond($, clock, w)
+  expect(w.toasts.filter(t => /did not take/.test(t))).toHaveLength(1)
+})
+
 test('a reading an older version writes after this session started says, once, to restart that session', async ($, on) => {
   const w = fresh()
   w.keychain['Claude Code-credentials'] = blob('tok-1')
