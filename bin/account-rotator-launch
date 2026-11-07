@@ -10,6 +10,9 @@ Prints the slot on stdout (an empty line for Claude Code's own login) and one li
 stderr. Exit 0 with a pick, 1 when no account has room or no session has picked one yet, 2 on a usage error.
 """
 
+# Read as text, so `str | None` is no error on a macOS python3 older than 3.10.
+from __future__ import annotations
+
 import argparse
 import glob
 import json
