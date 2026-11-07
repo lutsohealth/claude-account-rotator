@@ -2,7 +2,7 @@ import { expect, test } from 'claude-code/testing'
 
 import type { RotateTo, View } from '../types'
 import { weekLeaveFrom, launchOnFrom, pickLaunch, isSessionStop } from './model'
-import { USAGE_BACKOFF_MAX_MS, USAGE_CLAIM_WAIT_MS, USAGE_EARLY_MS, afterUsage, claimDueReads, isUsageDue, mayForceUsage, retryAfterFrom, usageDueFrom } from './model'
+import { USAGE_BACKOFF_MAX_MS, USAGE_CLAIM_MS, USAGE_CLAIM_WAIT_MS, USAGE_EARLY_MS, afterUsage, claimDueReads, isUsageDue, mayForceUsage, mayReadSince, renewClaim, retryAfterFrom, usageDueFrom } from './model'
 import { DEFAULT_FOOTER, availableNow, braille, browsersFrom, chromeNote, continueTextFrom, counted, fiveHourLimitFrom, credentialFrom, credentialsFile, fableMark, fableSpentNotice, fableStay, footerStyleFrom, healthOf, identityFromProfile, isFableSpent, isFableStop, isNoBrowser, isPolicyRefusal, keepFable, keychainItem, legacyMark, markFrom, nextReset, pickTarget, pie, readingFromUsage, rotateToFrom, shouldLeave, roomColor, windowPct, withMark, withWeekMark } from './model'
 
 const NOW = Date.parse('2026-10-12T10:00:00Z')
@@ -675,6 +675,65 @@ test('a stored schedule is read field by field; one with no time is none', () =>
   expect(usageDueFrom({ next: NOW, fails: -1 })).toEqual({ next: NOW, fails: 0 })
   expect(usageDueFrom({ fails: 0 })).toBeUndefined()
   expect(usageDueFrom('x')).toBeUndefined()
+})
+
+/** A store in memory, as the sessions on one Mac share it. */
+function memoryStore(): { values: Map<string, unknown>; get: (key: string) => Promise<unknown>; set: (key: string, value: unknown) => Promise<void> } {
+  const values = new Map<string, unknown>()
+  return { values, get: async key => values.get(key), set: async (key, value) => void values.set(key, value) }
+}
+
+// Review codex-r1 LEASE [CLAIM-LEASE], the instance, adapted to the fix: the claim is renewed as each read starts,
+// so a read that starts late in a long check still holds it against a session that claims a lease later.
+test('a claim renewed as its read starts holds the read for a lease from the read, not from the check', async () => {
+  const store = memoryStore()
+  expect((await claimDueReads(store, ['1'], 'A', NOW, async () => {})).has('1')).toBe(true)
+  // A's read of login 1 starts 80 s into its check.
+  const renewed = renewClaim(usageDueFrom(store.values.get('usage-due:1')), 'A', NOW + 80_000)
+  expect(renewed).toBeDefined()
+  await store.set('usage-due:1', renewed)
+  expect((await claimDueReads(store, ['1'], 'B', NOW + USAGE_CLAIM_MS, async () => {})).has('1')).toBe(false)
+})
+
+// Review codex-r1 LEASE [CLAIM-LEASE], the class: every position in a check's list, and every way a claim stops
+// being this session's (it ran out and another took it, another's read finished).
+test('a read renews only a claim still its own, at every position of the check', async () => {
+  const ids = ['1', '2', '3', '4', '5']
+  for (const id of ids) {
+    const store = memoryStore()
+    await claimDueReads(store, ids, 'A', NOW, async () => {})
+    const at = NOW + 20_000 * Number(id)
+    expect([id, renewClaim(usageDueFrom(store.values.get(`usage-due:${id}`)), 'A', at)?.claim]).toEqual([id, 'A'])
+  }
+  const lapsed = memoryStore()
+  await claimDueReads(lapsed, ['1'], 'A', NOW, async () => {})
+  await claimDueReads(lapsed, ['1'], 'B', NOW + USAGE_CLAIM_MS, async () => {})
+  expect(renewClaim(usageDueFrom(lapsed.values.get('usage-due:1')), 'A', NOW + USAGE_CLAIM_MS + 1)).toBeUndefined()
+  expect(renewClaim(afterUsage(undefined, { kind: 'ok', hasResponded: false }, NOW), 'A', NOW + 1)).toBeUndefined()
+})
+
+// Review codex-r1 BACKOFF [TICK-BOUND-WAIT], adapted to the fix: due-ness is judged on the minute's tick, so a
+// capped back-off is read within one tick of its end, whatever the phase of the failure.
+test('a capped back-off is read at the first minute tick after it ends, at every phase of the failure', () => {
+  for (const phase of [1, 300, 30_000, 59_999, 5 * 60_000]) {
+    const readAt = NOW + phase
+    const due = afterUsage({ next: readAt, fails: 9 }, { kind: 'failed' }, readAt)
+    expect(due.next).toBe(readAt + USAGE_BACKOFF_MAX_MS)
+    const ticks = Array.from({ length: 70 }, (_, i) => NOW + (i + 1) * MIN)
+    const firstRead = ticks.find(tick => isUsageDue(due, tick))
+    expect([phase, firstRead === undefined ? Infinity : firstRead - readAt]).toEqual([phase, expect.any(Number)])
+    expect(firstRead! - readAt).toBeLessThanOrEqual(USAGE_BACKOFF_MAX_MS + MIN)
+    expect(firstRead! - readAt).toBeGreaterThanOrEqual(USAGE_BACKOFF_MAX_MS)
+  }
+})
+
+test('a settling switch reads a login once: not past a good read since the switch, a back-off or another session\'s read', () => {
+  const since = NOW - 2 * MIN
+  expect(mayReadSince({ next: NOW + 9 * MIN, fails: 0, at: since - 1 }, 'me', NOW, since)).toBe(true)
+  expect(mayReadSince({ next: NOW + 9 * MIN, fails: 0, at: since }, 'me', NOW, since)).toBe(true)
+  expect(mayReadSince({ next: NOW + 9 * MIN, fails: 0, at: since + 1 }, 'me', NOW, since)).toBe(false)
+  expect(mayReadSince({ next: NOW + 9 * MIN, fails: 1, at: since - 1 }, 'me', NOW, since)).toBe(false)
+  expect(mayReadSince({ next: NOW + 60_000, fails: 0, claim: 'other', at: since - 1 }, 'me', NOW, since)).toBe(false)
 })
 
 /**

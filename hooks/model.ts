@@ -899,6 +899,21 @@ const isClaimedElsewhere = (due: UsageDue | undefined, sessionId: string, now: n
 export const mayForceUsage = (due: UsageDue | undefined, sessionId: string, now: number): boolean =>
   !isBackedOff(due, now) && !isClaimedElsewhere(due, sessionId, now) && (due?.at === undefined || now - due.at > USAGE_FORCE_AFTER_MS)
 
+/**
+ * A settling switch may read a login once: no back-off stands, no other session's read is under way, and no good
+ * read came after the switch began (`since`). The minute gate does not apply: the switch is news the last read lacks.
+ */
+export const mayReadSince = (due: UsageDue | undefined, sessionId: string, now: number, since: number): boolean =>
+  !isBackedOff(due, now) && !isClaimedElsewhere(due, sessionId, now) && (due?.at === undefined || due.at <= since)
+
+/**
+ * The claim renewed as this session's read of the login starts, so the claim lasts from the read, not from the
+ * check that claimed it; undefined when the claim is no longer this session's (it ran out and another took it, or
+ * another session's read has finished).
+ */
+export const renewClaim = (due: UsageDue | undefined, sessionId: string, now: number): UsageDue | undefined =>
+  due?.claim === sessionId ? claimUsage(due, sessionId, now) : undefined
+
 /** The schedule with this session's claim on the read: every other session finds it not due until the claim runs out. */
 export const claimUsage = (due: UsageDue | undefined, sessionId: string, now: number): UsageDue => ({
   ...(due ?? { fails: 0 }),

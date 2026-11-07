@@ -30,6 +30,8 @@ type World = {
   retryAfter?: Record<string, string>
   /** The access token of each usage call the mod made, in order. */
   usageCalls: string[]
+  /** Access tokens whose usage call throws, as a dropped connection does. */
+  throwing?: string[]
   /** access token -> the email of the account it signs in, as the profile endpoint answers */
   owners: Record<string, string>
   /** The token a /login signs in, where the session reads its sign-in, and its plan. */
@@ -159,6 +161,7 @@ function world(on: On, w: World, store: Record<string, unknown> | Map<string, un
       return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(profile) } }
     }
     w.usageCalls.push(token)
+    if (w.throwing?.includes(token)) throw new Error('socket hang up')
     const failing = w.failing?.[token]
     const retryAfter = w.retryAfter?.[token]
     if (failing !== undefined) return { value: { status: failing, ok: false, headers: retryAfter === undefined ? {} : { 'retry-after': retryAfter }, text: '' } }
@@ -3845,8 +3848,10 @@ test('after a 429 with Retry-After 1800 no session calls for 30 minutes, and the
   expect((store.get('check-error:2') as { why?: string } | undefined)?.why).toMatch(/HTTP 429.*1800/)
   await clock.advance(10 * 60_000 + 1000)
   expect(callsWith(w, 'tok-2')).toBe(1)
-  // The back-off ends just after the 30-minute check: the 40-minute one reads again.
-  await clock.advance(31 * 60_000)
+  // The back-off ends just after the 30th minute: the minute's tick after it reads again, whatever the 10-minute check's phase.
+  await clock.advance(19 * 60_000)
+  expect(callsWith(w, 'tok-2')).toBe(1)
+  await clock.advance(2 * 60_000)
   expect(callsWith(w, 'tok-2')).toBe(2)
 })
 
@@ -3926,3 +3931,129 @@ test('a /login reads the usage of the login in use again only past a minute sinc
   await clock.settle()
   expect(callsWith(w, 'tok-1')).toBe(2)
 })
+
+test('a usage call that throws backs off as a failed one, for every session', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.throwing = ['tok-1']
+  const store = new Map<string, unknown>(Object.entries({ accounts: [{ id: '1', slot: '', email: 'one@example.com' }] }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  expect(callsWith(w, 'tok-1')).toBe(1)
+  expect(store.get('usage-due:1')).toMatchObject({ fails: 1 })
+  // Past the claim, inside the two-minute back-off: a stop reads nothing.
+  await clock.advance(100_000)
+  await $.classic.StopFailure({ error: 'rate_limit' })
+  await clock.settle()
+  expect(callsWith(w, 'tok-1')).toBe(1)
+})
+
+/** A response's rate limits: the 5-hour window and the week, in percent used. */
+const limitsOf = (five: number, week: number): SessionRateLimit[] => [
+  { kind: 'five_hour', percentUsed: five, resetsAt: '2026-10-12T12:00:00Z' },
+  { kind: 'seven_day', percentUsed: week, resetsAt: '2026-10-18T03:00:00Z' },
+]
+
+/** A response measured with the world's limits, and what it set off run out. */
+async function respond($: Engine, clock: MockClock, w: World): Promise<void> {
+  await $.session.measure({ context: { window: 200_000 }, rateLimits: w.limits, changed: ['rateLimits'] })
+  await clock.settle()
+}
+
+// Review opus-r1 F1 [STALE-COMPARISON], the instance: the settle read the target at the base; gated, it must still read it once.
+test('a switch that took is confirmed though its login was spent elsewhere since its last read', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [50, 40]
+  w.usage['tok-2'] = [10, 30]
+  const clock = world(on, w, TWO_LOGINS)
+  await start($, clock)
+  expect(w.envSets).toEqual([])
+  await clock.advance(25 * 60_000)
+  // Login 2 was used outside this store meanwhile; login 1's response crosses the leave line.
+  w.usage['tok-2'] = [30, 32]
+  w.usage['tok-1'] = [93, 40]
+  w.limits = limitsOf(93, 40)
+  await respond($, clock, w)
+  expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
+  // The switch took: responses report login 2's real usage, before its schedule reads it.
+  w.limits = limitsOf(30, 32)
+  await clock.advance(60_000)
+  await respond($, clock, w)
+  await clock.advance(3 * 60_000 + 10_000)
+  await respond($, clock, w)
+  expect(w.toasts.filter(t => /has not shown/.test(t))).toEqual([])
+})
+
+// Review opus-r1 F1 [STALE-COMPARISON], the class: every reading the settle compares, each window sameUsage compares,
+// and the cost: at most two usage calls per switch.
+const SETTLE_CASES: { name: string; spent: [number, number]; landed: 'confirmed' | 'reverted' }[] = [
+  { name: 'switch took, target spent elsewhere since its read', spent: [30, 32], landed: 'confirmed' },
+  { name: 'switch did not take, the source\'s 5-hour window climbed 4 points', spent: [97, 40], landed: 'reverted' },
+  { name: 'switch did not take, the source\'s week climbed 4 points', spent: [93, 44], landed: 'reverted' },
+]
+for (const c of SETTLE_CASES) {
+  test(`the settle judges a response against readings no older than the switch, at two usage calls at most (${c.name})`, async ($, on) => {
+    const w = fresh()
+    w.keychain['Claude Code-credentials'] = blob('tok-1')
+    w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+    w.usage['tok-1'] = [93, 40]
+    w.usage['tok-2'] = [10, 30]
+    const clock = world(on, w, TWO_LOGINS)
+    await start($, clock)
+    expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
+    const before = w.usageCalls.length
+    // The login the responses report spends on; the usage endpoint agrees with them.
+    w.usage[c.landed === 'confirmed' ? 'tok-2' : 'tok-1'] = c.spent
+    w.limits = limitsOf(...c.spent)
+    await clock.advance(60_000)
+    await respond($, clock, w)
+    await clock.advance(4 * 60_000)
+    await respond($, clock, w)
+    const landed = w.toasts.some(t => /did not take/.test(t)) ? 'reverted' : w.toasts.some(t => /has not shown/.test(t)) ? 'told not shown' : 'confirmed'
+    expect([c.name, landed]).toEqual([c.name, c.landed])
+    expect(w.usageCalls.length - before).toBeLessThanOrEqual(2)
+  })
+}
+
+// Review opus-r1 F2 [GATE-OWNED-BY-SIGN-IN], the instance: a /login that signs in another person reads the new sign-in at once.
+test('a /login that signs another person in reads the new sign-in at once', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.usage['tok-1'] = [80, 20]
+  w.usage['tok-9'] = [5, 5]
+  w.owners = { 'tok-1': 'one@example.com', 'tok-9': 'nine@example.com' }
+  w.loginToken = 'tok-9'
+  const store = new Map<string, unknown>(Object.entries({ accounts: [{ id: '1', slot: '', email: 'one@example.com' }] }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  await $.command.run({ command: 'login', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 120 } })
+  await clock.settle()
+  expect(w.toasts.filter(t => /is nine@example.com/.test(t))).toHaveLength(1)
+  const five = (store.get('reading:1') as { fiveHour?: { pct?: number } } | undefined)?.fiveHour?.pct
+  expect([callsWith(w, 'tok-9'), five]).toEqual([1, 5])
+})
+
+// Review opus-r1 F2 [GATE-OWNED-BY-SIGN-IN], the class: every gate an old sign-in leaves on a forced read.
+const SIGN_IN_GATES: { name: string; before: (w: World) => void; wait: number }[] = [
+  { name: 'the old sign-in read under a minute ago', before: () => undefined, wait: 0 },
+  { name: 'the old sign-in under a Retry-After back-off', before: w => { w.failing = { 'tok-1': 429 }; w.retryAfter = { 'tok-1': '1800' } }, wait: 2 * 60_000 },
+]
+for (const c of SIGN_IN_GATES) {
+  test(`a new sign-in is read past every gate the old one left (${c.name})`, async ($, on) => {
+    const w = fresh()
+    w.keychain['Claude Code-credentials'] = blob('tok-1')
+    w.usage['tok-1'] = [80, 20]
+    w.usage['tok-9'] = [5, 5]
+    w.owners = { 'tok-1': 'one@example.com', 'tok-9': 'nine@example.com' }
+    w.loginToken = 'tok-9'
+    c.before(w)
+    const clock = world(on, w, new Map<string, unknown>(Object.entries({ accounts: [{ id: '1', slot: '', email: 'one@example.com' }] })))
+    await start($, clock)
+    await clock.advance(c.wait)
+    await $.command.run({ command: 'login', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 120 } })
+    await clock.settle()
+    expect([c.name, callsWith(w, 'tok-9')]).toEqual([c.name, 1])
+  })
+}
