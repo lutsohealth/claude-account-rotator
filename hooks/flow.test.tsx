@@ -4726,6 +4726,14 @@ for (const [name, make, expected] of PLAN_CASES) {
   })
 }
 
+test('an account stored before the tier was kept, all else the same, reads Ultra by its sign-in\'s Max 20x tier', async ($, on) => {
+  const w = planWorld(blob('tok-1', NOW + 6 * HOUR, 'max', 'default_claude_max_20x'), [10, 30])
+  const kept = { accounts: [{ id: '1', slot: '', email: 'one@example.com', orgId: 'org-one@example.com', plan: 'max' }, TWO_LOGINS.accounts[1]] }
+  const clock = world(on, w, { ...kept, 'rotate-to': 'off' })
+  await start($, clock)
+  expect(await paneText($)).toMatch(/^Ultra$/m)
+})
+
 test('an account in the organization named for its own email draws no Company', async ($, on) => {
   const w = planWorld(blob('tok-1'), [10, 30])
   w.orgNames = { 'tok-1': "one@example.com's Organization" }
