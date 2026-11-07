@@ -2,6 +2,13 @@
 
 What each version of the account rotator changed. To get each one as Claude Code starts, turn on auto-update: in `/plugin`, open **Marketplaces**, pick **claude-account-rotator** and choose **Enable auto-update**. To update by hand, run `claude plugin marketplace update claude-account-rotator`, then `claude plugin update account-rotator@claude-account-rotator`, and start a new session.
 
+## 0.5.4-lutso.1 - 2026-11-07
+
+- **All your sessions share one usage schedule.** Each account's usage is read once per interval, however many sessions run: every 10 minutes for an account a session is using, every 30 for the rest. More sessions no longer mean more usage calls, so the usage endpoint answers "HTTP 429" far less. Sessions on an older version still read on their own until they restart.
+- **A failed usage read waits before it tries again**, for every session. After a 429 every session waits what the endpoint's Retry-After asks, or 2 minutes doubling with each failure, whichever is longer, at most an hour. The panel's failure line names the wait, as in "(retry after 1800 s)". The account keeps its last good reading meanwhile.
+- **A usage-limit stop, `/login` or a sign-in reads the account again only once its last read is a minute old** and no wait stands. A switch reads each of its two accounts at most once while it settles.
+- **A new sign-in on an account is read at once**, even when the account's last sign-in was read moments before or was waiting after a 429.
+
 ## 0.5.3-lutso.1 - 2026-11-07
 
 - **`/accounts` opens and closes the panel.** Type it at the prompt, even while Claude works, to open the panel the footer opens, and again to close it. Where you or another plugin already have an `accounts` command, yours stays yours and `/accounts` is not added.
