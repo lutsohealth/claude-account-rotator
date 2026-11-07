@@ -105,6 +105,9 @@ const viewAtom = atom({ plugin: 'account-rotator', key: 'view' } as const, EMPTY
  * below 144 columns. Kept in step with closes by the person and with reloads.
  */
 let isPaneShown = false
+
+/** Whether boot has set the view's login to the one this session uses. */
+let isBooted = false
 /** The `claude auth login` child of the sign-in under way, so Cancel can end it. */
 let running: HookStream<ProcessSpawnChunk, ProcessSpawnResult> | undefined
 /** The login this session is signing in; a stored 'logging-in' from a session that died is checked again. */
@@ -258,7 +261,12 @@ async function mergeStore($: Host): Promise<void> {
   const holders: Record<string, Holder> = {}
   for (const a of accounts) {
     const r = await storedReading($, a.id)
-    if (r !== undefined) readings[a.id] = r
+    if (r?.by === a.id) readings[a.id] = r
+    else {
+      // A reading no login can be shown to own is not read back; a stop an older version marked inside it keeps.
+      const legacy = legacyMark(r, await $.clock.now())
+      if (legacy !== undefined) await keepLegacyMark($, a.id, legacy)
+    }
     const m = markFrom(await $.store.get(`mark:${a.id}`))
     if (m !== undefined) marks[a.id] = m
     const n = await $.store.get(`no-five-hour:${a.id}`)
@@ -594,7 +602,7 @@ async function checkAccount($: Host, account: Account): Promise<void> {
           // A body whose 5-hour window it cannot read leaves what the last one said.
           if (reading.fiveHour !== undefined || noFiveHour === true) await saveNoFiveHour($, account.id, noFiveHour === true)
           // A body with no Fable row leaves the week a stop marked spent as it is.
-          await saveReading($, account.id, keepFable(reading, (await getView($)).readings[account.id], now))
+          await saveReading($, account.id, { ...keepFable(reading, (await getView($)).readings[account.id], now), by: account.id })
         }
       }
     }
@@ -819,13 +827,16 @@ async function onMeasure($: Host, limits: readonly SessionRateLimit[]): Promise<
     await settlePending($, true)
     return
   }
+  // Until boot has read which login this session uses, the view's login is a default, not this session's: a
+  // response measured then is no login's to store (it once put account 3's week under account 1).
+  if (!isBooted) return
   const reading = readingFromLimits(limits, await $.clock.now())
   if (reading === undefined) return
   // A response that reports a 5-hour window shows the account has one, whatever the last usage check said.
   if (reading.fiveHour !== undefined && view.noFiveHour?.[view.activeId] === true) await saveNoFiveHour($, view.activeId, false)
   // A response never lists the Fable week: the one the last check read stays.
   const fable = view.readings[view.activeId]?.fable
-  await saveReading($, view.activeId, { ...reading, ...(fable ? { fable } : {}) })
+  await saveReading($, view.activeId, { ...reading, ...(fable ? { fable } : {}), by: view.activeId })
   await maybeRotate($)
 }
 
@@ -879,7 +890,7 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
       need = 'fable'
       await setView($, v => ({ ...v, isFableStopped: true }))
       // The limit was hit before the usage call shows it: count the Fable week as full.
-      if (!isFableSpent(r, now)) await saveReading($, active.id, { ...read, fable: fableMark(r?.fable, now), at: now })
+      if (!isFableSpent(r, now)) await saveReading($, active.id, { ...read, fable: fableMark(r?.fable, now), at: now, by: active.id })
     } else if (!shouldLeave(after, now) && isSessionStop(said)) {
       // Claude's words name the 5-hour window: the account has one, whatever its last usage check said.
       await saveNoFiveHour($, active.id, false)
@@ -1362,6 +1373,7 @@ async function boot($: Host, isInteractive: boolean): Promise<void> {
   const sessionId = await $.session.id().catch(() => undefined)
   await mergeStore($)
   await setView($, v => ({ ...v, activeId, ...(sessionId === undefined ? {} : { sessionId }) }))
+  isBooted = true
   await checkSwitching($, slot)
   // First, while the session can still move: the rotation waits for it.
   if (isInteractive && shouldConnectAtOpen(await getView($))) {

@@ -231,7 +231,9 @@ const LAUNCH_WHY: Record<'room' | 'nonzero' | 'reset', string> = {
  * with room. Undefined while no login has room.
  */
 export function pickLaunch(view: View, now: number): Omit<LaunchPick, 'at'> | undefined {
-  const ready = view.accounts.filter(a => view.health[a.id]?.kind === 'ok' && hasRoom(view.readings[a.id], now))
+  // A login whose usage check fails and that has no reading of its own has room no one can show.
+  const isUnread = (a: Account) => view.checkErrors?.[a.id] !== undefined && view.readings[a.id] === undefined
+  const ready = view.accounts.filter(a => view.health[a.id]?.kind === 'ok' && !isUnread(a) && hasRoom(view.readings[a.id], now))
   const pick = (a: Account | undefined, why: string) => (a === undefined ? undefined : { id: a.id, slot: a.slot, why })
   const room = (a: Account) => availableNow(view.readings[a.id], now, 0) ?? roomLeft(view.readings[a.id]?.sevenDay, now) ?? 100
   // A view kept from before a hot reload lacks the setting: it reads as the default.

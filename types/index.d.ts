@@ -6,9 +6,10 @@ export type UsageWindow = { pct: number; resetsAt?: string; isStop?: true }
  * Fable week, which only the usage endpoint lists: a response never reports it.
  * `noFiveHour` where the usage endpoint listed no 5-hour window: the account
  * has none, as a verified Ultra account, so no stop marks one on it. A view's
- * reading carries it from `View.noFiveHour`; a stored one does not.
+ * reading carries it from `View.noFiveHour`; a stored one does not. `by` is the login whose sign-in produced the
+ * read; a stored reading without it, or naming another login, is no login's and is not read back.
  */
-export type Reading = { fiveHour?: UsageWindow; sevenDay?: UsageWindow; fable?: UsageWindow; noFiveHour?: true; at: number }
+export type Reading = { fiveHour?: UsageWindow; sevenDay?: UsageWindow; fable?: UsageWindow; noFiveHour?: true; at: number; by?: string }
 
 /**
  * The 5-hour window a stop marked spent, kept in the store under its own key,

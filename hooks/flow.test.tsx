@@ -1452,7 +1452,7 @@ test('a stored stop mark with no reset time, on an account whose token is not li
   // Login 2's access token has run out: no check reads its usage again.
   w.keychain[await keychainItem(SLOT2)] = blob('tok-2', NOW - HOUR)
   w.usage['tok-1'] = [null, 40]
-  const stale = { fiveHour: { pct: 100 }, sevenDay: { pct: 10, resetsAt: '2026-10-18T03:00:00Z' }, at: NOW - 6 * HOUR }
+  const stale = { fiveHour: { pct: 100 }, sevenDay: { pct: 10, resetsAt: '2026-10-18T03:00:00Z' }, at: NOW - 6 * HOUR, by: '2' }
   const clock = world(on, w, { ...TWO_LOGINS, 'reading:2': stale })
   await start($, clock)
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
@@ -1737,7 +1737,7 @@ test('a Fable stop on a login with a standing 5-hour mark leaves the mark standi
     ...TWO_LOGINS,
     'rotate-to': 'off',
     // A 5-hour window read an hour before the stop that marked it.
-    'reading:1': { fiveHour: { pct: 50, resetsAt: '2026-10-12T12:00:00Z' }, sevenDay: { pct: 40, resetsAt: '2026-10-18T03:00:00Z' }, fable: { pct: 50, resetsAt: '2026-10-18T03:00:00Z' }, at: NOW - HOUR },
+    'reading:1': { fiveHour: { pct: 50, resetsAt: '2026-10-12T12:00:00Z' }, sevenDay: { pct: 40, resetsAt: '2026-10-18T03:00:00Z' }, fable: { pct: 50, resetsAt: '2026-10-18T03:00:00Z' }, at: NOW - HOUR, by: '1' },
     'mark:1': { pct: 100, resetsAt: '2026-10-12T15:00:00Z', at: NOW - 30 * 60_000 },
   }))
   const clock = world(on, w, store)
@@ -1855,7 +1855,7 @@ test('a session that starts on a spent login whose token has run out holds the s
   w.usage['tok-1'] = [null, 100]
   w.usage['tok-2'] = [null, 30]
   // Another session read login 1's spent week while its token was live.
-  const clock = world(on, w, { ...TWO_LOGINS, 'reading:1': { sevenDay: { pct: 100, resetsAt: '2026-10-18T03:00:00Z' }, at: NOW - 2 * HOUR } })
+  const clock = world(on, w, { ...TWO_LOGINS, 'reading:1': { sevenDay: { pct: 100, resetsAt: '2026-10-18T03:00:00Z' }, at: NOW - 2 * HOUR, by: '1' } })
   await start($, clock)
   await clock.advance(2 * 60_000)
   expect(w.envSets).toEqual([])
@@ -3167,7 +3167,7 @@ test('a later stop still counts when an earlier reading came from a session cloc
   const store = new Map<string, unknown>(Object.entries({
     ...TWO_LOGINS,
     'rotate-to': 'off',
-    'reading:1': { fiveHour: { pct: 30, resetsAt: '2026-10-12T12:00:00Z' }, at: NOW + HOUR },
+    'reading:1': { fiveHour: { pct: 30, resetsAt: '2026-10-12T12:00:00Z' }, at: NOW + HOUR, by: '1' },
     'mark:1': { pct: 100, resetsAt: '2026-10-12T15:00:00Z', at: NOW },
   }))
   const clock = world(on, w, store)
@@ -3184,7 +3184,7 @@ test('a later stop survives clock skew at every view recount site', async ($, on
   const store = new Map<string, unknown>(Object.entries({
     ...TWO_LOGINS,
     'rotate-to': 'off',
-    'reading:1': { fiveHour: { pct: 30, resetsAt: '2026-10-12T12:00:00Z' }, at: NOW + HOUR },
+    'reading:1': { fiveHour: { pct: 30, resetsAt: '2026-10-12T12:00:00Z' }, at: NOW + HOUR, by: '1' },
     'mark:1': { pct: 100, resetsAt: '2026-10-12T15:00:00Z', at: NOW },
   }))
   const clock = world(on, w, store)
@@ -3263,7 +3263,7 @@ test('a Fable stop does not restamp an older 5-hour window over a mark written s
   const store = new Map<string, unknown>(Object.entries({
     ...TWO_LOGINS,
     'rotate-to': 'off',
-    'reading:1': { fiveHour: { pct: 50, resetsAt: '2026-10-12T12:00:00Z' }, at: NOW - HOUR },
+    'reading:1': { fiveHour: { pct: 50, resetsAt: '2026-10-12T12:00:00Z' }, at: NOW - HOUR, by: '1' },
   }))
   const clock = world(on, w, store)
   await start($, clock)
@@ -3284,7 +3284,7 @@ test('a Fable stop preserves an unseen concurrent mark through every 5-hour limi
     ...TWO_LOGINS,
     'rotate-to': 'off',
     'five-hour-limit': 'off',
-    'reading:1': { fiveHour: { pct: 50, resetsAt: '2026-10-12T12:00:00Z' }, at: NOW - HOUR },
+    'reading:1': { fiveHour: { pct: 50, resetsAt: '2026-10-12T12:00:00Z' }, at: NOW - HOUR, by: '1' },
   }))
   const clock = world(on, w, store)
   await start($, clock)
