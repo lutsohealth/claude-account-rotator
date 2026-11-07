@@ -48,6 +48,13 @@ function view(
 /** A login that reports no 5-hour window: its week alone, used `week` percent, resetting at `resetsAt`. */
 const weekOnly = (week: number, resetsAt: string) => ({ sevenDay: { pct: week, resetsAt }, at: NOW })
 
+test('a login whose usage check fails with no reading of its own is never a rotation target (puma-4q7j2.8, RULING 4278)', () => {
+  const v = view({ '1': [95, 50], '2': [0, 0], '3': [0, 60] }, {}, 'room')
+  delete v.readings['2']
+  v.checkErrors = { '2': { why: 'the usage call answered HTTP 429', at: NOW } }
+  expect(pickTarget(v, NOW)?.id).toBe('3')
+})
+
 test('a stored 5-hour limit choice is kept when known, else on', () => {
   expect(fiveHourLimitFrom('off')).toBe('off')
   expect(fiveHourLimitFrom('on')).toBe('on')

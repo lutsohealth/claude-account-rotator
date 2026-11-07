@@ -181,12 +181,16 @@ function resetOf(r: Reading | undefined, now: number): number {
  * with a Fable reading comes before any with none, and the most room means the
  * most Fable room, then the most 5-hour room.
  */
+/** A login whose usage check fails and that has no reading of its own: room no one can show. */
+export const isUnread = (view: View, a: Account): boolean => view.checkErrors?.[a.id] !== undefined && view.readings[a.id] === undefined
+
 export function pickTarget(view: View, now: number, need?: Need): Account | undefined {
   const isFable = need === 'fable'
   const open = view.accounts.filter(
     a =>
       a.id !== view.activeId &&
       view.health[a.id]?.kind === 'ok' &&
+      !isUnread(view, a) &&
       !isSpent(view.readings[a.id], now, view.weekLeave) &&
       !(isFable && isFableSpent(view.readings[a.id], now)),
   )
@@ -231,7 +235,7 @@ const LAUNCH_WHY: Record<'room' | 'nonzero' | 'reset', string> = {
  * with room. Undefined while no login has room.
  */
 export function pickLaunch(view: View, now: number): Omit<LaunchPick, 'at'> | undefined {
-  const ready = view.accounts.filter(a => view.health[a.id]?.kind === 'ok' && hasRoom(view.readings[a.id], now))
+  const ready = view.accounts.filter(a => view.health[a.id]?.kind === 'ok' && !isUnread(view, a) && hasRoom(view.readings[a.id], now))
   const pick = (a: Account | undefined, why: string) => (a === undefined ? undefined : { id: a.id, slot: a.slot, why })
   const room = (a: Account) => availableNow(view.readings[a.id], now, 0) ?? roomLeft(view.readings[a.id]?.sevenDay, now) ?? 100
   // A view kept from before a hot reload lacks the setting: it reads as the default.

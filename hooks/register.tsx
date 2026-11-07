@@ -105,6 +105,9 @@ const viewAtom = atom({ plugin: 'account-rotator', key: 'view' } as const, EMPTY
  * below 144 columns. Kept in step with closes by the person and with reloads.
  */
 let isPaneShown = false
+
+/** Whether boot has set the view's login to the one this session uses. */
+let isBooted = false
 /** The `claude auth login` child of the sign-in under way, so Cancel can end it. */
 let running: HookStream<ProcessSpawnChunk, ProcessSpawnResult> | undefined
 /** The login this session is signing in; a stored 'logging-in' from a session that died is checked again. */
@@ -165,6 +168,12 @@ async function storedReading($: Host, id: string): Promise<Reading | undefined> 
   return typeof r === 'object' && r !== null && typeof (r as Reading).at === 'number' ? (r as Reading) : undefined
 }
 
+/** A login's stored reading when that login produced it; one with no owner, or another's, is no one's to build on. */
+async function ownedReading($: Host, id: string): Promise<Reading | undefined> {
+  const r = await storedReading($, id)
+  return r?.by === id ? r : undefined
+}
+
 /** What the store holds beside a login's reading, each under its own key: its stop marks, and whether it has no 5-hour window. */
 type Beside = { mark?: Mark; weekMark?: Mark; noFiveHour?: boolean }
 
@@ -191,7 +200,7 @@ async function saveNoFiveHour($: Host, id: string, hasNoFiveHour: boolean): Prom
 async function saveWeekMark($: Host, id: string, weekMark: Mark): Promise<void> {
   await $.store.set(`week-mark:${id}`, weekMark)
   const now = await $.clock.now()
-  const read = (await storedReading($, id)) ?? { at: weekMark.at }
+  const read = (await ownedReading($, id)) ?? { at: weekMark.at }
   await setView($, v => {
     const weekMarks = { ...v.weekMarks, [id]: weekMark }
     return { ...v, weekMarks, readings: { ...v.readings, [id]: viewed(read, { ...besideOf(v, id), weekMark }, v.fiveHourLimit, now) } }
@@ -225,7 +234,7 @@ async function keepLegacyMark($: Host, id: string, legacy: Mark): Promise<void> 
 async function saveMark($: Host, id: string, mark: Mark): Promise<void> {
   await $.store.set(`mark:${id}`, mark)
   const now = await $.clock.now()
-  const read = (await storedReading($, id)) ?? { at: mark.at }
+  const read = (await ownedReading($, id)) ?? { at: mark.at }
   await setView($, v => ({
     ...v,
     marks: { ...v.marks, [id]: mark },
@@ -258,7 +267,12 @@ async function mergeStore($: Host): Promise<void> {
   const holders: Record<string, Holder> = {}
   for (const a of accounts) {
     const r = await storedReading($, a.id)
-    if (r !== undefined) readings[a.id] = r
+    if (r?.by === a.id) readings[a.id] = r
+    else {
+      // A reading no login can be shown to own is not read back; a stop an older version marked inside it keeps.
+      const legacy = legacyMark(r, await $.clock.now())
+      if (legacy !== undefined) await keepLegacyMark($, a.id, legacy)
+    }
     const m = markFrom(await $.store.get(`mark:${a.id}`))
     if (m !== undefined) marks[a.id] = m
     const n = await $.store.get(`no-five-hour:${a.id}`)
@@ -302,7 +316,10 @@ async function mergeStore($: Host): Promise<void> {
       const weekMark = weekMarks[a.id] ?? v.weekMarks?.[a.id]
       if (weekMark !== undefined) nextWeekMarks[a.id] = weekMark
       // On a tie the stored read wins: this session's copy is already counted, and may have lost a window.
-      const reading = mine !== undefined && (theirs === undefined || mine.at > theirs.at) ? mine : theirs
+      const kept = mine !== undefined && (theirs === undefined || mine.at > theirs.at) ? mine : theirs
+      // A stop's mark still in force counts with no reading under it: a reading dropped as no one's takes no mark along.
+      const inForce = (m: Mark | undefined) => m !== undefined && Date.parse(m.resetsAt) > now
+      const reading = kept ?? (inForce(mark) || inForce(weekMark) ? { at: now, by: a.id } : undefined)
       if (reading !== undefined) nextReadings[a.id] = viewed(reading, { mark, weekMark, noFiveHour: none }, fiveHourLimit, now)
       const own = v.health[a.id]
       const h = signingIn === a.id ? own : (health[a.id] ?? own)
@@ -333,7 +350,7 @@ async function setFiveHourLimit($: Host, fiveHourLimit: FiveHourLimit): Promise<
   const now = await $.clock.now()
   const stored: Record<string, Reading> = {}
   for (const id of Object.keys((await getView($)).readings)) {
-    const r = await storedReading($, id)
+    const r = await ownedReading($, id)
     if (r !== undefined) stored[id] = r
   }
   await setView($, v => ({
@@ -594,7 +611,7 @@ async function checkAccount($: Host, account: Account): Promise<void> {
           // A body whose 5-hour window it cannot read leaves what the last one said.
           if (reading.fiveHour !== undefined || noFiveHour === true) await saveNoFiveHour($, account.id, noFiveHour === true)
           // A body with no Fable row leaves the week a stop marked spent as it is.
-          await saveReading($, account.id, keepFable(reading, (await getView($)).readings[account.id], now))
+          await saveReading($, account.id, { ...keepFable(reading, (await getView($)).readings[account.id], now), by: account.id })
         }
       }
     }
@@ -784,13 +801,24 @@ async function settlePending($: Host, isResponse: boolean): Promise<void> {
   const reading = readingFromLimits((await $.session.usage()).rateLimits, now)
   const target = accounts.find(a => a.id === pending.id)
   if (target !== undefined) await checkAccount($, target)
-  if (sameUsage(reading, (await getView($)).readings[pending.id], now)) {
+  const isTarget = (v: View) => sameUsage(reading, v.readings[pending.id], now)
+  const isSource = (v: View) => sameUsage(reading, v.readings[pending.from], now)
+  // A response that matches the login left as well tells nothing: confirmed on it, the old login's next responses
+  // would be stored as the new one's.
+  if (isTarget(await getView($)) && !isSource(await getView($))) {
     untaken.delete(pending.id)
     await setView($, v => ({ ...v, pending: undefined }))
   } else if (isResponse && now - pending.since > CONFIRM_GIVE_UP_MS) {
     const from = accounts.find(a => a.id === pending.from)
     if (from !== undefined) await checkAccount($, from)
-    if (from === undefined || !sameUsage(reading, (await getView($)).readings[from.id], now)) {
+    const after = await getView($)
+    // Minutes on, a switch has landed if it ever will: only a response that is the old login's alone points back.
+    if (isTarget(after) && isSource(after)) {
+      untaken.delete(pending.id)
+      await setView($, v => ({ ...v, pending: undefined }))
+      return
+    }
+    if (from === undefined || !isSource(after)) {
       await setView($, v => ({ ...v, pending: undefined }))
       tell($, `The switch to Claude account ${pending.id} has not shown in responses.`)
       return
@@ -819,13 +847,16 @@ async function onMeasure($: Host, limits: readonly SessionRateLimit[]): Promise<
     await settlePending($, true)
     return
   }
+  // Until boot has read which login this session uses, the view's login is a default, not this session's: a
+  // response measured then is no login's to store (it once put account 3's week under account 1).
+  if (!isBooted) return
   const reading = readingFromLimits(limits, await $.clock.now())
   if (reading === undefined) return
   // A response that reports a 5-hour window shows the account has one, whatever the last usage check said.
   if (reading.fiveHour !== undefined && view.noFiveHour?.[view.activeId] === true) await saveNoFiveHour($, view.activeId, false)
   // A response never lists the Fable week: the one the last check read stays.
   const fable = view.readings[view.activeId]?.fable
-  await saveReading($, view.activeId, { ...reading, ...(fable ? { fable } : {}) })
+  await saveReading($, view.activeId, { ...reading, ...(fable ? { fable } : {}), by: view.activeId })
   await maybeRotate($)
 }
 
@@ -871,7 +902,7 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
     const after = await getView($)
     const r = after.readings[active.id]
     // A mark goes on the read as stored, so a 5-hour window the limit hides stays in it.
-    const read = (await storedReading($, active.id)) ?? r
+    const read = (await ownedReading($, active.id)) ?? r
     // Claude's own words tell the Fable week from any other limit; the usage read decides only where there are none.
     const said = stop.last_assistant_message
     const isFable = said === undefined || said === '' ? isFableSpent(r, now) : isFableStop(said)
@@ -879,7 +910,7 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
       need = 'fable'
       await setView($, v => ({ ...v, isFableStopped: true }))
       // The limit was hit before the usage call shows it: count the Fable week as full.
-      if (!isFableSpent(r, now)) await saveReading($, active.id, { ...read, fable: fableMark(r?.fable, now), at: now })
+      if (!isFableSpent(r, now)) await saveReading($, active.id, { ...read, fable: fableMark(r?.fable, now), at: now, by: active.id })
     } else if (!shouldLeave(after, now) && isSessionStop(said)) {
       // Claude's words name the 5-hour window: the account has one, whatever its last usage check said.
       await saveNoFiveHour($, active.id, false)
@@ -1362,6 +1393,7 @@ async function boot($: Host, isInteractive: boolean): Promise<void> {
   const sessionId = await $.session.id().catch(() => undefined)
   await mergeStore($)
   await setView($, v => ({ ...v, activeId, ...(sessionId === undefined ? {} : { sessionId }) }))
+  isBooted = true
   await checkSwitching($, slot)
   // First, while the session can still move: the rotation waits for it.
   if (isInteractive && shouldConnectAtOpen(await getView($))) {
