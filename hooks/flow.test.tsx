@@ -1311,7 +1311,8 @@ test('with the 5-hour limit off, the account in use past 90% of its 5-hour windo
   await pane.unmount()
 })
 
-test('a plain usage-limit stop on an account that reports no 5-hour window moves, and marks it spent for five hours, not for good', async ($, on) => {
+// Bug puma-4q7j2.3: an account with no 5-hour window has only its week to run out, so a stop marks the week, never a 5-hour window.
+test('a plain usage-limit stop on an account that reports no 5-hour window moves, and marks its week spent until the week resets, with no 5-hour row', async ($, on) => {
   const w = fresh()
   w.keychain['Claude Code-credentials'] = blob('tok-1')
   w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
@@ -1324,8 +1325,10 @@ test('a plain usage-limit stop on an account that reports no 5-hour window moves
   await $.classic.StopFailure({ error: 'rate_limit', last_assistant_message: 'Claude usage limit reached.' })
   await clock.settle()
   expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
+  expect(w.toasts.filter(t => /: account 1 has 0% of its week left\.$/.test(t))).toHaveLength(1)
   await pane.redraw()
-  expect(await pane.find({ text: /^resets in 5h 0m$/ })).toBeDefined()
+  expect(await pane.find({ text: /^resets in 5h/ })).toBeUndefined()
+  expect(await pane.findAll({ type: 'Text', text: /none reported$/ })).toHaveLength(2)
   await pane.unmount()
 })
 
@@ -1353,6 +1356,40 @@ test('a session that starts on a login whose week is spent moves at once; a turn
   await clock.advance(36_000)
   expect(w.submitted).toHaveLength(1)
   expect(w.submitted[0]).toMatch(/Continue where you left off/)
+})
+
+// Bug puma-4q7j2.3, RULING 4226: the store as the bug left it on a Mac, a 5-hour mark on an account that reports none.
+test('a 5-hour stop mark already stored on a login whose usage reports no 5-hour window counts for nothing: the session moves there at once', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [null, 100]
+  w.usage['tok-2'] = [null, 7]
+  const store = { ...TWO_LOGINS, 'mark:2': { pct: 100, resetsAt: '2026-10-12T14:00:00Z', at: NOW - HOUR } }
+  const clock = world(on, w, store)
+  await start($, clock)
+  expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  expect(await pane.findAll({ type: 'Text', text: /none reported$/ })).toHaveLength(2)
+  expect(await pane.find({ text: /^resets in [0-9]+h/ })).toBeUndefined()
+  await pane.unmount()
+})
+
+test('two turns that die before one switch lands carry on once', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [null, 100]
+  w.usage['tok-2'] = [null, 7]
+  const clock = world(on, w, TWO_LOGINS)
+  await start($, clock)
+  await $.classic.StopFailure(WEEKLY_STOP)
+  await clock.settle()
+  await clock.advance(5_000)
+  await $.classic.StopFailure(WEEKLY_STOP)
+  await clock.settle()
+  await clock.advance(40_000)
+  expect(w.submitted).toHaveLength(1)
 })
 
 test('a turn that dies on the weekly limit marks the week spent, never a 5-hour window, and moves', async ($, on) => {
@@ -1602,8 +1639,9 @@ test('another session\'s stop mark, landing as a response saves the reading, sta
   const w = fresh()
   w.keychain['Claude Code-credentials'] = blob('tok-1')
   w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
-  w.usage['tok-1'] = [null, 40]
-  w.usage['tok-2'] = [null, 30]
+  // Logins that report a 5-hour window: one with none takes no 5-hour mark.
+  w.usage['tok-1'] = [30, 40]
+  w.usage['tok-2'] = [30, 30]
   const store = new OtherSessionStore(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off' }))
   const clock = world(on, w, store)
   await start($, clock)
@@ -1625,8 +1663,8 @@ test('another session\'s stop mark stands through every save of a reading on the
   const w = fresh()
   w.keychain['Claude Code-credentials'] = blob('tok-1')
   w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
-  w.usage['tok-1'] = [null, 40, 40]
-  w.usage['tok-2'] = [null, 30, 30]
+  w.usage['tok-1'] = [30, 40, 40]
+  w.usage['tok-2'] = [30, 30, 30]
   w.limits = [{ kind: 'seven_day', percentUsed: 40, resetsAt: '2026-10-18T03:00:00Z' }]
   const store = new OtherSessionStore(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off' }))
   const clock = world(on, w, store)
@@ -1701,9 +1739,9 @@ test('two sessions\' stops, on two logins at once, each leave their mark', async
   w.keychain['Claude Code-credentials'] = blob('tok-1')
   w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
   w.keychain[await keychainItem(SLOT3)] = blob('tok-3')
-  w.usage['tok-1'] = [null, 40]
-  w.usage['tok-2'] = [null, 30]
-  w.usage['tok-3'] = [null, 20]
+  w.usage['tok-1'] = [30, 40]
+  w.usage['tok-2'] = [30, 30]
+  w.usage['tok-3'] = [20, 20]
   const store = new Map<string, unknown>(Object.entries(THREE_LOGINS))
   const clock = world(on, w, store)
   await start($, clock)
@@ -2932,7 +2970,7 @@ test('a later stop survives clock skew at every view recount site', async ($, on
 test('a current usage check preserves an unexpired 0.4 stop mark left in a reading by another session', async ($, on) => {
   const w = fresh()
   w.keychain['Claude Code-credentials'] = blob('tok-1')
-  w.usage['tok-1'] = [null, 40]
+  w.usage['tok-1'] = [30, 40]
   const store = new Map<string, unknown>(Object.entries({
     ...TWO_LOGINS,
     'rotate-to': 'off',
@@ -3082,9 +3120,6 @@ test('a stop\'s mark stands until its reset through every reading writer, whethe
   const offenders: string[] = []
   const marked = async () => { await pane.redraw(); return (await pane.find({ text: /^▱{10} 0% left$/ })) !== undefined }
   if (!(await marked())) offenders.push('usage check with a window')
-  w.usage['tok-1'] = [null, 40]
-  await clock.advance(10 * 60_000)
-  if (!(await marked())) offenders.push('usage check without one')
   w.limits = [{ kind: 'five_hour', percentUsed: 30, resetsAt: '2026-10-12T12:00:00Z' }]
   await $.session.measure({ context: { window: 200_000 }, rateLimits: w.limits, changed: ['rateLimits'] })
   await clock.settle()
@@ -3093,6 +3128,10 @@ test('a stop\'s mark stands until its reset through every reading writer, whethe
   await $.session.measure({ context: { window: 200_000 }, rateLimits: w.limits, changed: ['rateLimits'] })
   await clock.settle()
   if (!(await marked())) offenders.push('response without one')
+  // Bug puma-4q7j2.3: the usage endpoint saying the account has no 5-hour window is the one read that ends the mark.
+  w.usage['tok-1'] = [null, 40]
+  await clock.advance(10 * 60_000)
+  if (await marked()) offenders.push('usage check reporting none')
   await pane.unmount()
   expect(offenders).toEqual([])
 })

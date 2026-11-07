@@ -269,7 +269,7 @@ export function readingFromUsage(body: unknown, now: number): Reading | undefine
   const sevenDay = windowFrom(seven_day)
   const fable = fableFrom(limits)
   if (fiveHour === undefined && sevenDay === undefined && fable === undefined) return undefined
-  return { ...(fiveHour ? { fiveHour } : {}), ...(sevenDay ? { sevenDay } : {}), ...(fable ? { fable } : {}), at: now }
+  return { ...(fiveHour ? { fiveHour } : { noFiveHour: true }), ...(sevenDay ? { sevenDay } : {}), ...(fable ? { fable } : {}), at: now }
 }
 
 /**
@@ -285,12 +285,32 @@ export function keepFable(fresh: Reading, stored: Reading | undefined, now: numb
 }
 
 /**
+ * Whether the usage endpoint says the account has no 5-hour window, as a
+ * verified Ultra account's does, with no window read since: such an account has
+ * no 5-hour window to mark. A response that lists none says nothing of it.
+ */
+export function reportsNoFiveHour(r: Reading | undefined): boolean {
+  return r?.noFiveHour === true && r.fiveHour === undefined
+}
+
+/**
+ * A fresh reading with the week a stop marked spent, which the stored one
+ * holds, until that week's reset: the usage read can lag the stop. A week the
+ * fresh reading itself marks replaces it.
+ */
+export function keepWeek(fresh: Reading, stored: Reading | undefined, now: number): Reading {
+  const kept = stored?.sevenDay
+  if (fresh.sevenDay?.isStop === true || kept?.isStop !== true || kept.resetsAt === undefined || Date.parse(kept.resetsAt) <= now) return fresh
+  return { ...fresh, sevenDay: kept }
+}
+
+/**
  * A reading with the 5-hour window a stop marked spent, until the mark's reset
  * time and no sooner: no read ends a mark, so no order between a reading and a
- * mark matters.
+ * mark matters. A read that reports no 5-hour window takes no mark.
  */
 export function withMark(r: Reading | undefined, mark: Mark | undefined, now: number): Reading | undefined {
-  if (mark === undefined || Date.parse(mark.resetsAt) <= now) return r
+  if (mark === undefined || Date.parse(mark.resetsAt) <= now || reportsNoFiveHour(r)) return r
   return { ...(r ?? { at: mark.at }), fiveHour: { pct: mark.pct, resetsAt: mark.resetsAt, isStop: true } }
 }
 

@@ -4,8 +4,10 @@ export type UsageWindow = { pct: number; resetsAt?: string; isStop?: true }
 /**
  * A login's usage as last read, `at` in epoch milliseconds. `fable` is the
  * Fable week, which only the usage endpoint lists: a response never reports it.
+ * `noFiveHour` where the usage endpoint listed no 5-hour window: the account
+ * has none, as a verified Ultra account, so no stop marks one on it.
  */
-export type Reading = { fiveHour?: UsageWindow; sevenDay?: UsageWindow; fable?: UsageWindow; at: number }
+export type Reading = { fiveHour?: UsageWindow; sevenDay?: UsageWindow; fable?: UsageWindow; noFiveHour?: true; at: number }
 
 /**
  * The 5-hour window a stop marked spent, kept in the store under its own key,

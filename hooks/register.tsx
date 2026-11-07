@@ -42,6 +42,8 @@ import {
   isFableSpent,
   isFableStop,
   isWeeklyStop,
+  keepWeek,
+  reportsNoFiveHour,
   isLoginOf,
   isNoBrowser,
   isOnNormalLogin,
@@ -105,6 +107,8 @@ let signingIn: string | undefined
 let signInQueue: Promise<void> = Promise.resolve()
 /** The carry-on a switch owes: what the turn that stopped died on, which picks the line sent. */
 type CarryOn = { need?: Need }
+/** When the switch began whose landing a turn that died before it already carries on after. */
+let carriedFor: number | undefined
 /**
  * A switch the refresh guard holds back: the latest one asked for, tried again
  * each minute until it goes. A Fable stop's carry-on waits in it, and goes out
@@ -169,10 +173,12 @@ function viewed(read: Reading, mark: Mark | undefined, limit: FiveHourLimit, now
  */
 async function saveReading($: Host, id: string, read: Reading): Promise<void> {
   const now = await $.clock.now()
-  const legacy = legacyMark(await storedReading($, id), now)
+  const stored = await storedReading($, id)
+  const legacy = legacyMark(stored, now)
   if (legacy !== undefined) await keepLegacyMark($, id, legacy)
-  await $.store.set(`reading:${id}`, read)
-  await setView($, v => ({ ...v, readings: { ...v.readings, [id]: viewed(read, v.marks?.[id], v.fiveHourLimit, now) } }))
+  const kept = keepWeek(read, stored, now)
+  await $.store.set(`reading:${id}`, kept)
+  await setView($, v => ({ ...v, readings: { ...v.readings, [id]: viewed(kept, v.marks?.[id], v.fiveHourLimit, now) } }))
 }
 
 /** Moves an older version's mark to the mark's own key, unless the mark there already stands longer. */
@@ -696,9 +702,11 @@ async function onMeasure($: Host, limits: readonly SessionRateLimit[]): Promise<
   }
   const reading = readingFromLimits(limits, await $.clock.now())
   if (reading === undefined) return
-  // A response never lists the Fable week: the one the last check read stays.
-  const fable = view.readings[view.activeId]?.fable
-  await saveReading($, view.activeId, { ...reading, ...(fable ? { fable } : {}) })
+  // A response never lists the Fable week, nor says an account has no 5-hour window: what the last check read stays.
+  const last = view.readings[view.activeId]
+  const fable = last?.fable
+  const hasNoFiveHour = reading.fiveHour === undefined && last?.noFiveHour === true
+  await saveReading($, view.activeId, { ...reading, ...(fable ? { fable } : {}), ...(hasNoFiveHour ? { noFiveHour: true as const } : {}) })
   await maybeRotate($)
 }
 
@@ -734,7 +742,9 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
     // A Connect visit and a Fable stop keep their own handling below.
     const isSettling = view.pending !== undefined && (await $.clock.now()) - view.pending.since < SETTLE_MS
     if (isSettling && !isConnectingChrome && !isFableStop(stop.last_assistant_message)) {
-      carryOnAfterSettle($, {})
+      // One carry-on per switch, however many turns die before it lands.
+      if (carriedFor !== view.pending?.since) carryOnAfterSettle($, {})
+      carriedFor = view.pending?.since
       return
     }
     await checkAccount($, active)
@@ -751,9 +761,10 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
       await setView($, v => ({ ...v, isFableStopped: true }))
       // The limit was hit before the usage call shows it: count the Fable week as full.
       if (!isFableSpent(r, now)) await saveReading($, active.id, { ...read, fable: fableMark(r?.fable, now), at: now })
-    } else if (!shouldLeave(after, now) && isWeeklyStop(said)) {
-      // The week ran out before the usage call shows it: count the week as full, never a 5-hour window.
-      await saveReading($, active.id, { ...read, sevenDay: spentMark(read?.sevenDay, now, WEEK_MS), at: now })
+    } else if (!shouldLeave(after, now) && (isWeeklyStop(said) || reportsNoFiveHour(read))) {
+      // The week ran out before the usage call shows it, by Claude's words or as the only window the account has:
+      // count the week as full until its reset, never a 5-hour window.
+      await saveReading($, active.id, { ...read, sevenDay: { ...spentMark(read?.sevenDay, now, WEEK_MS), isStop: true }, at: now })
     } else if (!shouldLeave(after, now)) {
       // The limit was hit before the usage call shows it: count the 5-hour window as full, five hours at most where none is reported.
       const spent = spentMark(read?.fiveHour, now, FIVE_HOUR_MS)

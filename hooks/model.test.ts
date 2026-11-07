@@ -210,7 +210,7 @@ test('reads the Fable week from the usage body\'s limits rows: Fable and its num
 })
 
 test('a usage body with only limits answers a reading holding the Fable week alone', () => {
-  expect(readingFromUsage({ limits: [fableRow('Fable 5.1', 62)] }, NOW)).toEqual({ fable: { pct: 62, resetsAt: FABLE_END }, at: NOW })
+  expect(readingFromUsage({ limits: [fableRow('Fable 5.1', 62)] }, NOW)).toEqual({ fable: { pct: 62, resetsAt: FABLE_END }, noFiveHour: true, at: NOW })
   expect(readingFromUsage({ limits: [fableRow('Sonnet', 62)] }, NOW)).toBeUndefined()
 })
 
