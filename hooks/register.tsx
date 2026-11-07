@@ -17,6 +17,7 @@ import {
   EMPTY_VIEW,
   FIVE_HOUR_MS,
   LEAVE_FIVE_HOUR,
+  WEEK_MS,
   counted,
   fiveHourLimitFrom,
   legacyMark,
@@ -40,6 +41,7 @@ import {
   identityFromStatus,
   isFableSpent,
   isFableStop,
+  isWeeklyStop,
   isLoginOf,
   isNoBrowser,
   isOnNormalLogin,
@@ -727,6 +729,14 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
     const before = await saveHealth($, active.id, { kind: 'login-needed', why: 'sign-in rejected' })
     if (before?.kind !== 'login-needed') await announceLockout($, active, 'sign-in rejected')
   } else {
+    // Claude Code reads the new login only once the switch lands: a turn that dies before then went out on the
+    // login being left, which the switch already leaves. Nothing is marked on the login moved to; the turn carries on there.
+    // A Connect visit and a Fable stop keep their own handling below.
+    const isSettling = view.pending !== undefined && (await $.clock.now()) - view.pending.since < SETTLE_MS
+    if (isSettling && !isConnectingChrome && !isFableStop(stop.last_assistant_message)) {
+      carryOnAfterSettle($, {})
+      return
+    }
     await checkAccount($, active)
     const now = await $.clock.now()
     const after = await getView($)
@@ -741,6 +751,9 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
       await setView($, v => ({ ...v, isFableStopped: true }))
       // The limit was hit before the usage call shows it: count the Fable week as full.
       if (!isFableSpent(r, now)) await saveReading($, active.id, { ...read, fable: fableMark(r?.fable, now), at: now })
+    } else if (!shouldLeave(after, now) && isWeeklyStop(said)) {
+      // The week ran out before the usage call shows it: count the week as full, never a 5-hour window.
+      await saveReading($, active.id, { ...read, sevenDay: spentMark(read?.sevenDay, now, WEEK_MS), at: now })
     } else if (!shouldLeave(after, now)) {
       // The limit was hit before the usage call shows it: count the 5-hour window as full, five hours at most where none is reported.
       const spent = spentMark(read?.fiveHour, now, FIVE_HOUR_MS)

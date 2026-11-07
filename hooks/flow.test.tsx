@@ -680,7 +680,7 @@ async function hasFableBand($: Engine): Promise<boolean> {
 }
 
 /** What Claude says when a turn dies on a limit that is not the Fable week. */
-const PLAIN_STOPS = ["You've hit your session limit · resets 3pm", "You've hit your weekly limit · resets Oct 18", 'Claude usage limit reached.']
+const PLAIN_STOPS = ["You've hit your session limit · resets 3pm", 'Claude usage limit reached.']
 
 for (const message of PLAIN_STOPS) {
   test(`a plain usage-limit stop ("${message}") on a login whose Fable week is spent marks the 5-hour window and moves to any login with room, with no Fable band`, async ($, on) => {
@@ -1326,6 +1326,51 @@ test('a plain usage-limit stop on an account that reports no 5-hour window moves
   expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
   await pane.redraw()
   expect(await pane.find({ text: /^resets in 5h 0m$/ })).toBeDefined()
+  await pane.unmount()
+})
+
+/** A turn that died on the week, in Claude Code's words as seats on a Mac got them, its accounts reporting no 5-hour window. */
+const WEEKLY_STOP = { error: 'rate_limit', last_assistant_message: "You've hit your weekly limit · resets Nov 10 at 11am (Europe/Tallinn)" }
+
+// Bug puma-4q7j2.3: the stop went out on the login being left, and was marked on the one moved to.
+test('a session that starts on a login whose week is spent moves at once; a turn that dies on that week before the switch lands marks nothing on the login moved to, and carries on once it lands', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [null, 100]
+  w.usage['tok-2'] = [null, 7]
+  const clock = world(on, w, TWO_LOGINS)
+  await start($, clock)
+  expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
+  await $.classic.StopFailure(WEEKLY_STOP)
+  await clock.settle()
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  expect(await pane.findAll({ type: 'Text', text: /none reported$/ })).toHaveLength(2)
+  expect(await pane.find({ text: /^resets in 5h/ })).toBeUndefined()
+  await pane.unmount()
+  expect(w.envSets).toHaveLength(1)
+  expect(w.submitted).toEqual([])
+  await clock.advance(36_000)
+  expect(w.submitted).toHaveLength(1)
+  expect(w.submitted[0]).toMatch(/Continue where you left off/)
+})
+
+test('a turn that dies on the weekly limit marks the week spent, never a 5-hour window, and moves', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [null, 90]
+  w.usage['tok-2'] = [null, 30]
+  const clock = world(on, w, TWO_LOGINS)
+  await start($, clock)
+  expect(w.envSets).toEqual([])
+  await $.classic.StopFailure(WEEKLY_STOP)
+  await clock.settle()
+  expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
+  expect(w.toasts.filter(t => /^Switched to Claude account 2.*: account 1 has 0% of its week left\.$/.test(t))).toHaveLength(1)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  expect(await pane.findAll({ type: 'Text', text: /none reported$/ })).toHaveLength(2)
+  expect(await pane.find({ text: /^resets in 5h/ })).toBeUndefined()
   await pane.unmount()
 })
 

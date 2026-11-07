@@ -124,6 +124,11 @@ export function isFableStop(text: string | undefined): boolean {
   return /reached your Fable limit/.test(text ?? '')
 }
 
+/** Whether the last message of a turn that died on a limit says the limit was the week. */
+export function isWeeklyStop(text: string | undefined): boolean {
+  return /hit your weekly limit/.test(text ?? '')
+}
+
 export function shouldLeave(view: View, now: number, need?: Need): boolean {
   const r = view.readings[view.activeId]
   return view.health[view.activeId]?.kind === 'login-needed' || isSpent(r, now) || (need === 'fable' && isFableSpent(r, now))
@@ -306,8 +311,9 @@ export function markFrom(value: unknown): Mark | undefined {
   return isMark ? { pct: v.pct as number, resetsAt: v.resetsAt as string, at: v.at as number } : undefined
 }
 
-/** How long a Fable week runs: a mark with no reset time of its own stands this long. */
-export const FABLE_WEEK_MS = 7 * 24 * 3600_000
+/** How long a week, the Fable week among them, runs: a mark with no reset time of its own stands this long. */
+export const WEEK_MS = 7 * 24 * 3600_000
+export const FABLE_WEEK_MS = WEEK_MS
 
 /**
  * The mark a Fable stop leaves on a login: its Fable week spent, until the
