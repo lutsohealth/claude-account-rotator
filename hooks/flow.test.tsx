@@ -2735,7 +2735,8 @@ test('before the rotation moves the session off Claude Code\'s login, Claude in 
   // Kept in the store every session reads: the next sync from it keeps it.
   await clock.advance(61_000)
   const pane = await mountPane($)
-  expect(await pane.find({ type: 'Text', text: 'Org · max · Chrome' })).toBeDefined()
+  // C5: the plan by its name; a max with a 5-hour window is Max.
+  expect(await pane.find({ type: 'Text', text: 'Org · Max · Chrome' })).toBeDefined()
   expect(await pane.find({ type: 'Text', text: 'Active Claude extension accounts from your Chrome windows:' })).toBeDefined()
   expect((await pane.find({ key: 'chrome-row-1' }))?.text).toMatch(/● in use$/)
   expect(await pane.find({ key: 'chrome-use-1' })).toBeUndefined()

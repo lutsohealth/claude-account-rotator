@@ -55,13 +55,20 @@ export type Account = {
   orgName?: string
   /** `subscriptionType` as `claude auth status` reports it: max, team, pro. */
   plan?: string
+  /** The plan's name as the profile names it (`organization.plan_display_name`): Ultra. */
+  planName?: string
+  /** The sign-in's rate-limit tier: its `rateLimitTier` (default_claude_max_20x), or `claude auth status`'s `planTier` (max_20x). */
+  tier?: string
 }
+
+/** A plan's name, where the mod knows it; a plan word it does not know is drawn as it is. */
+export type PlanTier = 'Ultra' | 'Max' | 'Pro' | 'Team' | 'Enterprise'
 
 /**
  * Who a login's sign-in belongs to, as the profile endpoint answered for the
  * token `token` digests; the plan as Claude Code reads it from the sign-in.
  */
-export type Holder = { token: string; who: Pick<Account, 'email' | 'orgId' | 'orgName' | 'plan'> & { email: string } }
+export type Holder = { token: string; who: Pick<Account, 'email' | 'orgId' | 'orgName' | 'plan' | 'planName' | 'tier'> & { email: string } }
 
 /** How the footer draws one of its rows: a glyph per login, or not at all. */
 export type Glyphs = 'bars' | 'pie' | 'braille' | 'none'

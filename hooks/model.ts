@@ -1,4 +1,4 @@
-import type { Account, Fill, FiveHourLimit, FooterStyle, Glyphs, Health, Highlight, LaunchOn, LaunchPick, Mark, Reading, RotateTo, UsageDue, UsageWindow, View } from '../types'
+import type { Account, Fill, FiveHourLimit, FooterStyle, Glyphs, Health, Highlight, LaunchOn, LaunchPick, Mark, PlanTier, Reading, RotateTo, UsageDue, UsageWindow, View } from '../types'
 
 /** Leave a login once its 5-hour window is this full (percent). */
 export const LEAVE_FIVE_HOUR = 90
@@ -487,6 +487,8 @@ export type Credential = {
   refreshToken?: string
   /** `subscriptionType`, the plan Claude Code reads from the sign-in: on a Team or Enterprise one it keeps plugins from switching. */
   plan?: string
+  /** `rateLimitTier`, the sign-in's rate-limit tier: default_claude_max_20x is Ultra. */
+  tier?: string
 }
 
 export function credentialFrom(text: string): Credential | undefined {
@@ -499,7 +501,7 @@ export function credentialFrom(text: string): Credential | undefined {
   }
   const oauth = (parsed as { claudeAiOauth?: unknown } | null)?.claudeAiOauth
   if (typeof oauth !== 'object' || oauth === null) return undefined
-  const { accessToken, expiresAt, refreshTokenExpiresAt, refreshToken, subscriptionType } = oauth as Record<string, unknown>
+  const { accessToken, expiresAt, refreshTokenExpiresAt, refreshToken, subscriptionType, rateLimitTier } = oauth as Record<string, unknown>
   if (typeof accessToken !== 'string' || typeof expiresAt !== 'number') return undefined
   return {
     accessToken,
@@ -507,6 +509,7 @@ export function credentialFrom(text: string): Credential | undefined {
     ...(typeof refreshTokenExpiresAt === 'number' ? { refreshTokenExpiresAt } : {}),
     ...(typeof refreshToken === 'string' ? { refreshToken } : {}),
     ...(typeof subscriptionType === 'string' ? { plan: subscriptionType } : {}),
+    ...(typeof rateLimitTier === 'string' && rateLimitTier !== '' ? { tier: rateLimitTier } : {}),
   }
 }
 
@@ -786,7 +789,7 @@ export function freeId(accounts: readonly Account[]): string {
   return String(n)
 }
 
-export type Identity = Pick<Account, 'email' | 'orgId' | 'orgName' | 'plan'>
+export type Identity = Pick<Account, 'email' | 'orgId' | 'orgName' | 'plan' | 'planName' | 'tier'>
 
 /** Who a slot is signed in as, from `claude auth status --json`; undefined when signed out. */
 export function identityFromStatus(stdout: string): Identity | undefined {
@@ -805,6 +808,7 @@ export function identityFromStatus(stdout: string): Identity | undefined {
     ...(typeof status.orgId === 'string' ? { orgId: status.orgId } : {}),
     ...(typeof status.orgName === 'string' ? { orgName: status.orgName } : {}),
     ...(typeof status.subscriptionType === 'string' ? { plan: status.subscriptionType } : {}),
+    ...(typeof status.planTier === 'string' && status.planTier !== '' ? { tier: status.planTier } : {}),
   }
 }
 
@@ -826,31 +830,38 @@ export function identityFromProfile(body: unknown): Identity | undefined {
   const field = (value: unknown, key: string) => (typeof value === 'object' && value !== null ? (value as Record<string, unknown>)[key] : undefined)
   const { account, organization } = (typeof body === 'object' && body !== null ? body : {}) as Record<string, unknown>
   const [email, orgId, orgName] = [field(account, 'email'), field(organization, 'uuid'), field(organization, 'name')]
+  const planName = field(organization, 'plan_display_name')
   if (typeof email !== 'string' || email === '') return undefined
   return {
     email,
     ...(typeof orgId === 'string' ? { orgId } : {}),
     ...(typeof orgName === 'string' ? { orgName } : {}),
+    ...(typeof planName === 'string' && planName !== '' ? { planName } : {}),
   }
 }
 
-/** A Team or Enterprise plan: Claude Code keeps plugins from switching accounts in a session that starts on one. */
-export const isSeatPlan = (plan: string | undefined): boolean => plan === 'team' || plan === 'enterprise'
+/** The plan words `subscriptionType` says, by the name the pane draws. */
+const PLAN_WORDS: Readonly<Record<string, PlanTier>> = { max: 'Max', pro: 'Pro', team: 'Team', enterprise: 'Enterprise' }
 
-/** A plan as the pane names it: personal Max or Pro, or a Team or Enterprise seat. */
-export function planText(plan: string): string {
-  switch (plan) {
-    case 'max':
-      return 'personal Max'
-    case 'pro':
-      return 'personal Pro'
-    case 'team':
-      return 'a Team seat'
-    case 'enterprise':
-      return 'an Enterprise seat'
-    default:
-      return plan
-  }
+/**
+ * A login's plan by its name: the one its profile names; else its sign-in's tier, Max 20x being Ultra (the
+ * renamed plan) and Max 5x Max; else its plan word, a max whose usage reports no 5-hour window being Ultra, as only
+ * an Ultra plan has none. A plan word the mod does not know is drawn as it is; nothing known, nothing drawn.
+ */
+export function planName(account: Pick<Account, 'plan' | 'planName' | 'tier'>, hasNoFiveHour: boolean): PlanTier | string | undefined {
+  if (account.planName !== undefined && account.planName !== '') return account.planName
+  if (account.tier !== undefined && /(^|_)max_20x$/.test(account.tier)) return 'Ultra'
+  if (account.tier !== undefined && /(^|_)max_5x$/.test(account.tier)) return 'Max'
+  if (account.plan === undefined) return undefined
+  if (account.plan === 'max' && hasNoFiveHour) return 'Ultra'
+  return PLAN_WORDS[account.plan] ?? account.plan
+}
+
+/** The Company a login's row names: its organization, unless that is the one named for its own email. */
+export function companyOf(account: Pick<Account, 'email' | 'orgName'>): string | undefined {
+  const { email, orgName } = account
+  if (orgName === undefined || orgName === '') return undefined
+  return email !== undefined && orgName === `${email}'s Organization` ? undefined : orgName
 }
 
 // ---------------------------------------------------------------- one usage schedule per store

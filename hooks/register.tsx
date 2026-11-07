@@ -664,7 +664,8 @@ async function followSignIn($: Host, account: Account, who: Identity): Promise<A
   const twin = isSame ? undefined : accounts.find(a => a.id !== own.id && isLoginOf(a, who))
   if (twin !== undefined) return twin
   const followed = { ...own, ...who }
-  if (followed.email !== own.email || followed.orgId !== own.orgId || followed.orgName !== own.orgName || followed.plan !== own.plan) {
+  const fields = ['email', 'orgId', 'orgName', 'plan', 'planName', 'tier'] as const
+  if (fields.some(f => followed[f] !== own[f])) {
     await saveAccounts($, accounts.map(a => (a.id === own.id ? followed : a)))
   }
   if (!isSame) {
@@ -758,7 +759,9 @@ async function checkAccount($: Host, account: Account, gate: UsageGate): Promise
   if (health.kind === 'ok' && credential !== undefined) {
     const isLive = credential.expiresAt > now + 60_000
     const holder = await holderOf($, account, credential, isLive)
-    const twin = holder === undefined ? undefined : await followSignIn($, account, holder.who)
+    // The tier is the sign-in's own, read at every check: a holder named before it was kept lacks it.
+    const who = holder === undefined ? undefined : { ...holder.who, ...(credential.tier === undefined ? {} : { tier: credential.tier }) }
+    const twin = who === undefined ? undefined : await followSignIn($, account, who)
     if (twin !== undefined) health = { kind: 'login-needed', why: `signed in as account ${twin.id} now` }
     // A token no profile call has named may be another login's: its usage is read and stored once it is named.
     else if (isLive && holder !== undefined) {
