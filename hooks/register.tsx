@@ -171,7 +171,6 @@ async function recordStop($: Host, id: string, since: number, before: Record<str
   const writes = { ...kept.writes }
   for (const key of STOP_KEYS(id)) {
     if (!sameValue(after[key], before[key])) writes[key] = { before: writes[key]?.before ?? before[key], written: after[key] }
-    else if (writes[key] !== undefined) writes[key] = { ...writes[key], written: after[key] }
   }
   const setsFable = !wasFableStopped && (await getView($)).isFableStopped === true
   return { ...kept, writes, setFableStop: kept.setFableStop || setsFable }

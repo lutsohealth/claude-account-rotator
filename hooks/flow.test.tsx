@@ -4605,6 +4605,46 @@ for (const reason of ['clear', 'resume']) {
   }
 }
 
+// [UNDO-OWNERSHIP]: what the stop's own usage read stored is the login's, not the stop's: it stands after the revert.
+test('the usage read a stop makes 90 s into an unproven switch stands once the stop is reverted', async ($, on) => {
+  const { store, clock } = await stopDuringSwitch($, on, 90_000, "You've hit your session limit", undefined, { 'tok-2': [null, 41] })
+  const read = store.get('usage:2') as { at?: number; src?: string } | undefined
+  expect(read?.src).toBe('body')
+  await endSession($, clock)
+  expect(store.get('usage:2')).toEqual(read)
+})
+
+// [UNDO-OWNERSHIP]: a move the stop itself makes is why the mark exists: the mark stays, whatever ends the switch after.
+test('a stop that moves the session on from an unproven switch keeps its mark through the session\'s end', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [10, 40]
+  w.usage['tok-2'] = [10, 41]
+  w.weekResets = { 'tok-2': OTHER_WEEK }
+  const store = new Map<string, unknown>(Object.entries(TWO_LOGINS))
+  const clock = world(on, w, store)
+  await start($, clock)
+  await useNow($, clock, '2')
+  await clock.advance(40_000)
+  await $.classic.StopFailure({ error: 'rate_limit', last_assistant_message: 'Claude usage limit reached.' })
+  await clock.settle()
+  expect(w.toasts.some(t => /^Switched to Claude account 1/.test(t))).toBe(true)
+  await endSession($, clock)
+  expect(store.get('mark:2')).toBeDefined()
+})
+
+// Review opus-e17 F3 [UNDO-OWNERSHIP]: a proven Fable stop after a provisional Fable stop keeps the session's Fable stop.
+test('a proven Fable stop after a provisional one keeps the every-Fable notice once the provisional one is reverted', async ($, on) => {
+  const { w, clock } = await stopDuringSwitch($, on, 40_000, FABLE_STOP.last_assistant_message, undefined, { 'tok-1': [10, 40, 100], 'tok-2': [10, 41, 100] })
+  w.limits = ONES_WEEK
+  await respond($, clock, w)
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  await endSession($, clock)
+  expect(await bandText($)).toMatch(/has used its Fable week/)
+})
+
 // [END-IS-NOT-EXIT]: a reason the engine may add later keeps the mark, as 0.5.5 did.
 test('a session end for a reason the mod does not know keeps an unproven stop\'s mark', async ($, on) => {
   const { store, clock } = await stopDuringSwitch($, on, 40_000, 'Claude usage limit reached.')
