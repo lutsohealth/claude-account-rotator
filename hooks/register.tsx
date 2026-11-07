@@ -123,6 +123,12 @@ let isPaneShown = false
 let isBooted = false
 /** When this session's boot read the store: an older version's reading written after it says that version still runs. */
 let bootedAt: number | undefined
+/** An older version writes its reading at every check, every 10 minutes at most: one this old has stopped. */
+const OLDER_WRITER_MS = 30 * 60_000
+/** The last response this session measured, and when: it names the login a stop during an unproven switch belongs to. */
+let lastMeasured: { at: number; reading: Reading | undefined } | undefined
+/** A stop marked on the login moved to before any response proved the switch: undone if the switch did not take. */
+let provisionalStop: { id: string; since: number } | undefined
 /** The `claude auth login` child of the sign-in under way, so Cancel can end it. */
 let running: HookStream<ProcessSpawnChunk, ProcessSpawnResult> | undefined
 /** The login this session is signing in; a stored 'logging-in' from a session that died is checked again. */
@@ -299,7 +305,8 @@ async function mergeStore($: Host): Promise<void> {
     const old = await legacyReading($, a.id)
     const legacy = legacyMark(old, await $.clock.now())
     if (legacy !== undefined) await keepLegacyMark($, a.id, legacy)
-    if (bootedAt !== undefined && old !== undefined && old.at > bootedAt) hasOlderWriter = true
+    const now = await $.clock.now()
+    if (bootedAt !== undefined && old !== undefined && old.at > bootedAt && now - old.at < OLDER_WRITER_MS) hasOlderWriter = true
     const m = markFrom(await $.store.get(`mark:${a.id}`))
     if (m !== undefined) marks[a.id] = m
     const n = await $.store.get(`no-five-hour:${a.id}`)
@@ -354,7 +361,7 @@ async function mergeStore($: Host): Promise<void> {
       const holder = holders[a.id] ?? v.holders[a.id]
       if (holder !== undefined) nextHolders[a.id] = holder
     }
-    return { ...v, accounts, readings: nextReadings, marks: nextMarks, noFiveHour: nextNoFiveHour, weekMarks: nextWeekMarks, checkErrors, health: nextHealth, holders: nextHolders, footer, rotateTo, fiveHourLimit, weekLeave, launchOn, fableContinueText, chromeAccountId, chromeAccountIds, hasOlderWriter: v.hasOlderWriter === true || hasOlderWriter }
+    return { ...v, accounts, readings: nextReadings, marks: nextMarks, noFiveHour: nextNoFiveHour, weekMarks: nextWeekMarks, checkErrors, health: nextHealth, holders: nextHolders, footer, rotateTo, fiveHourLimit, weekLeave, launchOn, fableContinueText, chromeAccountId, chromeAccountIds, hasOlderWriter }
   })
 }
 
@@ -490,14 +497,14 @@ async function fetchUsage($: Host, accessToken: string): Promise<UsageAnswer> {
 }
 
 /** Who a token signs in, as Claude Code asks at a sign-in: email, organization and plan; undefined when the call fails. */
-async function fetchIdentity($: Host, accessToken: string): Promise<Identity | undefined> {
+async function fetchIdentity($: Host, accessToken: string): Promise<{ who?: Identity; status: number }> {
   const res = await $.http.fetch(PROFILE_URL, { headers: oauthHeaders(accessToken) })
-  if (!res.ok) return undefined
+  if (!res.ok) return { status: res.status }
   try {
-    return identityFromProfile(JSON.parse(res.text))
+    return { who: identityFromProfile(JSON.parse(res.text)), status: res.status }
   } catch {
     // A body that is not JSON says nothing of who; the next check asks again.
-    return undefined
+    return { status: res.status }
   }
 }
 
@@ -573,8 +580,12 @@ async function holderOf($: Host, account: Account, credential: Credential, isLiv
   const known = (await getView($)).holders[account.id]
   if (known?.token === token) return known
   if (!isLive) return undefined
-  const who = await fetchIdentity($, credential.accessToken)
-  if (who?.email === undefined) return undefined
+  const { who, status } = await fetchIdentity($, credential.accessToken)
+  if (who?.email === undefined) {
+    // No usage is read for a sign-in nobody has named: the pane says why, until a check names it.
+    await saveCheckError($, account.id, `the profile call answered HTTP ${status}, so its usage is not read until it names the sign-in`)
+    return undefined
+  }
   const holder = { token, who: { ...who, email: who.email, ...(credential.plan === undefined ? {} : { plan: credential.plan }) } }
   await saveHolder($, account.id, holder)
   // The schedule, its back-off and its minute gate were the old sign-in's: the new one is read at once.
@@ -937,6 +948,7 @@ async function settlePending($: Host, isResponse: boolean): Promise<void> {
       return
     }
     untaken.add(pending.id)
+    await undoProvisionalStop($, pending)
     try {
       await useSlot($, from.slot)
       movedAt = now
@@ -955,6 +967,8 @@ async function settlePending($: Host, isResponse: boolean): Promise<void> {
 
 /** A response's own usage: the active login's, unless a switch is still settling. */
 async function onMeasure($: Host, limits: readonly SessionRateLimit[]): Promise<void> {
+  const measuredAt = await $.clock.now()
+  lastMeasured = { at: measuredAt, reading: readingFromLimits(limits, measuredAt) }
   const view = await getView($)
   if (view.pending !== undefined) {
     await settlePending($, true)
@@ -1018,6 +1032,62 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
       carriedFor = view.pending?.since
       return
     }
+    // While a switch is unproven, a response since it began names the stop's login by its week, alone, or none at all
+    // (a mark is every session's). With no response since, the switch has landed by now: the stop is the login moved
+    // to, provisionally, and a settle that finds the switch did not take drops what the stop marked there.
+    const since = view.pending?.since
+    const hasResponseSince = since !== undefined && lastMeasured !== undefined && lastMeasured.at > since
+    const owner = since === undefined || !hasResponseSince ? active : provenStopper(view, lastMeasured?.reading)
+    if (since !== undefined && !hasResponseSince) provisionalStop = { id: active.id, since }
+    if (owner === undefined) await debug($, `a stop while the switch to account ${view.pending?.id} is unproven marks no account`)
+    else need = await markStop($, owner, stop.last_assistant_message)
+  }
+  // A switch still settling stays settling: only a new switch, or a response that proves one, ends it. The stop may
+  // move the session meanwhile (maybeRotate lets a stop through a settling switch), and that switch settles anew.
+  // The switch sends the carry-on once it lands, held back for a refresh or not.
+  if (!(await maybeRotate($, need, { need }))) {
+    if (isConnectingChrome) isCutByVisit = true
+    if (need === 'fable') await announceStay($)
+  }
+}
+
+/**
+ * Drops what a stop marked on the login moved to before any response proved the switch, once a settle finds the
+ * switch did not take: the stop went out on the login left. Marks from before the switch stay.
+ */
+async function undoProvisionalStop($: Host, pending: { id: string; since: number }): Promise<void> {
+  const p = provisionalStop
+  provisionalStop = undefined
+  if (p === undefined || p.id !== pending.id || p.since !== pending.since) return
+  const dropped: string[] = []
+  for (const key of [`mark:${p.id}`, `week-mark:${p.id}`]) {
+    const m = markFrom(await $.store.get(key))
+    if (m !== undefined && m.at >= p.since) {
+      await $.store.delete(key)
+      dropped.push(key)
+    }
+  }
+  const r = await storedReading($, p.id)
+  if (r?.src === 'stop' && r.at >= p.since) await $.store.delete(`usage:${p.id}`)
+  await setView($, v => {
+    const { [p.id]: _mark, ...marks } = v.marks ?? {}
+    const { [p.id]: _week, ...weekMarks } = v.weekMarks ?? {}
+    const { [p.id]: _reading, ...readings } = v.readings
+    return { ...v, readings, marks: dropped.includes(`mark:${p.id}`) ? marks : v.marks, weekMarks: dropped.includes(`week-mark:${p.id}`) ? weekMarks : v.weekMarks }
+  })
+  await mergeStore($)
+}
+
+/** The login a stop during an unproven switch belongs to: the one whose week the last response carries, alone. */
+function provenStopper(view: View, last: Reading | undefined): Account | undefined {
+  const owners = whoseWeek(last, view.readings)
+  return owners.length === 1 ? view.accounts.find(a => a.id === owners[0]) : undefined
+}
+
+/** Marks what a usage-limit stop on `active` spent, after reading its usage when the gate lets it; answers the need it names. */
+async function markStop($: Host, active: Account, said: string | undefined): Promise<Need | undefined> {
+  let need: Need | undefined
+  {
     await checkAccount($, active, 'force')
     const now = await $.clock.now()
     const after = await getView($)
@@ -1025,7 +1095,6 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
     // A mark goes on the read as stored, so a 5-hour window the limit hides stays in it.
     const read = (await ownedReading($, active.id)) ?? r
     // Claude's own words tell the Fable week from any other limit; the usage read decides only where there are none.
-    const said = stop.last_assistant_message
     const isFable = said === undefined || said === '' ? isFableSpent(r, now) : isFableStop(said)
     if (isFable) {
       need = 'fable'
@@ -1048,13 +1117,7 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
       await saveMark($, active.id, { pct: spent.pct, resetsAt: spent.resetsAt ?? new Date(now + FIVE_HOUR_MS).toISOString(), at: now })
     }
   }
-  // A switch still settling stays settling: only a new switch, or a response that proves one, ends it. The stop may
-  // move the session meanwhile (maybeRotate lets a stop through a settling switch), and that switch settles anew.
-  // The switch sends the carry-on once it lands, held back for a refresh or not.
-  if (!(await maybeRotate($, need, { need }))) {
-    if (isConnectingChrome) isCutByVisit = true
-    if (need === 'fable') await announceStay($)
-  }
+  return need
 }
 
 // ---------------------------------------------------------------- Claude in Chrome

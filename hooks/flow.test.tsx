@@ -2508,10 +2508,10 @@ test('a response that reports a 5-hour window clears no-five-hour, and Remove de
   await clock.settle()
   await pane.redraw()
   // Its schedule goes too: a login added later under the number 2 is read at once.
-  expect(store.has('usage-due:2')).toBe(true)
+  expect([store.has('usage-due:2'), store.has('usage:2')]).toEqual([true, true])
   await pane.press({ key: 'remove-2' })
   await clock.settle()
-  expect(['no-five-hour:2', 'week-mark:2', 'check-error:2', 'usage-due:2'].filter(k => store.has(k))).toEqual([])
+  expect(['no-five-hour:2', 'week-mark:2', 'check-error:2', 'usage-due:2', 'usage:2'].filter(k => store.has(k))).toEqual([])
   await pane.unmount()
 })
 
@@ -4257,6 +4257,125 @@ test('a session records the version it writes as, and drops the records of sessi
   expect(store.get('writer:session-1')).toEqual({ version: 1, at: NOW })
   expect([store.has('writer:gone'), store.has('writer:recent')]).toEqual([false, true])
 })
+
+/** Every text the pane draws, one per line. */
+async function paneText($: Engine): Promise<string> {
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  const texts = (await pane.findAll({ type: 'Text' })).map(t => t.text ?? '')
+  await pane.unmount()
+  return texts.join('\n')
+}
+
+/**
+ * A switch to login 2 by Use now, unproven by any response, with a turn dying on a limit `delay` after it; `last`,
+ * where given, the response measured between, by whose week it says which login it spent.
+ */
+async function stopDuringSwitch($: Engine, on: On, delay: number, said: string, last?: SessionRateLimit[]): Promise<{ w: World; store: Map<string, unknown>; clock: MockClock }> {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [10, 40]
+  w.usage['tok-2'] = [10, 41]
+  w.weekResets = { 'tok-2': OTHER_WEEK }
+  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off' }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  await pane.press({ key: 'use-2' })
+  await clock.settle()
+  await pane.unmount()
+  if (last !== undefined) {
+    await clock.advance(SETTLE_WAIT)
+    w.limits = last
+    await respond($, clock, w)
+  }
+  await clock.advance(delay)
+  await $.classic.StopFailure({ error: 'rate_limit', last_assistant_message: said })
+  await clock.settle()
+  return { w, store, clock }
+}
+
+/** Past the 35 s a switch takes to land. */
+const SETTLE_WAIT = 36_000
+
+// Review codex-c4 STOP-OWNER-CROSS [STOP-CROSSING], the instance: a stop with no response since an unproven switch
+// marks the login moved to provisionally, and the settle that finds the switch did not take drops it.
+test('a stop before any response proves a switch, when the switch then proves not to have taken, leaves the login moved to unmarked', async ($, on) => {
+  const { w, store, clock } = await stopDuringSwitch($, on, 40_000, 'Claude usage limit reached.')
+  w.limits = [{ kind: 'seven_day', percentUsed: 42, resetsAt: WEEK_RESET }]
+  await clock.advance(4 * 60_000 + 10_000)
+  await respond($, clock, w)
+  expect(w.toasts.some(t => /did not take/.test(t))).toBe(true)
+  expect(store.get('mark:2')).toBeUndefined()
+})
+
+// Review codex-c4 STOP-OWNER-CROSS [STOP-CROSSING], the class: every moment after the settle window, every kind of stop.
+const UNPROVEN_STOPS: [string, string, string][] = [
+  ['5-hour', "You've hit your session limit", 'mark:2'],
+  ['weekly', "You've hit your weekly limit", 'week-mark:2'],
+  ['plain', 'Claude usage limit reached.', 'mark:2'],
+]
+for (const delay of [36_000, 50_000]) {
+  for (const [kind, said, key] of UNPROVEN_STOPS) {
+    test(`a ${kind} stop ${delay / 1000} s into a switch that proves not to have taken leaves no ${key}`, async ($, on) => {
+      const { w, store, clock } = await stopDuringSwitch($, on, delay, said)
+      w.limits = [{ kind: 'seven_day', percentUsed: 42, resetsAt: WEEK_RESET }]
+      await clock.advance(4 * 60_000 + 10_000)
+      await respond($, clock, w)
+      expect([kind, delay, store.get(key)]).toEqual([kind, delay, undefined])
+    })
+  }
+}
+
+// Review opus-c4 F3 [STOP-CROSSING]: a response since the switch names the stop's login by its week.
+for (const [kind, said, key] of UNPROVEN_STOPS) {
+  test(`a ${kind} stop whose last response since an unproven switch carries the login left's week marks that login, not the one moved to`, async ($, on) => {
+    const last = [{ kind: 'five_hour', percentUsed: 100, resetsAt: '2026-10-12T12:00:00Z' }, { kind: 'seven_day', percentUsed: 41, resetsAt: WEEK_RESET }]
+    const { store } = await stopDuringSwitch($, on, 61_000, said, last)
+    expect([kind, store.get(key), store.get(key.replace(':2', ':1')) !== undefined]).toEqual([kind, undefined, true])
+  })
+}
+
+// Review opus-c4 F1 [STICKY-NOTICE]: the line stands while an older version writes, and falls once it has stopped.
+test('the older-session line falls once no older version has written for half an hour, on any login', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [10, 20]
+  w.usage['tok-2'] = [10, 30]
+  w.weekResets = { 'tok-2': OTHER_WEEK }
+  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off' }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  const offenders: string[] = []
+  for (const id of ['1', '2']) {
+    store.set(`reading:${id}`, { sevenDay: { pct: 50, resetsAt: WEEK_RESET }, at: clock.now() + 1, by: id })
+    await clock.advance(61_000)
+    if (!/older account-rotator still runs/.test(await bandText($))) offenders.push(`reading:${id} just written: no line`)
+    await clock.advance(31 * 60_000)
+    if (/older account-rotator still runs/.test(await bandText($))) offenders.push(`reading:${id} quiet half an hour: line still up`)
+  }
+  expect(offenders).toEqual([])
+})
+
+// Review opus-c4 F2 [SILENT-UNREAD]: a login no profile call names is unread, and the pane says why, whatever the failure.
+for (const status of [429, 500, 401]) {
+  test(`a login whose profile call answers ${status} is not read, and its check error says why`, async ($, on) => {
+    const w = fresh()
+    w.keychain['Claude Code-credentials'] = blob('tok-1')
+    w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+    w.usage['tok-1'] = [10, 20]
+    w.usage['tok-2'] = [10, 30]
+    w.profileFailing = { 'tok-2': status }
+    const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off' }))
+    const clock = world(on, w, store)
+    await start($, clock)
+    await clock.advance(10 * 60_000)
+    expect(callsWith(w, 'tok-2')).toBe(0)
+    expect((store.get('check-error:2') as { why?: string } | undefined)?.why).toMatch(new RegExp(`profile call answered HTTP ${status}`))
+    expect(await paneText($)).toMatch(new RegExp(`profile call answered HTTP ${status}`))
+  })
+}
 
 /** The band's text above the prompt, or '' where no band is drawn. */
 async function bandText($: Engine): Promise<string> {
