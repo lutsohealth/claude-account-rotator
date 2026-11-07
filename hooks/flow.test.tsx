@@ -20,10 +20,10 @@ type World = {
   /** credentials file -> stored text, or null where it cannot be read */
   files: Record<string, string | null>
   /**
-   * access token -> [5-hour %, week %, or null where the plan reports no weekly limit], and the Fable
-   * week's % as a third member where the usage endpoint lists one
+   * access token -> [5-hour %, or null where the account reports no 5-hour window, week %, or null where the
+   * plan reports no weekly limit], and the Fable week's % as a third member where the usage endpoint lists one
    */
-  usage: Record<string, [number, number | null, number?]>
+  usage: Record<string, [number | null, number | null, number?]>
   /** access token -> the email of the account it signs in, as the profile endpoint answers */
   owners: Record<string, string>
   /** The token a /login signs in, where the session reads its sign-in, and its plan. */
@@ -140,7 +140,7 @@ function world(on: On, w: World, store: Record<string, unknown>): MockClock {
     if (usage === undefined) return { value: { status: 401, ok: false, headers: {}, text: '' } }
     const [five, week, fable] = usage
     const body = {
-      five_hour: { utilization: five, resets_at: '2026-10-12T12:00:00Z' },
+      five_hour: five === null ? null : { utilization: five, resets_at: '2026-10-12T12:00:00Z' },
       seven_day: week === null ? null : { utilization: week, resets_at: '2026-10-18T03:00:00Z' },
       // A row for another model beside the Fable one, spent: read as Fable's, it would show.
       ...(fable === undefined ? {} : { limits: [limitRow('Sonnet', 100), limitRow('Fable 5.1', fable, w.fableResets)] }),
@@ -1262,11 +1262,68 @@ test('with next in list picked, Rotate now moves to the login after the one in u
   const clock = world(on, w, three)
   await start($, clock)
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
-  expect(await pane.find({ text: /moves to the account whose 5-hour window resets soonest/ })).toBeDefined()
+  expect(await pane.find({ text: /moves to the account whose 5-hour window, or else week, resets soonest/ })).toBeDefined()
   await pane.press({ key: 'rotate-to-order' })
   await clock.settle()
   await pane.redraw()
   expect(await pane.find({ text: /moves to the next account in the list with room/ })).toBeDefined()
+  await pane.press({ key: 'rotate' })
+  await clock.settle()
+  expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
+  await pane.unmount()
+})
+
+test('with the 5-hour limit off, the account in use past 90% of its 5-hour window stays and the pane\'s rule names the week alone; turned on in the pane, it moves', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [92, 40]
+  w.usage['tok-2'] = [10, 30]
+  const clock = world(on, w, { ...TWO_LOGINS, 'five-hour-limit': 'off' })
+  await start($, clock)
+  await clock.advance(11 * 60_000)
+  expect(w.envSets).toEqual([])
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  expect(await pane.find({ text: /^Once the account in use has 5% of its week left, moves to the account whose week resets soonest\.$/ })).toBeDefined()
+  expect(await pane.find({ text: /5-hour/ })).toBeUndefined()
+  await pane.press({ key: 'five-hour-limit-on' })
+  await clock.settle()
+  await clock.advance(10 * 60_000)
+  expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
+  await pane.redraw()
+  expect(await pane.find({ text: /10% of its 5-hour window, where it reports one, or 5% of its week left/ })).toBeDefined()
+  await pane.unmount()
+})
+
+test('a plain usage-limit stop on an account that reports no 5-hour window moves, and marks it spent for five hours, not for good', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [null, 40]
+  w.usage['tok-2'] = [null, 30]
+  const clock = world(on, w, { ...TWO_LOGINS, 'five-hour-limit': 'off' })
+  await start($, clock)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  expect(await pane.findAll({ type: 'Text', text: /none reported$/ })).toHaveLength(2)
+  await $.classic.StopFailure({ error: 'rate_limit', last_assistant_message: 'Claude usage limit reached.' })
+  await clock.settle()
+  expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
+  await pane.redraw()
+  expect(await pane.find({ text: /^resets in 5h 0m$/ })).toBeDefined()
+  await pane.unmount()
+})
+
+test('a stored stop mark with no reset time, on an account whose token is not live to read it again, stops counting five hours after its read', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  // Login 2's access token has run out: no check reads its usage again.
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2', NOW - HOUR)
+  w.usage['tok-1'] = [null, 40]
+  const stale = { fiveHour: { pct: 100 }, sevenDay: { pct: 10, resetsAt: '2026-10-18T03:00:00Z' }, at: NOW - 6 * HOUR }
+  const clock = world(on, w, { ...TWO_LOGINS, 'reading:2': stale })
+  await start($, clock)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  expect(await pane.findAll({ type: 'Text', text: /none reported$/ })).toHaveLength(2)
   await pane.press({ key: 'rotate' })
   await clock.settle()
   expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])

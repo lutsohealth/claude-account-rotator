@@ -10,12 +10,16 @@ import type {
   Timer,
 } from 'claude-code'
 
-import type { Account, FooterStyle, Health, Holder, Reading, RotateTo, View } from '../types'
+import type { Account, FiveHourLimit, FooterStyle, Health, Holder, Reading, RotateTo, View } from '../types'
 import {
   CHROME_SERVER,
   CHROME_TOOL,
   EMPTY_VIEW,
+  FIVE_HOUR_MS,
   LEAVE_FIVE_HOUR,
+  counted,
+  fiveHourLimitFrom,
+  spentMark,
   blockedText,
   browsersFrom,
   canConnectChrome,
@@ -141,7 +145,8 @@ async function saveAccounts($: Host, accounts: Account[]): Promise<void> {
   await setView($, v => ({ ...v, accounts }))
 }
 
-async function saveReading($: Host, id: string, reading: Reading): Promise<void> {
+async function saveReading($: Host, id: string, read: Reading): Promise<void> {
+  const reading = counted(read, (await getView($)).fiveHourLimit, await $.clock.now())
   await $.store.set(`reading:${id}`, reading)
   await setView($, v => ({ ...v, readings: { ...v.readings, [id]: reading } }))
 }
@@ -177,6 +182,8 @@ async function mergeStore($: Host): Promise<void> {
   }
   const footer = footerStyleFrom(await $.store.get('footer'))
   const rotateTo = rotateToFrom(await $.store.get('rotate-to'))
+  const fiveHourLimit = fiveHourLimitFrom(await $.store.get('five-hour-limit'))
+  const now = await $.clock.now()
   const fableContinueText = continueTextFrom(await $.store.get('fable-continue-text'))
   const chrome = await $.store.get('chrome-account')
   const chromeAccountId = typeof chrome === 'string' && accounts.some(a => a.id === chrome) ? chrome : undefined
@@ -190,14 +197,14 @@ async function mergeStore($: Host): Promise<void> {
       const mine = v.readings[a.id]
       const theirs = readings[a.id]
       const reading = mine !== undefined && (theirs === undefined || mine.at >= theirs.at) ? mine : theirs
-      if (reading !== undefined) nextReadings[a.id] = reading
+      if (reading !== undefined) nextReadings[a.id] = counted(reading, fiveHourLimit, now)
       const own = v.health[a.id]
       const h = signingIn === a.id ? own : (health[a.id] ?? own)
       if (h !== undefined) nextHealth[a.id] = h
       const holder = holders[a.id] ?? v.holders[a.id]
       if (holder !== undefined) nextHolders[a.id] = holder
     }
-    return { ...v, accounts, readings: nextReadings, health: nextHealth, holders: nextHolders, footer, rotateTo, fableContinueText, chromeAccountId, chromeAccountIds }
+    return { ...v, accounts, readings: nextReadings, health: nextHealth, holders: nextHolders, footer, rotateTo, fiveHourLimit, fableContinueText, chromeAccountId, chromeAccountIds }
   })
 }
 
@@ -212,6 +219,18 @@ async function setFooter($: Host, change: Partial<FooterStyle>): Promise<void> {
 async function setRotateTo($: Host, rotateTo: RotateTo): Promise<void> {
   await $.store.set('rotate-to', rotateTo)
   await setView($, v => ({ ...v, rotateTo }))
+}
+
+/** Turns the 5-hour window's count on or off, for every session; off drops the windows read so far. */
+async function setFiveHourLimit($: Host, fiveHourLimit: FiveHourLimit): Promise<void> {
+  await $.store.set('five-hour-limit', fiveHourLimit)
+  const now = await $.clock.now()
+  await setView($, v => ({
+    ...v,
+    fiveHourLimit,
+    readings: Object.fromEntries(Object.entries(v.readings).map(([id, r]) => [id, counted(r, fiveHourLimit, now)])),
+  }))
+  await maybeRotate($)
 }
 
 /** Names the account the Chrome extension is signed in to, for every session; none forgets it. */
@@ -667,9 +686,8 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
       // The limit was hit before the usage call shows it: count the Fable week as full.
       if (!isFableSpent(r, now)) await saveReading($, active.id, { ...r, fable: fableMark(r?.fable, now), at: now })
     } else if (!shouldLeave(after, now)) {
-      // The limit was hit before the usage call shows it: count the 5-hour window as full.
-      const resetsAt = r?.fiveHour?.resetsAt
-      await saveReading($, active.id, { ...r, fiveHour: { pct: 100, ...(resetsAt ? { resetsAt } : {}) }, at: now })
+      // The limit was hit before the usage call shows it: count the 5-hour window as full, five hours at most where none is reported.
+      await saveReading($, active.id, { ...r, fiveHour: { ...spentMark(r?.fiveHour, now, FIVE_HOUR_MS), isStop: true }, at: now })
     }
   }
   await setView($, v => ({ ...v, pending: undefined }))
@@ -1095,6 +1113,7 @@ function actions($: Host): Actions {
     remove: id => background(removeAccount($, id)),
     setFooter: change => background(setFooter($, change)),
     setRotateTo: rotateTo => background(setRotateTo($, rotateTo)),
+    setFiveHourLimit: limit => background(setFiveHourLimit($, limit)),
     tryChromeAccount: id => background(tryChromeAccount($, id)),
     toggleChromeOthers: () => background(setView($, v => ({ ...v, isChromeOthersShown: !v.isChromeOthersShown }))),
     connectChrome: () => background(connectChrome($)),
