@@ -766,7 +766,7 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
       // count the week as full until its reset, never a 5-hour window.
       await saveReading($, active.id, { ...read, sevenDay: { ...spentMark(read?.sevenDay, now, WEEK_MS), isStop: true }, at: now })
     } else if (!shouldLeave(after, now)) {
-      // The limit was hit before the usage call shows it: count the 5-hour window as full, five hours at most where none is reported.
+      // The limit was hit before the usage call shows it: count the 5-hour window as full, five hours at most where no reset is known.
       const spent = spentMark(read?.fiveHour, now, FIVE_HOUR_MS)
       await saveMark($, active.id, { pct: spent.pct, resetsAt: spent.resetsAt ?? new Date(now + FIVE_HOUR_MS).toISOString(), at: now })
     }

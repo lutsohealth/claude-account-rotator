@@ -1465,7 +1465,8 @@ test('a stop\'s mark on a login that reports a 5-hour window stands when the 5-h
 })
 
 // Review R1 mark_lifetime: a check or response whose read lists no 5-hour window ended a stop's mark early.
-test('a plain stop\'s mark on an account that reports no 5-hour window stands through the next account check', async ($, on) => {
+// The mark is the week's since bug puma-4q7j2.3: such an account has no 5-hour window.
+test('a plain stop\'s week mark on an account that reports no 5-hour window stands through the next account check', async ($, on) => {
   const w = fresh()
   w.keychain['Claude Code-credentials'] = blob('tok-1')
   w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
@@ -1484,7 +1485,7 @@ test('a plain stop\'s mark on an account that reports no 5-hour window stands th
 })
 
 // Review R1 mark_lifetime, the class: every writer of a reading, under every rotation choice and both switch values.
-test('a stop\'s 5-hour mark on an account that reports none stands through every reading writer, under every setting', async ($, on) => {
+test('a stop\'s week mark on an account that reports no 5-hour window stands through every reading writer, under every setting', async ($, on) => {
   const w = fresh()
   w.keychain['Claude Code-credentials'] = blob('tok-1')
   w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
