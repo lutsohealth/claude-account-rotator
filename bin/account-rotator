@@ -5,6 +5,7 @@
     account-rotator account select --account <id|email|system> [--agent claude] [--wait S] [--json] [--store PATH]
     account-rotator account use --account <id|email|system> [--agent claude] [--wait S] [--json] [--store PATH]
     account-rotator account rm --account <id|email> [--agent claude] [--wait S] [--json] [--store PATH]
+    account-rotator account add [--folder PATH] [--agent claude] [--wait S] [--json] [--store PATH]
 
 `list` prints each account's row as the switcher pane draws it, from the store's `rows` key, which every session of
 the mod rewrites when a row changes: its times are stored as instants, rendered here at this clock and in this zone.
@@ -15,6 +16,8 @@ Use now does. `rm` signs an account out and drops it, as Remove does. No verb wr
 request file in the Claude config folder's account-rotator-requests, naming the store's `store-id`; a session of the
 mod on that store applies it and answers with a result file. `use` also names the session, by the mark the mod sets in
 its Bash children's environment.
+
+`add` signs a new folder in, in this terminal, then asks in the same way for a session to list it.
 """
 
 # Read as text, so `str | None` is no error on a macOS python3 older than 3.10.
@@ -24,7 +27,10 @@ import argparse
 import json
 import math
 import os
+import re
+import shutil
 import signal
+import subprocess
 import sys
 import time
 import uuid
@@ -39,6 +45,7 @@ EXIT_NO_STORE = 1
 EXIT_USAGE = 2
 EXIT_NO_SESSION = 3
 EXIT_REFUSED = 4
+EXIT_NO_SIGN_IN = 5
 EXIT_CANCELLED = 130
 MINUTE_MS = 60_000
 POLL_S = 0.25
@@ -51,9 +58,9 @@ SLOT_VAR = "CLAUDE_SECURESTORAGE_CONFIG_DIR"
 OLDER_NOTE = "an older version of the mod stored some rows as text, their times as of when it wrote them"
 EXITS = (
     "Exit 0 done, 1 no store or a damaged one, 2 a usage error (an unknown flag or verb, --agent not claude, an --account"
-    " that names no account or several, a --wait not above 0 and at most 300, use outside a session of the mod, rm of Claude Code's own login), 3 no session"
-    " took the request within --wait, or none has given the store a store-id yet, 4 a session refused it, 130 stopped, the"
-    " request withdrawn."
+    " that names no account or several, a --wait not above 0 and at most 300, use outside a session of the mod, rm of Claude Code's own login, add with no terminal,"
+    " a --folder that names no numbered folder under the accounts folder), 3 no session took the request within --wait, or none"
+    " has given the store a store-id yet, 4 a session refused it, 5 the sign-in did not finish, 130 stopped, the request withdrawn."
 )
 
 
@@ -282,9 +289,46 @@ def ask(folder: str, request: dict, wait_s: float) -> dict | None:
                 pass
 
 
+def stop_on_signals() -> None:
+    for signum in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(signum, cancelled)
+
+
+def no_store_id(store: str) -> int:
+    print(f"account-rotator: {store} has no store-id: no session of this version of the mod has run on it; start one, then run again", file=sys.stderr)
+    return EXIT_NO_SESSION
+
+
+def session_answer(store: str, store_id: str, account: str, wait_s: float, fields: dict, untaken: str, way_back: str = "") -> tuple[int, dict | None]:
+    """Leaves a request for the sessions on this store, written whole by a rename, and waits. An ok answer comes back with
+    0; any other way out is said here, `way_back` after it, and comes back as its exit code. `fields` are what the verb
+    asks, `untaken` says who took it not."""
+    stop_on_signals()
+    folder, nonce = requests_folder(store), uuid.uuid4().hex
+    try:
+        result = ask(folder, {**fields, "nonce": nonce, "at": time.time() * 1000, "id": account, "store": store_id}, wait_s)
+    except OSError as error:
+        print(f"account-rotator: cannot write a request in {folder}: {error.strerror or error}{way_back}", file=sys.stderr)
+        return EXIT_NO_STORE, None
+    if result is None:
+        print(f"account-rotator: {untaken} the request within {wait_s:g} s, so it is withdrawn; a session may have taken it in that same moment: run account list{way_back}", file=sys.stderr)
+        return EXIT_NO_SESSION, None
+    if not result["ok"]:
+        print(f"account-rotator: a session refused: {result['message']}", file=sys.stderr)
+        return EXIT_REFUSED, None
+    return 0, result
+
+
+def report(store: str, result: dict, envelope: dict, as_json: bool) -> None:
+    if as_json:
+        print(json.dumps({"id": str(uuid.uuid4()), "ok": True, "result": envelope, "_meta": {"runtimeId": None, "store": store}}, indent=2))
+    else:
+        print(f"account-rotator: {result['message']}")
+
+
 def request_session(data: dict, store: str, given: str, wait_s: float, as_json: bool, fields: dict, untaken: str, envelope_of) -> int:
-    """Leaves a request for the sessions on this store, written whole by a rename, waits for the answer and reports it.
-    `fields` are what the verb asks, `untaken` says who took it not, and `envelope_of(account, result)` is its --json."""
+    """Asks the sessions on this store about the account `given` names and reports the answer: `envelope_of(account,
+    result)` is the verb's --json."""
     try:
         account = resolve(data, given)
     except UsageError as error:
@@ -292,28 +336,11 @@ def request_session(data: dict, store: str, given: str, wait_s: float, as_json: 
         return EXIT_USAGE
     store_id = data.get("store-id")
     if not isinstance(store_id, str):
-        print(f"account-rotator: {store} has no store-id: no session of this version of the mod has run on it; start one, then run again", file=sys.stderr)
-        return EXIT_NO_SESSION
-    for signum in (signal.SIGTERM, signal.SIGHUP):
-        signal.signal(signum, cancelled)
-    folder, nonce = requests_folder(store), uuid.uuid4().hex
-    try:
-        result = ask(folder, {**fields, "nonce": nonce, "at": time.time() * 1000, "id": account, "store": store_id}, wait_s)
-    except OSError as error:
-        print(f"account-rotator: cannot write a request in {folder}: {error.strerror or error}", file=sys.stderr)
-        return EXIT_NO_STORE
-    if result is None:
-        print(f"account-rotator: {untaken} the request within {wait_s:g} s, so it is withdrawn; a session may have taken it in that same moment: run account list", file=sys.stderr)
-        return EXIT_NO_SESSION
-    message = result["message"]
-    if not result["ok"]:
-        print(f"account-rotator: a session refused: {message}", file=sys.stderr)
-        return EXIT_REFUSED
-    if as_json:
-        print(json.dumps({"id": str(uuid.uuid4()), "ok": True, "result": envelope_of(account, result), "_meta": {"runtimeId": None, "store": store}}, indent=2))
-    else:
-        print(f"account-rotator: {message}")
-    return 0
+        return no_store_id(store)
+    code, result = session_answer(store, store_id, account, wait_s, fields, untaken)
+    if result is not None:
+        report(store, result, envelope_of(account, result), as_json)
+    return code
 
 
 def select(data: dict, store: str, given: str, wait_s: float, as_json: bool) -> int:
@@ -363,16 +390,128 @@ def remove(data: dict, store: str, given: str, wait_s: float, as_json: bool) -> 
     return request_session(data, store, account, wait_s, as_json, {"kind": "rm", **seen}, f"no session of the mod on {store} took", envelope)
 
 
+def accounts_folder() -> str:
+    """Where the mod keeps each account's folder, whichever config folder a session runs on: hooks/register.tsx addAccount."""
+    return os.path.join(os.path.expanduser("~"), ".claude", "accounts")
+
+
+def folder_given(given: str) -> str:
+    """The folder `--folder` names, as a session compares it: a numbered one that exists under the accounts folder."""
+    path, root = os.path.abspath(given), accounts_folder()
+    if os.path.dirname(path) != root or not re.fullmatch(r"[1-9][0-9]*", os.path.basename(path)) or not os.path.isdir(path):
+        raise UsageError(f"--folder {given} names no numbered folder that exists under {root}: pass one, or see --help")
+    return path
+
+
+def make_folder(data: dict) -> str:
+    """Makes the next free folder: the first number from 2 with no account on it and no folder, as os.mkdir refuses one
+    that exists. The sign-in only ever goes in a folder made here, as a login run in another would replace what it holds."""
+    root = accounts_folder()
+    os.makedirs(root, exist_ok=True)
+    ids, slots = {a["id"] for a in data["accounts"]}, {a.get("slot") for a in data["accounts"]}
+    number = 2
+    while True:
+        path = os.path.join(root, str(number))
+        if str(number) not in ids and path not in slots:
+            try:
+                os.mkdir(path)
+            except FileExistsError:
+                pass
+            else:
+                with open(os.path.join(path, "README"), "w", encoding="utf-8") as f:
+                    f.write(f"Claude account {number}, kept by the account-rotator mod.\n")
+                return path
+        number += 1
+
+
+def sign_in(folder: str, as_json: bool) -> str | None:
+    """The sign-in, on this terminal, for a person to approve in the browser: why it did not finish, or None. Under --json
+    what it prints goes to stderr, so stdout stays one JSON object."""
+    env = {**os.environ, SLOT_VAR: folder, "CLAUDE_CONFIG_DIR": folder}
+    try:
+        code = subprocess.run(["claude", "auth", "login", "--claudeai"], env=env, stdout=sys.stderr if as_json else None).returncode
+    except OSError as error:
+        return f"cannot run claude: {error.strerror or error}"
+    return None if code == 0 else f"claude auth login exited {code}"
+
+
+def new_folder_signed_in(data: dict, store: str, as_json: bool) -> tuple[int, str | None]:
+    """Makes a folder and signs it in; one that does not finish goes: nothing but this run ever held it."""
+    try:
+        folder = make_folder(data)
+    except OSError as error:
+        print(f"account-rotator: cannot make a folder under {accounts_folder()}: {error.strerror or error}; fix that, or see --help", file=sys.stderr)
+        return EXIT_NO_STORE, None
+    try:
+        why = sign_in(folder, as_json)
+    except KeyboardInterrupt:
+        shutil.rmtree(folder, ignore_errors=True)
+        print("account-rotator: stopped during the sign-in, so its folder is removed and nothing is asked", file=sys.stderr)
+        return EXIT_CANCELLED, None
+    if why is not None:
+        shutil.rmtree(folder, ignore_errors=True)
+        print(f"account-rotator: the sign-in did not finish ({why}), so its folder is removed and nothing is asked: run it again, or see --help", file=sys.stderr)
+        return EXIT_NO_SIGN_IN, None
+    return 0, folder
+
+
+def is_listed(store: str, slot: str) -> bool:
+    try:
+        path, data = read(store)
+        check(data, path)
+    except StoreError:
+        return False
+    return any(a.get("slot") == slot for a in data["accounts"])
+
+
+def add(data: dict, store: str, folder: str | None, wait_s: float, as_json: bool) -> int:
+    """Signs a new folder in, or takes one given, and asks a session to list it. The store has no compare-and-set, so an
+    ok is read back: another session's write can take its place. A folder signed in stays when no session lists it."""
+    if not isinstance(data.get("store-id"), str):
+        return no_store_id(store)
+    stop_on_signals()
+    if folder is None:
+        code, folder = new_folder_signed_in(data, store, as_json)
+        if folder is None:
+            return code
+    way_back = f"; {folder} stays signed in: account add --folder {folder}"
+    # A sign-in takes minutes: the store-id as it stands now.
+    try:
+        store, data = read(store)
+        check(data, store)
+    except StoreError as error:
+        print(f"account-rotator: {error}{way_back}", file=sys.stderr)
+        return EXIT_NO_STORE
+    store_id = data.get("store-id")
+    if not isinstance(store_id, str):
+        return no_store_id(store)
+    number = os.path.basename(folder)
+    try:
+        code, result = session_answer(store, store_id, number, wait_s, {"kind": "add", "slot": folder}, f"no session of the mod on {store} took", way_back)
+    except KeyboardInterrupt:
+        print(f"account-rotator: stopped, so the request is withdrawn; a session may have taken it in that same moment: run account list{way_back}", file=sys.stderr)
+        return EXIT_CANCELLED
+    if result is None:
+        return code
+    if not is_listed(store, folder):
+        print(f"account-rotator: a session answered, but {store} does not list {folder}: another session's write took its place{way_back}", file=sys.stderr)
+        return EXIT_NO_STORE
+    account = result.get("accountId") if isinstance(result.get("accountId"), str) else number
+    pick = result.get("pickId") if isinstance(result.get("pickId"), str) else None
+    report(store, result, {"account": account, "folder": folder, "activeAccountId": pick, "message": result["message"]}, as_json)
+    return 0
+
+
 def parsers() -> tuple[argparse.ArgumentParser, argparse.ArgumentParser]:
     """The root parser, and the account group's, whose help a bare `account` prints."""
     root = argparse.ArgumentParser(
         prog="account-rotator",
-        description="The account-rotator mod's Claude accounts, from a shell. Verbs: account list, account select, account use, account rm.",
+        description="The account-rotator mod's Claude accounts, from a shell. Verbs: account list, account select, account use, account rm, account add.",
         epilog=EXITS,
     )
     groups = root.add_subparsers(dest="group", metavar="account")
-    account = groups.add_parser("account", help="the Claude accounts the mod keeps", description="Verbs: account list, account select, account use, account rm.", epilog=EXITS)
-    verbs = account.add_subparsers(dest="verb", metavar="list|select|use|rm")
+    account = groups.add_parser("account", help="the Claude accounts the mod keeps", description="Verbs: account list, account select, account use, account rm, account add.", epilog=EXITS)
+    verbs = account.add_subparsers(dest="verb", metavar="list|select|use|rm|add")
     listing = verbs.add_parser(
         "list",
         help="print each account's row as the switcher pane draws it",
@@ -397,10 +536,19 @@ def parsers() -> tuple[argparse.ArgumentParser, argparse.ArgumentParser]:
         description="account rm: sign an account out and drop it, its keys and its place as where new sessions start, as the panel's Remove does, through any session of the mod on the store. It never writes the store. Other sessions on that account are not moved; their next check finds its sign-in gone. A session on it that applies this moves off first, and answers not ok with no other account to take over, while Claude in Chrome connects, or when the sign-out fails, which keeps the account. Claude Code's own login is not the mod's: exit 2.",
         epilog=EXITS,
     )
+    adding = verbs.add_parser(
+        "add",
+        help="sign a new account in through the browser, as the panel's + Add an account does",
+        description="account add: sign a new account in through the browser and list it, as the panel's + Add an account does. A person approves the sign-in, so it runs in this terminal and exits 2 with no terminal: an agent's Bash call is refused. It makes the next free folder under ~/.claude/accounts, never one that exists; then a session of the mod on the store lists it, within a minute, under the folder's number. A failed sign-in removes the folder it made. It never writes the store. A twin, a login some account holds already, Claude Code's own login among them, is refused with exit 4 and its folder stays signed in, with no account on it: the answer gives the sign-out command. A row whose organization no session has read yet counts as another login. --folder <path> takes a folder already signed in, with no terminal and no sign-in: the way back when no session took the request.",
+        epilog=EXITS,
+    )
+    adding.add_argument("--folder", help="a numbered folder under ~/.claude/accounts that is signed in already: no sign-in runs, and no terminal is needed")
+    wait_help = "seconds to wait for a session to take the request, above 0 and at most 300 (default 90; a session looks once a minute)"
     for verb in (selecting, using, removing):
         verb.add_argument("--account", required=True, help="the account: its id, its email (when one account has it), or system, the account on Claude Code's own login")
-        verb.add_argument("--wait", type=wait_seconds, default=90.0, help="seconds to wait for a session to take the request, above 0 and at most 300 (default 90; a session looks once a minute)")
-    for verb in (listing, selecting, using, removing):
+    for verb in (selecting, using, removing, adding):
+        verb.add_argument("--wait", type=wait_seconds, default=90.0, help=wait_help)
+    for verb in (listing, selecting, using, removing, adding):
         verb.add_argument("--agent", default="claude", help="the agent whose accounts these are: claude, the only one the mod keeps")
         verb.add_argument("--json", action="store_true", help="print Orca's JSON envelope instead of text")
         verb.add_argument("--store", help="the mod's store file (default: the newest " + STORE_GLOB + " holding accounts, under the Claude config folder)")
@@ -420,12 +568,24 @@ def main(argv: list[str] | None = None, *, now: float | None = None, zone: tzinf
     if args.verb == "use" and not os.environ.get(SESSION_VAR):
         print(f"account-rotator: account use moves the session running it, and {SESSION_VAR} is unset: run it from the Bash tool of a session on this version of the mod, or see --help", file=sys.stderr)
         return EXIT_USAGE
+    folder = None
+    if args.verb == "add":
+        if args.folder is None and not sys.stdin.isatty():
+            print("account-rotator: account add signs in through a browser, which a person approves, and this has no terminal: run it in a terminal, or pass --folder <path> for a folder already signed in, or see --help", file=sys.stderr)
+            return EXIT_USAGE
+        try:
+            folder = None if args.folder is None else folder_given(args.folder)
+        except UsageError as error:
+            print(f"account-rotator: {error}", file=sys.stderr)
+            return EXIT_USAGE
     try:
         store, data = read(args.store)
         check(data, store)
     except StoreError as error:
         print(f"account-rotator: {error}", file=sys.stderr)
         return EXIT_NO_STORE
+    if args.verb == "add":
+        return add(data, store, folder, args.wait, args.json)
     requesting = {"select": select, "use": use, "rm": remove}
     if args.verb in requesting:
         try:

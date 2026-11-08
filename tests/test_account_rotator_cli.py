@@ -754,7 +754,7 @@ STUB_CLAUDE = """#!/bin/sh
 { printf 'argv=%s\\n' "$*"; printf 'slot=%s\\n' "$CLAUDE_SECURESTORAGE_CONFIG_DIR"; printf 'config=%s\\n' "$CLAUDE_CONFIG_DIR"
   if [ -t 0 ]; then echo tty=yes; else echo tty=no; fi; } >> "$STUB_LOG"
 echo "stub: opening your browser"
-if [ -n "$STUB_THEN" ]; then sh -c "$STUB_THEN"; fi
+if [ -n "$STUB_THEN" ]; then exec sh -c "$STUB_THEN"; fi
 exit "${STUB_EXIT:-0}"
 """
 
@@ -881,7 +881,7 @@ class Add(RequestCase):
         self.addCleanup(os.close, ours)
         started = self.tmp / "started"
         child = subprocess.Popen([sys.executable, str(CLI), "account", "add"], stdin=theirs, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                                 env=self.add_env(STUB_THEN=f"touch {started}; sleep 20"))
+                                 env=self.add_env(STUB_THEN=f"touch {started}; exec sleep 20"))
         os.close(theirs)
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline and not started.exists():

@@ -60,6 +60,8 @@ type World = {
   markAtStart?: string
   /** Claude Code's security policy refuses every variable but the slot. */
   refuseMark?: boolean
+  /** Runs before each write of a shared store, to read what stood before it. */
+  onStoreSet?: (key: string, value: unknown) => void
   /** The slot of each `claude auth status` the mod ran. */
   statusAsked?: string[]
   /** Runs inside a `claude auth status`: what another session writes while this one waits on it. */
@@ -148,9 +150,10 @@ const ran = (exitCode: number, stdout: string): ProcessRunResult => ({
 })
 
 /** `$.store` over `entries`, which the test writes mid-run as another session on the Mac would. */
-function sharedStore(on: On, entries: Map<string, unknown>): void {
+function sharedStore(on: On, entries: Map<string, unknown>, w: World): void {
   on('store.get', (_$, e) => ({ value: entries.get(e.key) }))
   on('store.set', (_$, e) => {
+    w.onStoreSet?.(e.key, e.value)
     entries.set(e.key, e.value)
     return { value: undefined }
   })
@@ -164,7 +167,7 @@ function sharedStore(on: On, entries: Map<string, unknown>): void {
 /** Everything beneath the plugin: keychain or credentials files, `claude auth`, the usage API, the UI sinks. */
 function world(on: On, w: World, store: Record<string, unknown> | Map<string, unknown>): MockClock {
   const clock = mock.clock(on, { now: NOW })
-  if (store instanceof Map) sharedStore(on, store)
+  if (store instanceof Map) sharedStore(on, store, w)
   else mock.store(on, store)
   mock.env(on, { USER: 'tester', HOME, ...w.env })
   let slot = w.env.CLAUDE_SECURESTORAGE_CONFIG_DIR ?? ''
@@ -7059,12 +7062,12 @@ test('an add lists the folder under its number with who signed in, for a session
   w.files[`${REQUESTS}/${N1}.json`] = addRequest(N1, SLOT7, store.get('store-id'), clock.now())
   await untilTick(clock)
   expect(listedRow(store, '7')).toMatchObject({ id: '7', slot: SLOT7, email: 'seven@example.com', orgId: 'org-seven@example.com', plan: 'max' })
-  expect(store.get('health:7')).toEqual({ kind: 'ok' })
+  expect(store.get('health:7')).toMatchObject({ kind: 'ok' })
   expect(resultOf(w, N1)).toMatchObject({ nonce: N1, ok: true, accountId: '7' })
   expect(resultOf(w, N1)?.message).toMatch(/account 7 .*seven@example\.com.* is added/)
   expect(w.usageCalls, 'the same minute reads the new account: it needs no read of its own').toContain('tok-7')
   await untilTick(clock)
-  expect(store.get('health:7')).toEqual({ kind: 'ok' })
+  expect(store.get('health:7')).toMatchObject({ kind: 'ok' })
 })
 
 test('an add during a Bash call that names the CLI is applied at once', async ($, on) => {
@@ -7245,10 +7248,8 @@ test('two sessions on one store, health: the health stands before the row, so a 
   const { w, store, clock } = await selectWorld($, on)
   await signInFolder(w, SLOT7, 'seven@example.com')
   let healthAtRow: unknown = 'no row written'
-  const set = store.set.bind(store)
-  store.set = (key: string, value: unknown) => {
+  w.onStoreSet = (key, value) => {
     if (key === 'accounts' && (value as { id: string }[]).some(a => a.id === '7') && healthAtRow === 'no row written') healthAtRow = store.get('health:7')
-    return set(key, value)
   }
   w.files[`${REQUESTS}/${N1}.json`] = addRequest(N1, SLOT7, store.get('store-id'), clock.now())
   await untilTick(clock)

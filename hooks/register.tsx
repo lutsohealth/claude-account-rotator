@@ -65,6 +65,7 @@ import {
   readingFromUsage,
   holdsLogin,
   sameLogin,
+  slotNumber,
   shouldLeave,
   WRITER_VERSION,
   whoseWeek,
@@ -528,10 +529,11 @@ async function takeRequest($: Host, resultPath: string, request: RotatorRequest,
 /**
  * What a request asks, done: `select` sets the login new sessions start on, as the panel's New on does. The result
  * names the pick that setting makes: a login with no room gives way to the next with room, or to Claude Code's login.
- * `use` moves this session. `rm` drops an account, as the panel's Remove does.
+ * `use` moves this session. `rm` drops an account, as the panel's Remove does. `add` lists a folder signed in.
  */
-async function applyRequest($: Host, request: RotatorRequest): Promise<{ ok: boolean; message: string; pickId?: string; activeId?: string }> {
+async function applyRequest($: Host, request: RotatorRequest): Promise<{ ok: boolean; message: string; pickId?: string; activeId?: string; accountId?: string }> {
   if (request.kind === 'rm') return removeAccount($, request.id, request)
+  if (request.kind === 'add') return adoptSlot($, request.slot)
   const target = (await getView($)).accounts.find(a => a.id === request.id)
   if (target === undefined) return { ok: false, message: `account ${request.id} is not listed in this store` }
   if (request.kind === 'use') return useAccount($, target)
@@ -1774,6 +1776,38 @@ async function addAccount($: Host): Promise<void> {
   await saveAccounts($, [...accounts, { id, slot }])
   await saveHealth($, id, { kind: 'login-needed', why: 'not signed in yet' })
   await signInOne($, id)
+}
+
+/**
+ * An `account add`: lists a folder the CLI signed in, under the folder's number while no other slot holds it. Who signed
+ * in is read here, then the list again, as the read takes seconds and another session can list either meanwhile. The
+ * health stands before the row: a session that merges between them would otherwise find it not signed in. The minute's
+ * check reads its usage.
+ */
+async function adoptSlot($: Host, slot: string): Promise<{ ok: boolean; message: string; accountId?: string; pickId?: string }> {
+  const number = slotNumber(slot, (await $.env.get('HOME')) ?? '')
+  if (number === undefined) return { ok: false, message: `${slot} is no numbered folder under ~/.claude/accounts, so nothing is added` }
+  const already = (a: Account) => ({ ok: true, message: `already account ${a.id}`, accountId: a.id })
+  const listed = (await loadAccounts($)).find(a => a.slot === slot)
+  if (listed !== undefined) return already(listed)
+  const who = await signedInAs($, slot)
+  if (who === undefined) return { ok: false, message: `${slot} holds no sign-in, so nothing is added: run account add to sign in` }
+  const accounts = await loadAccounts($)
+  const meanwhile = accounts.find(a => a.slot === slot)
+  if (meanwhile !== undefined) return already(meanwhile)
+  const twin = accounts.find(a => sameLogin(a, who))
+  if (twin !== undefined) {
+    return {
+      ok: false,
+      message: `that sign-in is account ${label(twin)} already, so nothing is added. Sign out of claude.ai in your browser (or pick another organization), then run account add again. ${slot} stays signed in with no account on it: sign it out with CLAUDE_SECURESTORAGE_CONFIG_DIR=${slot} CLAUDE_CONFIG_DIR=${slot} claude auth logout`,
+    }
+  }
+  const account = withSignIn({ id: accounts.some(a => a.id === number) ? freeId(accounts) : number, slot }, who)
+  await saveHealth($, account.id, { kind: 'ok' })
+  await saveAccounts($, [...accounts, account])
+  await saveLaunchPick($)
+  const { text, pickId } = await pickAnswer($)
+  return { ok: true, message: `account ${label(account)} is added; ${text}`, accountId: account.id, pickId }
 }
 
 /**
