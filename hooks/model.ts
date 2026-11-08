@@ -984,10 +984,14 @@ function usageLine(view: View, a: Account, now: number): RowPart[] {
   return [...usedParts('Used', r.sevenDay, now), ...fable, ...(resets === undefined ? [] : [{ text: `  ${resets}` }])]
 }
 
-/** Line 3, where the counted reading holds a 5-hour window: it used, and its reset ahead. */
+/**
+ * Line 3, where the login is known to have a 5-hour window (hasFiveHour), whatever the 5h limit: it used and its
+ * reset ahead, as the counted reading holds it; a dash, dim, where the limit set off drops it from the count.
+ */
 function fiveHourLine(view: View, a: Account, now: number): RowPart[] | undefined {
+  if (!hasFiveHour(view, a.id)) return undefined
   const w = view.readings[a.id]?.fiveHour
-  if (w === undefined) return undefined
+  if (w === undefined) return [{ text: '5h –', tone: 'dim' }]
   const reset = resetAhead(w, now)
   return [...usedParts('5h', w, now), ...(reset === undefined ? [] : [{ text: `  resets ${reset}` }])]
 }
