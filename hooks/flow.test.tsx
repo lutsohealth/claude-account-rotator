@@ -110,6 +110,8 @@ type World = {
   /** Claude Code's security policy refuses every switch, as in a session on a Team seat. */
   refuseEnv?: boolean
   breakEnv?: boolean
+  /** Awaited before each answer, so a press can finish during a usage read. */
+  beforeFetch?: () => Promise<void>
   /**
    * Claude in Chrome, where the session has it: the slots of the accounts a
    * Chrome extension is signed in to, one per Chrome profile, and the slot its
@@ -234,7 +236,8 @@ function world(on: On, w: World, store: Record<string, unknown> | Map<string, un
     }
     throw new Error(`unexpected command: ${e.argv.join(' ')}`)
   })
-  on('http.fetch', (_$, e) => {
+  on('http.fetch', async (_$, e) => {
+    await w.beforeFetch?.()
     const token = (e.init?.headers?.Authorization ?? '').replace('Bearer ', '')
     if (e.url === 'https://api.anthropic.com/api/oauth/profile') {
       const profileFailing = w.profileFailing?.[token]
@@ -4934,6 +4937,44 @@ async function useNow($: Engine, clock: MockClock, id: string): Promise<void> {
 async function endSession($: Engine, clock: MockClock, reason = 'prompt_input_exit'): Promise<void> {
   await $.session.end({ reason, sessionId: 'session-1', resume: { id: 'session-1' } } as Parameters<Engine['session']['end']>[0])
   await clock.settle()
+}
+
+// puma-eslxj.20 (RULING 4713): a press that finishes during the stop's own usage read leaves a record naming the switch
+// it replaced. The next end of a switch gives that mark back too: left, it reads spent for every session until its reset.
+for (const isProven of [false, true]) {
+  test(`a stop whose usage read a press outlasts leaves the login moved to unmarked at the next press, ${isProven ? 'that press\'s switch proven' : 'its switch still unproven'}`, async ($, on) => {
+    const w = fresh()
+    w.keychain['Claude Code-credentials'] = blob('tok-1')
+    w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+    w.usage['tok-1'] = [10, 40]
+    w.usage['tok-2'] = [10, 41]
+    w.weekResets = { 'tok-2': OTHER_WEEK }
+    const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off' }))
+    const clock = world(on, w, store)
+    await start($, clock)
+    const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+    await pane.press({ key: 'use-2' })
+    await clock.settle()
+    await clock.advance(90_000)
+    let isPressed = false
+    w.beforeFetch = async () => {
+      if (isPressed) return
+      isPressed = true
+      await pane.press({ key: 'use-1' })
+    }
+    await $.classic.StopFailure({ error: 'rate_limit', last_assistant_message: 'Claude usage limit reached.' })
+    await clock.settle()
+    expect([isPressed, store.get('mark:2') !== undefined]).toEqual([true, true])
+    if (isProven) {
+      await clock.advance(SETTLE_WAIT)
+      w.limits = [{ kind: 'seven_day', percentUsed: 42, resetsAt: WEEK_RESET }]
+      await respond($, clock, w)
+    }
+    await pane.press({ key: 'use-2' })
+    await clock.settle()
+    expect(store.get('mark:2')).toBeUndefined()
+    await pane.unmount()
+  })
 }
 
 test('a stop before any response proves a switch, when a press replaces the switch, leaves the login moved to unmarked', async ($, on) => {
