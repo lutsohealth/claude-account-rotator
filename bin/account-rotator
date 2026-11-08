@@ -345,7 +345,12 @@ def remove(data: dict, store: str, given: str, wait_s: float, as_json: bool) -> 
     except UsageError as error:
         print(f"account-rotator: {error}", file=sys.stderr)
         return EXIT_USAGE
-    if next(a.get("slot") for a in data["accounts"] if a["id"] == account) == "":
+    row = next(a for a in data["accounts"] if a["id"] == account)
+    slot = row.get("slot")
+    if not isinstance(slot, str):
+        print(f"account-rotator: {store}: account {account} has no slot, which the mod never writes, so nothing is asked: fix the store by hand, or see --help", file=sys.stderr)
+        return EXIT_NO_STORE
+    if slot == "":
         print(f"account-rotator: account {account} is Claude Code's own login, which the mod does not remove: sign it out with claude auth logout, or see --help", file=sys.stderr)
         return EXIT_USAGE
 
@@ -353,7 +358,9 @@ def remove(data: dict, store: str, given: str, wait_s: float, as_json: bool) -> 
         pick = result.get("pickId") if isinstance(result.get("pickId"), str) else None
         return {"account": account, "activeAccountId": pick, "message": result["message"]}
 
-    return request_session(data, store, account, wait_s, as_json, {"kind": "rm"}, f"no session of the mod on {store} took", envelope)
+    # What this read saw: the session compares it before it signs anything out, as an id can change holder while a request waits.
+    seen = {"slot": slot, **({"email": row["email"]} if isinstance(row.get("email"), str) else {})}
+    return request_session(data, store, account, wait_s, as_json, {"kind": "rm", **seen}, f"no session of the mod on {store} took", envelope)
 
 
 def parsers() -> tuple[argparse.ArgumentParser, argparse.ArgumentParser]:

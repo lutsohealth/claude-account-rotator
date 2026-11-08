@@ -530,7 +530,7 @@ async function takeRequest($: Host, resultPath: string, request: RotatorRequest,
  * `use` moves this session. `rm` drops an account, as the panel's Remove does.
  */
 async function applyRequest($: Host, request: RotatorRequest): Promise<{ ok: boolean; message: string; pickId?: string; activeId?: string }> {
-  if (request.kind === 'rm') return removeAccount($, request.id)
+  if (request.kind === 'rm') return removeAccount($, request.id, request)
   const target = (await getView($)).accounts.find(a => a.id === request.id)
   if (target === undefined) return { ok: false, message: `account ${request.id} is not listed in this store` }
   if (request.kind === 'use') return useAccount($, target)
@@ -1779,12 +1779,19 @@ async function addAccount($: Host): Promise<void> {
  * The second press of Remove, or an `account rm`: signs the slot out, then drops it from the list. It reads the list
  * from the store, as another session may have removed the account already. A logout that fails keeps the account: one
  * dropped from the list with its login still signed in is out of everyone's sight. Other sessions on it are not moved.
+ * `seen`: what the CLI read of the account. A request waits, and an id can hold another login by the time it is applied.
  */
-async function removeAccount($: Host, id: string): Promise<{ ok: boolean; message: string; pickId?: string }> {
-  const account = (await loadAccounts($)).find(a => a.id === id)
+async function removeAccount($: Host, id: string, seen?: { slot: string; email?: string }): Promise<{ ok: boolean; message: string; pickId?: string }> {
+  const accounts = await loadAccounts($)
+  const account = accounts.find(a => a.id === id)
   if (account === undefined) return { ok: true, message: `account ${id} is already gone` }
   if (account.slot === '') return { ok: false, message: `account ${id} is Claude Code's own login, which the mod does not remove` }
   if (isConnectingChrome) return { ok: false, message: CONNECTING_TEXT }
+  if (seen !== undefined && (seen.slot !== account.slot || seen.email !== account.email)) {
+    return { ok: false, message: `account ${id} holds another login than this command read, so nothing is removed: run account list` }
+  }
+  const sharing = accounts.find(a => a.id !== id && a.slot === account.slot)
+  if (sharing !== undefined) return { ok: false, message: `account ${id} shares its sign-in with account ${sharing.id}, so signing it out would sign out both: nothing is removed` }
   const view = await getView($)
   if (view.activeId === id) {
     const other = view.accounts.find(a => a.id !== id && view.health[a.id]?.kind === 'ok')
