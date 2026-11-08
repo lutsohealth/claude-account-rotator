@@ -3,7 +3,7 @@ import type { Engine, MockClock } from 'claude-code/testing'
 import type { On, ProcessRunResult, SessionRateLimit, ToolCallArgs } from 'claude-code'
 import type { StoredRows } from '../types'
 
-import { DEFAULT_FOOTER, USAGE_CLAIM_WAIT_MS, USAGE_FORCE_AFTER_MS, USAGE_IDLE_MS, keychainItem, roomColor } from './model'
+import { DEFAULT_FOOTER, USAGE_CLAIM_WAIT_MS, USAGE_FORCE_AFTER_MS, USAGE_IDLE_MS, fingerprint, keychainItem, roomColor } from './model'
 import { laterMark, longBar, markFrom, storedLineText } from './model'
 import { PANE_COLUMNS } from './view'
 
@@ -2865,6 +2865,31 @@ for (const { name, most, run } of MERGE_COST_CASES) {
     expect(merges, `${name} merged the store ${merges} times (most ${most}): ${store.log.join(', ')}. A merge right after a merge reads nothing new`).toBeLessThanOrEqual(most)
   })
 }
+
+// puma-eslxj.22: a check judges a new sign-in against the holder the store names, not this session's view, so a sign-in
+// another session already named keeps the usage that session stored for it.
+test('a /login on a sign-in another session already named deletes none of the usage that session stored for it', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [20, 30]
+  w.usage['tok-2'] = [10, 30]
+  const store = new MergeLog(Object.entries(TWO_LOGINS))
+  const clock = world(on, w, store)
+  await start($, clock)
+  // The other session found login 1 signed in as nine@example.com and stored that sign-in, its usage and its schedule;
+  // this session's view still holds one@example.com's sign-in.
+  w.owners['tok-9'] = 'nine@example.com'
+  w.usage['tok-9'] = [5, 15]
+  w.loginToken = 'tok-9'
+  store.set('holder:1', { token: await fingerprint('refresh-tok-9'), who: { email: 'nine@example.com' } })
+  store.set('usage:1', { sevenDay: { pct: 15, resetsAt: WEEK_RESET }, at: NOW, by: '1', v: 1, src: 'body' })
+  store.set('usage-due:1', { next: NOW + 10 * 60_000, fails: 0, at: NOW, v: 1 })
+  store.log = []
+  await $.command.run(LOGIN)
+  await clock.settle()
+  expect(store.log.filter(e => /^delete (usage|no-five-hour|usage-due):1$/.test(e)), store.log.join(', ')).toEqual([])
+})
 
 // Review R1 of 181dc8e, footer_week_leave: the footer counts the week by the same setting the rotation does.
 test('the footer shows no room now on a login whose week is down to the Week setting, as the rotation counts it', async ($, on) => {
