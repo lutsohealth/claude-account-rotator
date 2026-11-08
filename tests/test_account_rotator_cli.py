@@ -797,8 +797,8 @@ class Add(RequestCase):
     def stored(self) -> dict:
         return json.loads(self.store.read_text(encoding="utf-8"))
 
-    def session(self, ok: bool = True, message: str = "account added", is_listed: bool = True) -> threading.Thread:
-        """A session that takes the first add it finds: it lists the slot in the store before it answers."""
+    def session(self, ok: bool = True, message: str = "account added", account_id: str | None = None) -> threading.Thread:
+        """A session that takes the first add it finds and answers."""
 
         def respond() -> None:
             deadline = time.monotonic() + 20
@@ -807,11 +807,7 @@ class Add(RequestCase):
                 if found:
                     request = json.loads(found[0].read_text(encoding="utf-8"))
                     self.seen = request
-                    if ok and is_listed:
-                        store = self.stored()
-                        store["accounts"].append({"id": request["id"], "slot": request["slot"]})
-                        self.write(STORE, store)
-                    answered = {"nonce": request["nonce"], "ok": ok, "message": message, "accountId": request["id"], "pickId": "1"}
+                    answered = {"nonce": request["nonce"], "ok": ok, "message": message, "accountId": account_id or request["id"], "pickId": "1"}
                     (self.requests / f"{request['nonce']}.result.json").write_text(json.dumps(answered), encoding="utf-8")
                     return
                 time.sleep(0.05)
@@ -860,15 +856,85 @@ class Add(RequestCase):
         self.assertEqual(self.seen["slot"], str(self.accounts / str(n + 3)))
         self.assertEqual((existing / "theirs").read_text(encoding="utf-8"), "kept")
 
-    def test_a_failed_sign_in_exits_5_removes_its_own_folder_and_asks_nothing(self) -> None:
-        done = self.add("--wait", "1", STUB_EXIT="7")
-        self.assertEqual((done.returncode, "Traceback" in done.stderr, "--help" in done.stderr), (5, False, True), done.stderr)
-        self.assertEqual((list(self.accounts.iterdir()), self.requests.exists()), ([], False))
+    def way_back(self) -> str:
+        """Review C13-R1 F1, F2, F4: every return after the sign-in keeps the folder and names how to ask again, and claims no sign-in."""
+        slot = self.accounts / self.next_number
+        return f"{slot} is kept: account add --folder {slot} asks again"
 
-    def test_no_claude_to_run_exits_5_and_removes_its_own_folder(self) -> None:
+    def test_a_failed_sign_in_exits_5_keeps_its_folder_and_asks_nothing(self) -> None:
+        # Review C13-R1 F1 [AFTER-SIGN-IN] (RULING 4668): nobody read what the folder holds, and a keychain item outlives it.
+        done = self.add("--wait", "1", STUB_EXIT="7")
+        self.assertEqual((done.returncode, self.way_back() in done.stderr, "Traceback" in done.stderr), (5, True, False), done.stderr)
+        self.assertTrue((self.accounts / self.next_number).is_dir())
+        self.assertFalse(self.requests.exists())
+
+    def test_no_claude_to_run_exits_5_and_keeps_its_folder(self) -> None:
         done = self.add("--wait", "1", PATH="/nowhere")
-        self.assertEqual((done.returncode, "claude" in done.stderr, "Traceback" in done.stderr), (5, True, False), done.stderr)
-        self.assertEqual(list(self.accounts.iterdir()), [])
+        self.assertEqual((done.returncode, "claude" in done.stderr, self.way_back() in done.stderr, "Traceback" in done.stderr), (5, True, True, False), done.stderr)
+
+    def test_a_later_add_after_a_failed_sign_in_takes_the_next_number(self) -> None:
+        self.assertEqual(self.add("--wait", "1", STUB_EXIT="7").returncode, 5)
+        self.session()
+        self.assertEqual(self.add("--wait", "10").returncode, 0)
+        self.assertEqual(self.seen["slot"], str(self.accounts / str(int(self.next_number) + 1)))
+
+    def test_the_first_folder_of_a_store_listing_only_claude_codes_login_is_2(self) -> None:
+        store = self.stored()
+        store["accounts"] = [a for a in store["accounts"] if a["slot"] == ""]
+        self.write(STORE, store)
+        self.session()
+        self.assertEqual(self.add("--wait", "10").returncode, 0)
+        self.assertEqual(self.seen["id"], "2")
+
+    def test_every_return_after_the_sign_in_names_the_way_back(self) -> None:
+        # Review C13-R1 F2 [AFTER-SIGN-IN]: a store-id gone, a store that does not parse, a request it cannot write.
+        gone = {k: v for k, v in self.stored().items() if k != "store-id"}
+        no_id = self.tmp / "no-id.json"
+        no_id.write_text(json.dumps(gone), encoding="utf-8")
+        torn = self.tmp / "torn.json"
+        torn.write_text('{"accounts": [', encoding="utf-8")
+        whole = self.store.read_text(encoding="utf-8")
+        ways = {
+            "store-id gone": (3, f"cp {no_id} {self.store}"),
+            "store does not parse": (1, f"cp {torn} {self.store}"),
+            "requests folder a file": (1, f"touch {self.requests}"),
+        }
+        self.assertTrue(ways)
+        offenders = []
+        for name, (code, then) in ways.items():
+            done = self.add("--wait", "1", STUB_THEN=then)
+            slot = max((p for p in self.accounts.iterdir() if p.name.isdigit()), key=lambda p: int(p.name))
+            if done.returncode != code or f"{slot} is kept: account add --folder {slot} asks again" not in done.stderr or "Traceback" in done.stderr:
+                offenders.append(f"{name}: exit {done.returncode}: {done.stderr}")
+            self.store.write_text(whole, encoding="utf-8")
+            if self.requests.is_file():
+                self.requests.unlink()
+        self.assertEqual(offenders, [], "a folder left unnamed after a sign-in")
+
+    def test_folder_claims_no_sign_in_nobody_read(self) -> None:
+        # Review C13-R1 F4 [AFTER-SIGN-IN].
+        slot = self.accounts / "12"
+        slot.mkdir()
+        done = self.add("--folder", str(slot), "--wait", "0.2", has_terminal=False)
+        self.assertEqual((done.returncode, "signed in" in done.stderr, f"{slot} is kept" in done.stderr), (3, False, True), done.stderr)
+
+    def test_folder_refuses_a_link(self) -> None:
+        # Review C13-R1 PATH-ALIAS [INPUT-EDGES]: the slot's name would be another folder's sign-in, outside or inside.
+        outside = self.tmp / "outside"
+        outside.mkdir()
+        inside = self.accounts / "8"
+        inside.mkdir()
+        links = {"7": outside, "9": inside}
+        for name, target in links.items():
+            (self.accounts / name).symlink_to(target, target_is_directory=True)
+            done = self.add("--folder", str(self.accounts / name), "--wait", "0.2", has_terminal=False)
+            self.assertEqual((done.returncode, "--help" in done.stderr), (2, True), f"{name} -> {target}: {done.stderr}")
+        self.assertFalse(self.requests.exists())
+
+    def test_a_closed_stdin_exits_2(self) -> None:
+        # Review C13-R1 F8 [INPUT-EDGES]: Python makes sys.stdin None then.
+        done = subprocess.run(["sh", "-c", 'exec "$@" <&-', "sh", sys.executable, str(CLI), "account", "add"], capture_output=True, text=True, env=self.add_env(), timeout=30)
+        self.assertEqual((done.returncode, "Traceback" in done.stderr), (2, False), done.stderr)
 
     def test_a_folder_it_cannot_make_exits_1_with_no_sign_in(self) -> None:
         self.accounts.rmdir()
@@ -876,7 +942,7 @@ class Add(RequestCase):
         done = self.add("--wait", "1")
         self.assertEqual((done.returncode, "Traceback" in done.stderr, self.stub_said()), (1, False, []), done.stderr)
 
-    def test_a_signal_during_the_sign_in_exits_130_and_removes_its_own_folder(self) -> None:
+    def test_a_signal_during_the_sign_in_exits_130_and_keeps_its_folder(self) -> None:
         ours, theirs = pty.openpty()
         self.addCleanup(os.close, ours)
         started = self.tmp / "started"
@@ -889,7 +955,8 @@ class Add(RequestCase):
         self.assertTrue(started.exists(), "the stub never started: the fixture did not reach the sign-in")
         child.send_signal(signal.SIGTERM)
         _, stderr = child.communicate(timeout=10)
-        self.assertEqual((child.returncode, "Traceback" in stderr, list(self.accounts.iterdir())), (130, False, []), stderr)
+        self.assertEqual((child.returncode, "Traceback" in stderr, self.way_back() in stderr), (130, False, True), stderr)
+        self.assertTrue((self.accounts / self.next_number).is_dir())
 
     def test_a_signal_while_a_session_is_asked_withdraws_the_request_keeps_the_folder_and_names_the_way_back(self) -> None:
         ours, theirs = pty.openpty()
@@ -902,29 +969,24 @@ class Add(RequestCase):
         self.assertTrue(self.requests.is_dir() and list(self.requests.glob("*.json")), "the CLI wrote no request: the fixture did not reach the wait")
         child.send_signal(signal.SIGTERM)
         _, stderr = child.communicate(timeout=10)
-        slot = str(self.accounts / self.next_number)
-        self.assertEqual((child.returncode, list(self.requests.iterdir()), f"--folder {slot}" in stderr, "Traceback" in stderr), (130, [], True, False), stderr)
-        self.assertTrue(Path(slot).is_dir())
+        self.assertEqual((child.returncode, list(self.requests.iterdir()), self.way_back() in stderr, "Traceback" in stderr), (130, [], True, False), stderr)
+        self.assertTrue((self.accounts / self.next_number).is_dir())
 
     def test_a_refusal_exits_4_in_the_sessions_words_and_keeps_the_folder(self) -> None:
         self.session(ok=False, message="that sign-in is account 2 already")
         done = self.add("--wait", "10")
-        self.assertEqual((done.returncode, "account 2 already" in done.stderr), (4, True), done.stderr)
+        self.assertEqual((done.returncode, "account 2 already" in done.stderr, self.way_back() in done.stderr), (4, True, True), done.stderr)
         self.assertTrue((self.accounts / self.next_number).is_dir())
 
     def test_no_session_exits_3_withdraws_the_request_keeps_the_folder_and_names_the_way_back(self) -> None:
         done = self.add("--wait", "0.3")
-        slot = str(self.accounts / self.next_number)
-        self.assertEqual((done.returncode, f"--folder {slot}" in done.stderr, len(done.stderr.strip().splitlines())), (3, True, 1), done.stderr)
+        self.assertEqual((done.returncode, self.way_back() in done.stderr, len(done.stderr.strip().splitlines())), (3, True, 1), done.stderr)
         self.assertEqual(list(self.requests.iterdir()), [])
-        self.assertTrue(Path(slot).is_dir())
+        self.assertTrue((self.accounts / self.next_number).is_dir())
 
-    def test_a_session_that_answers_ok_with_the_store_not_listing_the_folder_exits_1_naming_the_way_back(self) -> None:
-        # Two sessions on one store, `accounts`: no compare-and-set, so another session's write can take this one's place.
-        self.session(is_listed=False)
-        done = self.add("--wait", "10")
-        slot = str(self.accounts / self.next_number)
-        self.assertEqual((done.returncode, f"--folder {slot}" in done.stderr, "Traceback" in done.stderr), (1, True, False), done.stderr)
+    def test_json_names_the_id_the_session_answered_not_the_folders_number(self) -> None:
+        self.session(account_id="3")
+        self.assertEqual(json.loads(self.add("--json", "--wait", "10").stdout)["result"]["account"], "3")
 
     def test_the_request_names_the_store_id_as_it_stands_after_the_sign_in(self) -> None:
         # Two sessions on one store, `store-id`: a sign-in takes minutes, and two sessions booting at once settle on the last write.
@@ -941,9 +1003,6 @@ class Add(RequestCase):
         slot.mkdir()
         for given in (str(slot), f"{slot}/", os.path.relpath(slot)):
             with self.subTest(given=given):
-                store = self.stored()
-                store["accounts"] = [a for a in store["accounts"] if a["slot"] != str(slot)]
-                self.write(STORE, store)
                 self.session()
                 done = self.add("--folder", given, "--wait", "10", has_terminal=False)
                 self.assertEqual((done.returncode, self.seen["slot"], self.seen["id"], self.stub_said()), (0, str(slot), "12", []), done.stderr)
@@ -971,7 +1030,8 @@ class Add(RequestCase):
     def test_help_names_the_verb_the_browser_the_flag_and_every_exit(self) -> None:
         self.assertIn("add", run(CLI, "account", "--help").stdout)
         said = " ".join(run(CLI, "account", "add", "--help").stdout.split())
-        for words in ("browser", "--folder", "signed in", "twin", "5 the sign-in did not finish", "Claude Code's own login"):
+        exits = ("1 no store or a damaged one", "2 a usage error", "3 no session", "4 a session refused", "5 the sign-in did not finish", "130 stopped")
+        for words in ("browser", "--folder", "twin", "Claude Code's own login", "keeps", *exits):
             self.assertIn(words, said)
 
 

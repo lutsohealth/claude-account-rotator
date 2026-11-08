@@ -62,6 +62,8 @@ type World = {
   refuseMark?: boolean
   /** Runs before each write of a shared store, to read what stood before it. */
   onStoreSet?: (key: string, value: unknown) => void
+  /** Runs after each write of a shared store: another session's write that lands next. */
+  afterStoreSet?: (key: string) => void
   /** The slot of each `claude auth status` the mod ran. */
   statusAsked?: string[]
   /** Runs inside a `claude auth status`: what another session writes while this one waits on it. */
@@ -155,6 +157,7 @@ function sharedStore(on: On, entries: Map<string, unknown>, w: World): void {
   on('store.set', (_$, e) => {
     w.onStoreSet?.(e.key, e.value)
     entries.set(e.key, e.value)
+    w.afterStoreSet?.(e.key)
     return { value: undefined }
   })
   on('store.delete', (_$, e) => {
@@ -7120,13 +7123,73 @@ test('an add of a login an account already holds is refused, Claude Code own log
   expect(offenders).toEqual([])
 })
 
-test('[TWIN-ORG-UNSEEN] an add under an email a row holds with its organization unread is another login to sameLogin, so it is listed', async ($, on) => {
+// Review C13-R1 F5 [TWIN-BY-WHAT-IS-KNOWN] (RULING 4668): a wrong refusal has a way back, a wrong acceptance makes a twin that stays.
+test('an add under an email a row holds with its organization unread is refused; under another organization it is listed', async ($, on) => {
   const { w, store, clock } = await selectWorld($, on)
-  store.set('accounts', TWO_LOGINS.accounts)
   await signInFolder(w, SLOT7, 'two@example.com')
+  store.set('accounts', TWO_LOGINS.accounts)
   w.files[`${REQUESTS}/${N1}.json`] = addRequest(N1, SLOT7, store.get('store-id'), clock.now())
   await untilTick(clock)
+  expect(resultOf(w, N1)?.ok).toBe(false)
+  expect(listedIds(store)).not.toContain('7')
+  store.set('accounts', [TWO_LOGINS.accounts[0], { id: '2', slot: SLOT2, email: 'two@example.com', orgId: 'org-other' }])
+  w.files[`${REQUESTS}/${N2}.json`] = addRequest(N2, SLOT7, store.get('store-id'), clock.now())
+  await untilTick(clock)
+  expect(resultOf(w, N2)?.ok).toBe(true)
   expect(listedIds(store)).toContain('7')
+})
+
+// Review C13-R1 F6 [AFTER-SIGN-IN]: nobody read that the folder holds no sign-in, and a second approval costs a person.
+test('an add whose status read fails says it could not read who, never that the folder holds no sign-in', async ($, on) => {
+  const { w, store, clock } = await selectWorld($, on)
+  await signInFolder(w, SLOT7, 'seven@example.com')
+  w.statusFails = 'garbage'
+  w.files[`${REQUESTS}/${N1}.json`] = addRequest(N1, SLOT7, store.get('store-id'), clock.now())
+  await untilTick(clock)
+  expect(String(resultOf(w, N1)?.message)).toMatch(/could not read who/)
+  expect(String(resultOf(w, N1)?.message)).not.toMatch(/holds no sign-in|run account add/)
+})
+
+// Review C13-R1 F3 and OVERCLAIM [AFTER-SIGN-IN]: the session reads its own write back, so the answer is what the store holds.
+test('two sessions on one store, accounts: a write that took the place of the new row answers not ok, and a row under another id answers that id', async ($, on) => {
+  const { w, store, clock } = await selectWorld($, on)
+  await signInFolder(w, SLOT7, 'seven@example.com')
+  const without = store.get('accounts') as object[]
+  let writes = 0
+  w.afterStoreSet = key => {
+    if (key === 'accounts' && writes++ === 0) store.set('accounts', without)
+  }
+  w.files[`${REQUESTS}/${N1}.json`] = addRequest(N1, SLOT7, store.get('store-id'), clock.now())
+  await untilTick(clock)
+  expect(resultOf(w, N1)?.ok).toBe(false)
+  expect(String(resultOf(w, N1)?.message)).toMatch(/another session's write/)
+  writes = 0
+  w.afterStoreSet = key => {
+    if (key === 'accounts' && writes++ === 0) store.set('accounts', [...without, { id: '9', slot: SLOT7, email: 'seven@example.com', orgId: 'org-seven@example.com' }])
+  }
+  w.files[`${REQUESTS}/${N2}.json`] = addRequest(N2, SLOT7, store.get('store-id'), clock.now())
+  await untilTick(clock)
+  expect(resultOf(w, N2)).toMatchObject({ ok: true, accountId: '9' })
+  expect(String(resultOf(w, N2)?.message)).toMatch(/account 9 /)
+})
+
+// Review C13-R1 F9 [STALE-ID-KEY]: an account on `rm` is not moved, so a session on it can write under the id after the rm.
+test('a row an add lists wears no key an old holder of that id left, by the list rm drops', async ($, on) => {
+  const { w, store, clock } = await selectWorld($, on)
+  const left = ACCOUNT_KEYS.map(key => `${key}:7`)
+  expect(left.length, 'the sweep lists no key').toBeGreaterThan(0)
+  for (const key of left) store.set(key, { oldHolder: true })
+  await signInFolder(w, SLOT7, 'seven@example.com')
+  w.statusFails = undefined
+  w.files[`${REQUESTS}/${N1}.json`] = addRequest(N1, SLOT7, store.get('store-id'), clock.now())
+  let whenListed: string[] = ['the row was never written']
+  w.onStoreSet = (key, value) => {
+    if (key === 'accounts' && (value as { id: string }[]).some(a => a.id === '7') && whenListed[0] === 'the row was never written') {
+      whenListed = left.filter(k => JSON.stringify(store.get(k)) === JSON.stringify({ oldHolder: true }))
+    }
+  }
+  await untilTick(clock)
+  expect(whenListed, 'keys of the old holder when the new row was written').toEqual([])
 })
 
 test('an add of a folder with no sign-in that can be read lists nothing, in each way the read fails', async ($, on) => {

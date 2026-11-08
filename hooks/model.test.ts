@@ -1374,6 +1374,8 @@ test('a slot has a number only as a folder directly under the accounts folder, i
   const root = `${home}/.claude/accounts`
   expect(slotNumber(`${root}/7`, home)).toBe('7')
   expect(slotNumber(`${root}/12`, home)).toBe('12')
+  // Review C13-R1 F7 [INPUT-EDGES]: the CLI's expanduser strips a HOME's trailing slash.
+  expect(slotNumber(`${root}/7`, `${home}/`)).toBe('7')
   const bad = ['', root, `${root}/`, `${root}/0`, `${root}/007`, `${root}/abc`, `${root}/7/`, `${root}/7/8`, `${root}/../2`, `/other${root}/7`, `/home/y/.claude/accounts/7`]
   expect(bad.filter(slot => slotNumber(slot, home) !== undefined)).toEqual([])
 })
