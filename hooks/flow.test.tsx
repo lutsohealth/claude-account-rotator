@@ -2708,6 +2708,66 @@ test('a Chrome guess that finds no browser stores no miss once another session h
   expect(store.has('chrome-miss')).toBe(false)
 })
 
+test('a browser answering on Claude Code\'s login keeps the extension\'s account another session named meanwhile', async ($, on) => {
+  const w = fresh()
+  const store = new Map<string, unknown>(Object.entries(TWO_LOGINS))
+  // The other session names account 2 while this session's ask, answered on login 1, is in flight.
+  const extensions = Object.defineProperty([''], 'includes', {
+    value(this: string[], slot: string) {
+      store.set('chrome-account', '2')
+      return Array.prototype.includes.call(this, slot)
+    },
+  })
+  w.chrome = { extensions }
+  await spentOne(w)
+  const clock = world(on, w, store)
+  await start($, clock)
+  expect(w.chromeAsked).toEqual([''])
+  expect(store.get('chrome-account')).toBe('2')
+})
+
+// Review R1 CHROME-OWNER-REMOVE (Codex, #32): Remove clears chrome-account only while the store still names the removed account.
+test('Remove keeps a Chrome account another session named since this session last read the store', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [20, 30]
+  w.usage['tok-2'] = [10, 30]
+  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off', 'chrome-account': '2' }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  store.set('chrome-account', '1')
+  await pane.press({ key: 'ask-remove-2' })
+  await clock.settle()
+  await pane.redraw()
+  await pane.press({ key: 'remove-2' })
+  await clock.settle()
+  expect(store.get('chrome-account')).toBe('1')
+  await pane.unmount()
+})
+
+// Review R1 CHROME-OWNER-REMOVE, the class: a third account named meanwhile stays too.
+test('Remove keeps a third account another session named for Chrome since this session last read the store', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [20, 30]
+  w.usage['tok-2'] = [10, 30]
+  const store = new Map<string, unknown>(Object.entries({ ...THREE_LOGINS, 'rotate-to': 'off', 'chrome-account': '2' }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  store.set('chrome-account', '3')
+  await pane.press({ key: 'ask-remove-2' })
+  await clock.settle()
+  await pane.redraw()
+  await pane.press({ key: 'remove-2' })
+  await clock.settle()
+  expect(store.get('chrome-account')).toBe('3')
+  await pane.unmount()
+})
+
 // Review R1 of 181dc8e, footer_week_leave: the footer counts the week by the same setting the rotation does.
 test('the footer shows no room now on a login whose week is down to the Week setting, as the rotation counts it', async ($, on) => {
   const w = fresh()
