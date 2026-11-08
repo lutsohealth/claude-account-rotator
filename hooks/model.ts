@@ -690,8 +690,11 @@ export function slotEnv(slot: string): Record<string, string> {
  * settings, it keeps a plugin you install from changing where sign-ins are read.
  */
 export function isPolicyRefusal(error: unknown): boolean {
-  return String(error).includes('is not for plugins outside policy to change')
+  return error instanceof SwitchHeld || String(error).includes('is not for plugins outside policy to change')
 }
+
+/** The engine's own hold on a variable, which `$.env.set` resolves with rather than rejects, its reason in words of its own. */
+export class SwitchHeld extends Error {}
 
 /** Whether this session reads the normal login, the one `/login` signs in, rather than a slot the mod moved it to. */
 export function isOnNormalLogin(view: View): boolean {
@@ -1283,16 +1286,20 @@ export function afterUsage(due: UsageDue | undefined, outcome: UsageOutcome, now
 /** How long a request waits for a session: a CLI that gave up or died leaves nothing a later session applies. */
 export const REQUEST_TTL_MS = 5 * 60_000
 
+/** How often a Bash call that names the CLI looks for its request: the CLI polls for the answer at the same pace. */
+export const REQUEST_POLL_MS = 250
+
 /** A nonce the CLI writes: letters, digits and dashes, so it names a file in the requests folder and nothing else. */
 const NONCE = /^[A-Za-z0-9-]{6,64}$/
 
 /** A request read back from its file, while it is fresh; anything else is none. */
 export function requestFrom(value: unknown, now: number): RotatorRequest | undefined {
   if (typeof value !== 'object' || value === null) return undefined
-  const { kind, nonce, at, id, store } = value as Record<string, unknown>
-  if (kind !== 'select' || typeof nonce !== 'string' || !NONCE.test(nonce) || typeof id !== 'string' || typeof store !== 'string') return undefined
+  const { kind, nonce, at, id, store, session } = value as Record<string, unknown>
+  if (typeof nonce !== 'string' || !NONCE.test(nonce) || typeof id !== 'string' || typeof store !== 'string') return undefined
   if (typeof at !== 'number' || Math.abs(now - at) > REQUEST_TTL_MS) return undefined
-  return { kind, nonce, at, id, store }
+  if (kind === 'select') return { kind, nonce, at, id, store }
+  return kind === 'use' && typeof session === 'string' && session !== '' ? { kind, nonce, at, id, store, session } : undefined
 }
 
 /** The requests folder: in the Claude config folder, CLAUDE_CONFIG_DIR or `~/.claude`, as bin/account_rotator_store.py finds it. */
