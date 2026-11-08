@@ -6094,6 +6094,15 @@ test('a select while no login has room says new sessions start on Claude Code\'s
   expect(resultOf(w, N1)?.pickId).toBeUndefined()
 })
 
+test('a request another session already answered is not applied by this one', async ($, on) => {
+  const { w, store, clock } = await selectWorld($, on)
+  w.files[`${REQUESTS}/${N1}.json`] = selectRequest(N1, '2', store.get('store-id'), clock.now())
+  w.files[`${REQUESTS}/${N1}.result.json`] = JSON.stringify({ nonce: N1, ok: true, message: 'theirs', at: clock.now() })
+  await clock.advance(60_000)
+  expect(store.get('launch-on')).toBeUndefined()
+  expect(JSON.parse(w.files[`${REQUESTS}/${N1}.result.json`] ?? '{}').message).toBe('theirs')
+})
+
 // Review C11-R1 [TEST-NAME-OVERCLAIM] (Opus): one session here, twice; two holding one listing apply it twice, the same launch-on.
 test('a request with a result already is not applied again at this session\'s next minute', async ($, on) => {
   const { w, store, clock } = await selectWorld($, on)
