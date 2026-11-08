@@ -480,11 +480,16 @@ async function applyRequests($: Host): Promise<void> {
   }
 }
 
-/** What a request asks, done: `select` sets the login new sessions start on, as the panel's New on does. */
-async function applyRequest($: Host, request: RotatorRequest): Promise<{ ok: boolean; message: string }> {
+/**
+ * What a request asks, done: `select` sets the login new sessions start on, as the panel's New on does. The result
+ * names the pick that setting makes: a login with no room gives way to the next with room, or to Claude Code's login.
+ */
+async function applyRequest($: Host, request: RotatorRequest): Promise<{ ok: boolean; message: string; pickId?: string }> {
   if (!(await getView($)).accounts.some(a => a.id === request.id)) return { ok: false, message: `account ${request.id} is not listed in this store` }
   await setLaunchOn($, `account:${request.id}`)
-  return { ok: true, message: `new sessions start on account ${request.id}` }
+  const pick = (await $.store.get('launch-slot')) as LaunchPick | undefined
+  if (pick === undefined) return { ok: true, message: "no account has room, so new sessions start on Claude Code's login" }
+  return { ok: true, message: `new sessions start on account ${pick.id} (${pick.why})`, pickId: pick.id }
 }
 
 /** JSON text as a value, or undefined where it does not parse. */

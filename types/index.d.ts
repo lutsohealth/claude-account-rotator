@@ -47,7 +47,8 @@ export type Row = { id: string; lines: RowPart[][] }
 /**
  * A request `account-rotator account select` writes to `<nonce>.json` in the requests folder: new sessions start on
  * login `id`. `store` is the `store-id` of the store the CLI read; `at` is when it wrote the request, epoch ms. The
- * session that applies it writes `<nonce>.result.json`: `{ nonce, ok, message, at }`.
+ * session that applies it writes `<nonce>.result.json`: `{ nonce, ok, message, pickId?, at }`, `pickId` the login new
+ * sessions then start on, which is another where `id` has no room.
  */
 export type RotatorRequest = { kind: 'select'; nonce: string; at: number; id: string; store: string }
 

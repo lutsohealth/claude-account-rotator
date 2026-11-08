@@ -6017,13 +6017,13 @@ const resultOf = (w: World, nonce: string): Record<string, unknown> | undefined 
   return typeof text === 'string' ? (JSON.parse(text) as Record<string, unknown>) : undefined
 }
 
-/** Two logins with room, a session started on login 1, a minute's merge done. */
-async function selectWorld($: Engine, on: On): Promise<{ w: World; store: Map<string, unknown>; clock: MockClock }> {
+/** Two logins, with room unless the test spends login 2's week, a session started on login 1, a minute's merge done. */
+async function selectWorld($: Engine, on: On, login2: [number, number] = [10, 20]): Promise<{ w: World; store: Map<string, unknown>; clock: MockClock }> {
   const w = fresh()
   w.keychain['Claude Code-credentials'] = blob('tok-1')
   w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
   w.usage['tok-1'] = [10, 20]
-  w.usage['tok-2'] = [10, 20]
+  w.usage['tok-2'] = login2
   const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off' }))
   const clock = world(on, w, store)
   await start($, clock)
@@ -6050,6 +6050,16 @@ test('a select request for this store is applied at the minute: launch-on, launc
   await clock.advance(60_000)
   expect([store.get('launch-on'), (store.get('launch-slot') as { id?: string } | undefined)?.id]).toEqual(['account:2', '2'])
   expect(resultOf(w, N1)).toMatchObject({ nonce: N1, ok: true })
+})
+
+// Found live on vox login 2 at 52f30f5: account 1 had no room, the pick went to account 3, and the result said account 1.
+test('a select of a login with no room is applied, and its result names the login new sessions really start on', async ($, on) => {
+  const { w, store, clock } = await selectWorld($, on, [50, 100])
+  w.files[`${REQUESTS}/${N1}.json`] = selectRequest(N1, '2', store.get('store-id'), clock.now())
+  await clock.advance(60_000)
+  expect([store.get('launch-on'), (store.get('launch-slot') as { id?: string } | undefined)?.id]).toEqual(['account:2', '1'])
+  expect(resultOf(w, N1)).toMatchObject({ ok: true, pickId: '1' })
+  expect(resultOf(w, N1)?.message).toMatch(/new sessions start on account 1 \(account 2 has no room/)
 })
 
 test('a request read from another store, a stale one, one whose nonce is not its file\'s and one for a login not listed change nothing', async ($, on) => {

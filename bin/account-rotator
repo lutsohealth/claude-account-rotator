@@ -253,7 +253,8 @@ def select(data: dict, store: str, given: str, wait_s: float, as_json: bool) -> 
         print(f"account-rotator: a session refused: {message}", file=sys.stderr)
         return EXIT_REFUSED
     if as_json:
-        envelope = {"account": account, "activeAccountId": account, "launchOn": f"account:{account}"}
+        pick = result.get("pickId") if isinstance(result.get("pickId"), str) else None
+        envelope = {"account": account, "activeAccountId": pick, "launchOn": f"account:{account}"}
         print(json.dumps({"id": str(uuid.uuid4()), "ok": True, "result": envelope, "_meta": {"runtimeId": None, "store": store}}, indent=2))
     else:
         print(f"account-rotator: {message}")

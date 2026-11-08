@@ -328,7 +328,14 @@ class Select(StoreCase):
     def select(self, *args: str) -> subprocess.CompletedProcess[str]:
         return run(CLI, "account", "select", *args, env=self.env())
 
-    def answer(self, ok: bool, message: str) -> threading.Thread:
+    def test_json_says_the_account_new_sessions_really_start_on(self) -> None:
+        # Found live on vox login 2 at 52f30f5: the account selected had no room, and the pick was another.
+        self.answer(True, "new sessions start on account 1 (account 2 has no room, and it is the next with room)", pick_id="1")
+        done = self.select("--account", "2", "--json", "--wait", "10")
+        result = json.loads(done.stdout)["result"]
+        self.assertEqual((done.returncode, result["activeAccountId"], result["launchOn"]), (0, "1", "account:2"))
+
+    def answer(self, ok: bool, message: str, pick_id: str | None = None) -> threading.Thread:
         """A session that answers the first request it finds, as the mod's minute tick does."""
 
         def respond() -> None:
@@ -338,7 +345,8 @@ class Select(StoreCase):
                 if found:
                     request = json.loads(found[0].read_text(encoding="utf-8"))
                     self.seen = request
-                    (self.requests / f"{request['nonce']}.result.json").write_text(json.dumps({"nonce": request["nonce"], "ok": ok, "message": message}), encoding="utf-8")
+                    answered = {"nonce": request["nonce"], "ok": ok, "message": message, "pickId": pick_id or request["id"]}
+                    (self.requests / f"{request['nonce']}.result.json").write_text(json.dumps(answered), encoding="utf-8")
                     return
                 time.sleep(0.05)
 
