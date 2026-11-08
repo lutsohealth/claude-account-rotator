@@ -80,10 +80,8 @@ def reset_text(at_ms: float, now_ms: float) -> str:
 
 
 def line_text(line: str | list, now_ms: float, zone: tzinfo | None) -> str:
-    """A stored line as text: a string line as it was stored; else its runs, each {clock} and {until} rendered, and an
-    {until} already past as `passed` (hooks/model.ts storedLineText)."""
-    if isinstance(line, str):
-        return line
+    """A stored line as text: a string line as it was stored (its characters are its runs); else its runs, each {clock}
+    and {until} rendered, and an {until} already past as `passed` (hooks/model.ts storedLineText)."""
     text = []
     for run in line:
         if isinstance(run, str):
