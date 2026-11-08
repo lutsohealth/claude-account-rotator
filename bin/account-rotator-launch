@@ -23,10 +23,28 @@ import time
 STORE_GLOB = "account-rotator_claude-account-rotator-*.json"
 
 
+def holds_accounts(path: str) -> bool:
+    """Whether a file is a store: a JSON object holding an accounts list. A stray file of the store's name is not."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return False
+    return isinstance(data, dict) and isinstance(data.get("accounts"), list)
+
+
+def mtime(path: str) -> float:
+    try:
+        return os.path.getmtime(path)
+    except OSError:
+        return -1.0
+
+
 def default_store() -> str | None:
+    """The newest store of the installed mod in the Claude config folder; bin/account-rotator picks it alike."""
     config = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(os.path.expanduser("~"), ".claude")
-    found = sorted(glob.glob(os.path.join(config, "plugins", "store", STORE_GLOB)), key=os.path.getmtime)
-    return found[-1] if found else None
+    found = sorted(glob.glob(os.path.join(config, "plugins", "store", STORE_GLOB)), key=mtime, reverse=True)
+    return next((path for path in found if holds_accounts(path)), None)
 
 
 def main() -> int:

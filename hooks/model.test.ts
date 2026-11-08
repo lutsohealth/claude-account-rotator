@@ -5,7 +5,7 @@ import { weekLeaveFrom, launchOnFrom, pickLaunch, isSessionStop } from './model'
 import { isSameWeek, whoseWeek } from './model'
 import { companyOf, identityFromStatus, planName } from './model'
 import { laterMark, spentMark, withFableMark } from './model'
-import { EMPTY_VIEW, USAGE_IDLE_MS, fitRow, rowOf, rowsOf, rowText, storedLineText } from './model'
+import { EMPTY_VIEW, USAGE_IDLE_MS, fitRow, rowOf, rowsOf, rowText, storedLine, storedLineText } from './model'
 import ROWS_FIXTURE from '../tests/fixtures/rows'
 import { USAGE_BACKOFF_MAX_MS, USAGE_CLAIM_MS, USAGE_CLAIM_WAIT_MS, USAGE_EARLY_MS, WRITER_VERSION, afterUsage, claimDueReads, gatingDue, isUsageDue, mayForceUsage, mayReadSince, renewClaim, retryAfterFrom, usageDueFrom } from './model'
 import { DEFAULT_FOOTER, availableNow, braille, browsersFrom, chromeNote, continueTextFrom, counted, fiveHourLimitFrom, credentialFrom, credentialsFile, fableMark, fableSpentNotice, fableStay, footerStyleFrom, healthOf, identityFromProfile, isFableSpent, isFableStop, isNoBrowser, isPolicyRefusal, keepFable, keychainItem, legacyMark, markFrom, nextReset, pickTarget, pie, readingFromUsage, rotateToFrom, shouldLeave, roomColor, windowPct, withMark, withWeekMark } from './model'
@@ -1020,7 +1020,7 @@ test('a failed read newer than the last good one ends line 1 with its time and s
   const v = rowView({ checkErrors: { '1': HTTP_429 } })
   expect(rowLines(v)).toEqual(['andres@lutsohealth.com · Company · Ultra  18:39 Failed to update (HTTP 429)', OPERATOR_LINE_2])
   const [line1, line2] = rowOf(v, ANDRES, ROW_NOW, TALLINN).lines
-  expect(line1?.at(-1)).toEqual({ text: '18:39 Failed to update (HTTP 429)', tone: 'warning' })
+  expect(line1?.at(-1)).toEqual({ text: '18:39 Failed to update (HTTP 429)', tone: 'warning', runs: [{ clock: FAILED_AT }, ' Failed to update (HTTP 429)'] })
   expect(line2?.map(p => p.tone)).toEqual(line2?.map(() => 'dim'))
   expect(rowOf(rowView(), ANDRES, ROW_NOW, TALLINN).lines[1]?.some(p => p.tone === 'dim')).toBe(false)
 })
@@ -1218,7 +1218,7 @@ const storedLines = (v: View, now: number) => rowsOf(v, now).map(r => ({ id: r.i
 
 test('the merge stores the fixture\'s rows: text runs, each time of day and each reset as epoch ms', () => {
   expect(FIXTURE_VIEW.accounts).toEqual(ROWS_FIXTURE.store.accounts)
-  expect(rowsOf(FIXTURE_VIEW, ROWS_FIXTURE.now, ROWS_FIXTURE.zone)).toEqual(ROWS_FIXTURE.store.rows.rows)
+  expect(rowsOf(FIXTURE_VIEW, ROWS_FIXTURE.now)).toEqual(ROWS_FIXTURE.store.rows.rows)
 })
 
 test('the pane draws the fixture\'s lines, and the stored rows read at the same clock and zone are those lines', () => {
@@ -1228,9 +1228,9 @@ test('the pane draws the fixture\'s lines, and the stored rows read at the same 
 })
 
 test('the stored rows hold no minute and no zone: two sessions a minute apart in two zones store the same rows', () => {
-  const ours = rowsOf(FIXTURE_VIEW, ROWS_FIXTURE.now, TALLINN)
-  expect(rowsOf(FIXTURE_VIEW, ROWS_FIXTURE.now + MINUTE, 'America/New_York')).toEqual(ours)
-  expect(JSON.stringify(ours)).toContain('"clock"')
+  const stored = (now: number, timeZone: string) => FIXTURE_VIEW.accounts.map(a => rowOf(FIXTURE_VIEW, a, now, timeZone).lines.map(storedLine))
+  expect(stored(ROWS_FIXTURE.now + MINUTE, 'America/New_York')).toEqual(stored(ROWS_FIXTURE.now, TALLINN))
+  expect(stored(ROWS_FIXTURE.now, TALLINN)).toEqual(rowsOf(FIXTURE_VIEW, ROWS_FIXTURE.now).map(r => r.lines))
 })
 
 test('a stored line read a minute later counts its resets down, and read in UTC says its times in UTC', () => {

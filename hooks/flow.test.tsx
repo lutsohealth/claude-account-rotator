@@ -5532,7 +5532,7 @@ test('the merge stores each login\'s row lines under rows, stamped with when and
   const rows = rowsOf(store)
   expect([rows?.v, typeof rows?.at, rows?.rows?.map(r => r.id)]).toEqual([1, 'number', ['1', '2']])
   expect(lineOne(store, '1')).toMatch(new RegExp(`^one@example\\.com.*  updated ${localTime(goodReadAt(store, '1'))}$`))
-  expect(rowsText(store)?.[0]?.lines[1]).toBe('Used ▰▰▰▱▱▱▱▱▱▱ 30% Fable ▰▰▰▰▱▱▱▱▱▱ 40%  resets 5d 16h 59m · Fable 4d 16h 59m')
+  expect(rowsText(store, clock.now())?.[0]?.lines[1]).toBe('Used ▰▰▰▱▱▱▱▱▱▱ 30% Fable ▰▰▰▰▱▱▱▱▱▱ 40%  resets 5d 16h 59m · Fable 4d 16h 59m')
   expect(clock.now()).toBeLessThan(NOW + 2 * 60_000)
 })
 
@@ -5730,9 +5730,9 @@ async function drawnLines($: Engine, bodyColumns: number): Promise<Record<string
 }
 
 test('at 82 columns the pane draws each account\'s two row lines as the rows key holds them, the buttons ending line 1', async ($, on) => {
-  const { store } = await rowsWorld($, on)
+  const { store, clock } = await rowsWorld($, on)
   const lines = await drawnLines($, 82)
-  const stored = rowsOf(store)?.rows ?? []
+  const stored = rowsText(store, clock.now()) ?? []
   // The seed: both accounts have stored rows.
   expect(stored.map(r => r.id)).toEqual(['1', '2'])
   for (const r of stored) {

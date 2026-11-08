@@ -31,14 +31,24 @@ export type CheckError = { why: string; at: number }
 /**
  * A run of a row's text, and how it is drawn: dim, or as a warning; plain where no tone is named. `used` is a bar's
  * percent used, which colors it by the room left; `shrink` marks the email and the Company, which a narrow pane cuts.
+ * `runs` is how `rows` stores a part that holds a time: its text with each time as epoch milliseconds.
  */
-export type RowPart = { text: string; tone?: 'dim' | 'warning'; used?: number; shrink?: 'email' | 'company' }
+export type RowPart = { text: string; tone?: 'dim' | 'warning'; used?: number; shrink?: 'email' | 'company'; runs?: StoredRun[] }
+
+/**
+ * A run of a stored row line: text, or a time its reader renders at its own clock and zone: `clock` as HH:MM, `until`
+ * as the time left until it, both epoch milliseconds.
+ */
+export type StoredRun = string | { clock: number } | { until: number }
 
 /** A login's row: who it is with the last read's state, its week and Fable week used, then its 5-hour window where it has one. */
 export type Row = { id: string; lines: RowPart[][] }
 
-/** The rows every session's merge stores under `rows`, for the CLI: each login's lines as text, when, and the writer's version. */
-export type StoredRows = { v: number; at: number; rows: { id: string; lines: string[] }[] }
+/**
+ * The rows every session's merge stores under `rows`, for the CLI: each login's lines as runs, when, and the writer's
+ * version. A session older than this shape stored each line as one string, its times rendered by the writer.
+ */
+export type StoredRows = { v: number; at: number; rows: { id: string; lines: StoredRun[][] }[] }
 
 /**
  * When a login's usage is next read, for every session, under `usage-due:<id>`: every usage call goes through it.
