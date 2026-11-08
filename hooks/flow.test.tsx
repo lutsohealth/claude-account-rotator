@@ -2631,6 +2631,83 @@ test('removing the account the launcher would start on picks another at once', a
   await pane.unmount()
 })
 
+// puma-eslxj.21: a shared key this session writes keeps what another session stored since this session's view last
+// read the store. Each test writes the store as that other session, between this session's read and its write.
+test('a footer pick keeps the row style another session picked since this session last read the store', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [20, 30]
+  w.usage['tok-2'] = [10, 30]
+  const store = new Map<string, unknown>(Object.entries(TWO_LOGINS))
+  const clock = world(on, w, store)
+  await start($, clock)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  store.set('footer', { week: 'none' })
+  await pane.press({ key: 'footer-session-bars' })
+  await clock.settle()
+  expect(store.get('footer')).toMatchObject({ session: 'bars', week: 'none' })
+  await pane.unmount()
+})
+
+test('Remove keeps an account another session added since this session last read the store', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [null, 40]
+  w.usage['tok-2'] = [null, 30]
+  const store = new Map<string, unknown>(Object.entries(TWO_LOGINS))
+  const clock = world(on, w, store)
+  await start($, clock)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  store.set('accounts', [...TWO_LOGINS.accounts, { id: '3', slot: `${HOME}/.claude/accounts/3`, email: 'three@example.com' }])
+  await pane.press({ key: 'ask-remove-2' })
+  await clock.settle()
+  await pane.redraw()
+  await pane.press({ key: 'remove-2' })
+  await clock.settle()
+  expect((store.get('accounts') as { id: string }[]).map(a => a.id)).toEqual(['1', '3'])
+  await pane.unmount()
+})
+
+test('the launch pick follows the New on setting another session stored since this session last read the store', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [null, 40]
+  w.usage['tok-2'] = [null, 30]
+  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off' }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  expect(store.get('launch-slot')).toMatchObject({ id: '2', why: 'it has the most room' })
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  store.set('launch-on', 'account:1')
+  store.set('launch-slot', { id: '1', slot: '', why: 'you picked it', at: NOW })
+  // Any press that runs the rotation stores the pick again, before the minute's merge.
+  await pane.press({ key: 'week-leave-up' })
+  await clock.settle()
+  expect(store.get('launch-slot')).toMatchObject({ id: '1', why: 'you picked it' })
+  await pane.unmount()
+})
+
+test('a Chrome guess that finds no browser stores no miss once another session has named the extension\'s account', async ($, on) => {
+  const w = fresh()
+  const store = new Map<string, unknown>(Object.entries(TWO_LOGINS))
+  // The other session names the extension's account while this session's guess is asking Chrome.
+  const extensions = Object.assign([SLOT2], {
+    includes(this: string[], slot: string) {
+      store.set('chrome-account', '2')
+      return Array.prototype.includes.call(this, slot)
+    },
+  })
+  w.chrome = { extensions }
+  await spentOne(w)
+  const clock = world(on, w, store)
+  await start($, clock)
+  expect(w.chromeAsked).toEqual([''])
+  expect(store.has('chrome-miss')).toBe(false)
+})
+
 // Review R1 of 181dc8e, footer_week_leave: the footer counts the week by the same setting the rotation does.
 test('the footer shows no room now on a login whose week is down to the Week setting, as the rotation counts it', async ($, on) => {
   const w = fresh()
