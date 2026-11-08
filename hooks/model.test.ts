@@ -1293,6 +1293,23 @@ test('a request of another kind, shape or age is no request', () => {
   expect(cases.filter(([, value]) => requestFrom(value, NOW) !== undefined).map(([name]) => name)).toEqual([])
 })
 
+// C12 (puma-eslxj.13, RULING 4624): `account use` aims at one session by the mark that session set in its Bash children's environment.
+const USE = { kind: 'use', nonce: 'n0nce-5678', at: NOW, id: '2', store: 'store-abc', session: 'session-abc' }
+
+test('a use request is read back with the mark of the session it is for', () => {
+  expect(requestFrom(USE, NOW)).toEqual(USE)
+})
+
+test('a use request names a session or is no request, and a select request carries none', () => {
+  const cases: [string, unknown][] = [
+    ['no mark', { ...USE, session: undefined }],
+    ['an empty mark', { ...USE, session: '' }],
+    ['a mark that is no string', { ...USE, session: 7 }],
+  ]
+  expect(cases.filter(([, value]) => requestFrom(value, NOW) !== undefined).map(([name]) => name)).toEqual([])
+  expect(requestFrom({ ...SELECT, session: 'session-abc' }, NOW)).toEqual(SELECT)
+})
+
 test('the requests live in the Claude config folder of the session, CLAUDE_CONFIG_DIR or ~/.claude', () => {
   expect([requestsDir('/cfg', '/home/x'), requestsDir(undefined, '/home/x')]).toEqual(['/cfg/account-rotator-requests', '/home/x/.claude/account-rotator-requests'])
 })

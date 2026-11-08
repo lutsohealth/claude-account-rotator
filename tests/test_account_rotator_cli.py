@@ -316,9 +316,8 @@ class ReviewPassedReset(StoreCase):
         self.assertIn("a reset has passed since its row was written for account 2", last)
 
 
-class Select(StoreCase):
-    """C11 (puma-eslxj.12, RULING 4593 and 4595): `account select` writes a request file in the config folder's
-    account-rotator-requests, naming the store's store-id, and waits for the result file a session writes."""
+class RequestCase(StoreCase):
+    """A store with a store-id, and a session that answers the requests the CLI leaves."""
 
     def setUp(self) -> None:
         super().setUp()
@@ -326,6 +325,33 @@ class Select(StoreCase):
         store["store-id"] = "store-abc"
         self.store = self.write(STORE, store)
         self.requests = self.tmp / "account-rotator-requests"
+
+    def answer(self, ok: bool, message: str, pick_id: str | None = None, active_id: str | None = None) -> threading.Thread:
+        """A session that answers the first request it finds, as the mod's minute tick does."""
+
+        def respond() -> None:
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline:
+                found = [p for p in self.requests.glob("*.json") if not p.name.endswith(".result.json")] if self.requests.is_dir() else []
+                if found:
+                    request = json.loads(found[0].read_text(encoding="utf-8"))
+                    self.seen = request
+                    answered = {"nonce": request["nonce"], "ok": ok, "message": message, "pickId": pick_id or request["id"]}
+                    if active_id is not None:
+                        answered["activeId"] = active_id
+                    (self.requests / f"{request['nonce']}.result.json").write_text(json.dumps(answered), encoding="utf-8")
+                    return
+                time.sleep(0.05)
+
+        thread = threading.Thread(target=respond)
+        thread.start()
+        self.addCleanup(thread.join)
+        return thread
+
+
+class Select(RequestCase):
+    """C11 (puma-eslxj.12, RULING 4593 and 4595): `account select` writes a request file in the config folder's
+    account-rotator-requests, naming the store's store-id, and waits for the result file a session writes."""
 
     def select(self, *args: str) -> subprocess.CompletedProcess[str]:
         return run(CLI, "account", "select", *args, env=self.env())
@@ -461,26 +487,6 @@ class Select(StoreCase):
         self.answer(True, "ok")
         self.assertEqual(self.select("--account", "2", "--store", str(named), "--wait", "10").returncode, 0)
 
-    def answer(self, ok: bool, message: str, pick_id: str | None = None) -> threading.Thread:
-        """A session that answers the first request it finds, as the mod's minute tick does."""
-
-        def respond() -> None:
-            deadline = time.monotonic() + 20
-            while time.monotonic() < deadline:
-                found = [p for p in self.requests.glob("*.json") if not p.name.endswith(".result.json")] if self.requests.is_dir() else []
-                if found:
-                    request = json.loads(found[0].read_text(encoding="utf-8"))
-                    self.seen = request
-                    answered = {"nonce": request["nonce"], "ok": ok, "message": message, "pickId": pick_id or request["id"]}
-                    (self.requests / f"{request['nonce']}.result.json").write_text(json.dumps(answered), encoding="utf-8")
-                    return
-                time.sleep(0.05)
-
-        thread = threading.Thread(target=respond)
-        thread.start()
-        self.addCleanup(thread.join)
-        return thread
-
     def test_an_id_an_email_and_system_each_name_one_account(self) -> None:
         for given, expected in (("2", "2"), ("two@example.com", "2"), ("TWO@example.com", "2"), ("system", "1")):
             with self.subTest(account=given):
@@ -521,6 +527,119 @@ class Select(StoreCase):
         done = self.select("--account", "2", "--json", "--wait", "10")
         data = json.loads(done.stdout)
         self.assertEqual((done.returncode, data["ok"], data["result"]["activeAccountId"], data["result"]["launchOn"]), (0, True, "2", "account:2"))
+
+
+MARK = "session-abc"
+SESSION_VAR = "ACCOUNT_ROTATOR_SESSION"
+SLOT_VAR = "CLAUDE_SECURESTORAGE_CONFIG_DIR"
+
+
+class Use(RequestCase):
+    """C12 (puma-eslxj.13, RULING 4624): `account use` moves the one session that runs it. The mod sets a mark in the
+    environment of its Bash children; the request names it and only that session applies it, during the Bash call."""
+
+    def session_env(self, **extra: str) -> dict[str, str]:
+        """This process's environment, as a Bash child of a session on the mod sees it."""
+        base = {k: v for k, v in self.env().items() if k not in (SESSION_VAR, SLOT_VAR)}
+        return {**base, SESSION_VAR: MARK, **extra}
+
+    def use(self, *args: str) -> subprocess.CompletedProcess[str]:
+        return run(CLI, "account", "use", *args, env=self.session_env())
+
+    def test_with_the_mark_unset_or_empty_it_exits_2_naming_the_way_out_and_leaves_no_file(self) -> None:
+        unset = {k: v for k, v in self.session_env().items() if k != SESSION_VAR}
+        for name, env in (("unset", unset), ("empty", {**unset, SESSION_VAR: ""})):
+            with self.subTest(mark=name):
+                done = run(CLI, "account", "use", "--account", "2", env=env)
+                self.assertEqual((done.returncode, SESSION_VAR in done.stderr, "--help" in done.stderr, "Traceback" in done.stderr), (2, True, True, False), done.stderr)
+                self.assertFalse(self.requests.exists(), "exit 2 writes no request")
+
+    def test_with_the_mark_unset_it_exits_2_even_with_no_store(self) -> None:
+        self.store.unlink()
+        env = {k: v for k, v in self.session_env().items() if k != SESSION_VAR}
+        self.assertEqual(run(CLI, "account", "use", "--account", "2", env=env).returncode, 2)
+
+    def test_the_request_names_the_mark_the_store_and_the_account_and_both_files_go(self) -> None:
+        for given, expected in (("2", "2"), ("two@example.com", "2"), ("system", "1")):
+            with self.subTest(account=given):
+                self.answer(True, f"this session now uses account {expected}")
+                done = self.use("--account", given, "--wait", "10")
+                self.assertEqual((done.returncode, self.seen["kind"], self.seen["session"], self.seen["store"], self.seen["id"]), (0, "use", MARK, "store-abc", expected), done.stderr)
+                self.assertIn(f"this session now uses account {expected}", done.stdout)
+                self.assertEqual(sorted(p.name for p in self.requests.iterdir()), [])
+
+    def test_a_refusal_gives_exit_4_with_the_sessions_words(self) -> None:
+        self.answer(False, "Claude Code's security policy refuses a switch")
+        done = self.use("--account", "2", "--wait", "10")
+        self.assertEqual((done.returncode, "security policy" in done.stderr), (4, True), done.stderr)
+
+    def test_an_account_no_listed_one_names_exits_2_and_leaves_no_file(self) -> None:
+        done = self.use("--account", "nobody@example.com")
+        self.assertEqual(done.returncode, 2, done.stderr)
+        self.assertFalse(self.requests.exists())
+
+    def test_no_session_within_wait_gives_exit_3_says_whose_and_withdraws_the_request(self) -> None:
+        done = self.use("--account", "2", "--wait", "0.3")
+        self.assertEqual((done.returncode, "the session that ran this" in done.stderr), (3, True), done.stderr)
+        self.assertEqual(list(self.requests.iterdir()), [])
+
+    def test_a_store_no_session_has_given_a_store_id_gives_exit_3_and_writes_nothing(self) -> None:
+        store = json.loads(self.store.read_text(encoding="utf-8"))
+        del store["store-id"]
+        self.write(STORE, store)
+        self.assertEqual(self.use("--account", "2", "--wait", "0.3").returncode, 3)
+        self.assertFalse(self.requests.exists())
+
+    def test_no_catchable_signal_leaves_a_request_or_a_traceback(self) -> None:
+        signals = {"SIGINT": signal.SIGINT, "SIGTERM": signal.SIGTERM, "SIGHUP": signal.SIGHUP}
+        self.assertTrue(signals)
+        offenders = {}
+        for name, signum in signals.items():
+            child = subprocess.Popen([sys.executable, str(CLI), "account", "use", "--account", "2", "--wait", "30"], env=self.session_env(), stderr=subprocess.PIPE, text=True)
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline and not (self.requests.is_dir() and list(self.requests.glob("*.json"))):
+                time.sleep(0.02)
+            self.assertTrue(self.requests.is_dir() and list(self.requests.glob("*.json")), "the CLI wrote no request: the fixture did not reach the wait")
+            child.send_signal(signum)
+            _, stderr = child.communicate(timeout=5)
+            left = sorted(p.name for p in self.requests.iterdir())
+            if left or "Traceback" in stderr or child.returncode != 130:
+                offenders[name] = (left, child.returncode, stderr[-120:])
+        self.assertEqual(offenders, {}, "fix: finally withdraws the request on every exit, one line, exit 130")
+
+    def test_json_is_orcas_envelope_naming_the_account_this_session_is_on_after_it(self) -> None:
+        self.answer(True, "this session moves to account 2 in a few minutes", active_id="1")
+        done = self.use("--account", "2", "--json", "--wait", "10")
+        data = json.loads(done.stdout)
+        self.assertEqual((done.returncode, data["ok"], data["result"]["account"], data["result"]["thisSessionAccountId"], "in a few minutes" in data["result"]["message"]), (0, True, "2", "1", True), done.stderr)
+
+    def test_help_names_the_verb_and_what_it_moves(self) -> None:
+        for args in (["account", "--help"], ["account", "use", "--help"]):
+            done = run(CLI, *args)
+            self.assertEqual((done.returncode, "use" in done.stdout), (0, True), done.stderr)
+        self.assertIn(SESSION_VAR, run(CLI, "account", "use", "--help").stdout)
+
+
+class ListThisSession(StoreCase):
+    """C12: `list --json` names the account the session running it is on, read from the slot its Bash children carry."""
+
+    def session(self, *args: str, **extra: str) -> dict:
+        base = {k: v for k, v in self.env().items() if k not in (SESSION_VAR, SLOT_VAR)}
+        return json.loads(run(CLI, "account", "list", "--json", *args, env={**base, **extra}).stdout)["result"]
+
+    def test_the_account_whose_slot_this_session_carries(self) -> None:
+        slots = {a["id"]: a["slot"] for a in self.fixture["store"]["accounts"]}
+        self.assertTrue(slots)
+        for account, slot in slots.items():
+            with self.subTest(account=account):
+                env = {SESSION_VAR: MARK, **({SLOT_VAR: slot} if slot else {})}
+                self.assertEqual(self.session(**env)["thisSessionAccountId"], account)
+
+    def test_none_outside_a_session_or_on_a_slot_no_account_holds(self) -> None:
+        slot = next(a["slot"] for a in self.fixture["store"]["accounts"] if a["slot"])
+        self.assertIsNone(self.session()["thisSessionAccountId"], "no mark: this shell is in no session")
+        self.assertIsNone(self.session(**{SLOT_VAR: slot})["thisSessionAccountId"], "a slot with no mark is no session of the mod")
+        self.assertIsNone(self.session(**{SESSION_VAR: MARK, SLOT_VAR: "/nowhere"})["thisSessionAccountId"])
 
 
 if __name__ == "__main__":

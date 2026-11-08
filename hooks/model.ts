@@ -1283,6 +1283,9 @@ export function afterUsage(due: UsageDue | undefined, outcome: UsageOutcome, now
 /** How long a request waits for a session: a CLI that gave up or died leaves nothing a later session applies. */
 export const REQUEST_TTL_MS = 5 * 60_000
 
+/** How often a Bash call that names the CLI looks for its request: the CLI polls for the answer at the same pace. */
+export const REQUEST_POLL_MS = 250
+
 /** A nonce the CLI writes: letters, digits and dashes, so it names a file in the requests folder and nothing else. */
 const NONCE = /^[A-Za-z0-9-]{6,64}$/
 

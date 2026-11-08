@@ -5,7 +5,7 @@ import type { StoredRows } from '../types'
 
 import { DEFAULT_FOOTER, USAGE_CLAIM_WAIT_MS, USAGE_FORCE_AFTER_MS, USAGE_IDLE_MS, fingerprint, keychainItem, roomColor } from './model'
 import { laterMark, longBar, markFrom, storedLineText } from './model'
-import { REQUEST_TTL_MS } from './model'
+import { REQUEST_POLL_MS, REQUEST_TTL_MS, blockedText } from './model'
 import { PANE_COLUMNS } from './view'
 
 const NOW = Date.parse('2026-10-12T10:00:00Z')
@@ -54,6 +54,14 @@ type World = {
   /** slot -> signed-in email */
   emails: Record<string, string>
   envSets: { name: string; value?: string }[]
+  /** The variables the mod set other than the slot, by name. */
+  otherEnv: Record<string, string | undefined>
+  /** What ACCOUNT_ROTATOR_SESSION held when the engine's own start ran. */
+  markAtStart?: string
+  /** Claude Code's security policy refuses every variable but the slot. */
+  refuseMark?: boolean
+  /** While set, a Bash call runs until it settles. */
+  bashRuns?: Promise<void>
   spawned: { argv: readonly string[]; env?: Record<string, string> }[]
   submitted: string[]
   /** Whether each line in `submitted` was sent as the person's own words (`asUser`), not under the mod's name. */
@@ -149,6 +157,11 @@ function world(on: On, w: World, store: Record<string, unknown> | Map<string, un
   mock.env(on, { USER: 'tester', HOME, ...w.env })
   let slot = w.env.CLAUDE_SECURESTORAGE_CONFIG_DIR ?? ''
   on('env.set', (_$, e) => {
+    if (e.name !== 'CLAUDE_SECURESTORAGE_CONFIG_DIR') {
+      if (w.refuseMark) return { deny: `env (managed): ${e.name} is not for plugins outside policy to change` }
+      w.otherEnv[e.name] = e.value
+      return { value: {} }
+    }
     if (w.refuseEnv) return { deny: `env (managed): ${e.name} is not for plugins outside policy to change` }
     // The mod sets the slot in use at its start, to learn whether it may switch: not a switch.
     if ((e.value ?? '') === slot) return { value: {} }
@@ -229,6 +242,10 @@ function world(on: On, w: World, store: Record<string, unknown> | Map<string, un
     if (w.chrome !== undefined && isAnswered(w.chrome)) return { result: [{ type: 'text', text: 'Tabs: none' }], text: 'Tabs: none' }
     return { isError: true as const, result: NO_BROWSER, text: NO_BROWSER }
   })
+  on('tool.call', { tool: 'Bash' }, async () => {
+    await w.bashRuns
+    return { result: 'ran', text: 'ran' } as never
+  })
   on('command.run', { command: 'mcp' }, (_$, e) => {
     w.commands.push(`/mcp ${e.args}`)
     if (w.chrome !== undefined && e.args === 'reconnect claude-in-chrome') delete w.chrome.as
@@ -239,7 +256,10 @@ function world(on: On, w: World, store: Record<string, unknown> | Map<string, un
     w.asUser.push(e.origin.kind === 'plugin' && e.origin.asUser === true)
     return { text: e.text }
   })
-  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  on('session.start', (_$, e) => {
+    w.markAtStart = w.otherEnv.ACCOUNT_ROTATOR_SESSION
+    return { cwd: e.cwd }
+  })
   on('session.end', (_$, e) => ({ sessionId: e.sessionId }))
   on('session.id', () => ({ value: 'session-1' }))
   on('tool.check', () => ({ decision: 'allow' as const }))
@@ -292,6 +312,7 @@ const fresh = (system: World['system'] = 'macOS'): World => ({
   owners: {},
   emails: {},
   envSets: [],
+  otherEnv: {},
   spawned: [],
   submitted: [],
   asUser: [],
@@ -6018,8 +6039,7 @@ const resultOf = (w: World, nonce: string): Record<string, unknown> | undefined 
 }
 
 /** Two logins, with room unless the test spends a week, a session started on login 1, a minute's merge done. */
-async function selectWorld($: Engine, on: On, login2: [number, number] = [10, 20], login1: [number, number] = [10, 20]): Promise<{ w: World; store: Map<string, unknown>; clock: MockClock }> {
-  const w = fresh()
+async function selectWorld($: Engine, on: On, login2: [number, number] = [10, 20], login1: [number, number] = [10, 20], w: World = fresh()): Promise<{ w: World; store: Map<string, unknown>; clock: MockClock }> {
   w.keychain['Claude Code-credentials'] = blob('tok-1')
   w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
   w.usage['tok-1'] = login1
@@ -6250,4 +6270,220 @@ test('every listing order of three requests ends on the newest', async ($, on) =
     for (const path of Object.keys(w.files)) if (path.startsWith(`${REQUESTS}/`)) delete w.files[path]
   }
   expect(offenders, `orders in which an older request overwrites a newer one; apply by ascending \`at\`, or only the newest: ${offenders.join('; ')}`).toEqual([])
+})
+
+// C12 (puma-eslxj.13, RULING 4624): `account use` moves the one session that ran it, by the mark it set at boot.
+
+const USE_COMMAND = 'account-rotator account use --account 2'
+/** A use request as bin/account-rotator writes it, aimed at the session whose mark is `session`. */
+const useRequest = (nonce: string, id: string, storeId: unknown, at: number, session: unknown) => JSON.stringify({ kind: 'use', nonce, at, id, store: storeId, session })
+const ownMark = (w: World) => w.otherEnv.ACCOUNT_ROTATOR_SESSION
+
+/** A Bash call as Claude makes one, running until `finish`; the test writes the request the command would. */
+function bashCall($: Engine, w: World, command: string): { finish: () => Promise<unknown> } {
+  let end = () => {}
+  w.bashRuns = new Promise<void>(resolve => {
+    end = resolve
+  })
+  const done = $.tool.call({ tool: 'Bash', command } as unknown as ToolCallArgs)
+  return {
+    finish: () => {
+      end()
+      return done
+    },
+  }
+}
+
+/** One beat of the watch over a running call. */
+const beat = async (clock: MockClock) => {
+  await clock.advance(REQUEST_POLL_MS)
+  await clock.settle()
+}
+
+/** The next minute's tick, whatever the time now. */
+const untilTick = async (clock: MockClock) => {
+  await clock.advance(60_000)
+  await clock.settle()
+}
+
+test('boot sets a mark in the environment of every later Bash child, before the engine starts, and it is no session id', async ($, on) => {
+  const { w } = await selectWorld($, on)
+  expect(typeof w.markAtStart).toBe('string')
+  expect(w.markAtStart).toBe(ownMark(w))
+  expect(ownMark(w)).not.toBe('session-1')
+})
+
+test('a policy that refuses the mark leaves the session running, and no use request is applied', async ($, on) => {
+  const w = fresh()
+  w.refuseMark = true
+  const { store, clock } = await selectWorld($, on, undefined, undefined, w)
+  expect(typeof store.get('store-id'), 'the session stopped at the refusal').toBe('string')
+  w.files[`${REQUESTS}/${N1}.json`] = useRequest(N1, '2', store.get('store-id'), clock.now(), 'undefined')
+  await untilTick(clock)
+  expect([resultOf(w, N1), w.envSets]).toEqual([undefined, []])
+})
+
+test('during a Bash call that names account-rotator, a use for this session is applied within a beat, and its result names the account', async ($, on) => {
+  const { w, store, clock } = await selectWorld($, on)
+  const call = bashCall($, w, USE_COMMAND)
+  w.files[`${REQUESTS}/${N1}.json`] = useRequest(N1, '2', store.get('store-id'), clock.now(), ownMark(w))
+  await beat(clock)
+  expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
+  expect(resultOf(w, N1)).toMatchObject({ nonce: N1, ok: true, activeId: '2' })
+  expect(resultOf(w, N1)?.message).toMatch(/this session now uses account 2/)
+  await call.finish()
+})
+
+test('a Bash call that does not name account-rotator watches nothing: the request waits for the minute, which applies it', async ($, on) => {
+  const { w, store, clock } = await selectWorld($, on)
+  const call = bashCall($, w, 'git status')
+  w.files[`${REQUESTS}/${N1}.json`] = useRequest(N1, '2', store.get('store-id'), clock.now(), ownMark(w))
+  await beat(clock)
+  await beat(clock)
+  expect(resultOf(w, N1)).toBeUndefined()
+  await call.finish()
+  await untilTick(clock)
+  expect(resultOf(w, N1)?.ok).toBe(true)
+})
+
+test('the watch ends with its call: a later request waits for the minute', async ($, on) => {
+  const { w, store, clock } = await selectWorld($, on)
+  const call = bashCall($, w, USE_COMMAND)
+  await beat(clock)
+  await call.finish()
+  await beat(clock)
+  w.files[`${REQUESTS}/${N1}.json`] = useRequest(N1, '2', store.get('store-id'), clock.now(), ownMark(w))
+  await beat(clock)
+  await beat(clock)
+  expect(resultOf(w, N1)).toBeUndefined()
+  await untilTick(clock)
+  expect(resultOf(w, N1)?.ok).toBe(true)
+})
+
+test('with no Bash call at all (a `!` command, a wrapper), the minute applies this session\'s use', async ($, on) => {
+  const { w, store, clock } = await selectWorld($, on)
+  w.files[`${REQUESTS}/${N1}.json`] = useRequest(N1, '2', store.get('store-id'), clock.now(), ownMark(w))
+  await untilTick(clock)
+  expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
+  expect(resultOf(w, N1)?.ok).toBe(true)
+})
+
+// Two sessions on one store: the store-id is shared, so the mark alone tells them apart.
+test('two sessions on one store: another session\'s use is not applied here, by the watch or the minute, and its answer stays its own', async ($, on) => {
+  const { w, store, clock } = await selectWorld($, on)
+  const before = store.get('launch-on')
+  const [theirs, answered] = ['their-0001', 'their-0002']
+  w.files[`${REQUESTS}/${theirs}.json`] = useRequest(theirs, '2', store.get('store-id'), clock.now(), 'session-theirs')
+  w.files[`${REQUESTS}/${answered}.json`] = useRequest(answered, '2', store.get('store-id'), clock.now(), 'session-theirs')
+  const answer = JSON.stringify({ nonce: answered, ok: true, message: 'theirs', at: clock.now() })
+  w.files[`${REQUESTS}/${answered}.result.json`] = answer
+  const call = bashCall($, w, USE_COMMAND)
+  await beat(clock)
+  await call.finish()
+  await untilTick(clock)
+  expect(w.envSets, 'this session moved on another session\'s request').toEqual([])
+  expect(resultOf(w, theirs), 'this session answered another session\'s request').toBeUndefined()
+  expect(w.files[`${REQUESTS}/${answered}.result.json`]).toBe(answer)
+  expect(store.get('launch-on')).toBe(before)
+  // The control: the other session's select is every session's to take, so the same minute reached the folder.
+  w.files[`${REQUESTS}/${N1}.json`] = selectRequest(N1, '2', store.get('store-id'), clock.now())
+  await untilTick(clock)
+  expect(resultOf(w, N1)?.ok, 'the control took no request: the fixture no longer reaches applyRequests').toBe(true)
+})
+
+test('a use with this session\'s mark and another store\'s id is not applied', async ($, on) => {
+  const { w, clock } = await selectWorld($, on)
+  w.files[`${REQUESTS}/${N1}.json`] = useRequest(N1, '2', 'another-store', clock.now(), ownMark(w))
+  await untilTick(clock)
+  expect([resultOf(w, N1), w.envSets]).toEqual([undefined, []])
+})
+
+test('a policy refusal answers not ok with the blocked text', async ($, on) => {
+  const { w, store, clock } = await selectWorld($, on)
+  w.refuseEnv = true
+  const call = bashCall($, w, USE_COMMAND)
+  w.files[`${REQUESTS}/${N1}.json`] = useRequest(N1, '2', store.get('store-id'), clock.now(), ownMark(w))
+  await beat(clock)
+  await call.finish()
+  expect(resultOf(w, N1)).toMatchObject({ ok: false, message: blockedText(true), activeId: '1' })
+})
+
+test('a switch held for a token refresh answers ok, names the wait, and moves once the token has refreshed', async ($, on) => {
+  const { w, store, clock } = await selectWorld($, on)
+  w.keychain['Claude Code-credentials'] = blob('tok-1', clock.now() + 60_000)
+  const call = bashCall($, w, USE_COMMAND)
+  w.files[`${REQUESTS}/${N1}.json`] = useRequest(N1, '2', store.get('store-id'), clock.now(), ownMark(w))
+  await beat(clock)
+  await call.finish()
+  expect(w.envSets).toEqual([])
+  expect(resultOf(w, N1)).toMatchObject({ ok: true, activeId: '1' })
+  expect(resultOf(w, N1)?.message).toMatch(/this session moves to account 2 in a few minutes, once account 1's token has refreshed/)
+  w.keychain['Claude Code-credentials'] = blob('tok-1', clock.now() + 6 * HOUR)
+  await untilTick(clock)
+  expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
+})
+
+test('a use of the account in use answers ok and moves nothing', async ($, on) => {
+  const { w, store, clock } = await selectWorld($, on)
+  w.files[`${REQUESTS}/${N1}.json`] = useRequest(N1, '1', store.get('store-id'), clock.now(), ownMark(w))
+  await untilTick(clock)
+  expect(w.envSets).toEqual([])
+  expect(resultOf(w, N1)).toMatchObject({ ok: true, activeId: '1' })
+  expect(resultOf(w, N1)?.message).toMatch(/this session already uses account 1/)
+})
+
+test('a use of an account not listed, or one the panel offers no Use now for, answers not ok and moves nothing', async ($, on) => {
+  const { w, store, clock } = await selectWorld($, on)
+  delete w.keychain[await keychainItem(SLOT2)]
+  await untilTick(clock)
+  w.files[`${REQUESTS}/gone-00001.json`] = useRequest('gone-00001', '9', store.get('store-id'), clock.now(), ownMark(w))
+  w.files[`${REQUESTS}/${N1}.json`] = useRequest(N1, '2', store.get('store-id'), clock.now(), ownMark(w))
+  await untilTick(clock)
+  expect(w.envSets).toEqual([])
+  expect(resultOf(w, 'gone-00001')).toMatchObject({ ok: false, message: 'account 9 is not listed in this store' })
+  expect(resultOf(w, N1)?.ok).toBe(false)
+  expect(resultOf(w, N1)?.message).toMatch(/account 2 cannot take over/)
+})
+
+test('a select during a Bash call that names account-rotator is applied within a beat too', async ($, on) => {
+  const { w, store, clock } = await selectWorld($, on)
+  const call = bashCall($, w, 'account-rotator account select --account 2')
+  w.files[`${REQUESTS}/${N1}.json`] = selectRequest(N1, '2', store.get('store-id'), clock.now())
+  await beat(clock)
+  expect(store.get('launch-on')).toBe('account:2')
+  await call.finish()
+})
+
+test('the watch and the minute reaching one request at one instant apply it once', async ($, on) => {
+  const { w, store, clock } = await selectWorld($, on)
+  // The watch's beats, counted from its call, land on the minute's tick.
+  const untilMinute = 60_000 - ((clock.now() - NOW) % 60_000)
+  await clock.advance(untilMinute)
+  await clock.settle()
+  const call = bashCall($, w, USE_COMMAND)
+  await clock.advance(60_000 - 1)
+  w.files[`${REQUESTS}/${N1}.json`] = useRequest(N1, '2', store.get('store-id'), clock.now(), ownMark(w))
+  await clock.advance(1)
+  await clock.settle()
+  await call.finish()
+  expect((w.writes ?? []).filter(p => p === `${REQUESTS}/${N1}.result.json`)).toHaveLength(1)
+  expect(w.envSets).toHaveLength(1)
+})
+
+test('before boot has read the accounts, the watch takes no request: it would answer that no account is listed', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [10, 20]
+  w.usage['tok-2'] = [10, 20]
+  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off', 'store-id': 'store-abc' }))
+  const clock = world(on, w, store)
+  const call = bashCall($, w, 'account-rotator account select --account 2')
+  w.files[`${REQUESTS}/${N1}.json`] = selectRequest(N1, '2', 'store-abc', clock.now())
+  await beat(clock)
+  expect(resultOf(w, N1)).toBeUndefined()
+  await start($, clock)
+  await beat(clock)
+  expect(resultOf(w, N1)?.ok).toBe(true)
+  await call.finish()
 })
