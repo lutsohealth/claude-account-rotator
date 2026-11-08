@@ -5345,3 +5345,46 @@ test('rows another session stored with other lines are written again from the st
   const now = rowsOf(store)
   expect([now?.rows, now?.at === 1]).toEqual([ours?.rows, false])
 })
+
+// Review C8-R1 F1 (Opus) [UPDATED-WITHOUT-READING] (RULING 4521): a usage answer that stores no reading is no good
+// read: the row's updated time stays at the last read that stored one, and a login never read so has none.
+test('a usage answer that stores no reading leaves login 2\'s row at its last good read', async ($, on) => {
+  const { w, store, clock } = await rowsWorld($, on)
+  const readAt = goodReadAt(store, '2')
+  const before = store.get('usage:2')
+  // The endpoint answers 200 with no window the mod can read: checkAccount stores no reading.
+  w.usage['tok-2'] = [null, null]
+  const calls = w.usageCalls.filter(t => t === 'tok-2').length
+  await clock.advance(USAGE_IDLE_MS + 2 * 60_000)
+  // The seed: login 2 was read again, and its reading is the boot read's still.
+  expect([w.usageCalls.filter(t => t === 'tok-2').length > calls, store.get('usage:2') === before]).toEqual([true, true])
+  expect(lineOne(store, '2')).toMatch(new RegExp(`  updated ${localTime(readAt)}$`))
+})
+
+test('the login in use, a response since, read by its schedule into no reading, keeps its updated time', async ($, on) => {
+  const { w, store, clock } = await rowsWorld($, on)
+  const readAt = goodReadAt(store, '1')
+  await clock.advance(4 * 60_000)
+  w.limits = [{ kind: 'seven_day', percentUsed: 31, resetsAt: WEEK_RESET }]
+  await respond($, clock, w)
+  w.usage['tok-1'] = [null, null]
+  const calls = w.usageCalls.filter(t => t === 'tok-1').length
+  await clock.advance(USAGE_IDLE_MS)
+  expect(w.usageCalls.filter(t => t === 'tok-1').length > calls).toBe(true)
+  expect(lineOne(store, '1')).toMatch(new RegExp(`  updated ${localTime(readAt)}$`))
+})
+
+test('a login whose only usage answer stored no reading draws no updated time over no reading yet', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [null, 30, 40]
+  w.usage['tok-2'] = [null, null]
+  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off' }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  await clock.advance(61_000)
+  // The seed: login 2 was read, and stored no reading.
+  expect([w.usageCalls.includes('tok-2'), store.has('usage:2')]).toEqual([true, false])
+  expect(lineOne(store, '2')).not.toMatch(/updated/)
+})

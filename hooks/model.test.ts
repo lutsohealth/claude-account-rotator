@@ -5,7 +5,7 @@ import { weekLeaveFrom, launchOnFrom, pickLaunch, isSessionStop } from './model'
 import { isSameWeek, whoseWeek } from './model'
 import { companyOf, identityFromStatus, planName } from './model'
 import { laterMark, spentMark, withFableMark } from './model'
-import { EMPTY_VIEW, rowOf, rowText } from './model'
+import { EMPTY_VIEW, USAGE_IDLE_MS, rowOf, rowText } from './model'
 import { USAGE_BACKOFF_MAX_MS, USAGE_CLAIM_MS, USAGE_CLAIM_WAIT_MS, USAGE_EARLY_MS, WRITER_VERSION, afterUsage, claimDueReads, gatingDue, isUsageDue, mayForceUsage, mayReadSince, renewClaim, retryAfterFrom, usageDueFrom } from './model'
 import { DEFAULT_FOOTER, availableNow, braille, browsersFrom, chromeNote, continueTextFrom, counted, fiveHourLimitFrom, credentialFrom, credentialsFile, fableMark, fableSpentNotice, fableStay, footerStyleFrom, healthOf, identityFromProfile, isFableSpent, isFableStop, isNoBrowser, isPolicyRefusal, keepFable, keychainItem, legacyMark, markFrom, nextReset, pickTarget, pie, readingFromUsage, rotateToFrom, shouldLeave, roomColor, windowPct, withMark, withWeekMark } from './model'
 
@@ -1095,4 +1095,43 @@ test('a login with a 5-hour window in its counted reading has a third line for i
   const v = rowView({ readings: { '1': r }, noFiveHour: { '1': false } }, max)
   expect(rowLines(v)).toEqual(['andres@lutsohealth.com · Company · Max  updated 18:34', OPERATOR_LINE_2, '5h ▰▰▰▰▰▱▱▱▱▱ 50%  resets 1h 20m'])
   expect(rowLines(rowView())).toHaveLength(2)
+})
+
+// Review C8-R1 unreadable-body (Codex) [UPDATED-WITHOUT-READING] (RULING 4521): a 2xx answer whose body yields no
+// reading is the outcome `empty`, which keeps the last good read's time. Codex's block passed `ok` for that body; the
+// fix gives the body `empty`, so the block is kept with `empty`.
+test('an answer whose body holds no usage keeps the last good read\'s time, and the row says it', () => {
+  const PRO = { id: '1', slot: '', email: 'andres@lutsohealth.com', plan: 'pro' }
+  expect(readingFromUsage({}, ROW_NOW)).toBeUndefined()
+  const due = afterUsage({ next: READ_AT, fails: 0, at: READ_AT }, { kind: 'empty', hasResponded: false }, ROW_NOW)
+  expect([due.at, due.fails, due.next]).toEqual([READ_AT, 0, ROW_NOW + USAGE_IDLE_MS])
+  const v = rowView({ readAt: { '1': due.at as number }, noFiveHour: {} }, PRO)
+  expect(rowText(rowOf({ ...v, readings: { '1': { sevenDay: { pct: 31, resetsAt: ROW_WEEK_END }, at: READ_AT, by: '1' } } }, PRO, ROW_NOW, 'UTC'))[0]).toBe('andres@lutsohealth.com · Pro  updated 16:34')
+})
+
+test('an empty answer on a login never read well makes no good read: the row has no updated time', () => {
+  expect(readingFromUsage(null, ROW_NOW)).toBeUndefined()
+  const due = afterUsage(undefined, { kind: 'empty', hasResponded: true }, ROW_NOW)
+  expect([due.at, due.next]).toEqual([undefined, ROW_NOW + 10 * MINUTE])
+  expect(rowLines(rowView({ readings: {}, readAt: due.at === undefined ? {} : { '1': due.at } }))[0]).toBe('andres@lutsohealth.com · Company · Ultra')
+})
+
+// Review C8-R1 F1 class (c) (Opus) [UPDATED-WITHOUT-READING]: rowOf never pairs an updated time with no reading.
+test('a login with no reading draws no updated time, whatever else the view holds', () => {
+  const cases: [string, Partial<View>][] = [
+    ['health ok', {}],
+    ['no health', { health: {} }],
+    ['an older failure', { checkErrors: { '1': { why: 'HTTP 429', at: READ_AT - 3 * MINUTE } } }],
+    ['no-five-hour stored', { noFiveHour: { '1': true } }],
+  ]
+  const offenders = cases.filter(([, change]) => /updated/.test(rowLines(rowView({ readings: {}, ...change }))[0] ?? ''))
+  expect(cases.length).toBeGreaterThan(0)
+  expect(offenders.map(([name]) => name)).toEqual([])
+})
+
+// Review C8-R1 equal-time (Codex) [FAILURE-TIE-HIDDEN] (RULING 4521): a good read clears check-error, so a failure
+// standing at the same millisecond as the good read came after it.
+test('a failure at the same millisecond as the good read shows, with its status or without', () => {
+  expect(rowLines(rowView({ checkErrors: { '1': { ...HTTP_429, at: READ_AT } } }))[0]).toBe('andres@lutsohealth.com · Company · Ultra  18:34 Failed to update (HTTP 429)')
+  expect(rowLines(rowView({ checkErrors: { '1': { why: 'the usage call failed to connect', at: READ_AT } } }))[0]).toBe('andres@lutsohealth.com · Company · Ultra  18:34 Failed to update')
 })
