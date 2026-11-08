@@ -5418,9 +5418,14 @@ test('boot failure refreshes the exported row before the first minute tick', asy
 // the end of the line that holds them, with no id column and no separate failure line.
 
 type DrawnNode = { type?: string; props?: Record<string, unknown>; children?: unknown[] }
-/** The text an element shows: its strings, and its Texts' strings, in order. */
-const shownText = (n: unknown): string =>
-  typeof n === 'string' ? n : typeof n === 'object' && n !== null && (n as DrawnNode).type !== 'Button' ? ((n as DrawnNode).children ?? []).map(shownText).join('') : ''
+/** The text an element shows: its strings, and its Texts' strings, in order; the buttons' box at a line's end left out. */
+const shownText = (n: unknown): string => {
+  if (typeof n === 'string') return n
+  if (typeof n !== 'object' || n === null) return ''
+  const { type, props, children } = n as DrawnNode
+  if (type === 'Button' || String(props?.key ?? '').startsWith('end-')) return ''
+  return (children ?? []).map(shownText).join('')
+}
 /** The Buttons under an element, by key. */
 const buttonsIn = (n: unknown): string[] => {
   if (typeof n !== 'object' || n === null) return []

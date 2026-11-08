@@ -28,8 +28,11 @@ export type Mark = { pct: number; resetsAt: string; at: number }
 /** A usage check that failed: what failed (a stage and an HTTP status, or the error), and when, in epoch milliseconds. */
 export type CheckError = { why: string; at: number }
 
-/** A run of a row's text, and how it is drawn: dim, or as a warning; plain where no tone is named. */
-export type RowPart = { text: string; tone?: 'dim' | 'warning' }
+/**
+ * A run of a row's text, and how it is drawn: dim, or as a warning; plain where no tone is named. `used` is a bar's
+ * percent used, which colors it by the room left; `shrink` marks the email and the Company, which a narrow pane cuts.
+ */
+export type RowPart = { text: string; tone?: 'dim' | 'warning'; used?: number; shrink?: 'email' | 'company' }
 
 /** A login's row: who it is with the last read's state, its week and Fable week used, then its 5-hour window where it has one. */
 export type Row = { id: string; lines: RowPart[][] }

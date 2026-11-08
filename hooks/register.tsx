@@ -84,7 +84,7 @@ import {
   rowsOf,
 } from './model'
 import type { Credential, Identity, Need, StayReason } from './model'
-import { Band, Footer, Pane } from './view'
+import { Band, Footer, PANE_COLUMNS, Pane } from './view'
 import type { Actions } from './view'
 
 type Host = EngineInterface
@@ -93,8 +93,6 @@ const PANE = 'claude-accounts'
 const TITLE = 'Claude accounts'
 /** The slash command that opens and closes the pane. */
 const ACCOUNTS_COMMAND = 'accounts'
-/** The dock width the pane asks for: a login's line, its buttons and its usage rows fit on one line each. */
-const PANE_COLUMNS = 64
 /** Claude Code caches a keychain read for 30 s, so a switch lands within this. */
 const SETTLE_MS = 35_000
 /** A switch no response has shown after this long is reported as not taken. */
@@ -798,6 +796,8 @@ async function requestUsage($: Host, account: Account, accessToken: string, gate
   const ok = usage.kind === 'ok' ? { kind: readingFromUsage(usage.body, at) === undefined ? ('empty' as const) : ('ok' as const), hasResponded } : undefined
   const outcome = ok ?? (usage.kind === 'rejected' ? usage : { kind: 'failed' as const, retryAfter: usage.retryAfter })
   await $.store.set(key, afterUsage(due, outcome, at))
+  // This session's own good read reaches its pane and its rows at once, not at the next minute's merge.
+  if (outcome.kind === 'ok') await setView($, v => ({ ...v, readAt: { ...v.readAt, [account.id]: at } }))
   return usage
 }
 
@@ -875,6 +875,8 @@ async function checkAll($: Host, isEvery = true): Promise<void> {
       await saveCheckError($, account.id, `the check failed (${kind}); the debug log has the rest`).catch(() => undefined)
     }
   }
+  // The rows carry what this check read, for a session that ends before the next merge.
+  await saveRows($, await $.clock.now())
   await maybeRotate($)
 }
 
@@ -1897,6 +1899,6 @@ export const register: Register = on => {
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const view = await getView($)
-    return Pane($.ui.resolve(e), view, await $.clock.now(), actions($))
+    return Pane($.ui.resolve(e), view, await $.clock.now(), actions($), e.props.bodyColumns)
   })
 }

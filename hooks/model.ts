@@ -940,16 +940,19 @@ export function clockText(at: number, timeZone?: string): string {
 const resetAhead = (w: UsageWindow | undefined, now: number): string | undefined =>
   w?.resetsAt !== undefined && Date.parse(w.resetsAt) > now ? resetText(w.resetsAt, now) : undefined
 
-/** A window as the row draws it: its label, a ten-cell bar and the percent used, whatever the footer fills with; a dash, dim, where none is read. */
-function usedPart(label: string, w: UsageWindow | undefined, now: number): RowPart {
+/**
+ * A window as the row draws it: its label, then a ten-cell bar and the percent used, whatever the footer fills with,
+ * the bar's part carrying that percent for its color; a dash, dim, where none is read.
+ */
+function usedParts(label: string, w: UsageWindow | undefined, now: number): RowPart[] {
   const pct = windowPct(w, now)
-  if (pct === undefined) return { text: `${label} –`, tone: 'dim' }
+  if (pct === undefined) return [{ text: `${label} –`, tone: 'dim' }]
   const used = Math.round(pct)
-  return { text: `${label} ${longBar(used)} ${used}%` }
+  return [{ text: `${label} ` }, { text: `${longBar(used)} ${used}%`, used }]
 }
 
-/** The status in a failure's words: `Failed to update`, with the HTTP status where its why names one. */
-const HTTP_STATUS = /HTTP (\d{3})/
+/** The HTTP status in a failure's why, where the usage call answered it: another call's status is not the update's. */
+const HTTP_STATUS = /usage call answered HTTP (\d{3})/
 
 /**
  * Line 1's end: a sign-in needed; else a failed check no older than the last good read, at its time; else the last
@@ -973,15 +976,12 @@ function usageLine(view: View, a: Account, now: number): RowPart[] {
   const r = view.readings[a.id]
   if (r === undefined) return [{ text: `Used ${longBar(0)} no reading yet`, tone: 'dim' }]
   const plan = planName(a, hasNoFiveHour(view, a.id))
-  const fable = r.fable !== undefined || (plan !== undefined && HAS_FABLE_WEEK.test(plan)) ? usedPart('Fable', r.fable, now) : undefined
+  const isFable = r.fable !== undefined || (plan !== undefined && HAS_FABLE_WEEK.test(plan))
+  const fable = isFable ? usedParts(' Fable', r.fable, now) : []
   const [week, fableReset] = [resetAhead(r.sevenDay, now), resetAhead(r.fable, now)]
   const resets =
     week === undefined ? (fableReset === undefined ? undefined : `Fable resets ${fableReset}`) : `resets ${week}${fableReset === undefined || fableReset === week ? '' : ` · Fable ${fableReset}`}`
-  return [
-    usedPart('Used', r.sevenDay, now),
-    ...(fable === undefined ? [] : [{ ...fable, text: ` ${fable.text}` }]),
-    ...(resets === undefined ? [] : [{ text: `  ${resets}` }]),
-  ]
+  return [...usedParts('Used', r.sevenDay, now), ...fable, ...(resets === undefined ? [] : [{ text: `  ${resets}` }])]
 }
 
 /** Line 3, where the counted reading holds a 5-hour window: it used, and its reset ahead. */
@@ -989,19 +989,25 @@ function fiveHourLine(view: View, a: Account, now: number): RowPart[] | undefine
   const w = view.readings[a.id]?.fiveHour
   if (w === undefined) return undefined
   const reset = resetAhead(w, now)
-  return [usedPart('5h', w, now), ...(reset === undefined ? [] : [{ text: `  resets ${reset}` }])]
+  return [...usedParts('5h', w, now), ...(reset === undefined ? [] : [{ text: `  resets ${reset}` }])]
 }
 
 /**
- * A login's row from the counted view: line 1 who it is (email, Company, plan) and its last read's state, line 2 its
- * week and Fable week used, line 3 its 5-hour window where it has one. A failure shown dims the usage lines.
- * `timeZone` names the clock's zone; the machine's own where none is named.
+ * A login's row from the counted view: line 1 who it is (email, Company, plan, and Chrome where the extension is
+ * signed in to it) and its last read's state, line 2 its week and Fable week used, line 3 its 5-hour window where it
+ * has one. A failure shown dims the usage lines. `timeZone` names the clock's zone; the machine's own where none is named.
  */
 export function rowOf(view: View, a: Account, now: number, timeZone?: string): Row {
   const who = a.email ?? (a.slot === '' ? 'your normal account' : 'not signed in yet')
-  const about = [companyOf(a), planName(a, hasNoFiveHour(view, a.id))].filter((s): s is string => s !== undefined)
+  const [company, plan] = [companyOf(a), planName(a, hasNoFiveHour(view, a.id))]
   const state = statePart(view, a, timeZone)
-  const line1: RowPart[] = [{ text: who }, ...(about.length === 0 ? [] : [{ text: ` · ${about.join(' · ')}` }]), ...(state === undefined ? [] : [{ text: '  ' }, state])]
+  const line1: RowPart[] = [
+    { text: who, shrink: 'email' },
+    ...(company === undefined ? [] : [{ text: ` · ${company}`, shrink: 'company' as const }]),
+    ...(plan === undefined ? [] : [{ text: ` · ${plan}` }]),
+    ...(view.chromeAccountId === a.id ? [{ text: ' · Chrome' }] : []),
+    ...(state === undefined ? [] : [{ text: '  ' }, state]),
+  ]
   const isFailed = state?.tone === 'warning' && view.health[a.id]?.kind !== 'login-needed'
   const dim = (line: RowPart[]): RowPart[] => (isFailed ? line.map(p => ({ ...p, tone: 'dim' })) : line)
   const five = fiveHourLine(view, a, now)
@@ -1022,6 +1028,51 @@ export function rowsOf(view: View, now: number): StoredRows['rows'] {
 export function isSameRows(stored: unknown, rows: StoredRows['rows']): boolean {
   const held = typeof stored === 'object' && stored !== null ? (stored as { rows?: unknown }).rows : undefined
   return JSON.stringify(held) === JSON.stringify(rows)
+}
+
+/** A row fitted to a width: its lines, and the line whose end holds the buttons, an empty one where they have their own. */
+export type FittedRow = { lines: RowPart[][]; endLine: number }
+
+/** The cells between a line's text and the buttons at its end. */
+export const END_GAP = 2
+
+/** The cells a line takes, one per character. */
+export const cellsOf = (line: readonly RowPart[]): number => line.reduce((n, p) => n + [...p.text].length, 0)
+
+/** A Company part cut to `cells` (at least ` · X…`), or an email cut in its middle (at least `x…y`), with an ellipsis. */
+function cutTo(p: RowPart, cells: number): RowPart {
+  const chars = [...p.text]
+  if (cells >= chars.length) return p
+  if (p.shrink === 'company') return { ...p, text: `${chars.slice(0, Math.max(5, cells) - 1).join('')}…` }
+  const keep = Math.max(2, cells - 1)
+  const head = Math.ceil(keep / 2)
+  return { ...p, text: `${chars.slice(0, head).join('')}…${chars.slice(chars.length - (keep - head)).join('')}` }
+}
+
+/** Line 1 cut to `columns`: the Company first, then the email's middle; the plan and the state never. */
+function fitLine1(line: RowPart[], columns: number): RowPart[] {
+  let fitted = line
+  for (const kind of ['company', 'email'] as const) {
+    const over = cellsOf(fitted) - columns
+    if (over <= 0) return fitted
+    fitted = fitted.map(p => (p.shrink === kind ? cutTo(p, [...p.text].length - over) : p))
+  }
+  return fitted
+}
+
+/**
+ * A row fitted to a pane `columns` wide, its buttons `endWidth` cells: line 1 cut to the width, and the buttons at
+ * line 1's end where they fit beside it, else at line 2's end, else on a line of their own after line 2. Without
+ * buttons they end line 1.
+ */
+export function fitRow(row: Row, columns: number, endWidth: number): FittedRow {
+  const [first = [], second, ...rest] = row.lines
+  const line1 = fitLine1(first, columns)
+  const fits = (line: RowPart[] | undefined) => line !== undefined && cellsOf(line) + END_GAP + endWidth <= columns
+  if (endWidth === 0 || fits(line1)) return { lines: [line1, ...(second === undefined ? [] : [second]), ...rest], endLine: 0 }
+  if (fits(second)) return { lines: [line1, second as RowPart[], ...rest], endLine: 1 }
+  const before = [line1, ...(second === undefined ? [] : [second])]
+  return { lines: [...before, [], ...rest], endLine: before.length }
 }
 
 // ---------------------------------------------------------------- one usage schedule per store
