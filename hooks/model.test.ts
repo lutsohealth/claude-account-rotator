@@ -5,7 +5,7 @@ import { weekLeaveFrom, launchOnFrom, pickLaunch, isSessionStop } from './model'
 import { isSameWeek, whoseWeek } from './model'
 import { companyOf, identityFromStatus, planName } from './model'
 import { laterMark, spentMark, withFableMark } from './model'
-import { EMPTY_VIEW, USAGE_IDLE_MS, rowOf, rowText } from './model'
+import { EMPTY_VIEW, USAGE_IDLE_MS, fitRow, rowOf, rowText } from './model'
 import { USAGE_BACKOFF_MAX_MS, USAGE_CLAIM_MS, USAGE_CLAIM_WAIT_MS, USAGE_EARLY_MS, WRITER_VERSION, afterUsage, claimDueReads, gatingDue, isUsageDue, mayForceUsage, mayReadSince, renewClaim, retryAfterFrom, usageDueFrom } from './model'
 import { DEFAULT_FOOTER, availableNow, braille, browsersFrom, chromeNote, continueTextFrom, counted, fiveHourLimitFrom, credentialFrom, credentialsFile, fableMark, fableSpentNotice, fableStay, footerStyleFrom, healthOf, identityFromProfile, isFableSpent, isFableStop, isNoBrowser, isPolicyRefusal, keepFable, keychainItem, legacyMark, markFrom, nextReset, pickTarget, pie, readingFromUsage, rotateToFrom, shouldLeave, roomColor, windowPct, withMark, withWeekMark } from './model'
 
@@ -1134,4 +1134,75 @@ test('a login with no reading draws no updated time, whatever else the view hold
 test('a failure at the same millisecond as the good read shows, with its status or without', () => {
   expect(rowLines(rowView({ checkErrors: { '1': { ...HTTP_429, at: READ_AT } } }))[0]).toBe('andres@lutsohealth.com · Company · Ultra  18:34 Failed to update (HTTP 429)')
   expect(rowLines(rowView({ checkErrors: { '1': { why: 'the usage call failed to connect', at: READ_AT } } }))[0]).toBe('andres@lutsohealth.com · Company · Ultra  18:34 Failed to update')
+})
+
+// C9 (puma-eslxj.10, problem g part 2): the row fitted to the pane's width, the buttons at a line's end. A login with
+// Remove beside its slot ends in `[ Remove ]`, a gap and the slot `[ Use now ]`: 23 cells.
+const ENDS = 23
+/** The row fitted to `columns`: each line's text, the line the buttons end ('own' where they take a line of their own). */
+function fitted(v: View, columns: number, account = v.accounts[0] ?? ANDRES) {
+  const f = fitRow(rowOf(v, account, ROW_NOW, TALLINN), columns, ENDS)
+  const lines = f.lines.map(line => line.map(p => p.text).join(''))
+  return { lines, end: f.lines[f.endLine]?.length === 0 ? 'own' : f.endLine }
+}
+const L1 = 'andres@lutsohealth.com · Company · Ultra  updated 18:34'
+const FAILED_L1 = 'andres@lutsohealth.com · Company · Ultra  18:39 Failed to update (HTTP 429)'
+
+test('at 82 columns the operator\'s row holds its buttons on line 1; at 64 they take a line of their own after line 2', () => {
+  expect(fitted(rowView(), 82)).toEqual({ lines: [L1, OPERATOR_LINE_2], end: 0 })
+  expect(fitted(rowView(), 64)).toEqual({ lines: [L1, OPERATOR_LINE_2, ''], end: 'own' })
+})
+
+test('with no Company the row is the same but for line 1, at 82 and at 64', () => {
+  const own = { ...ANDRES, orgName: "andres@lutsohealth.com's Organization" }
+  const l1 = 'andres@lutsohealth.com · Ultra  updated 18:34'
+  expect(fitted(rowView({}, own), 82)).toEqual({ lines: [l1, OPERATOR_LINE_2], end: 0 })
+  expect(fitted(rowView({}, own), 64)).toEqual({ lines: [l1, OPERATOR_LINE_2, ''], end: 'own' })
+})
+
+test('a failed read\'s longer line 1 moves the buttons to the end of line 2 where they fit, else to a line of their own', () => {
+  const v = rowView({ checkErrors: { '1': HTTP_429 } })
+  expect(fitted(v, 82)).toEqual({ lines: [FAILED_L1, OPERATOR_LINE_2, ''], end: 'own' })
+  const short = rowView({ checkErrors: { '1': HTTP_429 }, readings: { '1': { sevenDay: { pct: 31, resetsAt: ROW_WEEK_END }, noFiveHour: true, at: READ_AT, by: '1' } } })
+  expect(fitted(short, 82)).toEqual({ lines: [FAILED_L1, 'Used ▰▰▰▱▱▱▱▱▱▱ 31% Fable –  resets 2d 3h 14m'], end: 1 })
+})
+
+test('a line 1 wider than the pane cuts the Company first, then the email\'s middle, never the state', () => {
+  const v = rowView({ checkErrors: { '1': HTTP_429 } })
+  // 75 cells: 2 over 73 come off the Company alone; 11 over 64 take the Company to one letter, then 6 from the email.
+  expect(fitted(v, 73).lines[0]).toBe('andres@lutsohealth.com · Comp… · Ultra  18:39 Failed to update (HTTP 429)')
+  expect(fitted(v, 64)).toEqual({ lines: ['andres@l…lth.com · C… · Ultra  18:39 Failed to update (HTTP 429)', OPERATOR_LINE_2, ''], end: 'own' })
+  expect(fitted(v, 56).lines[0]).toBe('andr…com · C… · Ultra  18:39 Failed to update (HTTP 429)')
+})
+
+test('a login with no reading, no Fable row, a 5-hour window or a sign-in needed fits as the operator drew each, at 82 and 64', () => {
+  const noReading = rowView({ readings: {}, readAt: {} })
+  expect(fitted(noReading, 82)).toEqual({ lines: ['andres@lutsohealth.com · Company · Ultra', 'Used ▱▱▱▱▱▱▱▱▱▱ no reading yet'], end: 0 })
+  expect(fitted(noReading, 64)).toEqual({ lines: ['andres@lutsohealth.com · Company · Ultra', 'Used ▱▱▱▱▱▱▱▱▱▱ no reading yet'], end: 1 })
+  const noFable = rowView({ readings: { '1': { sevenDay: { pct: 31, resetsAt: ROW_WEEK_END }, noFiveHour: true, at: READ_AT, by: '1' } } })
+  expect(fitted(noFable, 82)).toEqual({ lines: [L1, 'Used ▰▰▰▱▱▱▱▱▱▱ 31% Fable –  resets 2d 3h 14m'], end: 0 })
+  expect(fitted(noFable, 64)).toEqual({ lines: [L1, 'Used ▰▰▰▱▱▱▱▱▱▱ 31% Fable –  resets 2d 3h 14m', ''], end: 'own' })
+  const max = { ...ANDRES, tier: 'default_claude_max_5x' }
+  const five = rowView({ readings: { '1': { sevenDay: { pct: 31, resetsAt: ROW_WEEK_END }, fable: { pct: 38, resetsAt: ROW_WEEK_END }, fiveHour: { pct: 50, resetsAt: ahead(0, 1, 20) }, at: READ_AT, by: '1' } }, noFiveHour: { '1': false } }, max)
+  const maxL1 = 'andres@lutsohealth.com · Company · Max  updated 18:34'
+  expect(fitted(five, 82)).toEqual({ lines: [maxL1, OPERATOR_LINE_2, '5h ▰▰▰▰▰▱▱▱▱▱ 50%  resets 1h 20m'], end: 0 })
+  expect(fitted(five, 64)).toEqual({ lines: [maxL1, OPERATOR_LINE_2, '', '5h ▰▰▰▰▰▱▱▱▱▱ 50%  resets 1h 20m'], end: 'own' })
+  const signIn = rowView({ health: { '1': { kind: 'login-needed', why: 'sign-in expired' } } })
+  expect(fitted(signIn, 82)).toEqual({ lines: ['andres@lutsohealth.com · Company · Ultra  ⚠ sign in needed', OPERATOR_LINE_2, ''], end: 'own' })
+  expect(fitted(signIn, 64)).toEqual({ lines: ['andres@lutsohealth.com · Company · Ultra  ⚠ sign in needed', OPERATOR_LINE_2, ''], end: 'own' })
+})
+
+test('the bars carry the percent used, so the pane colors them by the room left; labels and dashes carry none', () => {
+  const [, line2] = rowOf(rowView(), ANDRES, ROW_NOW, TALLINN).lines
+  expect(line2?.map(p => p.used)).toEqual([undefined, 31, undefined, 38, undefined])
+})
+
+// Review C8-R1 Opus advisory [STATUS-OF-ANOTHER-CALL] (RULING 4525, 4538): the row's HTTP status is the usage call's.
+test('a failure of another call draws Failed to update with no status: the status is the usage call\'s alone', () => {
+  const profile = { why: 'the profile call answered HTTP 403, so its usage is not read until it names the sign-in', at: FAILED_AT }
+  expect(rowLines(rowView({ checkErrors: { '1': profile } }))[0]).toBe('andres@lutsohealth.com · Company · Ultra  18:39 Failed to update')
+})
+
+test('the account the Chrome extension is signed in to says Chrome after its plan', () => {
+  expect(rowLines(rowView({ chromeAccountId: '1' }))[0]).toBe('andres@lutsohealth.com · Company · Ultra · Chrome  updated 18:34')
 })

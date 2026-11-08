@@ -5388,3 +5388,88 @@ test('a login whose only usage answer stored no reading draws no updated time ov
   expect([w.usageCalls.includes('tok-2'), store.has('usage:2')]).toEqual([true, false])
   expect(lineOne(store, '2')).not.toMatch(/updated/)
 })
+
+// Review C8-R1 boot-stale (Codex) [ROWS-LAG-ONE-MERGE] (RULING 4521, 4538): a session's own read reaches the rows at
+// once, not at the next minute's merge, so a session that ends within that minute leaves them current.
+test('boot success refreshes the exported row before the first minute tick', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.usage['tok-1'] = [null, 30]
+  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off' }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  expect(store.has('usage:1')).toBe(true)
+  expect((store.get('usage-due:1') as { at?: number } | undefined)?.at).toBeDefined()
+  expect(lineOne(store, '1')).toMatch(/  updated \d\d:\d\d$/)
+})
+
+test('boot failure refreshes the exported row before the first minute tick', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.failing = { 'tok-1': 429 }
+  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off' }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  expect(store.get('check-error:1')).toMatchObject({ why: expect.stringMatching(/HTTP 429/) })
+  expect(lineOne(store, '1')).toMatch(/Failed to update \(HTTP 429\)$/)
+})
+
+// C9 (puma-eslxj.10, problem g part 2): the pane draws each account's row fitted to its body's width, the buttons at
+// the end of the line that holds them, with no id column and no separate failure line.
+
+type DrawnNode = { type?: string; props?: Record<string, unknown>; children?: unknown[] }
+/** The text an element shows: its strings, and its Texts' strings, in order. */
+const shownText = (n: unknown): string =>
+  typeof n === 'string' ? n : typeof n === 'object' && n !== null && (n as DrawnNode).type !== 'Button' ? ((n as DrawnNode).children ?? []).map(shownText).join('') : ''
+/** The Buttons under an element, by key. */
+const buttonsIn = (n: unknown): string[] => {
+  if (typeof n !== 'object' || n === null) return []
+  const { type, props, children } = n as DrawnNode
+  return type === 'Button' ? [String(props?.key ?? '')] : (children ?? []).flatMap(buttonsIn)
+}
+/** The pane's row lines at `bodyColumns`, by their Box's key `line-<id>-<n>`: each line's text and its Buttons. */
+async function drawnLines($: Engine, bodyColumns: number): Promise<Record<string, { text: string; buttons: string[] }>> {
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: { ...PANE_PROPS, bodyColumns } })
+  const tree = await pane.drawn()
+  await pane.unmount()
+  const out: Record<string, { text: string; buttons: string[] }> = {}
+  const walk = (n: unknown): void => {
+    if (typeof n !== 'object' || n === null) return
+    const { type, props, children } = n as DrawnNode
+    const key = props?.key
+    if (type === 'Box' && typeof key === 'string' && key.startsWith('line-')) out[key] = { text: shownText(n), buttons: buttonsIn(n) }
+    ;(children ?? []).forEach(walk)
+  }
+  walk(tree)
+  return out
+}
+
+test('at 82 columns the pane draws each account\'s two row lines as the rows key holds them, the buttons ending line 1', async ($, on) => {
+  const { store } = await rowsWorld($, on)
+  const lines = await drawnLines($, 82)
+  const stored = rowsOf(store)?.rows ?? []
+  // The seed: both accounts have stored rows.
+  expect(stored.map(r => r.id)).toEqual(['1', '2'])
+  for (const r of stored) {
+    expect([r.id, [lines[`line-${r.id}-0`]?.text, lines[`line-${r.id}-1`]?.text]]).toEqual([r.id, r.lines])
+    expect([r.id, lines[`line-${r.id}-0`]?.buttons.length]).not.toEqual([r.id, 0])
+  }
+  expect(Object.keys(lines).filter(k => k.startsWith('line-2-'))).toEqual(['line-2-0', 'line-2-1'])
+})
+
+test('a pane too narrow for any row line and its buttons gives the buttons a line of their own after line 2', async ($, on) => {
+  const { store } = await rowsWorld($, on)
+  const lines = await drawnLines($, 50)
+  expect([lines['line-2-0']?.buttons, lines['line-2-1']?.buttons, lines['line-2-2']?.text]).toEqual([[], [], ''])
+  expect(lines['line-2-2']?.buttons).toContain('ask-remove-2')
+  expect(lines['line-2-1']?.text).toBe(rowsOf(store)?.rows?.find(r => r.id === '2')?.lines[1])
+})
+
+test('the pane draws no id column and no separate failure line: a failed read ends line 1 instead', async ($, on) => {
+  const { store } = await rowsWorld($, on, true)
+  const lines = await drawnLines($, 82)
+  const text = await paneText($)
+  expect([text.includes('its last usage check failed'), text.split('\n').includes('1'), text.split('\n').includes('2')]).toEqual([false, false, false])
+  expect(lines['line-1-0']?.text).toMatch(/  \d\d:\d\d Failed to update \(HTTP 429\)$/)
+  expect(lines['line-1-0']?.text).toBe(lineOne(store, '1'))
+})
