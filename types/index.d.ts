@@ -134,6 +134,8 @@ export type View = {
   noFiveHour?: Record<string, boolean>
   /** Each login's week a stop marked spent, under its own key, `week-mark:<id>`, for the reason `Mark` gives. */
   weekMarks?: Record<string, Mark>
+  /** Each login's Fable week a stop marked spent, under its own key, `fable-mark:<id>`, which no save of a reading writes. */
+  fableMarks?: Record<string, Mark>
   /** Each login's last usage check that failed, under `check-error:<id>`, until one succeeds: what failed, and when. */
   checkErrors?: Record<string, CheckError>
   health: Record<string, Health>

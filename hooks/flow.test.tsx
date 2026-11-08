@@ -3799,10 +3799,10 @@ for (const [name, by] of [['no owner', undefined], ['another login as owner', '2
     await start($, clock)
     await $.classic.StopFailure({ error: 'rate_limit', last_assistant_message: 'You have reached your Fable limit' })
     await clock.settle()
-    // The stop stores its Fable mark under usage:1, and takes no week from the reading no login owns.
-    const stored = store.get('usage:1') as { sevenDay?: unknown; src?: string } | undefined
-    expect(stored?.src).toBe('stop')
-    expect(stored?.sevenDay).toBeUndefined()
+    // C6 (puma-eslxj.7), a changed expected value. SOURCE: the C6 CASE, RULING 4467: the stop stores its Fable mark
+    // under fable-mark:1, not usage:1, so it writes no reading at all and takes no week from the one no login owns.
+    expect(markOf(store.get('fable-mark:1'))[0]).toBe(100)
+    expect(store.get('usage:1')).toBeUndefined()
   })
 }
 

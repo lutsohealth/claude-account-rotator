@@ -597,12 +597,15 @@ const BAR_WIDTH = 20
  * when it resets: beside it, or under the bar on a narrow pane. A plan that
  * reports no such window (a Team seat's week) says so.
  */
+/** A window row's label column: its longest label, `Fable`, and a space. */
+const LABEL_WIDTH = 6
+
 function windowRow(ui: Ui, fill: Fill, isActive: boolean, name: string, hasReading: boolean, w: UsageWindow | undefined, now: number) {
   const { Box, Text } = ui
   const left = roomLeft(w, now)
   return (
     <Box flexDirection="row" marginLeft={3}>
-      <Box width={5} flexShrink={0}>
+      <Box width={LABEL_WIDTH} flexShrink={0}>
         <Text dimColor={!isActive}>{name}</Text>
       </Box>
       <Box flexDirection="row" flexWrap="wrap" columnGap={2}>
@@ -618,6 +621,29 @@ function windowRow(ui: Ui, fill: Fill, isActive: boolean, name: string, hasReadi
         </Box>
         {w?.resetsAt !== undefined && left !== undefined && left < 100 && <Text dimColor={!isActive}>resets {untilText(w.resetsAt, now)}</Text>}
       </Box>
+    </Box>
+  )
+}
+
+/** The plans with a separate weekly limit for Fable: on these, a login whose usage lists no Fable week draws it unknown. */
+const HAS_FABLE_WEEK = /^(max|ultra)\b/i
+
+/**
+ * A login's Fable week: the one its reading holds, on any plan, as a body listed it or a stop marked it; else on Max
+ * and Ultra a dash, as the week is unknown, never 0%; else nothing.
+ */
+function fableRow(ui: Ui, view: View, a: Account, isActive: boolean, now: number) {
+  const { Box, Text } = ui
+  const fable = view.readings[a.id]?.fable
+  if (fable !== undefined) return windowRow(ui, view.footer.fill, isActive, 'Fable', true, fable, now)
+  const plan = planName(a, hasNoFiveHour(view, a.id))
+  if (plan === undefined || !HAS_FABLE_WEEK.test(plan)) return undefined
+  return (
+    <Box flexDirection="row" marginLeft={3}>
+      <Box width={LABEL_WIDTH} flexShrink={0}>
+        <Text dimColor={!isActive}>Fable</Text>
+      </Box>
+      <Text dimColor>–</Text>
     </Box>
   )
 }
@@ -676,7 +702,7 @@ function lineEnd(ui: Ui, view: View, a: Account, act: Actions) {
 /**
  * One login: who it is at the left of its first line, its state and presses
  * at the right (under it, still at the right, on a pane too narrow for both),
- * then its two windows. The login in use is drawn bright, the rest dim.
+ * then its windows: the 5-hour one where it has one, the week, the Fable week. The login in use is drawn bright, the rest dim.
  */
 function accountRows(ui: Ui, view: View, a: Account, now: number, act: Actions) {
   const { Box, Text } = ui
@@ -707,6 +733,7 @@ function accountRows(ui: Ui, view: View, a: Account, now: number, act: Actions) 
       </Box>
       {!hasNoFiveHour(view, a.id) && windowRow(ui, view.footer.fill, isActive, '5h', r !== undefined, r?.fiveHour, now)}
       {windowRow(ui, view.footer.fill, isActive, 'week', r !== undefined, r?.sevenDay, now)}
+      {fableRow(ui, view, a, isActive, now)}
       {expiry !== undefined && expiry - now < SIGN_IN_WARN_MS && (
         <Text color="warning">   sign-in runs out {untilText(expiry, now)}; signing in again renews it</Text>
       )}

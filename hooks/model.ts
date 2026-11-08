@@ -383,6 +383,29 @@ export function withWeekMark(r: Reading | undefined, mark: Mark | undefined, now
 }
 
 /**
+ * A reading with the Fable week a stop marked spent, until the mark's reset: a
+ * Fable stop says the week was full, so a body of the same week that reads it
+ * lower lags the stop. A body whose Fable week resets over an hour after the
+ * mark's reads a new week, which ends the mark; one that resets after the stop
+ * and before the mark ends a mark that guessed a week from the stop at that
+ * real reset. A week that reset before the stop is an older one, and says nothing.
+ */
+export function withFableMark(r: Reading | undefined, mark: Mark | undefined, now: number): Reading | undefined {
+  if (mark === undefined) return r
+  const read = r?.fable?.resetsAt
+  if (read !== undefined && Date.parse(read) - Date.parse(mark.resetsAt) > SAME_WEEK_MS) return r
+  const isMarksWeek = read !== undefined && Date.parse(read) > mark.at && Date.parse(read) < Date.parse(mark.resetsAt)
+  const resetsAt = isMarksWeek ? read : mark.resetsAt
+  if (Date.parse(resetsAt) <= now) return r
+  return { ...(r ?? { at: mark.at }), fable: { pct: mark.pct, resetsAt, isStop: true } }
+}
+
+/** Of two marks, the one that ends later: a write keeps it, as the store has no conditional write. */
+export function laterMark(held: Mark | undefined, mark: Mark): Mark {
+  return held !== undefined && Date.parse(held.resetsAt) >= Date.parse(mark.resetsAt) ? held : mark
+}
+
+/**
  * A reading with the 5-hour window a stop marked spent, until the mark's reset
  * time and no sooner: no read ends a mark, so no order between a reading and a
  * mark matters. A read that reports no 5-hour window takes no mark.

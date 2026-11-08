@@ -925,6 +925,12 @@ test('a mark that guessed a week from the stop ends at the earlier reset a body 
   expect(withFableMark({ at: NOW }, stopMark(guessed), NOW)?.fable?.resetsAt).toBe(guessed)
 })
 
+test('a stored Fable week that reset before the stop is an older week: it leaves the mark whole', () => {
+  const guessed = new Date(NOW + 7 * 24 * HOUR).toISOString()
+  const older = new Date(NOW - HOUR).toISOString()
+  expect(withFableMark(fableAt(100, older), stopMark(guessed), NOW)?.fable).toEqual({ pct: 100, resetsAt: guessed, isStop: true })
+})
+
 test('of two Fable marks the one that ends later stands, and of one, that one', () => {
   const later = new Date(Date.parse(FABLE_END) + HOUR).toISOString()
   expect(laterMark(stopMark(), stopMark(later))).toEqual(stopMark(later))
