@@ -151,6 +151,16 @@ class ListText(StoreCase):
 
 
 class ListJson(StoreCase):
+    def test_json_gives_an_account_with_no_row_no_lines_and_says_so_and_text_keeps_the_placeholder(self) -> None:
+        # puma-eslxj.24 [STATUS-AS-DATA]: a status is no data; the text is for a person.
+        store = json.loads(json.dumps(self.fixture["store"]))
+        store["accounts"].append({"id": "3", "slot": "/home/test/.claude/accounts/3", "email": "three@example.com"})
+        path = self.write("third.json", store)
+        accounts = json.loads(self.list_in_process("--json", store=path)[1])["result"]["accounts"]
+        self.assertEqual([(a["id"], a["hasRow"], bool(a["lines"])) for a in accounts], [("1", True, True), ("2", True, True), ("3", False, False)])
+        self.assertEqual(accounts[2]["lines"], [])
+        self.assertIn("three@example.com  no row stored yet", self.list_in_process(store=path)[1])
+
     def test_json_is_orcas_envelope_with_the_mods_own_fields_per_account(self) -> None:
         code, out = self.list_in_process("--json")
         data = json.loads(out)

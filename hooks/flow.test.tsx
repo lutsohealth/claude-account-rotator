@@ -60,6 +60,10 @@ type World = {
   markAtStart?: string
   /** Claude Code's security policy refuses every variable but the slot. */
   refuseMark?: boolean
+  /** How the store refuses the `store-id` key: its write, or its read and its write. */
+  storeIdFails?: 'write' | 'read'
+  /** What the mod wrote to the debug log. */
+  logged?: string[]
   /** Runs before each write of a shared store, to read what stood before it. */
   onStoreSet?: (key: string, value: unknown) => void
   /** Runs after each write of a shared store: another session's write that lands next. */
@@ -153,8 +157,9 @@ const ran = (exitCode: number, stdout: string): ProcessRunResult => ({
 
 /** `$.store` over `entries`, which the test writes mid-run as another session on the Mac would. */
 function sharedStore(on: On, entries: Map<string, unknown>, w: World): void {
-  on('store.get', (_$, e) => ({ value: entries.get(e.key) }))
+  on('store.get', (_$, e) => (e.key === 'store-id' && w.storeIdFails === 'read' ? { deny: 'store: refused' } : { value: entries.get(e.key) }))
   on('store.set', (_$, e) => {
+    if (e.key === 'store-id' && w.storeIdFails !== undefined) return { deny: 'store: refused' }
     w.onStoreSet?.(e.key, e.value)
     entries.set(e.key, e.value)
     w.afterStoreSet?.(e.key)
@@ -296,7 +301,10 @@ function world(on: On, w: World, store: Record<string, unknown> | Map<string, un
     w.toasts.push(e.text)
     return { value: undefined }
   })
-  on('ui.log', () => ({ value: undefined }))
+  on('ui.log', (_$, e) => {
+    w.logged = [...(w.logged ?? []), e.text]
+    return { value: undefined }
+  })
   on('ui.notify', (_$, e) => {
     w.notices.push(e.text)
     return { value: { isSent: true, channel: 'iterm2' } }
@@ -7172,6 +7180,47 @@ test('two sessions on one store, accounts: a write that took the place of the ne
   await untilTick(clock)
   expect(resultOf(w, N2)).toMatchObject({ ok: true, accountId: '9' })
   expect(String(resultOf(w, N2)?.message)).toMatch(/account 9 /)
+})
+
+// puma-eslxj.28 [STORE-ID-THROW-SKIPS-MINUTE]: a refused store-id rejects no merge, so the minute settles and checks, in that order: a check read means the settle ran.
+for (const way of ['write', 'read'] as const) {
+  test(`a refused store-id ${way} skips none of the minute, and says so in the debug log`, async ($, on) => {
+    const { w, store, clock } = await selectWorld($, on)
+    store.delete('store-id')
+    store.delete('usage-due:2')
+    w.usageCalls = []
+    w.logged = []
+    w.storeIdFails = way
+    await untilTick(clock)
+    expect(w.usageCalls, 'the minute did not reach its check').toContain('tok-2')
+    expect((w.logged ?? []).filter(line => /store-id/.test(line)).length, 'the refusal is logged on its own').toBeGreaterThan(0)
+  })
+}
+
+test('a session that starts under a refused store-id write still boots and reads its accounts', async ($, on) => {
+  const w = fresh()
+  w.storeIdFails = 'write'
+  const { store } = await selectWorld($, on, undefined, undefined, w)
+  expect(store.has('store-id')).toBe(false)
+  expect(w.usageCalls.length, 'boot stopped at its merge').toBeGreaterThan(0)
+})
+
+test('two sessions on one store, store-id: a refused write is tried again the next minute, and an id another session wrote meanwhile stands', async ($, on) => {
+  const { w, store, clock } = await selectWorld($, on)
+  store.delete('store-id')
+  w.storeIdFails = 'write'
+  await untilTick(clock)
+  expect(store.has('store-id')).toBe(false)
+  w.storeIdFails = undefined
+  await untilTick(clock)
+  expect(typeof store.get('store-id'), 'the next minute did not write it').toBe('string')
+  store.delete('store-id')
+  w.storeIdFails = 'write'
+  await untilTick(clock)
+  w.storeIdFails = undefined
+  store.set('store-id', 'theirs')
+  await untilTick(clock)
+  expect(store.get('store-id')).toBe('theirs')
 })
 
 // Review C13-R2 RED-READBACK-IDENTITY [AFTER-SIGN-IN]: the slot alone is not the sign-in this session read.
