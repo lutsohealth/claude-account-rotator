@@ -1135,8 +1135,7 @@ async function retryHeld($: Host): Promise<void> {
   if (h === undefined) return
   if (h.isRotation) {
     if (view.rotateTo === 'off' || view.isSwitchBlocked) {
-      // A press that took its place meanwhile is no rotation's: it stands.
-      await setView($, v => (v.held?.isRotation === true ? { ...v, held: undefined } : v))
+      await setView($, v => ({ ...v, held: undefined }))
       return
     }
     if (isConnectingChrome) return

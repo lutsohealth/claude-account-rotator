@@ -109,6 +109,7 @@ type World = {
   env: Record<string, string>
   /** Claude Code's security policy refuses every switch, as in a session on a Team seat. */
   refuseEnv?: boolean
+  breakEnv?: boolean
   /**
    * Claude in Chrome, where the session has it: the slots of the accounts a
    * Chrome extension is signed in to, one per Chrome profile, and the slot its
@@ -196,6 +197,7 @@ function world(on: On, w: World, store: Record<string, unknown> | Map<string, un
       return { value: {} }
     }
     if (w.refuseEnv) return { deny: `env (managed): ${e.name} is not for plugins outside policy to change` }
+    if (w.breakEnv) return { deny: 'no policy said this' }
     // The mod sets the slot in use at its start, to learn whether it may switch: not a switch.
     if ((e.value ?? '') === slot) return { value: {} }
     slot = e.value ?? ''
@@ -2147,6 +2149,16 @@ test('a switch held back for a token about to refresh is said once and made once
 
 // puma-eslxj.29 [HELD-LOST-AT-RELOAD] (RULING 4708): a reload cancels the module's waits and loses its variables, and
 // the kit cannot reload a module. So these pin what survives one: the view holds the switch, and session.start's tick retries it.
+function watchedView(on: On): () => View | undefined {
+  let view: View | undefined
+  on('state.set', async (_$, e, next) => {
+    const { key, value } = e as unknown as { key: string; value: View }
+    if (key === 'view') view = value
+    return next(e)
+  })
+  return () => view
+}
+
 test('a switch held back is in the view until it lands, and session.start\'s minute tick lands it', async ($, on) => {
   const w = fresh()
   w.keychain['Claude Code-credentials'] = blob('tok-1', NOW + 5 * 60_000)
@@ -2154,22 +2166,35 @@ test('a switch held back is in the view until it lands, and session.start\'s min
   w.usage['tok-1'] = [20, 30]
   w.usage['tok-2'] = [10, 30]
   const clock = world(on, w, TWO_LOGINS)
-  let view: View | undefined
-  on('state.set', async (_$, e, next) => {
-    const { key, value } = e as unknown as { key: string; value: View }
-    if (key === 'view') view = value
-    return next(e)
-  })
+  const view = watchedView(on)
   await start($, clock)
   // Between two ticks, so a wait of the switch's own would come due after the next one.
   await clock.set(NOW + 70_000)
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
   await pane.press({ key: 'rotate' })
   await clock.settle()
-  expect([view?.activeId, view?.held?.target.id, w.envSets]).toEqual(['1', '2', []])
+  expect([view()?.activeId, view()?.held?.target.id, w.envSets]).toEqual(['1', '2', []])
   w.keychain['Claude Code-credentials'] = blob('tok-1', NOW + 8 * HOUR)
   await clock.set(NOW + 121_000)
-  expect([view?.held, w.envSets]).toEqual([undefined, [{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }]])
+  expect([view()?.held, w.envSets]).toEqual([undefined, [{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }]])
+  await pane.unmount()
+})
+
+test('a held switch\'s retry that throws is logged', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1', NOW + 5 * 60_000)
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [20, 30]
+  w.usage['tok-2'] = [10, 30]
+  const clock = world(on, w, TWO_LOGINS)
+  await start($, clock)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  await pane.press({ key: 'use-2' })
+  await clock.settle()
+  w.breakEnv = true
+  w.keychain['Claude Code-credentials'] = blob('tok-1', NOW + 8 * HOUR)
+  await clock.advance(60_000)
+  expect((w.logged ?? []).filter(line => line.includes('held switch retry failed'))).toHaveLength(1)
   await pane.unmount()
 })
 
@@ -3817,6 +3842,21 @@ for (const rotateTo of ['reset', 'room', 'order']) {
     })
   }
 }
+
+test('a switch the rotation asked for leaves the view once the rotation is off: turned on again, the rotation asks afresh', async ($, on) => {
+  const w = fresh()
+  const clock = await guarded(on, w, {}, [20, 30, 100])
+  const view = watchedView(on)
+  await start($, clock)
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  expect(view()?.held?.isRotation).toBe(true)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  await pane.press({ key: 'rotate-to-off' })
+  await clock.advance(60_000)
+  expect(view()?.held).toBe(undefined)
+  await pane.unmount()
+})
 
 test('Use now held back for a token about to refresh still lands when the rotation is turned off meanwhile: the person pressed for it', async ($, on) => {
   const w = fresh()
