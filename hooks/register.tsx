@@ -1327,7 +1327,7 @@ async function askChrome($: Host): Promise<ChromeAnswer> {
 
 /** With no account named for the Chrome extension yet, the one a browser answered as is it, for every session. */
 async function learnChrome($: Host, account: Account): Promise<void> {
-  if ((await getView($)).chromeAccountId !== undefined) return
+  if ((await $.store.get('chrome-account')) !== undefined) return
   await setChromeAccount($, account.id)
   tell($, `Claude in Chrome connects as Claude account ${label(account)}: your Chrome extension is signed in to it.`)
 }
@@ -1634,7 +1634,7 @@ async function removeAccount($: Host, id: string): Promise<void> {
   }
   await $.process.run(['claude', 'auth', 'logout'], { env: slotEnv(account.slot), timeoutMs: 20_000 })
   await saveAccounts($, (await loadAccounts($)).filter(a => a.id !== id))
-  if (view.chromeAccountId === id) await setChromeAccount($, undefined)
+  if ((await $.store.get('chrome-account')) === id) await setChromeAccount($, undefined)
   await noteChromeAccount($, id, false)
   await $.store.delete(`reading:${id}`)
   await $.store.delete(`usage:${id}`)
