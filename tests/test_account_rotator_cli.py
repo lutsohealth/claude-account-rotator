@@ -750,11 +750,17 @@ class Sweep(RequestCase):
             self.assertEqual((done.returncode, "Traceback" in done.stderr), (3, False), done.stderr)
         self.assertEqual(sorted(p.name for p in self.requests.iterdir()), sorted([*stays, "dddddddddd.json", "eeeeeeeeee.json"]))
 
-    def test_a_file_a_second_cli_swept_first_is_ignored(self) -> None:
-        # Two CLIs sweeping: the one that finds a listed file gone carries on.
+    def test_a_file_a_second_cli_swept_first_is_ignored_and_the_next_is_swept(self) -> None:
+        # Review C25 RACE-TEST-WITHOUT-ASSERTION. Two CLIs sweeping: the one that finds a listed file gone carries on.
+        self.requests.mkdir()
+        later = self.requests / "bbbbbbbbbb.json"
+        later.write_text("{}", encoding="utf-8")
+        old = time.time() - 301
+        os.utime(later, (old, old))
         cli = load_cli()
-        with patch.object(cli.os, "lstat", side_effect=FileNotFoundError), patch.object(cli.os, "listdir", return_value=["aaaaaaaaaa.json"]):
-            cli.sweep(str(self.tmp))
+        with patch.object(cli.os, "listdir", return_value=["aaaaaaaaaa.json", later.name]):
+            cli.sweep(str(self.requests))
+        self.assertFalse(later.exists())
 
 
 class ListThisSession(StoreCase):
