@@ -613,15 +613,12 @@ class Use(RequestCase):
         data = json.loads(done.stdout)
         self.assertEqual((done.returncode, data["ok"], data["result"]["account"], data["result"]["thisSessionAccountId"], "in a few minutes" in data["result"]["message"]), (0, True, "2", "1", True), done.stderr)
 
-    def test_help_names_the_verb_and_what_it_moves(self) -> None:
+    def test_help_names_the_verb_the_mark_the_minute_and_connect(self) -> None:
         for args in (["account", "--help"], ["account", "use", "--help"]):
             done = run(CLI, *args)
             self.assertEqual((done.returncode, "use" in done.stdout), (0, True), done.stderr)
-        self.assertIn(SESSION_VAR, run(CLI, "account", "use", "--help").stdout)
-
-    def test_help_says_a_background_bash_waits_for_the_minute_and_connect_refuses(self) -> None:
         said = " ".join(run(CLI, "account", "use", "--help").stdout.split())
-        for words in ("background Bash", "--wait under 60", "Chrome connects"):
+        for words in (SESSION_VAR, "background Bash", "--wait under 60", "Chrome connects"):
             self.assertIn(words, said)
 
 
