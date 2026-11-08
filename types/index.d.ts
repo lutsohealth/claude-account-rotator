@@ -160,6 +160,21 @@ export type ChromeLink = { as?: string; isPaired: boolean; hasFailed?: boolean }
 /** A run of the footer's text: its color, and the lighter one it takes while the pointer is over the footer. */
 export type FooterRun = { text: string; color?: string; lit?: string; backgroundColor?: string; dimColor?: boolean }
 
+/**
+ * A stop marked on the login moved to before any response proved the switch (`since`, its start). `writes`: each
+ * store key the stop changed, with what stood there once its own usage read was in (`before`, undefined for none)
+ * and what it `written`. `setFableStop`: the stop set this session's Fable stop. `readAt`: when its own read was in.
+ * Kept only when a settle proves the switch, or a stop's own move leaves it; undone by every other end of the
+ * switch: a settle that finds it did not take, a give-up, another switch, the end of the process.
+ */
+export type ProvisionalStop = {
+  id: string
+  since: number
+  readAt: number
+  writes: Record<string, { before: unknown; written: unknown }>
+  setFableStop: boolean
+}
+
 /** Everything the footer, band and pane draw from. */
 export type View = {
   accounts: Account[]
@@ -224,6 +239,8 @@ export type View = {
   sessionMark?: string
   /** This session only: the switch the refresh guard holds back, tried each minute, kept by a reload; `carry`, a Fable stop's carry-on. */
   held?:{ target: Account; why: string; carry?: { need?: 'fable' }; isRotation: boolean }
+  /** This session only: a stop marked on the login moved to before any response proved the switch; a reload keeps it. */
+  provisionalStop?: ProvisionalStop
   /** This session only: the footer draws imitated usage, to judge its look. */
   demo?: boolean
   /** This session's terminal draws block characters from its font, short of the line, as Terminal.app does. */

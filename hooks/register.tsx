@@ -9,7 +9,7 @@ import type {
   SessionRateLimit,
 } from 'claude-code'
 
-import type { Account, CheckError, FiveHourLimit, FooterStyle, Health, Holder, LaunchOn, LaunchPick, Mark, Reading, ReadingSource, RotateTo, RotatorRequest, UsageDue, View } from '../types'
+import type { Account, CheckError, FiveHourLimit, FooterStyle, Health, Holder, LaunchOn, LaunchPick, Mark, ProvisionalStop, Reading, ReadingSource, RotateTo, RotatorRequest, UsageDue, View } from '../types'
 import {
   CHROME_SERVER,
   CHROME_TOOL,
@@ -138,22 +138,6 @@ const OLDER_WRITER_MS = 30 * 60_000
 /** The last response this session measured, and when: it names the login a stop during an unproven switch belongs to. */
 let lastMeasured: { at: number; reading: Reading | undefined } | undefined
 /**
- * A stop marked on the login moved to before any response proved the switch (`since`, its start). `writes`: each
- * store key the stop changed, with what stood there once its own usage read was in (`before`, undefined for none)
- * and what it `written`. `setFableStop`: the stop set this session's Fable stop. `readAt`: when its own read was in.
- * Kept only when a settle proves the switch, or a stop's own move leaves it; undone by every other end of the
- * switch: a settle that finds it did not take, a give-up, another switch, the end of the process.
- */
-type ProvisionalStop = {
-  id: string
-  since: number
-  readAt: number
-  writes: Record<string, { before: unknown; written: unknown }>
-  setFableStop: boolean
-}
-let provisionalStop: ProvisionalStop | undefined
-
-/**
  * The session ends whose process ends with them, by the engine's SessionEndReason: /exit and its keys, a logout, a
  * `-p` run done or a signal. A reason not named here keeps the stop's marks.
  */
@@ -165,8 +149,11 @@ const PROCESS_ENDS: ReadonlySet<string> = new Set(['prompt_input_exit', 'logout'
  */
 async function proveSwitch($: Host, id: string): Promise<void> {
   untaken.delete(id)
-  if (provisionalStop?.id === id) provisionalStop = undefined
-  await setView($, v => (v.pending?.id === id ? { ...v, pending: undefined } : v))
+  await setView($, v => ({
+    ...v,
+    provisionalStop: v.provisionalStop?.id === id ? undefined : v.provisionalStop,
+    pending: v.pending?.id === id ? undefined : v.pending,
+  }))
 }
 
 /** The keys a stop writes for a login, every session's: its marks, its reading, its `no-five-hour`. */
@@ -185,7 +172,8 @@ const sameValue = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSO
  * A second stop on the same unproven switch adds what it wrote and keeps what stood before the first.
  */
 async function recordStop($: Host, id: string, since: number, before: Record<string, unknown>, wasFableStopped: boolean, readAt: number): Promise<ProvisionalStop> {
-  const kept = provisionalStop?.since === since && provisionalStop.id === id ? provisionalStop : { id, since, readAt, writes: {}, setFableStop: false }
+  const { provisionalStop: stood } = await getView($)
+  const kept = stood?.since === since && stood.id === id ? stood : { id, since, readAt, writes: {}, setFableStop: false }
   const after = await stopKeys($, id)
   const writes = { ...kept.writes }
   for (const key of STOP_KEYS(id)) {
@@ -1184,7 +1172,7 @@ async function switchTo($: Host, target: Account, why: string, isQuiet = false, 
   }
   // A switch that replaces an unproven one ends it unproven. A stop's own move (it carries on) keeps what the stop
   // marked: the mark is why it moves. Any other drops it.
-  if (carry !== undefined) provisionalStop = undefined
+  if (carry !== undefined) await setView($, v => ({ ...v, provisionalStop: undefined }))
   else await undoProvisionalStop($)
   const now = await $.clock.now()
   movedAt = now
@@ -1345,9 +1333,12 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
     }
     if (owner === undefined) await debug($, `a stop while the switch to account ${view.pending?.id} is unproven marks no account`)
     else need = await markStop($, owner, stop.last_assistant_message, isProvisional ? snapshot : undefined)
-    if (isProvisional && owner !== undefined) provisionalStop = await recordStop($, active.id, since, before, wasFableStopped, readAt)
+    if (isProvisional && owner !== undefined) {
+      const record = await recordStop($, active.id, since, before, wasFableStopped, readAt)
+      await setView($, v => ({ ...v, provisionalStop: record }))
+    }
     // A stop a response has proven sets this session's Fable stop of its own: no provisional one may take it back.
-    else if (need === 'fable' && provisionalStop !== undefined) provisionalStop = { ...provisionalStop, setFableStop: false }
+    else if (need === 'fable') await setView($, v => (v.provisionalStop === undefined ? v : { ...v, provisionalStop: { ...v.provisionalStop, setFableStop: false } }))
   }
   // A switch still settling stays settling: only a new switch, or a response that proves one, ends it. The stop may
   // move the session meanwhile (maybeRotate lets a stop through a settling switch), and that switch settles anew.
@@ -1366,9 +1357,9 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
  * set it and no proven stop has since.
  */
 async function undoProvisionalStop($: Host): Promise<void> {
-  const p = provisionalStop
-  provisionalStop = undefined
+  const { provisionalStop: p } = await getView($)
   if (p === undefined) return
+  await setView($, v => ({ ...v, provisionalStop: undefined }))
   const read = await storedReading($, p.id)
   const isReadSince = read?.src === 'body' && read.at > p.readAt
   const gone: string[] = []
