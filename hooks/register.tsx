@@ -1787,7 +1787,7 @@ async function addAccount($: Host): Promise<void> {
 async function adoptSlot($: Host, slot: string): Promise<{ ok: boolean; message: string; accountId?: string; pickId?: string }> {
   const number = slotNumber(slot, (await $.env.get('HOME')) ?? '')
   if (number === undefined) return { ok: false, message: `${slot} is no numbered folder under ~/.claude/accounts, so nothing is added` }
-  const already = (a: Account) => ({ ok: true, message: `already account ${a.id}`, accountId: a.id })
+  const already = async (a: Account) => ({ ok: true, message: `already account ${a.id}`, accountId: a.id, pickId: (await pickAnswer($)).pickId })
   const listed = (await loadAccounts($)).find(a => a.slot === slot)
   if (listed !== undefined) return already(listed)
   const who = await signedInAs($, slot)

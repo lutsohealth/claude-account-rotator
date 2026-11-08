@@ -7096,7 +7096,7 @@ test('an add of a folder an account already lists says which, and changes nothin
   w.statusAsked = []
   w.files[`${REQUESTS}/${N1}.json`] = addRequest(N1, SLOT2, store.get('store-id'), clock.now())
   await untilTick(clock)
-  expect(resultOf(w, N1)).toMatchObject({ ok: true, accountId: '2', message: 'already account 2' })
+  expect(resultOf(w, N1)).toMatchObject({ ok: true, accountId: '2', message: 'already account 2', pickId: (store.get('launch-slot') as { id: string }).id })
   expect(JSON.stringify(store.get('accounts'))).toBe(before)
 })
 
