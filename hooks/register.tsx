@@ -681,6 +681,9 @@ async function holderOf($: Host, account: Account, credential: Credential, isLiv
   if (known?.token === token) return known
   if (!isLive) return undefined
   const { who, status } = await fetchIdentity($, credential.accessToken)
+  // Another session may have named this sign-in while the profile call ran: then it is not a new one.
+  const named = holderFrom(await $.store.get(`holder:${account.id}`))
+  if (named?.token === token) return named
   if (who?.email === undefined) {
     // No usage is read for a sign-in nobody has named: the pane says why, until a check names it.
     const what = status >= 200 && status < 300 ? 'the profile answer named no email' : `the profile call answered HTTP ${status}`
