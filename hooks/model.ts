@@ -26,7 +26,6 @@ export const EMPTY_VIEW: View = {
   accounts: [],
   readings: {},
   health: {},
-  holders: {},
   activeId: '1',
   footer: DEFAULT_FOOTER,
   rotateTo: DEFAULT_ROTATE_TO,

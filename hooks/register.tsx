@@ -361,7 +361,6 @@ function holderFrom(value: unknown): Holder | undefined {
 
 async function saveHolder($: Host, id: string, holder: Holder): Promise<void> {
   await $.store.set(`holder:${id}`, holder)
-  await setView($, v => ({ ...v, holders: { ...v.holders, [id]: holder } }))
 }
 
 /** Folds what other sessions stored into this session's view. */
@@ -375,7 +374,6 @@ async function mergeStore($: Host): Promise<void> {
   const checkErrors: Record<string, CheckError> = {}
   const readAt: Record<string, number> = {}
   const health: Record<string, Health> = {}
-  const holders: Record<string, Holder> = {}
   let hasOlderWriter = false
   for (const a of accounts) {
     const r = await storedReading($, a.id)
@@ -402,8 +400,6 @@ async function mergeStore($: Host): Promise<void> {
     if (goodAt !== undefined) readAt[a.id] = goodAt
     const h = await $.store.get(`health:${a.id}`)
     if (typeof h === 'object' && h !== null && typeof (h as Health).kind === 'string') health[a.id] = h as Health
-    const s = holderFrom(await $.store.get(`holder:${a.id}`))
-    if (s !== undefined) holders[a.id] = s
   }
   const footer = footerStyleFrom(await $.store.get('footer'))
   const rotateTo = rotateToFrom(await $.store.get('rotate-to'))
@@ -423,7 +419,6 @@ async function mergeStore($: Host): Promise<void> {
     const nextWeekMarks: Record<string, Mark> = {}
     const nextFableMarks: Record<string, Mark> = {}
     const nextHealth: Record<string, Health> = {}
-    const nextHolders: Record<string, Holder> = {}
     for (const a of accounts) {
       // The reading, the marks and no-five-hour come from the store alone: every save writes the store before the
       // view, and a key another session deleted (its undo, Remove, a sign-in as another account) leaves this view too.
@@ -444,10 +439,8 @@ async function mergeStore($: Host): Promise<void> {
       const own = v.health[a.id]
       const h = signingIn === a.id ? own : (health[a.id] ?? own)
       if (h !== undefined) nextHealth[a.id] = h
-      const holder = holders[a.id] ?? v.holders[a.id]
-      if (holder !== undefined) nextHolders[a.id] = holder
     }
-    return { ...v, accounts, readings: nextReadings, marks: nextMarks, noFiveHour: nextNoFiveHour, weekMarks: nextWeekMarks, fableMarks: nextFableMarks, checkErrors, readAt, health: nextHealth, holders: nextHolders, footer, rotateTo, fiveHourLimit, weekLeave, launchOn, fableContinueText, chromeAccountId, chromeAccountIds, hasOlderWriter }
+    return { ...v, accounts, readings: nextReadings, marks: nextMarks, noFiveHour: nextNoFiveHour, weekMarks: nextWeekMarks, fableMarks: nextFableMarks, checkErrors, readAt, health: nextHealth, footer, rotateTo, fiveHourLimit, weekLeave, launchOn, fableContinueText, chromeAccountId, chromeAccountIds, hasOlderWriter }
   })
   await saveRows($, now)
 }
@@ -1658,16 +1651,14 @@ async function removeAccount($: Host, id: string): Promise<void> {
     const readings = { ...v.readings }
     const marks = { ...v.marks }
     const health = { ...v.health }
-    const holders = { ...v.holders }
     delete readings[id]
     delete marks[id]
     delete health[id]
-    delete holders[id]
     const { [id]: _none, ...noFiveHour } = v.noFiveHour ?? {}
     const { [id]: _week, ...weekMarks } = v.weekMarks ?? {}
     const { [id]: _fable, ...fableMarks } = v.fableMarks ?? {}
     const { [id]: _error, ...checkErrors } = v.checkErrors ?? {}
-    return { ...v, readings, marks, noFiveHour, weekMarks, fableMarks, checkErrors, health, holders, removing: undefined }
+    return { ...v, readings, marks, noFiveHour, weekMarks, fableMarks, checkErrors, health, removing: undefined }
   })
   // A launcher must never start a session on the account just removed.
   await saveLaunchPick($)

@@ -3009,7 +3009,7 @@ test('a view kept from the code before a hot reload, which lacks what this code 
   w.usage['tok-1'] = [20, 30]
   w.owners = { 'tok-1': 'one@example.com' }
   const clock = world(on, w, TWO_LOGINS)
-  // A hot reload keeps the view as the version before this one wrote it, with no `holders`: the first read finds that.
+  // A hot reload keeps the view as the version before this one wrote it, lacking what this code added: the first read finds that.
   const before ={ accounts: TWO_LOGINS.accounts, readings: {}, health: {}, activeId: '1', footer: DEFAULT_FOOTER, rotateTo: 'reset', hasFontBlocks: false }
   let isKept = false
   on('state.get', async (_$, e, next) => {
