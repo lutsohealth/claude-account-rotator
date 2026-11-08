@@ -2,6 +2,12 @@
 
 What each version of the account rotator changed. To get each one as Claude Code starts, turn on auto-update: in `/plugin`, open **Marketplaces**, pick **claude-account-rotator** and choose **Enable auto-update**. To update by hand, run `claude plugin marketplace update claude-account-rotator`, then `claude plugin update account-rotator@claude-account-rotator`, and start a new session.
 
+## 0.5.9-lutso.1 - 2026-11-08
+
+- **An account shows a 5-hour window only where it is known to have one**: its usage reported one, or a stop marked one. An account not read yet, such as one whose usage check keeps answering HTTP 429, no longer shows an empty **5h** row "no reading yet", and with no account known to have a 5-hour window the footer leaves out its top row and the panel its **5h limit** row (which stays while it is set to **off**, so it can be set on again).
+- **A 5-hour window stays known whatever the 5h limit is set to**, including one only a response reported.
+- **The footer no longer draws a blank top row** when its glyphs are off and the account in use has no 5-hour window while another does.
+
 ## 0.5.8-lutso.1 - 2026-11-08
 
 - **Each account shows its Fable week in the panel**, under its week: how much is left and when it resets, from the account's own usage. On Max and Ultra, which have a separate weekly limit for Fable, an account whose usage lists no Fable week yet shows **Fable –**: unknown, never 0%. Pro, Team and Enterprise show no Fable row unless their usage lists one.
