@@ -2694,8 +2694,8 @@ test('a Chrome guess that finds no browser stores no miss once another session h
   const w = fresh()
   const store = new Map<string, unknown>(Object.entries(TWO_LOGINS))
   // The other session names the extension's account while this session's guess is asking Chrome.
-  const extensions = Object.assign([SLOT2], {
-    includes(this: string[], slot: string) {
+  const extensions = Object.defineProperty([SLOT2], 'includes', {
+    value(this: string[], slot: string) {
       store.set('chrome-account', '2')
       return Array.prototype.includes.call(this, slot)
     },
