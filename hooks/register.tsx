@@ -1184,9 +1184,8 @@ async function switchTo($: Host, target: Account, why: string, isQuiet = false, 
   }
   // A switch that replaces an unproven one ends it unproven. A stop's own move (it carries on) keeps what the stop
   // marked: the mark is why it moves. Any other drops it.
-  const replaced = (await getView($)).pending
   if (carry !== undefined) provisionalStop = undefined
-  else if (replaced !== undefined) await undoProvisionalStop($, replaced)
+  else await undoProvisionalStop($)
   const now = await $.clock.now()
   movedAt = now
   moves += 1
@@ -1238,13 +1237,13 @@ async function settlePending($: Host, isResponse: boolean): Promise<void> {
     }
     if (from === undefined || !isSource(after)) {
       // No response proved either login: a stop marked on the one moved to is a guess, and every session reads marks.
-      await undoProvisionalStop($, pending)
+      await undoProvisionalStop($)
       await setView($, v => ({ ...v, pending: undefined }))
       tell($, `The switch to Claude account ${pending.id} has not shown in responses.`)
       return
     }
     untaken.add(pending.id)
-    await undoProvisionalStop($, pending)
+    await undoProvisionalStop($)
     try {
       await useSlot($, from.slot)
       movedAt = now
@@ -1360,16 +1359,16 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
 }
 
 /**
- * Gives back what a stop wrote on the login moved to before any response proved the switch `pending` (any switch,
- * when none is given), once the switch ends with no proof it took: the stop may have gone out on the login left.
- * A key goes back only while it still holds what the stop wrote (another session's write since stands), and its
+ * Gives back what a stop wrote on the login moved to before any response proved its switch, once a switch ends with
+ * no proof it took: the stop may have gone out on the login left. The record may name a switch a press already
+ * replaced, during the stop's own usage read. A key goes back only while it still holds what the stop wrote (another session's write since stands), and its
  * `no-five-hour` only while no usage read came after the stop's own; this session's Fable stop, only where the stop
  * set it and no proven stop has since.
  */
-async function undoProvisionalStop($: Host, pending?: { id: string; since: number }): Promise<void> {
+async function undoProvisionalStop($: Host): Promise<void> {
   const p = provisionalStop
   provisionalStop = undefined
-  if (p === undefined || (pending !== undefined && (p.id !== pending.id || p.since !== pending.since))) return
+  if (p === undefined) return
   const read = await storedReading($, p.id)
   const isReadSince = read?.src === 'body' && read.at > p.readAt
   const gone: string[] = []
