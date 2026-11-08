@@ -2,6 +2,12 @@
 
 What each version of the account rotator changed. To get each one as Claude Code starts, turn on auto-update: in `/plugin`, open **Marketplaces**, pick **claude-account-rotator** and choose **Enable auto-update**. To update by hand, run `claude plugin marketplace update claude-account-rotator`, then `claude plugin update account-rotator@claude-account-rotator`, and start a new session.
 
+## 0.5.15-lutso.1 - 2026-11-08
+
+- **`account-rotator account rm --account <id or email>` signs an account out and drops it from a shell**, as **Remove** does, through any session of the mod on that store, and says where new sessions start now. It refuses Claude Code's own login, and an account that holds another login than the command read, as far as it read one: where it read no email, whatever login that slot now holds goes; where it read an email and no organization, so does another organization under that email in that slot. [From a shell](README.md#from-a-shell) has the rest.
+- **A sign-out that fails now keeps the account, for Remove too**, and says why. Remove used to drop the account anyway, with its login still signed in and out of sight.
+- **Remove now says so where it would have reached too far:** while Claude in Chrome connects, or where the account shares its sign-in with another that stays, it tells you and removes nothing.
+
 ## 0.5.14-lutso.1 - 2026-11-08
 
 - **`account-rotator account use --account <id, email or system>` moves the session running it from a shell**, as **Use now** does, and says where the session stands. In the Bash tool's foreground it is answered while the command runs; run any other way, within a minute. Outside a session of the mod it exits 2, and no other session applies it. `account list --json` now names the account this session is on. [From a shell](README.md#from-a-shell) has the rest.
