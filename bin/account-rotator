@@ -50,6 +50,8 @@ MINUTE_MS = 60_000
 POLL_S = 0.25
 # hooks/model.ts REQUEST_TTL_MS: past it no session takes a request, so --wait stops there.
 REQUEST_TTL_S = 300
+# A request's own file names: hooks/model.ts NONCE, then what `ask` and a session write.
+LEFTOVER = re.compile(r"[A-Za-z0-9-]{6,64}\.(json|result\.json|json\.tmp)")
 # hooks/register.tsx setSessionMark: the mark a session of the mod sets in its Bash children's environment.
 SESSION_VAR = "ACCOUNT_ROTATOR_SESSION"
 # The slot a session runs on, which the mod keeps set in its Bash children's environment: unset is Claude Code's login.
@@ -273,11 +275,28 @@ def cancelled(signum: int, _frame: object) -> None:
     raise KeyboardInterrupt(signal.Signals(signum).name)
 
 
+def sweep(folder: str) -> None:
+    """Removes what a killed CLI or a dead session left: files of a request's own shape, past the time a request lasts.
+    The session's fs has no delete, so this is the one remover. Nothing here fails the verb that called it."""
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return
+    for name in filter(LEFTOVER.fullmatch, names):
+        path = os.path.join(folder, name)
+        try:
+            if os.lstat(path).st_mtime < time.time() - REQUEST_TTL_S:
+                os.remove(path)
+        except OSError:
+            pass
+
+
 def ask(folder: str, request: dict, wait_s: float) -> dict | None:
     """Writes a request whole, by a rename, and waits for its answer; the request is withdrawn on every way out."""
     path = os.path.join(folder, f"{request['nonce']}.json")
     try:
         os.makedirs(folder, exist_ok=True)
+        sweep(folder)
         with open(f"{path}.tmp", "w", encoding="utf-8") as f:
             json.dump(request, f)
         os.replace(f"{path}.tmp", path)

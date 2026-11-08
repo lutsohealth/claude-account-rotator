@@ -84,6 +84,7 @@ import {
   usageDueFrom,
   isSameRows,
   rowsOf,
+  REQUEST_MAX_BYTES,
   REQUEST_POLL_MS,
   REQUEST_TTL_MS,
   SwitchHeld,
@@ -465,6 +466,9 @@ async function saveStoreId($: Host): Promise<void> {
 
 /** The requests this session has taken: one whose result it could not write is not applied again over a later press. */
 const takenRequests = new Set<string>()
+/** The files in the requests folder already logged as skipped, and whether the last look at it failed: each said once. */
+const skippedRequests = new Set<string>()
+let isRequestListFailing = false
 
 /**
  * Sets what this session's Bash children carry in ACCOUNT_ROTATOR_SESSION, for `account use` to name it by. Kept in the
@@ -494,13 +498,25 @@ async function applyRequests($: Host, isMerging = false): Promise<void> {
   if (typeof storeId !== 'string') return
   const { sessionMark } = await getView($)
   const dir = requestsDir(await $.env.get('CLAUDE_CONFIG_DIR'), (await $.env.get('HOME')) ?? '')
-  const entries = await $.fs.list(dir).catch(() => [])
+  const entries = await $.fs.list(dir).then(found => {
+    isRequestListFailing = false
+    return found
+  }, async (error: unknown) => {
+    if (!isRequestListFailing) await debug($, `cannot read the requests folder ${dir}: ${String(error)}`)
+    isRequestListFailing = true
+    return []
+  })
   const names = new Set(entries.map(e => e.name))
   const now = await $.clock.now()
   const requests: RotatorRequest[] = []
-  for (const name of names) {
+  for (const { name, kind, size } of entries) {
     const nonce = name.endsWith('.json') && !name.endsWith('.result.json') ? name.slice(0, -'.json'.length) : undefined
     if (nonce === undefined || names.has(`${nonce}.result.json`) || takenRequests.has(nonce)) continue
+    if (kind !== 'file' || size > REQUEST_MAX_BYTES) {
+      if (!skippedRequests.has(name)) await debug($, `skipped ${name} in the requests folder: ${kind}, ${size} bytes`)
+      skippedRequests.add(name)
+      continue
+    }
     // A file the CLI is still writing, or one that is no request, reads as none.
     const text = await $.fs.read(`${dir}/${name}`).catch(() => undefined)
     const request = requestFrom(parsed(typeof text === 'string' ? text : undefined), now)
