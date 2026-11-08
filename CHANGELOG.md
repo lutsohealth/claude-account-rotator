@@ -2,6 +2,11 @@
 
 What each version of the account rotator changed. To get each one as Claude Code starts, turn on auto-update: in `/plugin`, open **Marketplaces**, pick **claude-account-rotator** and choose **Enable auto-update**. To update by hand, run `claude plugin marketplace update claude-account-rotator`, then `claude plugin update account-rotator@claude-account-rotator`, and start a new session.
 
+## 0.5.13-lutso.1 - 2026-11-08
+
+- **`account-rotator account select --account <id, email or system>` sets the account new sessions start on from a shell**, as **New on** does, and says which account they really start on: the next with room, where the one you named has none. A session of the mod on that store applies it within a minute. With no session running it exits 3 and takes its request back. [From a shell](README.md#from-a-shell) has the rest.
+- **A new sign-in is judged against who the store says holds it.** A session whose view lagged another session's sign-in no longer takes it for a new person and drops that account's usage.
+
 ## 0.5.12-lutso.1 - 2026-11-08
 
 - **`account-rotator account list` prints each account's lines from a shell**, as the panel draws them, then when they were written and which account new sessions start on; `--json` prints the envelope of Orca's `orca account list --json`. It reads the mod's store and never writes it. It is on the Bash tool's PATH while the mod is enabled; [From a shell](README.md#from-a-shell) gives the path for another terminal.
