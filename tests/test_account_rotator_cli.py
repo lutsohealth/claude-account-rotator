@@ -115,6 +115,16 @@ class ListText(StoreCase):
         expected = ["\n".join(self.fixture["lines"][a["id"]]) for a in self.fixture["store"]["accounts"]]
         self.assertEqual((code, blocks[:-1]), (0, expected))
 
+    def test_the_times_are_this_clocks_and_this_zones(self) -> None:
+        out = io.StringIO()
+        with redirect_stdout(out):
+            load_cli().main(["account", "list", "--store", str(self.store)], now=self.fixture["now"] + 60_000, zone=ZoneInfo("UTC"))
+        first = out.getvalue().split("\n\n")[0].split("\n")
+        self.assertEqual(first, [
+            "andres@lutsohealth.com · Company · Ultra  updated 16:34",
+            "Used ▰▰▰▱▱▱▱▱▱▱ 31% Fable ▰▰▰▰▱▱▱▱▱▱ 38%  resets 2d 3h 13m · Fable 1d 3h 13m",
+        ])
+
     def test_the_last_line_says_when_the_rows_were_written_and_where_new_sessions_start(self) -> None:
         _, out = self.list_in_process()
         last = out.rstrip("\n").split("\n")[-1]
