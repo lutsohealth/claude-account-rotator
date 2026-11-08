@@ -3,6 +3,7 @@ import type { Engine, MockClock } from 'claude-code/testing'
 import type { On, ProcessRunResult, SessionRateLimit, ToolCallArgs } from 'claude-code'
 
 import { DEFAULT_FOOTER, USAGE_CLAIM_WAIT_MS, USAGE_FORCE_AFTER_MS, USAGE_IDLE_MS, keychainItem, roomColor } from './model'
+import { longBar } from './model'
 
 const NOW = Date.parse('2026-10-12T10:00:00Z')
 const HOUR = 3600_000
@@ -988,7 +989,9 @@ for (const rotateTo of ['reset', 'room', 'order']) {
   })
 }
 
-test('a check whose usage lists a Fable week replaces the mark a stop left, so the session can move back to the login whose week it reads below 95%', async ($, on) => {
+// C6 (puma-eslxj.7), a changed expected value. SOURCE: the C6 CASE, RULING 4467: a Fable stop means the week was full,
+// and no body of the same week can read it lower but by lagging the stop, so the mark stands until its reset.
+test('a check whose usage lists the same Fable week lower leaves the mark a stop left, so the session does not move back before the week resets', async ($, on) => {
   const w = fresh()
   const clock = await markedThenReread($, on, w, {})
   w.usage['tok-1'] = [20, 30, 40]
@@ -996,8 +999,8 @@ test('a check whose usage lists a Fable week replaces the mark a stop left, so t
   await $.classic.StopFailure(FABLE_STOP)
   await clock.settle()
   await clock.advance(36_000)
-  expect(slots(w)).toEqual([SLOT2, ''])
-  expect(w.submitted).toHaveLength(2)
+  expect(slots(w)).toEqual([SLOT2])
+  expect(w.submitted).toHaveLength(1)
 })
 
 test('the mark a stop left ends at the reset time of the week it marks: a check after it lists no Fable week, and the session can move back', async ($, on) => {
@@ -1045,16 +1048,28 @@ for (const rotateTo of ['reset', 'room', 'order']) {
   })
 }
 
-test('a Fable mark with no reset time from the usage is replaced by a check that lists the Fable week, so the session can move back', async ($, on) => {
+// C6 (puma-eslxj.7), a changed expected value. SOURCE: the C6 CASE, RULING 4467: a body of the mark's week reading it
+// lower lags the stop; its earlier reset only shortens a mark that guessed a week from the stop.
+test('a Fable mark with no reset time from the usage, then a check that lists the Fable week lower, stands until that week\'s reset, and then the session can move back', async ($, on) => {
   const w = fresh()
   const clock = await markedWithNoRow($, on, w, {})
+  // The week the body reads resets three hours after the start, long before the week-long guess.
+  w.fableResets = '2026-10-12T13:00:00Z'
   w.usage['tok-1'] = [20, 30, 40]
   await pastNextRead(clock)
   await $.classic.StopFailure(FABLE_STOP)
   await clock.settle()
   await clock.advance(36_000)
+  expect(slots(w)).toEqual([SLOT2])
+  expect(w.submitted).toHaveLength(1)
+  // Past that reset, login 1 is free again.
+  await clock.advance(3 * HOUR)
+  w.usage['tok-1'] = [20, 30, 10]
+  await pastNextRead(clock)
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  await clock.advance(36_000)
   expect(slots(w)).toEqual([SLOT2, ''])
-  expect(w.submitted).toHaveLength(2)
 })
 
 /** What the terminal is told when a Fable stop finds no account with Fable room. */
@@ -2508,7 +2523,7 @@ test('a response that reports a 5-hour window clears no-five-hour, and Remove de
   // Login 2's week resets at its own time, so a response with login 1's week proves login 1.
   w.weekResets = { 'tok-2': OTHER_WEEK }
   const week = { pct: 100, resetsAt: OTHER_WEEK, at: NOW }
-  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off', 'week-mark:2': week, 'check-error:2': { why: 'x', at: NOW } }))
+  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off', 'week-mark:2': week, 'fable-mark:2': week, 'check-error:2': { why: 'x', at: NOW } }))
   const clock = world(on, w, store)
   await start($, clock)
   expect(store.get('no-five-hour:1')).toBe(true)
@@ -2524,7 +2539,7 @@ test('a response that reports a 5-hour window clears no-five-hour, and Remove de
   expect([store.has('usage-due:2'), store.has('usage:2')]).toEqual([true, true])
   await pane.press({ key: 'remove-2' })
   await clock.settle()
-  expect(['no-five-hour:2', 'week-mark:2', 'check-error:2', 'usage-due:2', 'usage:2'].filter(k => store.has(k))).toEqual([])
+  expect(['no-five-hour:2', 'week-mark:2', 'fable-mark:2', 'check-error:2', 'usage-due:2', 'usage:2'].filter(k => store.has(k))).toEqual([])
   await pane.unmount()
 })
 
@@ -4868,3 +4883,106 @@ for (const status of [503, 429, 500]) {
     expect([status, 'after', await aboutOf($, 'nine@example.com')]).toEqual([status, 'after', 'Org · Max'])
   })
 }
+
+// C6 (puma-eslxj.7): the Fable week per account in the pane, and the mark a Fable stop leaves under fable-mark:<id>.
+
+/** What the pane draws after each `Fable` row's label, in order: one entry per row. */
+async function fableRows($: Engine): Promise<string[]> {
+  const texts = (await paneText($)).split('\n')
+  return texts.flatMap((t, i) => (t === 'Fable' ? [texts[i + 1] ?? ''] : []))
+}
+
+test('a reading with Fable 66% draws a Fable row under the week with its bar at 66%', async ($, on) => {
+  const w = planWorld(blob('tok-1'), [10, 30, 66])
+  const clock = world(on, w, { ...TWO_LOGINS, 'rotate-to': 'off', footer: { ...DEFAULT_FOOTER, fill: 'used' } })
+  await start($, clock)
+  expect(await fableRows($)).toEqual([`${longBar(66)} 66% used`])
+  const text = await paneText($)
+  expect(text.indexOf('Fable')).toBeGreaterThan(text.indexOf('week'))
+})
+
+const FABLE_ROW_CASES: [string, () => World, string[]][] = [
+  ['Max whose usage lists no Fable week', () => planWorld(blob('tok-1'), [10, 30]), ['–']],
+  ['Ultra whose usage lists no Fable week', () => planWorld(blob('tok-1'), [null, 30]), ['–']],
+  ['Max with its Fable week at 66%', () => planWorld(blob('tok-1'), [10, 30, 66]), [`${longBar(34)} 34% left`]],
+  ['Pro whose usage lists no Fable week', () => planWorld(blob('tok-1', NOW + 6 * HOUR, 'pro'), [10, 30]), []],
+  ['Team whose usage lists no Fable week', () => planWorld(blob('tok-1', NOW + 6 * HOUR, 'team'), [10, 30]), []],
+  ['Enterprise whose usage lists no Fable week', () => planWorld(blob('tok-1', NOW + 6 * HOUR, 'enterprise'), [10, 30]), []],
+  ['a plan word the mod does not know, with no Fable week', () => planWorld(blob('tok-1', NOW + 6 * HOUR, 'galaxy'), [10, 30]), []],
+  ['Pro whose usage lists a Fable week at 50%', () => planWorld(blob('tok-1', NOW + 6 * HOUR, 'pro'), [10, 30, 50]), [`${longBar(50)} 50% left`]],
+]
+for (const [name, make, expected] of FABLE_ROW_CASES) {
+  test(`the pane's Fable rows for ${name}: ${JSON.stringify(expected)}`, async ($, on) => {
+    const clock = world(on, make(), { ...TWO_LOGINS, 'rotate-to': 'off' })
+    await start($, clock)
+    expect([name, await fableRows($)]).toEqual([name, expected])
+  })
+}
+
+/** Login 1 at 60% of its Fable week, login 2's spent, login 2's week its own: a Fable stop on login 1 stays there. */
+async function fableStopStays($: Engine, on: On, seed: Record<string, unknown> = {}): Promise<{ w: World; store: Map<string, unknown>; clock: MockClock }> {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [20, 30, 60]
+  w.usage['tok-2'] = [10, 30, 100]
+  w.weekResets = { 'tok-2': OTHER_WEEK }
+  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, ...seed }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  return { w, store, clock }
+}
+
+const markOf = (value: unknown) => [(value as { pct?: unknown } | undefined)?.pct, (value as { resetsAt?: unknown } | undefined)?.resetsAt]
+const fableOf = (value: unknown) => (value as { fable?: unknown } | undefined)?.fable
+
+test('a Fable stop marks its week spent under fable-mark:<id>, and neither the stored reading nor a response after it carries the mark', async ($, on) => {
+  const { w, store, clock } = await fableStopStays($, on)
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  expect(markOf(store.get('fable-mark:1'))).toEqual([100, FABLE_RESET])
+  expect(fableOf(store.get('usage:1'))).toEqual({ pct: 60, resetsAt: FABLE_RESET })
+  w.limits = [
+    { kind: 'five_hour', percentUsed: 21, resetsAt: '2026-10-12T12:00:00Z' },
+    { kind: 'seven_day', percentUsed: 30, resetsAt: WEEK_RESET },
+  ]
+  await respond($, clock, w)
+  expect((store.get('usage:1') as { src?: unknown } | undefined)?.src).toBe('response')
+  expect(fableOf(store.get('usage:1'))).toEqual({ pct: 60, resetsAt: FABLE_RESET })
+  // The pane still draws login 1's Fable week spent, by the mark.
+  expect((await fableRows($))[0]).toBe(`${longBar(0)} 0% left`)
+})
+
+test('a Fable mark another session stored is laid on the login\'s reading, over a lower body of the same week', async ($, on) => {
+  await fableStopStays($, on, { 'fable-mark:1': { pct: 100, resetsAt: FABLE_RESET, at: NOW } })
+  expect((await fableRows($))[0]).toBe(`${longBar(0)} 0% left`)
+})
+
+test('a Fable stop writing its mark keeps a mark another session stored since that ends later', async ($, on) => {
+  const later = '2026-10-17T03:30:00Z'
+  const { store, clock } = await fableStopStays($, on)
+  store.set('fable-mark:1', { pct: 100, resetsAt: later, at: NOW })
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  expect(markOf(store.get('fable-mark:1'))).toEqual([100, later])
+})
+
+test('a Fable stop writing its mark replaces a mark another session stored since that ends sooner', async ($, on) => {
+  const sooner = '2026-10-16T03:00:00Z'
+  const { store, clock } = await fableStopStays($, on)
+  store.set('fable-mark:1', { pct: 100, resetsAt: sooner, at: NOW })
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  expect(markOf(store.get('fable-mark:1'))).toEqual([100, FABLE_RESET])
+})
+
+// The undo's class (STOP_KEYS): a Fable stop marked during an unproven switch goes when the switch proves not to have taken.
+test('a Fable stop before any response proves a switch marks fable-mark on the login moved to, and the switch proving not to have taken drops it', async ($, on) => {
+  const { w, store, clock } = await stopDuringSwitch($, on, 40_000, FABLE_STOP.last_assistant_message, undefined, { 'tok-2': [10, 41, 50] })
+  expect(markOf(store.get('fable-mark:2'))).toEqual([100, FABLE_RESET])
+  w.limits = [{ kind: 'seven_day', percentUsed: 42, resetsAt: WEEK_RESET }]
+  await clock.advance(4 * 60_000 + 10_000)
+  await respond($, clock, w)
+  expect(w.toasts.some(t => /did not take/.test(t))).toBe(true)
+  expect(store.get('fable-mark:2')).toBeUndefined()
+})
