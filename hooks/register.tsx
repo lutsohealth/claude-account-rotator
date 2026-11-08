@@ -1780,9 +1780,11 @@ async function addAccount($: Host): Promise<void> {
 
 /**
  * An `account add`: lists a folder the CLI signed in, under the folder's number while no other slot holds it. Who signed
- * in is read here, then the list again, as the read takes seconds and another session can list either meanwhile. The
- * health stands before the row: a session that merges between them would otherwise find it not signed in. The minute's
- * check reads its usage.
+ * in is read here, then the list again, as the read takes seconds and another session can list either meanwhile. A
+ * twin goes by what is known of a row: a wrong refusal has a way back, a wrong acceptance makes a row nobody removes.
+ * The row wears nothing an old holder of its id left: a session not moved by an `rm` can write there after it. The
+ * health stands before the row: a session that merges between them would otherwise find it not signed in. The answer
+ * is the row the store holds after the write, as the store has no compare-and-set. The minute's check reads its usage.
  */
 async function adoptSlot($: Host, slot: string): Promise<{ ok: boolean; message: string; accountId?: string; pickId?: string }> {
   const number = slotNumber(slot, (await $.env.get('HOME')) ?? '')
@@ -1791,23 +1793,33 @@ async function adoptSlot($: Host, slot: string): Promise<{ ok: boolean; message:
   const listed = (await loadAccounts($)).find(a => a.slot === slot)
   if (listed !== undefined) return already(listed)
   const who = await signedInAs($, slot)
-  if (who === undefined) return { ok: false, message: `${slot} holds no sign-in, so nothing is added: run account add to sign in` }
+  if (who === undefined) return { ok: false, message: `could not read who ${slot} is signed in as, so nothing is added` }
   const accounts = await loadAccounts($)
   const meanwhile = accounts.find(a => a.slot === slot)
   if (meanwhile !== undefined) return already(meanwhile)
-  const twin = accounts.find(a => sameLogin(a, who))
+  const twin = accounts.find(a => isLoginOf(a, who))
   if (twin !== undefined) {
     return {
       ok: false,
-      message: `that sign-in is account ${label(twin)} already, so nothing is added. Sign out of claude.ai in your browser (or pick another organization), then run account add again. ${slot} stays signed in with no account on it: sign it out with CLAUDE_SECURESTORAGE_CONFIG_DIR=${slot} CLAUDE_CONFIG_DIR=${slot} claude auth logout`,
+      message: `that sign-in is account ${label(twin)} already${twin.orgId === undefined ? ', as far as is known: its organization is not read yet, so ask again once a check has read it' : ''}, so nothing is added. Sign out of claude.ai in your browser (or pick another organization), then run account add again. ${slot} stays signed in with no account on it: sign it out with CLAUDE_SECURESTORAGE_CONFIG_DIR=${slot} CLAUDE_CONFIG_DIR=${slot} claude auth logout`,
     }
   }
   const account = withSignIn({ id: accounts.some(a => a.id === number) ? freeId(accounts) : number, slot }, who)
+  await dropAccountKeys($, account.id)
   await saveHealth($, account.id, { kind: 'ok' })
   await saveAccounts($, [...accounts, account])
   await saveLaunchPick($)
+  const stood = (await loadAccounts($)).find(a => a.slot === slot)
+  if (stood === undefined) return { ok: false, message: `another session's write took the place of the row for ${slot}, so it is not listed` }
   const { text, pickId } = await pickAnswer($)
-  return { ok: true, message: `account ${label(account)} is added; ${text}`, accountId: account.id, pickId }
+  return { ok: true, message: `account ${label(stood)} is added; ${text}`, accountId: stood.id, pickId }
+}
+
+/** Every store key of one account's own, each dropped when an account goes and before a row takes its id. */
+async function dropAccountKeys($: Host, id: string): Promise<void> {
+  for (const key of ['reading', 'usage', 'mark', 'no-five-hour', 'week-mark', 'fable-mark', 'check-error', 'health', 'holder', 'usage-due']) {
+    await $.store.delete(`${key}:${id}`)
+  }
 }
 
 /**
@@ -1842,16 +1854,7 @@ async function removeAccount($: Host, id: string, seen?: { slot: string; email?:
   await saveAccounts($, (await loadAccounts($)).filter(a => a.id !== id))
   if ((await $.store.get('chrome-account')) === id) await setChromeAccount($, undefined)
   await noteChromeAccount($, id, false)
-  await $.store.delete(`reading:${id}`)
-  await $.store.delete(`usage:${id}`)
-  await $.store.delete(`mark:${id}`)
-  await $.store.delete(`no-five-hour:${id}`)
-  await $.store.delete(`week-mark:${id}`)
-  await $.store.delete(`fable-mark:${id}`)
-  await $.store.delete(`check-error:${id}`)
-  await $.store.delete(`health:${id}`)
-  await $.store.delete(`holder:${id}`)
-  await $.store.delete(`usage-due:${id}`)
+  await dropAccountKeys($, id)
   await setView($, v => {
     const readings = { ...v.readings }
     const marks = { ...v.marks }

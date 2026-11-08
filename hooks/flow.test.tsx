@@ -7131,6 +7131,7 @@ test('an add under an email a row holds with its organization unread is refused;
   w.files[`${REQUESTS}/${N1}.json`] = addRequest(N1, SLOT7, store.get('store-id'), clock.now())
   await untilTick(clock)
   expect(resultOf(w, N1)?.ok).toBe(false)
+  expect(String(resultOf(w, N1)?.message)).toMatch(/not read yet/)
   expect(listedIds(store)).not.toContain('7')
   store.set('accounts', [TWO_LOGINS.accounts[0], { id: '2', slot: SLOT2, email: 'two@example.com', orgId: 'org-other' }])
   w.files[`${REQUESTS}/${N2}.json`] = addRequest(N2, SLOT7, store.get('store-id'), clock.now())
