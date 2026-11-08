@@ -645,9 +645,12 @@ async function holderOf($: Host, account: Account, credential: Credential, isLiv
   }
   const holder = { token, who: { ...who, email: who.email, ...(credential.plan === undefined ? {} : { plan: credential.plan }) } }
   await saveHolder($, account.id, holder)
-  // The schedule, its back-off and its minute gate were the old sign-in's: the new one is read at once.
-  // What the old sign-in's usage said is its own, not the new one's (its plan above all): it goes with it.
-  if (known !== undefined) await dropSignInUsage($, account.id)
+  // The schedule, its back-off and its minute gate were the old token's: the new one is read at once. What another
+  // account's usage said is its own, not this one's (its plan above all): it goes with it. The same account under a
+  // new token (a refresh, or the same person signing in again) keeps its reading.
+  const isOtherAccount = known !== undefined && (known.who.email !== who.email || known.who.orgId !== who.orgId)
+  if (isOtherAccount) await dropSignInUsage($, account.id)
+  else if (known !== undefined) await $.store.delete(`usage-due:${account.id}`)
   return holder
 }
 
