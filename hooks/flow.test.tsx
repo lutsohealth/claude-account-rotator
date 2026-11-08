@@ -4,6 +4,7 @@ import type { On, ProcessRunResult, SessionRateLimit, ToolCallArgs } from 'claud
 
 import { DEFAULT_FOOTER, USAGE_CLAIM_WAIT_MS, USAGE_FORCE_AFTER_MS, USAGE_IDLE_MS, keychainItem, roomColor } from './model'
 import { laterMark, longBar, markFrom } from './model'
+import { PANE_COLUMNS } from './view'
 
 const NOW = Date.parse('2026-10-12T10:00:00Z')
 const HOUR = 3600_000
@@ -5488,6 +5489,36 @@ test('a pane too narrow for any row line and its buttons gives the buttons a lin
   expect([lines['line-2-0']?.buttons, lines['line-2-1']?.buttons, lines['line-2-2']?.text]).toEqual([[], [], ''])
   expect(lines['line-2-2']?.buttons).toContain('ask-remove-2')
   expect(lines['line-2-1']?.text).toBe(rowsOf(store)?.rows?.find(r => r.id === '2')?.lines[1])
+})
+
+// Mutations V1 and V2 survived: the buttons' place is decided by the row's width less the accounts box's frame (4) and
+// by Remove's width beside the slot (23 in all, after a gap of 2).
+test('login 2\'s buttons end line 1 only where the pane, less its frame, holds line 1, the gap and Remove with Use now', async ($, on) => {
+  const { store } = await rowsWorld($, on)
+  const width = [...lineOne(store, '2')].length + 2 + 23 + 4
+  expect((await drawnLines($, width))['line-2-0']?.buttons).toEqual(['ask-remove-2', 'use-2'])
+  expect((await drawnLines($, width - 1))['line-2-0']?.buttons).toEqual([])
+})
+
+// Mutation V4 survived: the pane asks for the operator's 82-cell row and the accounts box's frame around it.
+test('the pane asks the dock for the operator\'s 82-cell row and the 4 cells of the accounts box\'s frame', () => {
+  expect(PANE_COLUMNS).toBe(82 + 4)
+})
+
+// Mutation P1 survived: a bar is drawn in the color of the room its account has left.
+test('a row\'s bars are drawn in the color of the room left: login 1\'s week, 30% used, in the color of 70% left', async ($, on) => {
+  await rowsWorld($, on)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: { ...PANE_PROPS, bodyColumns: 86 } })
+  const colors: unknown[] = []
+  const walk = (n: unknown): void => {
+    if (typeof n !== 'object' || n === null) return
+    const { type, props, children } = n as DrawnNode
+    if (type === 'Text' && shownText(n) === '▰▰▰▱▱▱▱▱▱▱ 30%') colors.push(props?.color)
+    ;(children ?? []).forEach(walk)
+  }
+  walk(await pane.drawn())
+  await pane.unmount()
+  expect(colors).toEqual([roomColor(70)])
 })
 
 test('the pane draws no id column and no separate failure line: a failed read ends line 1 instead', async ($, on) => {
