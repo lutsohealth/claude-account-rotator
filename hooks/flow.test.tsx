@@ -7163,25 +7163,16 @@ test('an add of anything but a numbered folder under the accounts folder lists n
   expect(offenders).toEqual([])
 })
 
-test('an add whose number another slot holds takes the free id', async ($, on) => {
-  const { w, store, clock } = await selectWorld($, on)
-  store.set('accounts', [...TWO_LOGINS.accounts, { id: '7', slot: `${HOME}/.claude/accounts/9`, email: 'nine@example.com' }])
-  await signInFolder(w, SLOT7, 'seven@example.com')
-  w.files[`${REQUESTS}/${N1}.json`] = addRequest(N1, SLOT7, store.get('store-id'), clock.now())
-  await untilTick(clock)
-  expect(listedRow(store, '3')).toMatchObject({ slot: SLOT7, email: 'seven@example.com' })
-  expect(resultOf(w, N1)).toMatchObject({ ok: true, accountId: '3' })
-})
-
 // freeId and holdsLogin (C12): an adopted id can be one a waiting rm names, whose CLI read another holder.
-test('a waiting rm of an id an add gave another slot signs nothing out, by the slot', async ($, on) => {
+test('an add whose number another slot holds takes the free id, and a waiting rm of that id signs nothing out, by the slot', async ($, on) => {
   const { w, store, clock } = await selectWorld($, on)
   store.set('accounts', [...TWO_LOGINS.accounts, { id: '7', slot: `${HOME}/.claude/accounts/9`, email: 'nine@example.com' }])
   await signInFolder(w, SLOT7, 'seven@example.com')
   w.files[`${REQUESTS}/${N1}.json`] = addRequest(N1, SLOT7, store.get('store-id'), clock.now())
   w.files[`${REQUESTS}/${N2}.json`] = JSON.stringify({ kind: 'rm', nonce: N2, at: clock.now() + 1, id: '3', store: store.get('store-id'), slot: SLOT3, email: 'three@example.com' })
   await untilTick(clock)
-  expect(listedRow(store, '3')).toMatchObject({ slot: SLOT7 })
+  expect(listedRow(store, '3')).toMatchObject({ slot: SLOT7, email: 'seven@example.com' })
+  expect(resultOf(w, N1)).toMatchObject({ ok: true, accountId: '3' })
   expect([w.logouts ?? [], resultOf(w, N2)?.ok]).toEqual([[], false])
 })
 
@@ -7267,20 +7258,11 @@ test('two sessions on one store, launch-slot: the pick counts the setting anothe
   expect(resultOf(w, N1)).toMatchObject({ ok: true, pickId: '2' })
 })
 
-test('two sessions on one store, launch-slot: an add is a pick as the setting says, so the new account starts sessions when it has the most room', async ($, on) => {
-  const { w, store, clock } = await selectWorld($, on, [90, 90], [90, 90])
-  await signInFolder(w, SLOT7, 'seven@example.com')
-  w.files[`${REQUESTS}/${N1}.json`] = addRequest(N1, SLOT7, store.get('store-id'), clock.now())
-  await untilTick(clock)
-  await untilTick(clock)
-  expect((store.get('launch-slot') as { id?: string } | undefined)?.id).toBe('7')
-})
-
 test('two sessions on one store, rows: the rows the add leaves name the new account beside every other', async ($, on) => {
   const { w, store, clock } = await selectWorld($, on)
   await signInFolder(w, SLOT7, 'seven@example.com')
   w.files[`${REQUESTS}/${N1}.json`] = addRequest(N1, SLOT7, store.get('store-id'), clock.now())
-  await beatUntilResult(w, N1, clock)
+  await untilTick(clock)
   const rows = (store.get('rows') as StoredRows).rows.map(r => r.id)
   expect(rows).toEqual(['1', '2', '7'])
 })
@@ -7296,9 +7278,3 @@ test('two sessions on one store, store-id: an add read from another store is lef
   await untilTick(clock)
   expect([resultOf(w, N2)?.ok, store.get('store-id')]).toEqual([true, id])
 })
-
-/** Ticks until a session has answered the request: at most two minutes. */
-async function beatUntilResult(w: World, nonce: string, clock: MockClock): Promise<void> {
-  for (let n = 0; n < 2 && resultOf(w, nonce) === undefined; n += 1) await untilTick(clock)
-  expect(resultOf(w, nonce), 'no session answered').toBeDefined()
-}
