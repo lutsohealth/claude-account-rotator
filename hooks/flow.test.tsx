@@ -5075,3 +5075,99 @@ for (const [endName, end] of F3_ENDS) {
     })
   }
 }
+
+// C7 (puma-eslxj.8, problem e): a 5-hour window is drawn only where an account is known to have one. No reading and no
+// no-five-hour key is unknown, and unknown draws nothing.
+
+/** Two logins, `one` and `two` their usage (undefined: the usage call answers 429), with `store` seeded. */
+async function fiveHourWorld($: Engine, on: On, one: World['usage'][string] | undefined, two: World['usage'][string] | undefined, store: Record<string, unknown> = {}): Promise<{ w: World; clock: MockClock }> {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.failing = {}
+  if (one === undefined) w.failing['tok-1'] = 429
+  else w.usage['tok-1'] = one
+  if (two === undefined) w.failing['tok-2'] = 429
+  else w.usage['tok-2'] = two
+  const clock = world(on, w, { ...TWO_LOGINS, 'rotate-to': 'off', ...store })
+  await start($, clock)
+  return { w, clock }
+}
+
+/** The pane's lines from login 2's email to the end of the accounts box. */
+const loginTwoLines = (text: string) => text.slice(text.indexOf('two@example.com'), text.indexOf(' Accounts ')).split('\n')
+
+test('a login with no reading, no no-five-hour key and a usage call answering 429 draws no 5h row', async ($, on) => {
+  await fiveHourWorld($, on, [20, 30], undefined)
+  expect(loginTwoLines(await paneText($))).not.toContain('5h')
+})
+
+test('with every account unknown, the footer has no Session: label and the pane no 5h limit row', async ($, on) => {
+  await fiveHourWorld($, on, undefined, undefined)
+  const footer = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'SessionMode', props: { modes: [] } })
+  expect((await footer.findAll({ type: 'Text' })).map(t => t.text)).not.toContain('Session:')
+  await footer.unmount()
+  expect((await paneText($)).split('\n')).not.toContain('5h limit')
+})
+
+test('with every account reporting no 5-hour window, the pane has no 5h limit row', async ($, on) => {
+  await fiveHourWorld($, on, [null, 30], [null, 40])
+  expect((await paneText($)).split('\n')).not.toContain('5h limit')
+})
+
+test('with the 5h limit set off, the pane keeps its 5h limit row though no account is known to have a window, so it can be set on again', async ($, on) => {
+  await fiveHourWorld($, on, undefined, undefined, { 'five-hour-limit': 'off' })
+  expect((await paneText($)).split('\n')).toContain('5h limit')
+})
+
+test('with an account known to have a 5-hour window, the pane keeps its 5h limit row', async ($, on) => {
+  await fiveHourWorld($, on, [null, 30], [20, 40])
+  expect((await paneText($)).split('\n')).toContain('5h limit')
+})
+
+// [BLANK-SESSION-ROW]
+test('with the session glyphs off and its percent on, the login in use without a 5-hour window draws no blank footer row though another has one', async ($, on) => {
+  await fiveHourWorld($, on, [null, 30], [20, 40], { footer: { ...DEFAULT_FOOTER, session: 'none', sessionPercent: true } })
+  const footer = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'SessionMode', props: { modes: [] } })
+  const lines = ((await footer.find(GLYPHS))?.text ?? '').split('\n')
+  await footer.unmount()
+  // A row with no glyph and no percent: spaces and the highlight's lines alone.
+  expect(lines.filter(l => l.replace(/[\s│]/g, '') === '')).toEqual([])
+  expect(lines.length).toBeGreaterThan(0)
+})
+
+// Kept green: Claude's own words name the 5-hour window, so its account draws the row, whatever its usage said.
+test('a 5-hour stop on a login whose usage said it has no 5-hour window draws its 5h row', async ($, on) => {
+  const { clock } = await fiveHourWorld($, on, [null, 30], [20, 40])
+  expect((await paneText($)).split('\n').filter(l => l === '5h')).toHaveLength(1)
+  await pastLastRead(clock)
+  await $.classic.StopFailure({ error: 'rate_limit', last_assistant_message: "You've hit your session limit" })
+  await clock.settle()
+  expect((await paneText($)).split('\n').filter(l => l === '5h')).toHaveLength(2)
+})
+
+// C6's lesson, per input of the predicate: a key another session deletes turns the row back to unknown.
+const FIVE_HOUR_INPUTS: [string, unknown][] = [
+  ['no-five-hour:2', false],
+  ['mark:2', { pct: 100, resetsAt: '2026-10-12T12:00:00Z', at: NOW }],
+  ['usage:2', { fiveHour: { pct: 30, resetsAt: '2026-10-12T12:00:00Z' }, sevenDay: { pct: 30, resetsAt: WEEK_RESET }, at: NOW - 60_000, by: '2', v: 1, src: 'body' }],
+]
+for (const [key, value] of FIVE_HOUR_INPUTS) {
+  test(`${key} saying login 2 has a 5-hour window draws its 5h row`, async ($, on) => {
+    await fiveHourWorld($, on, [20, 30], undefined, { [key]: value })
+    expect([key, loginTwoLines(await paneText($)).includes('5h')]).toEqual([key, true])
+  })
+  test(`${key} another session deletes leaves login 2 with no 5h row at the next merge`, async ($, on) => {
+    const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off', [key]: value }))
+    const w = fresh()
+    w.keychain['Claude Code-credentials'] = blob('tok-1')
+    w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+    w.usage['tok-1'] = [20, 30]
+    w.failing = { 'tok-2': 429 }
+    const clock = world(on, w, store)
+    await start($, clock)
+    store.delete(key)
+    await clock.advance(61_000)
+    expect([key, loginTwoLines(await paneText($)).includes('5h')]).toEqual([key, false])
+  })
+}
