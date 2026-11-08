@@ -731,6 +731,40 @@ class Remove(RequestCase):
             self.assertIn(words, said)
 
 
+class Sweep(RequestCase):
+    """puma-eslxj.25 [LEFTOVERS-NEVER-SWEPT]: the engine's fs has no delete, so the CLI's next run removes what a killed CLI or a dead session left."""
+
+    def test_a_verb_removes_only_old_files_of_a_requests_own_shape_and_nothing_fails_it(self) -> None:
+        self.requests.mkdir()
+        old = time.time() - 301
+        gone = ["aaaaaaaaaa.json", "aaaaaaaaaa.result.json", "bbbbbbbbbb.json.tmp"]
+        stays = ["notes.txt", "short.json", "cccccccccc.json.bak"]
+        for name in [*gone, *stays]:
+            (self.requests / name).write_text("{}", encoding="utf-8")
+            os.utime(self.requests / name, (old, old))
+        (self.requests / "dddddddddd.json").write_text("{}", encoding="utf-8")
+        (self.requests / "eeeeeeeeee.json").mkdir()
+        os.utime(self.requests / "eeeeeeeeee.json", (old, old))
+        for verb in ("select", "rm"):
+            done = run(CLI, "account", verb, "--account", "2", "--wait", "0.2", env=self.env())
+            self.assertEqual((done.returncode, "Traceback" in done.stderr), (3, False), done.stderr)
+        self.assertEqual(sorted(p.name for p in self.requests.iterdir()), sorted([*stays, "dddddddddd.json", "eeeeeeeeee.json"]))
+
+    def test_a_file_a_second_cli_swept_first_is_ignored_and_the_next_is_swept(self) -> None:
+        # Review C25 RACE-TEST-WITHOUT-ASSERTION. Two CLIs sweeping: the one that finds a listed file gone carries on.
+        self.requests.mkdir()
+        later = self.requests / "bbbbbbbbbb.json"
+        later.write_text("{}", encoding="utf-8")
+        old = time.time() - 301
+        os.utime(later, (old, old))
+        cli = load_cli()
+        with patch.object(cli.os, "listdir", return_value=["aaaaaaaaaa.json", later.name]):
+            cli.sweep(str(self.requests))
+        self.assertFalse(later.exists())
+        with patch.object(cli.os, "listdir", side_effect=PermissionError):
+            self.assertIsNone(cli.sweep(str(self.requests)), "a failing list fails no verb")
+
+
 class ListThisSession(StoreCase):
     """C12: `list --json` names the account the session running it is on, read from the slot its Bash children carry."""
 

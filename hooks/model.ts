@@ -1296,6 +1296,9 @@ export function afterUsage(due: UsageDue | undefined, outcome: UsageOutcome, now
 /** How long a request waits for a session: a CLI that gave up or died leaves nothing a later session applies. */
 export const REQUEST_TTL_MS = 5 * 60_000
 
+/** The most a request file holds: far above what the CLI writes. A larger one is skipped unread. */
+export const REQUEST_MAX_BYTES = 4096
+
 /** How often a Bash call that names the CLI looks for its request: the CLI polls for the answer at the same pace. */
 export const REQUEST_POLL_MS = 250
 
