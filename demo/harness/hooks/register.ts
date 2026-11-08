@@ -190,11 +190,11 @@ export const register: Register = on => {
   on('env.set', async ($, e, next) => {
     if (next.origin.plugin !== MOD || e.name !== 'CLAUDE_SECURESTORAGE_CONFIG_DIR') return next(e)
     // The mod sets the slot in use at its start, to learn whether switching is allowed: no switch.
-    if ((e.value ?? '') === activeSlot) return { value: undefined }
+    if ((e.value ?? '') === activeSlot) return { value: {} }
     fill(await $.clock.now())
     activeSlot = e.value ?? ''
     isDraining = false
-    return { value: undefined }
+    return { value: {} }
   })
 
   on('process.run', async ($, e, next) => {
