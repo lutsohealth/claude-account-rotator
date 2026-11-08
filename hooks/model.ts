@@ -1317,10 +1317,12 @@ export function requestFrom(value: unknown, now: number): RotatorRequest | undef
   return kind === 'use' && typeof session === 'string' && session !== '' ? { kind, nonce, at, id, store, session } : undefined
 }
 
+/** Where each account's folder lives, whichever config a session runs on. A HOME's trailing slash goes: the CLI's expanduser strips it. */
+export const accountsRoot = (home: string): string => `${home.replace(/\/+$/, '')}/.claude/accounts`
+
 /** The number of a folder directly under the accounts folder, as `account add` makes and takes them; any other slot has none. */
 export function slotNumber(slot: string, home: string): string | undefined {
-  // A HOME's trailing slash: the CLI's expanduser strips it.
-  const root = `${home.replace(/\/+$/, '')}/.claude/accounts/`
+  const root = `${accountsRoot(home)}/`
   const name = slot.startsWith(root) ? slot.slice(root.length) : ''
   return /^[1-9][0-9]*$/.test(name) ? name : undefined
 }
