@@ -1651,9 +1651,11 @@ test('a stored stop mark with no reset time, on an account whose token is not li
   const clock = world(on, w, { ...TWO_LOGINS, 'usage:2': stale })
   await start($, clock)
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
-  // Login 1 reports no 5-hour window, so it has no 5h row; login 2's dropped 5-hour reading leaves its row with none reported.
-  expect(await pane.findAll({ type: 'Text', text: /none reported$/ })).toHaveLength(1)
-  expect(await pane.findAll({ type: 'Text', text: /^5h$/ })).toHaveLength(1)
+  // C7 (puma-eslxj.8), a changed expected value. SOURCE: the bead's decision "Draw a 5h line only when the newest
+  // accepted body or response lists a window, or a stop mark stands" (RULING 4490). Login 1 reports no 5-hour window;
+  // login 2's only window was an older version's stop mark, passed, and no body said it has one: neither draws a 5h row.
+  expect(await pane.findAll({ type: 'Text', text: /none reported$/ })).toHaveLength(0)
+  expect(await pane.findAll({ type: 'Text', text: /^5h$/ })).toHaveLength(0)
   await pane.press({ key: 'rotate' })
   await clock.settle()
   expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
@@ -1724,9 +1726,17 @@ test('a stop\'s week mark on an account that reports no 5-hour window stands thr
   w.usage['tok-1'] = [null, 40]
   w.usage['tok-2'] = [null, 96]
   w.limits = [{ kind: 'seven_day', percentUsed: 40, resetsAt: '2026-10-18T03:00:00Z' }]
-  const clock = world(on, w, TWO_LOGINS)
+  const store = new Map<string, unknown>(Object.entries(TWO_LOGINS))
+  const clock = world(on, w, store)
   await start($, clock)
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  // C7 (puma-eslxj.8), a changed step. SOURCE: the bead's decision that the "5h limit" row shows only while some account
+  // is known to have a window (RULING 4490). Neither account here has one, so the limit is set in the store every
+  // session shares, as another session's press sets it, and this session takes it at its next merge.
+  const setLimit = async (limit: 'on' | 'off') => {
+    store.set('five-hour-limit', limit)
+    await clock.advance(61_000)
+  }
   const markVisible = async () => {
     await pane.redraw()
     return (await pane.find({ text: /^▱{10} 0% left$/ })) !== undefined
@@ -1735,7 +1745,7 @@ test('a stop\'s week mark on an account that reports no 5-hour window stands thr
   for (const rotateTo of ['reset', 'room', 'order', 'off'] as const) {
     await pane.press({ key: `rotate-to-${rotateTo}` })
     for (const limit of ['on', 'off'] as const) {
-      await pane.press({ key: `five-hour-limit-${limit}` })
+      await setLimit(limit)
       await clock.settle()
       await $.classic.StopFailure({ error: 'rate_limit', last_assistant_message: 'Claude usage limit reached.' })
       await clock.settle()
