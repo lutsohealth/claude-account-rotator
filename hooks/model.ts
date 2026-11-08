@@ -1,4 +1,4 @@
-import type { Account, Fill, FiveHourLimit, FooterStyle, Glyphs, Health, Highlight, LaunchOn, LaunchPick, Mark, PlanTier, Reading, RotateTo, UsageDue, UsageWindow, View } from '../types'
+import type { Account, Fill, FiveHourLimit, FooterStyle, Glyphs, Health, Highlight, LaunchOn, LaunchPick, Mark, PlanTier, Reading, RotateTo, Row, RowPart, StoredRows, UsageDue, UsageWindow, View } from '../types'
 
 /** Leave a login once its 5-hour window is this full (percent). */
 export const LEAVE_FIVE_HOUR = 90
@@ -901,6 +901,129 @@ export function companyOf(account: Pick<Account, 'email' | 'orgName'>): string |
   return isOwn ? undefined : orgName.trim()
 }
 
+// ---------------------------------------------------------------- the row
+// One model of a login's row, which the pane draws and every session stores under `rows` for the CLI, so the two
+// cannot drift. Its lines are the operator's: `<email> · <Company> · <Plan>  updated HH:MM`, then
+// `Used <bar> N% Fable <bar> N%  resets Nd Nh Nm`, then a 5-hour line where the login has the window.
+
+/** Whether a login's usage said it has no 5-hour window, in its reading or, with none yet, in the store: the plan's name infers Ultra from it. */
+export function hasNoFiveHour(view: View, id: string): boolean {
+  const r = view.readings[id]
+  return r === undefined ? view.noFiveHour?.[id] === true : reportsNoFiveHour(r)
+}
+
+/**
+ * Whether a login is known to have a 5-hour window: its reading holds one (a read's, or a stop's mark), or its usage
+ * last said it has one. A login with no reading and no word either way is unknown, and unknown draws nothing.
+ */
+export function hasFiveHour(view: View, id: string): boolean {
+  return view.readings[id]?.fiveHour !== undefined || view.noFiveHour?.[id] === false
+}
+
+/** The plans with a separate weekly limit for Fable: on these, a login whose usage lists no Fable week draws it unknown. */
+export const HAS_FABLE_WEEK = /^(max|ultra)\b/i
+
+/** "2d 3h 14m", "20h 27m", "27m": the time until `at`, the days dropped under a day and the hours under an hour. */
+export function resetText(at: string, now: number): string {
+  const minutes = Math.max(0, Math.round((Date.parse(at) - now) / 60_000))
+  const [days, hours, mins] = [Math.floor(minutes / 1440), Math.floor((minutes % 1440) / 60), minutes % 60]
+  if (days > 0) return `${days}d ${hours}h ${mins}m`
+  return hours > 0 ? `${hours}h ${mins}m` : `${mins}m`
+}
+
+/** HH:MM on a 24-hour clock in `timeZone`, else in the machine's own. */
+export function clockText(at: number, timeZone?: string): string {
+  return new Intl.DateTimeFormat('en-GB', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23', ...(timeZone === undefined ? {} : { timeZone }) }).format(at)
+}
+
+/** A window's reset, while it lies ahead. */
+const resetAhead = (w: UsageWindow | undefined, now: number): string | undefined =>
+  w?.resetsAt !== undefined && Date.parse(w.resetsAt) > now ? resetText(w.resetsAt, now) : undefined
+
+/** A window as the row draws it: its label, a ten-cell bar and the percent used, whatever the footer fills with; a dash, dim, where none is read. */
+function usedPart(label: string, w: UsageWindow | undefined, now: number): RowPart {
+  const pct = windowPct(w, now)
+  if (pct === undefined) return { text: `${label} –`, tone: 'dim' }
+  const used = Math.round(pct)
+  return { text: `${label} ${longBar(used)} ${used}%` }
+}
+
+/** The status in a failure's words: `Failed to update`, with the HTTP status where its why names one. */
+const HTTP_STATUS = /HTTP (\d{3})/
+
+/**
+ * Line 1's end: a sign-in needed; else a failed check no older than the last good read, at its time; else the last
+ * good read's time, while a reading stands. With no good read known and no failure, nothing.
+ */
+function statePart(view: View, a: Account, timeZone: string | undefined): RowPart | undefined {
+  if (view.health[a.id]?.kind === 'login-needed') return { text: '⚠ sign in needed', tone: 'warning' }
+  const readAt = view.readAt?.[a.id]
+  const failure = view.checkErrors?.[a.id]
+  // A good read clears the failure, so one standing at the good read's own millisecond came after it.
+  if (failure !== undefined && (readAt === undefined || failure.at >= readAt)) {
+    const status = HTTP_STATUS.exec(failure.why)?.[1]
+    return { text: `${clockText(failure.at, timeZone)} Failed to update${status === undefined ? '' : ` (HTTP ${status})`}`, tone: 'warning' }
+  }
+  // A time over no reading would name a read the row cannot show.
+  return readAt === undefined || view.readings[a.id] === undefined ? undefined : { text: `updated ${clockText(readAt, timeZone)}` }
+}
+
+/** Line 2: the week used, the Fable week used (a dash on Max and Ultra where no body listed it), and the resets ahead. */
+function usageLine(view: View, a: Account, now: number): RowPart[] {
+  const r = view.readings[a.id]
+  if (r === undefined) return [{ text: `Used ${longBar(0)} no reading yet`, tone: 'dim' }]
+  const plan = planName(a, hasNoFiveHour(view, a.id))
+  const fable = r.fable !== undefined || (plan !== undefined && HAS_FABLE_WEEK.test(plan)) ? usedPart('Fable', r.fable, now) : undefined
+  const [week, fableReset] = [resetAhead(r.sevenDay, now), resetAhead(r.fable, now)]
+  const resets =
+    week === undefined ? (fableReset === undefined ? undefined : `Fable resets ${fableReset}`) : `resets ${week}${fableReset === undefined || fableReset === week ? '' : ` · Fable ${fableReset}`}`
+  return [
+    usedPart('Used', r.sevenDay, now),
+    ...(fable === undefined ? [] : [{ ...fable, text: ` ${fable.text}` }]),
+    ...(resets === undefined ? [] : [{ text: `  ${resets}` }]),
+  ]
+}
+
+/** Line 3, where the counted reading holds a 5-hour window: it used, and its reset ahead. */
+function fiveHourLine(view: View, a: Account, now: number): RowPart[] | undefined {
+  const w = view.readings[a.id]?.fiveHour
+  if (w === undefined) return undefined
+  const reset = resetAhead(w, now)
+  return [usedPart('5h', w, now), ...(reset === undefined ? [] : [{ text: `  resets ${reset}` }])]
+}
+
+/**
+ * A login's row from the counted view: line 1 who it is (email, Company, plan) and its last read's state, line 2 its
+ * week and Fable week used, line 3 its 5-hour window where it has one. A failure shown dims the usage lines.
+ * `timeZone` names the clock's zone; the machine's own where none is named.
+ */
+export function rowOf(view: View, a: Account, now: number, timeZone?: string): Row {
+  const who = a.email ?? (a.slot === '' ? 'your normal account' : 'not signed in yet')
+  const about = [companyOf(a), planName(a, hasNoFiveHour(view, a.id))].filter((s): s is string => s !== undefined)
+  const state = statePart(view, a, timeZone)
+  const line1: RowPart[] = [{ text: who }, ...(about.length === 0 ? [] : [{ text: ` · ${about.join(' · ')}` }]), ...(state === undefined ? [] : [{ text: '  ' }, state])]
+  const isFailed = state?.tone === 'warning' && view.health[a.id]?.kind !== 'login-needed'
+  const dim = (line: RowPart[]): RowPart[] => (isFailed ? line.map(p => ({ ...p, tone: 'dim' })) : line)
+  const five = fiveHourLine(view, a, now)
+  return { id: a.id, lines: [line1, dim(usageLine(view, a, now)), ...(five === undefined ? [] : [dim(five)])] }
+}
+
+/** A row's lines as text. */
+export function rowText(row: Row): string[] {
+  return row.lines.map(line => line.map(p => p.text).join(''))
+}
+
+/** Every login's row as text, as the merge stores it under `rows`, in the machine's own zone. */
+export function rowsOf(view: View, now: number): StoredRows['rows'] {
+  return view.accounts.map(a => ({ id: a.id, lines: rowText(rowOf(view, a, now)) }))
+}
+
+/** Whether the store's `rows` already hold these lines: then the merge writes nothing. */
+export function isSameRows(stored: unknown, rows: StoredRows['rows']): boolean {
+  const held = typeof stored === 'object' && stored !== null ? (stored as { rows?: unknown }).rows : undefined
+  return JSON.stringify(held) === JSON.stringify(rows)
+}
+
 // ---------------------------------------------------------------- one usage schedule per store
 // Every session reads every login's usage, so the calls grow as sessions times logins, and the usage endpoint
 // answers 429 to all of them. One key per login, shared by every session, says when it is next read.
@@ -1031,11 +1154,15 @@ export function retryAfterFrom(headers: Readonly<Record<string, string>>, now: n
   return Number.isFinite(ms) && ms > 0 ? ms : undefined
 }
 
-/** What a read came to, for the schedule: a body (and whether responses were stored since the last), a failure, a rejected sign-in. */
-export type UsageOutcome = { kind: 'ok'; hasResponded: boolean } | { kind: 'failed'; retryAfter?: number } | { kind: 'rejected' }
+/**
+ * What a read came to, for the schedule: a body (and whether responses were stored since the last), a body that holds
+ * no usage the mod reads (`empty`), a failure, a rejected sign-in.
+ */
+export type UsageOutcome = { kind: 'ok' | 'empty'; hasResponded: boolean } | { kind: 'failed'; retryAfter?: number } | { kind: 'rejected' }
 
 /**
- * The schedule after a read. A body: the next in 10 minutes for a login in use, else 30. A failure: the wait its
+ * The schedule after a read. A body: the next in 10 minutes for a login in use, else 30; a body with no usage in it
+ * the same, but it is no good read, so the last one's time stays. A failure: the wait its
  * Retry-After asks, or 2 minutes doubled for each failure before, whichever is longer, at most 60 minutes. A rejected
  * sign-in is no rate limit: read again in 10 minutes, so a new sign-in is read at once.
  */
@@ -1043,6 +1170,7 @@ export function afterUsage(due: UsageDue | undefined, outcome: UsageOutcome, now
   const last = due?.at === undefined ? {} : { at: due.at }
   const v = WRITER_VERSION
   if (outcome.kind === 'ok') return { next: now + (outcome.hasResponded ? USAGE_IN_USE_MS : USAGE_IDLE_MS), fails: 0, at: now, v }
+  if (outcome.kind === 'empty') return { next: now + (outcome.hasResponded ? USAGE_IN_USE_MS : USAGE_IDLE_MS), fails: 0, ...last, v }
   if (outcome.kind === 'rejected') return { next: now + USAGE_IN_USE_MS, fails: 0, ...last, v }
   const fails = due?.fails ?? 0
   const wait = Math.min(USAGE_BACKOFF_MAX_MS, Math.max(outcome.retryAfter ?? 0, USAGE_BACKOFF_MS * 2 ** fails))

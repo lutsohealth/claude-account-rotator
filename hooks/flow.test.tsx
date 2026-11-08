@@ -5243,3 +5243,148 @@ for (const limit of ['on', 'off'] as const) {
     expect([label, await knownSurfaces($, lines)]).toEqual([label, { paneRow: true, footerSession: true }])
   })
 }
+
+// C8 (puma-eslxj.9, problem g part 1): every session's merge writes each login's row under `rows`, for the CLI, built
+// from the store alone. The updated time is the last good usage read's (`usage-due:<id>.at`), never a response's.
+
+type RowsKey = { v?: number; at?: number; rows?: { id: string; lines: string[] }[] }
+const rowsOf = (store: Map<string, unknown>) => store.get('rows') as RowsKey | undefined
+const lineOne = (store: Map<string, unknown>, id: string) => rowsOf(store)?.rows?.find(r => r.id === id)?.lines[0] ?? '(no row)'
+/** When a login's last good usage read came, as its schedule holds it. */
+const goodReadAt = (store: Map<string, unknown>, id: string) => (store.get(`usage-due:${id}`) as { at?: number } | undefined)?.at ?? NaN
+/** HH:MM of `at` in this machine's zone, as a session writes the rows. */
+const localTime = (at: number) => new Intl.DateTimeFormat('en-GB', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(at)
+
+/** Two logins read at boot, or failing with 429 where `isFailing`, then a minute on, past the minute's merge. */
+async function rowsWorld($: Engine, on: On, isFailing = false): Promise<{ w: World; store: Map<string, unknown>; clock: MockClock }> {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  if (isFailing) w.failing = { 'tok-1': 429, 'tok-2': 429 }
+  w.usage['tok-1'] = [null, 30, 40]
+  w.usage['tok-2'] = [null, 40]
+  // Login 2's week resets at its own time, so a response proves login 1's.
+  w.weekResets = { 'tok-2': '2026-10-19T03:00:00Z' }
+  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off' }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  await clock.advance(61_000)
+  return { w, store, clock }
+}
+
+test('the merge stores each login\'s row lines under rows, stamped with when and the writer\'s version', async ($, on) => {
+  const { store, clock } = await rowsWorld($, on)
+  const rows = rowsOf(store)
+  expect([rows?.v, typeof rows?.at, rows?.rows?.map(r => r.id)]).toEqual([1, 'number', ['1', '2']])
+  expect(lineOne(store, '1')).toMatch(new RegExp(`^one@example\\.com.*  updated ${localTime(goodReadAt(store, '1'))}$`))
+  expect(rows?.rows?.[0]?.lines[1]).toBe('Used ▰▰▰▱▱▱▱▱▱▱ 30% Fable ▰▰▰▰▱▱▱▱▱▱ 40%  resets 5d 16h 59m · Fable 4d 16h 59m')
+  expect(clock.now()).toBeLessThan(NOW + 2 * 60_000)
+})
+
+test('a response that rewrites login 1\'s reading leaves its row\'s updated time at the last good usage read', async ($, on) => {
+  const { w, store, clock } = await rowsWorld($, on)
+  const readAt = goodReadAt(store, '1')
+  await clock.advance(4 * 60_000)
+  w.limits = [{ kind: 'seven_day', percentUsed: 31, resetsAt: WEEK_RESET }]
+  await respond($, clock, w)
+  const bumped = (store.get('usage:1') as { at?: number; src?: string } | undefined) ?? {}
+  // The seed: the response did rewrite the reading, at a minute the row would show.
+  expect([bumped.src, localTime(bumped.at ?? NaN) === localTime(readAt)]).toEqual(['response', false])
+  await clock.advance(61_000)
+  expect(lineOne(store, '1')).toMatch(new RegExp(`  updated ${localTime(readAt)}$`))
+})
+
+test('another session\'s good read of login 2 moves this session\'s row to that read\'s time', async ($, on) => {
+  const { store, clock } = await rowsWorld($, on)
+  // The seed: this session's own read shows first.
+  expect(lineOne(store, '2')).toMatch(new RegExp(`  updated ${localTime(goodReadAt(store, '2'))}$`))
+  await clock.advance(4 * 60_000)
+  const theirs = clock.now()
+  store.set('usage-due:2', { ...(store.get('usage-due:2') as object), at: theirs })
+  await clock.advance(61_000)
+  expect(lineOne(store, '2')).toMatch(new RegExp(`  updated ${localTime(theirs)}$`))
+  expect(localTime(theirs)).not.toBe(localTime(NOW))
+})
+
+test('login 2\'s schedule another session deletes leaves this session\'s row with no updated time', async ($, on) => {
+  const { store, clock } = await rowsWorld($, on)
+  expect(lineOne(store, '2')).toMatch(/  updated \d\d:\d\d$/)
+  store.delete('usage-due:2')
+  await clock.advance(60_000)
+  expect(lineOne(store, '2')).not.toMatch(/updated/)
+})
+
+test('a failure another session stores for login 2 shows on this session\'s row, and its delete brings the updated time back', async ($, on) => {
+  const { store, clock } = await rowsWorld($, on)
+  const readAt = goodReadAt(store, '2')
+  await clock.advance(4 * 60_000)
+  const failedAt = clock.now()
+  store.set('check-error:2', { why: 'the usage call answered HTTP 429', at: failedAt })
+  await clock.advance(60_000)
+  expect(lineOne(store, '2')).toMatch(new RegExp(`  ${localTime(failedAt)} Failed to update \\(HTTP 429\\)$`))
+  store.delete('check-error:2')
+  await clock.advance(60_000)
+  expect(lineOne(store, '2')).toMatch(new RegExp(`  updated ${localTime(readAt)}$`))
+})
+
+test('rows another session stored with this session\'s own lines are not written again', async ($, on) => {
+  const { store, clock } = await rowsWorld($, on, true)
+  const ours = rowsOf(store)
+  // The seed: the failures, which hold the lines still until the next read, are on the rows.
+  expect(lineOne(store, '1')).toMatch(/Failed to update \(HTTP 429\)$/)
+  store.set('rows', { ...ours, at: 1 })
+  await clock.advance(60_000)
+  expect(rowsOf(store)).toEqual({ ...ours, at: 1 })
+})
+
+test('rows another session stored with other lines are written again from the store, whatever this session wrote last', async ($, on) => {
+  const { store, clock } = await rowsWorld($, on, true)
+  const ours = rowsOf(store)
+  store.set('rows', { ...ours, at: 1, rows: [] })
+  await clock.advance(60_000)
+  const now = rowsOf(store)
+  expect([now?.rows, now?.at === 1]).toEqual([ours?.rows, false])
+})
+
+// Review C8-R1 F1 (Opus) [UPDATED-WITHOUT-READING] (RULING 4521): a usage answer that stores no reading is no good
+// read: the row's updated time stays at the last read that stored one, and a login never read so has none.
+test('a usage answer that stores no reading leaves login 2\'s row at its last good read', async ($, on) => {
+  const { w, store, clock } = await rowsWorld($, on)
+  const readAt = goodReadAt(store, '2')
+  const before = store.get('usage:2')
+  // The endpoint answers 200 with no window the mod can read: checkAccount stores no reading.
+  w.usage['tok-2'] = [null, null]
+  const calls = w.usageCalls.filter(t => t === 'tok-2').length
+  await clock.advance(USAGE_IDLE_MS + 2 * 60_000)
+  // The seed: login 2 was read again, and its reading is the boot read's still.
+  expect([w.usageCalls.filter(t => t === 'tok-2').length > calls, store.get('usage:2') === before]).toEqual([true, true])
+  expect(lineOne(store, '2')).toMatch(new RegExp(`  updated ${localTime(readAt)}$`))
+})
+
+test('the login in use, a response since, read by its schedule into no reading, keeps its updated time', async ($, on) => {
+  const { w, store, clock } = await rowsWorld($, on)
+  const readAt = goodReadAt(store, '1')
+  await clock.advance(4 * 60_000)
+  w.limits = [{ kind: 'seven_day', percentUsed: 31, resetsAt: WEEK_RESET }]
+  await respond($, clock, w)
+  w.usage['tok-1'] = [null, null]
+  const calls = w.usageCalls.filter(t => t === 'tok-1').length
+  await clock.advance(USAGE_IDLE_MS)
+  expect(w.usageCalls.filter(t => t === 'tok-1').length > calls).toBe(true)
+  expect(lineOne(store, '1')).toMatch(new RegExp(`  updated ${localTime(readAt)}$`))
+})
+
+test('a login whose only usage answer stored no reading draws no updated time over no reading yet', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [null, 30, 40]
+  w.usage['tok-2'] = [null, null]
+  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off' }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  await clock.advance(61_000)
+  // The seed: login 2 was read, and stored no reading.
+  expect([w.usageCalls.includes('tok-2'), store.has('usage:2')]).toEqual([true, false])
+  expect(lineOne(store, '2')).not.toMatch(/updated/)
+})

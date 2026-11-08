@@ -5,6 +5,7 @@ import { weekLeaveFrom, launchOnFrom, pickLaunch, isSessionStop } from './model'
 import { isSameWeek, whoseWeek } from './model'
 import { companyOf, identityFromStatus, planName } from './model'
 import { laterMark, spentMark, withFableMark } from './model'
+import { EMPTY_VIEW, USAGE_IDLE_MS, rowOf, rowText } from './model'
 import { USAGE_BACKOFF_MAX_MS, USAGE_CLAIM_MS, USAGE_CLAIM_WAIT_MS, USAGE_EARLY_MS, WRITER_VERSION, afterUsage, claimDueReads, gatingDue, isUsageDue, mayForceUsage, mayReadSince, renewClaim, retryAfterFrom, usageDueFrom } from './model'
 import { DEFAULT_FOOTER, availableNow, braille, browsersFrom, chromeNote, continueTextFrom, counted, fiveHourLimitFrom, credentialFrom, credentialsFile, fableMark, fableSpentNotice, fableStay, footerStyleFrom, healthOf, identityFromProfile, isFableSpent, isFableStop, isNoBrowser, isPolicyRefusal, keepFable, keychainItem, legacyMark, markFrom, nextReset, pickTarget, pie, readingFromUsage, rotateToFrom, shouldLeave, roomColor, windowPct, withMark, withWeekMark } from './model'
 
@@ -978,4 +979,159 @@ test('of two Fable marks the one that ends later stands, and of one, that one', 
   expect(laterMark(stopMark(), stopMark(later))).toEqual(stopMark(later))
   expect(laterMark(stopMark(later), stopMark())).toEqual(stopMark(later))
   expect(laterMark(undefined, stopMark())).toEqual(stopMark())
+})
+
+// C8 (puma-eslxj.9, problem g part 1): one row model, so the pane and the CLI cannot drift. The operator's row, from
+// the epic's "The row, exactly": `<email> · <Company> · <Plan>  updated HH:MM`, then `Used <bar> N% Fable <bar> N%
+// resets Nd Nh Nm`. The clock is fixed and the zone named: 16:34Z is 18:34 in Tallinn in November.
+const ROW_NOW = Date.parse('2026-11-08T16:40:00Z')
+const READ_AT = Date.parse('2026-11-08T16:34:00Z')
+const FAILED_AT = Date.parse('2026-11-08T16:39:00Z')
+const TALLINN = 'Europe/Tallinn'
+const MINUTE = 60_000
+/** A time `d` days, `h` hours and `m` minutes after the row's clock. */
+const ahead = (d: number, h: number, m: number) => new Date(ROW_NOW + ((d * 24 + h) * 60 + m) * MINUTE).toISOString()
+const ROW_WEEK_END = ahead(2, 3, 14)
+const ANDRES = { id: '1', slot: '', email: 'andres@lutsohealth.com', orgName: 'Company', plan: 'max', tier: 'default_claude_max_20x' }
+const HTTP_429 = { why: 'the usage call answered HTTP 429 (retry after 60 s)', at: FAILED_AT }
+
+/** An Ultra login read at 18:34 Tallinn time: its week 31% used and its Fable week 38%, both resetting in 2d 3h 14m. */
+function rowView(change: Partial<View> = {}, account: View['accounts'][number] = ANDRES): View {
+  return {
+    ...EMPTY_VIEW,
+    accounts: [account],
+    activeId: '1',
+    health: { '1': { kind: 'ok' } },
+    readings: { '1': { sevenDay: { pct: 31, resetsAt: ROW_WEEK_END }, fable: { pct: 38, resetsAt: ROW_WEEK_END }, noFiveHour: true, at: READ_AT, by: '1' } },
+    noFiveHour: { '1': true },
+    readAt: { '1': READ_AT },
+    ...change,
+  }
+}
+const rowLines = (v: View, timeZone = TALLINN) => rowText(rowOf(v, v.accounts[0] ?? ANDRES, ROW_NOW, timeZone))
+const OPERATOR_LINE_2 = 'Used ▰▰▰▱▱▱▱▱▱▱ 31% Fable ▰▰▰▰▱▱▱▱▱▱ 38%  resets 2d 3h 14m'
+
+test('the row is the operator\'s two lines: who, Company and plan, the last good read\'s time, then the week and Fable used', () => {
+  expect(rowLines(rowView())).toEqual(['andres@lutsohealth.com · Company · Ultra  updated 18:34', OPERATOR_LINE_2])
+})
+
+test('a failed read newer than the last good one ends line 1 with its time and status, and dims line 2', () => {
+  const v = rowView({ checkErrors: { '1': HTTP_429 } })
+  expect(rowLines(v)).toEqual(['andres@lutsohealth.com · Company · Ultra  18:39 Failed to update (HTTP 429)', OPERATOR_LINE_2])
+  const [line1, line2] = rowOf(v, ANDRES, ROW_NOW, TALLINN).lines
+  expect(line1?.at(-1)).toEqual({ text: '18:39 Failed to update (HTTP 429)', tone: 'warning' })
+  expect(line2?.map(p => p.tone)).toEqual(line2?.map(() => 'dim'))
+  expect(rowOf(rowView(), ANDRES, ROW_NOW, TALLINN).lines[1]?.some(p => p.tone === 'dim')).toBe(false)
+})
+
+test('a failure older than the last good read is past: line 1 says when the good read came', () => {
+  expect(rowLines(rowView({ checkErrors: { '1': { ...HTTP_429, at: READ_AT - MINUTE } } }))[0]).toBe('andres@lutsohealth.com · Company · Ultra  updated 18:34')
+})
+
+test('a failure that names no HTTP status says it failed, with nothing in parentheses', () => {
+  const v = rowView({ checkErrors: { '1': { why: 'the check failed (TypeError); the debug log has the rest', at: FAILED_AT } } })
+  expect(rowLines(v)[0]).toBe('andres@lutsohealth.com · Company · Ultra  18:39 Failed to update')
+})
+
+test('the updated time is the last good usage read\'s, not a response\'s that rewrote the reading since', () => {
+  const v = rowView()
+  const bumped = { ...rowView(), readings: { '1': { ...v.readings['1'], at: ROW_NOW } } } as View
+  expect(rowLines(bumped)[0]).toBe('andres@lutsohealth.com · Company · Ultra  updated 18:34')
+})
+
+test('a login with no good read known draws no updated time', () => {
+  expect(rowLines(rowView({ readAt: {} }))[0]).toBe('andres@lutsohealth.com · Company · Ultra')
+})
+
+test('the time is the zone\'s: the same read is 16:34 in UTC', () => {
+  expect(rowLines(rowView(), 'UTC')[0]).toBe('andres@lutsohealth.com · Company · Ultra  updated 16:34')
+})
+
+test('an organization named for the login\'s own email draws no Company', () => {
+  expect(rowLines(rowView({}, { ...ANDRES, orgName: "andres@lutsohealth.com's Organization" }))[0]).toBe('andres@lutsohealth.com · Ultra  updated 18:34')
+})
+
+test('a login that needs a sign-in says so in place of the time, a failure standing or not', () => {
+  const v = rowView({ health: { '1': { kind: 'login-needed', why: 'sign-in expired' } }, checkErrors: { '1': HTTP_429 } })
+  expect(rowLines(v)[0]).toBe('andres@lutsohealth.com · Company · Ultra  ⚠ sign in needed')
+})
+
+test('a login never read draws an empty bar and says so, dim, on line 2', () => {
+  const v = rowView({ readings: {}, readAt: {}, checkErrors: { '1': HTTP_429 } })
+  expect(rowLines(v)).toEqual(['andres@lutsohealth.com · Company · Ultra  18:39 Failed to update (HTTP 429)', 'Used ▱▱▱▱▱▱▱▱▱▱ no reading yet'])
+  expect(rowOf(v, ANDRES, ROW_NOW, TALLINN).lines[1]).toEqual([{ text: 'Used ▱▱▱▱▱▱▱▱▱▱ no reading yet', tone: 'dim' }])
+})
+
+test('on Max and Ultra a Fable week no body listed is a dash; on other plans there is no Fable part', () => {
+  const v = rowView()
+  const noFable = { ...v.readings['1'], fable: undefined } as View['readings'][string]
+  expect(rowLines({ ...v, readings: { '1': noFable } })[1]).toBe('Used ▰▰▰▱▱▱▱▱▱▱ 31% Fable –  resets 2d 3h 14m')
+  const pro = { ...ANDRES, plan: 'pro', tier: undefined }
+  expect(rowLines({ ...rowView({}, pro), readings: { '1': noFable }, noFiveHour: {} })).toEqual(['andres@lutsohealth.com · Company · Pro  updated 18:34', 'Used ▰▰▰▱▱▱▱▱▱▱ 31%  resets 2d 3h 14m'])
+})
+
+test('a Fable week that resets at another time than the week says its own reset after the week\'s', () => {
+  const v = rowView()
+  const r = { ...v.readings['1'], fable: { pct: 38, resetsAt: ahead(1, 3, 14) } } as View['readings'][string]
+  expect(rowLines({ ...v, readings: { '1': r } })[1]).toBe(`${OPERATOR_LINE_2} · Fable 1d 3h 14m`)
+})
+
+test('a reset under a day drops the days, and under an hour the hours', () => {
+  const at = (resetsAt: string) => rowLines(rowView({ readings: { '1': { sevenDay: { pct: 31, resetsAt }, fable: { pct: 38, resetsAt }, noFiveHour: true, at: READ_AT, by: '1' } } }))[1]
+  expect(at(ahead(0, 20, 27))).toBe('Used ▰▰▰▱▱▱▱▱▱▱ 31% Fable ▰▰▰▰▱▱▱▱▱▱ 38%  resets 20h 27m')
+  expect(at(ahead(0, 0, 27))).toBe('Used ▰▰▰▱▱▱▱▱▱▱ 31% Fable ▰▰▰▰▱▱▱▱▱▱ 38%  resets 27m')
+})
+
+test('a week whose reset has passed is 0% used with no reset; a plan that reports no week is a dash', () => {
+  const passed = rowView({ readings: { '1': { sevenDay: { pct: 31, resetsAt: ahead(0, 0, -1) }, noFiveHour: true, at: READ_AT, by: '1' } } })
+  expect(rowLines(passed)[1]).toBe('Used ▱▱▱▱▱▱▱▱▱▱ 0% Fable –')
+  const noWeek = rowView({ readings: { '1': { fable: { pct: 38, resetsAt: ROW_WEEK_END }, noFiveHour: true, at: READ_AT, by: '1' } } })
+  expect(rowLines(noWeek)[1]).toBe('Used – Fable ▰▰▰▰▱▱▱▱▱▱ 38%  Fable resets 2d 3h 14m')
+})
+
+test('a login with a 5-hour window in its counted reading has a third line for it; one with none has two lines', () => {
+  const max = { ...ANDRES, tier: 'default_claude_max_5x' }
+  const r = { sevenDay: { pct: 31, resetsAt: ROW_WEEK_END }, fable: { pct: 38, resetsAt: ROW_WEEK_END }, fiveHour: { pct: 50, resetsAt: ahead(0, 1, 20) }, at: READ_AT, by: '1' }
+  const v = rowView({ readings: { '1': r }, noFiveHour: { '1': false } }, max)
+  expect(rowLines(v)).toEqual(['andres@lutsohealth.com · Company · Max  updated 18:34', OPERATOR_LINE_2, '5h ▰▰▰▰▰▱▱▱▱▱ 50%  resets 1h 20m'])
+  expect(rowLines(rowView())).toHaveLength(2)
+})
+
+// Review C8-R1 unreadable-body (Codex) [UPDATED-WITHOUT-READING] (RULING 4521): a 2xx answer whose body yields no
+// reading is the outcome `empty`, which keeps the last good read's time. Codex's block passed `ok` for that body; the
+// fix gives the body `empty`, so the block is kept with `empty`.
+test('an answer whose body holds no usage keeps the last good read\'s time, and the row says it', () => {
+  const PRO = { id: '1', slot: '', email: 'andres@lutsohealth.com', plan: 'pro' }
+  expect(readingFromUsage({}, ROW_NOW)).toBeUndefined()
+  const due = afterUsage({ next: READ_AT, fails: 0, at: READ_AT }, { kind: 'empty', hasResponded: false }, ROW_NOW)
+  expect([due.at, due.fails, due.next]).toEqual([READ_AT, 0, ROW_NOW + USAGE_IDLE_MS])
+  const v = rowView({ readAt: { '1': due.at as number }, noFiveHour: {} }, PRO)
+  expect(rowText(rowOf({ ...v, readings: { '1': { sevenDay: { pct: 31, resetsAt: ROW_WEEK_END }, at: READ_AT, by: '1' } } }, PRO, ROW_NOW, 'UTC'))[0]).toBe('andres@lutsohealth.com · Pro  updated 16:34')
+})
+
+test('an empty answer on a login never read well makes no good read: the row has no updated time', () => {
+  expect(readingFromUsage(null, ROW_NOW)).toBeUndefined()
+  const due = afterUsage(undefined, { kind: 'empty', hasResponded: true }, ROW_NOW)
+  expect([due.at, due.next]).toEqual([undefined, ROW_NOW + 10 * MINUTE])
+  expect(rowLines(rowView({ readings: {}, readAt: due.at === undefined ? {} : { '1': due.at } }))[0]).toBe('andres@lutsohealth.com · Company · Ultra')
+})
+
+// Review C8-R1 F1 class (c) (Opus) [UPDATED-WITHOUT-READING]: rowOf never pairs an updated time with no reading.
+test('a login with no reading draws no updated time, whatever else the view holds', () => {
+  const cases: [string, Partial<View>][] = [
+    ['health ok', {}],
+    ['no health', { health: {} }],
+    ['an older failure', { checkErrors: { '1': { why: 'HTTP 429', at: READ_AT - 3 * MINUTE } } }],
+    ['no-five-hour stored', { noFiveHour: { '1': true } }],
+  ]
+  const offenders = cases.filter(([, change]) => /updated/.test(rowLines(rowView({ readings: {}, ...change }))[0] ?? ''))
+  expect(cases.length).toBeGreaterThan(0)
+  expect(offenders.map(([name]) => name)).toEqual([])
+})
+
+// Review C8-R1 equal-time (Codex) [FAILURE-TIE-HIDDEN] (RULING 4521): a good read clears check-error, so a failure
+// standing at the same millisecond as the good read came after it.
+test('a failure at the same millisecond as the good read shows, with its status or without', () => {
+  expect(rowLines(rowView({ checkErrors: { '1': { ...HTTP_429, at: READ_AT } } }))[0]).toBe('andres@lutsohealth.com · Company · Ultra  18:34 Failed to update (HTTP 429)')
+  expect(rowLines(rowView({ checkErrors: { '1': { why: 'the usage call failed to connect', at: READ_AT } } }))[0]).toBe('andres@lutsohealth.com · Company · Ultra  18:34 Failed to update')
 })

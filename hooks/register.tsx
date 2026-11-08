@@ -80,6 +80,8 @@ import {
   renewClaim,
   retryAfterFrom,
   usageDueFrom,
+  isSameRows,
+  rowsOf,
 } from './model'
 import type { Credential, Identity, Need, StayReason } from './model'
 import { Band, Footer, Pane } from './view'
@@ -367,6 +369,7 @@ async function mergeStore($: Host): Promise<void> {
   const weekMarks: Record<string, Mark> = {}
   const fableMarks: Record<string, Mark> = {}
   const checkErrors: Record<string, CheckError> = {}
+  const readAt: Record<string, number> = {}
   const health: Record<string, Health> = {}
   const holders: Record<string, Holder> = {}
   let hasOlderWriter = false
@@ -390,6 +393,9 @@ async function mergeStore($: Host): Promise<void> {
     if (f !== undefined) fableMarks[a.id] = f
     const e = await $.store.get(`check-error:${a.id}`)
     if (typeof e === 'object' && e !== null && typeof (e as CheckError).why === 'string' && typeof (e as CheckError).at === 'number') checkErrors[a.id] = e as CheckError
+    // The last good usage read, any session's: a response rewrites `usage:<id>` and its `at`, so the schedule says it.
+    const goodAt = usageDueFrom(await $.store.get(`usage-due:${a.id}`))?.at
+    if (goodAt !== undefined) readAt[a.id] = goodAt
     const h = await $.store.get(`health:${a.id}`)
     if (typeof h === 'object' && h !== null && typeof (h as Health).kind === 'string') health[a.id] = h as Health
     const s = await $.store.get(`holder:${a.id}`)
@@ -439,8 +445,19 @@ async function mergeStore($: Host): Promise<void> {
       const holder = holders[a.id] ?? v.holders[a.id]
       if (holder !== undefined) nextHolders[a.id] = holder
     }
-    return { ...v, accounts, readings: nextReadings, marks: nextMarks, noFiveHour: nextNoFiveHour, weekMarks: nextWeekMarks, fableMarks: nextFableMarks, checkErrors, health: nextHealth, holders: nextHolders, footer, rotateTo, fiveHourLimit, weekLeave, launchOn, fableContinueText, chromeAccountId, chromeAccountIds, hasOlderWriter }
+    return { ...v, accounts, readings: nextReadings, marks: nextMarks, noFiveHour: nextNoFiveHour, weekMarks: nextWeekMarks, fableMarks: nextFableMarks, checkErrors, readAt, health: nextHealth, holders: nextHolders, footer, rotateTo, fiveHourLimit, weekLeave, launchOn, fableContinueText, chromeAccountId, chromeAccountIds, hasOlderWriter }
   })
+  await saveRows($, now)
+}
+
+/**
+ * Stores every login's row under `rows`, for the CLI, when the lines differ from what the store holds: whichever
+ * session wrote them, so sessions that see the same store write them once between them.
+ */
+async function saveRows($: Host, now: number): Promise<void> {
+  const rows = rowsOf(await getView($), now)
+  if (isSameRows(await $.store.get('rows'), rows)) return
+  await $.store.set('rows', { v: WRITER_VERSION, at: now, rows })
 }
 
 /** Changes the footer's look for every session. */
@@ -777,7 +794,9 @@ async function requestUsage($: Host, account: Account, accessToken: string, gate
     throw error
   }
   const at = await $.clock.now()
-  const outcome = usage.kind === 'ok' ? { kind: 'ok' as const, hasResponded } : usage.kind === 'rejected' ? usage : { kind: 'failed' as const, retryAfter: usage.retryAfter }
+  // A body that holds no usage the mod reads stores no reading: it is no good read.
+  const ok = usage.kind === 'ok' ? { kind: readingFromUsage(usage.body, at) === undefined ? ('empty' as const) : ('ok' as const), hasResponded } : undefined
+  const outcome = ok ?? (usage.kind === 'rejected' ? usage : { kind: 'failed' as const, retryAfter: usage.retryAfter })
   await $.store.set(key, afterUsage(due, outcome, at))
   return usage
 }

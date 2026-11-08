@@ -5,6 +5,7 @@ import {
   DEFAULT_LAUNCH_ON,
   DEFAULT_WEEK_LEAVE,
   GLYPHS,
+  HAS_FABLE_WEEK,
   SIGN_IN_WARN_MS,
   WEEK_LEAVE_MAX,
   availableNow,
@@ -13,12 +14,13 @@ import {
   companyOf,
   fableSpentNotice,
   glyph,
+  hasFiveHour,
+  hasNoFiveHour,
   isOnNormalLogin,
   isSpent,
   longBar,
   nextReset,
   planName,
-  reportsNoFiveHour,
   resumeCommand,
   roomColor,
   roomLeft,
@@ -64,20 +66,6 @@ function rooms(view: View, a: Account, i: number, now: number): readonly [number
 
 /** A percent's room color, lighter while the pointer is over the footer. */
 const roomRun = (leftPct: number) => ({ color: roomColor(leftPct), lit: roomColor(leftPct, true) })
-
-/** Whether a login's usage said it has no 5-hour window, in its reading or, with none yet, in the store: the plan's name infers Ultra from it. */
-function hasNoFiveHour(view: View, id: string): boolean {
-  const r = view.readings[id]
-  return r === undefined ? view.noFiveHour?.[id] === true : reportsNoFiveHour(r)
-}
-
-/**
- * Whether a login is known to have a 5-hour window: its reading holds one (a read's, or a stop's mark), or its usage
- * last said it has one. A login with no reading and no word either way is unknown, and unknown draws nothing.
- */
-function hasFiveHour(view: View, id: string): boolean {
-  return view.readings[id]?.fiveHour !== undefined || view.noFiveHour?.[id] === false
-}
 
 /** Whether a login has no session row in the footer: a demo shows one for every login. */
 const hasNoSession = (view: View, a: Account) => !view.demo && !hasFiveHour(view, a.id)
@@ -635,9 +623,6 @@ function windowRow(ui: Ui, fill: Fill, isActive: boolean, name: string, hasReadi
     </Box>
   )
 }
-
-/** The plans with a separate weekly limit for Fable: on these, a login whose usage lists no Fable week draws it unknown. */
-const HAS_FABLE_WEEK = /^(max|ultra)\b/i
 
 /**
  * A login's Fable week: the one its reading holds, on any plan, as a body listed it or a stop marked it; else on Max
