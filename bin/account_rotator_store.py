@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import glob
 import json
-import math
 import os
 
 STORE_GLOB = "account-rotator_claude-account-rotator-*.json"
@@ -25,7 +24,7 @@ class StoreError(Exception):
 
 def is_instant(value: object) -> bool:
     """Whether a stored value is a time the mod writes: epoch milliseconds a Python datetime can render."""
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and 0 <= value <= MAX_INSTANT_MS
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and 0 <= value <= MAX_INSTANT_MS
 
 
 def config_folder() -> str:

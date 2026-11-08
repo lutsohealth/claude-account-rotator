@@ -195,6 +195,13 @@ class StorePick(StoreCase):
         (self.stores / "account-rotator_claude-account-rotator-dangling.json").symlink_to(self.tmp / "gone")
         self.assertEqual(self.picks(), {"account-rotator-launch": "/the/installed/store", "account-rotator": str(self.store)})
 
+    def test_a_dangling_file_of_the_stores_name_alone_is_no_store(self) -> None:
+        self.store.unlink()
+        (self.stores / "account-rotator_inline-a7581201d848.json").unlink()
+        (self.stores / "account-rotator_claude-account-rotator-dangling.json").symlink_to(self.tmp / "gone")
+        said = {name: run(ROOT / "bin" / name, *BINS[name], env=self.env()).stderr for name in BINS}
+        self.assertEqual({name: "no account-rotator store found" in text for name, text in said.items()}, dict.fromkeys(BINS, True), said)
+
     def test_each_bin_reads_the_store_through_a_link_as_path_may_reach_it(self) -> None:
         on_path = self.tmp / "on-path"
         on_path.mkdir()

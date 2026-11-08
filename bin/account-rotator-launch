@@ -18,8 +18,9 @@ import os
 import sys
 import time
 
-# The store module stands beside this file, which PATH may reach through a link.
-sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+# The store module stands beside this file. Run as a script, Python puts the file's own folder first on sys.path,
+# links resolved; this line is for a loader that does not.
+sys.path.insert(0, os.path.dirname(__file__))
 from account_rotator_store import STORE_GLOB, StoreError, is_instant, read  # noqa: E402
 
 
