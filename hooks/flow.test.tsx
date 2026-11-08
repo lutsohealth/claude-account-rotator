@@ -6052,9 +6052,10 @@ test('a select request for this store is applied at the minute: launch-on, launc
   expect(resultOf(w, N1)).toMatchObject({ nonce: N1, ok: true })
 })
 
-test('a request read from another store, a stale one and one for a login not listed change nothing', async ($, on) => {
+test('a request read from another store, a stale one, one whose nonce is not its file\'s and one for a login not listed change nothing', async ($, on) => {
   const { w, store, clock } = await selectWorld($, on)
   const [id, now, before] = [store.get('store-id'), clock.now(), store.get('launch-on')]
+  w.files[`${REQUESTS}/named-0001.json`] = selectRequest('other-name', '2', id, now)
   w.files[`${REQUESTS}/other-0001.json`] = selectRequest('other-0001', '2', 'another-store', now)
   w.files[`${REQUESTS}/stale-0001.json`] = selectRequest('stale-0001', '2', id, now - REQUEST_TTL_MS - 1)
   w.files[`${REQUESTS}/gone-00001.json`] = selectRequest('gone-00001', '9', id, now)
