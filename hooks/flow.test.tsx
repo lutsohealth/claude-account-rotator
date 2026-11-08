@@ -4844,6 +4844,9 @@ test('a token refresh that brings a new refresh token keeps the account\'s readi
   w.failing = { 'tok-1r': 503 }
   await clock.advance(10 * 60_000 + 1000)
   expect([read('usage:1') !== undefined, read('no-five-hour:1')]).toEqual([true, true])
+  // Its schedule was the old token's: the new token is read at the next minute, not when the old schedule says.
+  await clock.advance(61_000)
+  expect(callsWith(w, 'tok-1r')).toBeGreaterThan(0)
 })
 
 // Review opus-c5 F2: the old sign-in's no-five-hour and reading infer nothing about the new one.
