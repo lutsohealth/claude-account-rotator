@@ -353,9 +353,14 @@ async function saveHealth($: Host, id: string, health: Health): Promise<Health |
   return before
 }
 
+/** A stored `holder:<id>` as the merge and a check both read it: a token and an email, or none. */
+function holderFrom(value: unknown): Holder | undefined {
+  const s = value as Holder | null | undefined
+  return typeof s === 'object' && s !== null && typeof s.token === 'string' && typeof s.who?.email === 'string' ? s : undefined
+}
+
 async function saveHolder($: Host, id: string, holder: Holder): Promise<void> {
   await $.store.set(`holder:${id}`, holder)
-  await setView($, v => ({ ...v, holders: { ...v.holders, [id]: holder } }))
 }
 
 /** Folds what other sessions stored into this session's view. */
@@ -369,7 +374,6 @@ async function mergeStore($: Host): Promise<void> {
   const checkErrors: Record<string, CheckError> = {}
   const readAt: Record<string, number> = {}
   const health: Record<string, Health> = {}
-  const holders: Record<string, Holder> = {}
   let hasOlderWriter = false
   for (const a of accounts) {
     const r = await storedReading($, a.id)
@@ -396,10 +400,6 @@ async function mergeStore($: Host): Promise<void> {
     if (goodAt !== undefined) readAt[a.id] = goodAt
     const h = await $.store.get(`health:${a.id}`)
     if (typeof h === 'object' && h !== null && typeof (h as Health).kind === 'string') health[a.id] = h as Health
-    const s = await $.store.get(`holder:${a.id}`)
-    if (typeof s === 'object' && s !== null && typeof (s as Holder).token === 'string' && typeof (s as Holder).who?.email === 'string') {
-      holders[a.id] = s as Holder
-    }
   }
   const footer = footerStyleFrom(await $.store.get('footer'))
   const rotateTo = rotateToFrom(await $.store.get('rotate-to'))
@@ -419,7 +419,6 @@ async function mergeStore($: Host): Promise<void> {
     const nextWeekMarks: Record<string, Mark> = {}
     const nextFableMarks: Record<string, Mark> = {}
     const nextHealth: Record<string, Health> = {}
-    const nextHolders: Record<string, Holder> = {}
     for (const a of accounts) {
       // The reading, the marks and no-five-hour come from the store alone: every save writes the store before the
       // view, and a key another session deleted (its undo, Remove, a sign-in as another account) leaves this view too.
@@ -440,10 +439,8 @@ async function mergeStore($: Host): Promise<void> {
       const own = v.health[a.id]
       const h = signingIn === a.id ? own : (health[a.id] ?? own)
       if (h !== undefined) nextHealth[a.id] = h
-      const holder = holders[a.id] ?? v.holders[a.id]
-      if (holder !== undefined) nextHolders[a.id] = holder
     }
-    return { ...v, accounts, readings: nextReadings, marks: nextMarks, noFiveHour: nextNoFiveHour, weekMarks: nextWeekMarks, fableMarks: nextFableMarks, checkErrors, readAt, health: nextHealth, holders: nextHolders, footer, rotateTo, fiveHourLimit, weekLeave, launchOn, fableContinueText, chromeAccountId, chromeAccountIds, hasOlderWriter }
+    return { ...v, accounts, readings: nextReadings, marks: nextMarks, noFiveHour: nextNoFiveHour, weekMarks: nextWeekMarks, fableMarks: nextFableMarks, checkErrors, readAt, health: nextHealth, footer, rotateTo, fiveHourLimit, weekLeave, launchOn, fableContinueText, chromeAccountId, chromeAccountIds, hasOlderWriter }
   })
   await saveRows($, now)
 }
@@ -672,10 +669,14 @@ async function announceStay($: Host): Promise<void> {
  */
 async function holderOf($: Host, account: Account, credential: Credential, isLive: boolean): Promise<Holder | undefined> {
   const token = await fingerprint(credential.refreshToken ?? credential.accessToken)
-  const known = (await getView($)).holders[account.id]
+  // The store's, not the view's: a sign-in another session named since this view's last merge is not taken for a new one.
+  const known = holderFrom(await $.store.get(`holder:${account.id}`))
   if (known?.token === token) return known
   if (!isLive) return undefined
   const { who, status } = await fetchIdentity($, credential.accessToken)
+  // Another session may have named this sign-in while the profile call ran: then it is not a new one.
+  const named = holderFrom(await $.store.get(`holder:${account.id}`))
+  if (named?.token === token) return named
   if (who?.email === undefined) {
     // No usage is read for a sign-in nobody has named: the pane says why, until a check names it.
     const what = status >= 200 && status < 300 ? 'the profile answer named no email' : `the profile call answered HTTP ${status}`
@@ -1650,16 +1651,14 @@ async function removeAccount($: Host, id: string): Promise<void> {
     const readings = { ...v.readings }
     const marks = { ...v.marks }
     const health = { ...v.health }
-    const holders = { ...v.holders }
     delete readings[id]
     delete marks[id]
     delete health[id]
-    delete holders[id]
     const { [id]: _none, ...noFiveHour } = v.noFiveHour ?? {}
     const { [id]: _week, ...weekMarks } = v.weekMarks ?? {}
     const { [id]: _fable, ...fableMarks } = v.fableMarks ?? {}
     const { [id]: _error, ...checkErrors } = v.checkErrors ?? {}
-    return { ...v, readings, marks, noFiveHour, weekMarks, fableMarks, checkErrors, health, holders, removing: undefined }
+    return { ...v, readings, marks, noFiveHour, weekMarks, fableMarks, checkErrors, health, removing: undefined }
   })
   // A launcher must never start a session on the account just removed.
   await saveLaunchPick($)

@@ -40,7 +40,6 @@ function view(
       }),
     ),
     health: Object.fromEntries(ids.map(id => [id, health[id] ?? { kind: 'ok' as const }])),
-    holders: {},
     activeId: '1',
     footer: DEFAULT_FOOTER,
     rotateTo,

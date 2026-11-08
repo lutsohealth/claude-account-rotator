@@ -163,8 +163,6 @@ export type View = {
   /** When each login's last good usage read came, as its schedule `usage-due:<id>` holds it (`UsageDue.at`). */
   readAt?: Record<string, number>
   health: Record<string, Health>
-  /** Who each login's sign-in belongs to: a /login in a session on a login signs in there, whoever it signs in. */
-  holders: Record<string, Holder>
   /** The login this session sends its requests with. */
   activeId: string
   /** Set after a switch until a response shows the new login's usage. */

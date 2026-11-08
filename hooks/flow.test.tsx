@@ -3,7 +3,7 @@ import type { Engine, MockClock } from 'claude-code/testing'
 import type { On, ProcessRunResult, SessionRateLimit, ToolCallArgs } from 'claude-code'
 import type { StoredRows } from '../types'
 
-import { DEFAULT_FOOTER, USAGE_CLAIM_WAIT_MS, USAGE_FORCE_AFTER_MS, USAGE_IDLE_MS, keychainItem, roomColor } from './model'
+import { DEFAULT_FOOTER, USAGE_CLAIM_WAIT_MS, USAGE_FORCE_AFTER_MS, USAGE_IDLE_MS, fingerprint, keychainItem, roomColor } from './model'
 import { laterMark, longBar, markFrom, storedLineText } from './model'
 import { PANE_COLUMNS } from './view'
 
@@ -2682,8 +2682,8 @@ test('the launch pick follows the New on setting another session stored since th
   await start($, clock)
   expect(store.get('launch-slot')).toMatchObject({ id: '2', why: 'it has the most room' })
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  // The other session stores only the setting; this session's next pick must be made, and written, from it.
   store.set('launch-on', 'account:1')
-  store.set('launch-slot', { id: '1', slot: '', why: 'you picked it', at: NOW })
   // Any press that runs the rotation stores the pick again, before the minute's merge.
   await pane.press({ key: 'week-leave-up' })
   await clock.settle()
@@ -2866,6 +2866,92 @@ for (const { name, most, run } of MERGE_COST_CASES) {
   })
 }
 
+// puma-eslxj.22: a check judges a new sign-in against the holder the store names, not this session's view, so a sign-in
+// another session already named keeps the usage that session stored for it.
+test('a /login on a sign-in another session already named deletes none of the usage that session stored for it', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [20, 30]
+  w.usage['tok-2'] = [10, 30]
+  const store = new MergeLog(Object.entries(TWO_LOGINS))
+  const clock = world(on, w, store)
+  await start($, clock)
+  // The other session found login 1 signed in as nine@example.com and stored that sign-in, its usage and its schedule;
+  // this session's view still holds one@example.com's sign-in.
+  w.owners['tok-9'] = 'nine@example.com'
+  w.usage['tok-9'] = [5, 15]
+  w.loginToken = 'tok-9'
+  store.set('holder:1', { token: await fingerprint('refresh-tok-9'), who: { email: 'nine@example.com' } })
+  store.set('usage:1', { sevenDay: { pct: 15, resetsAt: WEEK_RESET }, at: NOW, by: '1', v: 1, src: 'body' })
+  store.set('usage-due:1', { next: NOW + 10 * 60_000, fails: 0, at: NOW, v: 1 })
+  store.log = []
+  await $.command.run(LOGIN)
+  await clock.settle()
+  expect(store.log.filter(e => /^delete (usage|no-five-hour|usage-due):1$/.test(e)), store.log.join(', ')).toEqual([])
+})
+
+/**
+ * The other session finishes its check of login 1 (names the sign-in, stores its usage and schedule) while this
+ * session's own check waits on the profile call: `owners[token]` is read inside that call, so its getter runs after
+ * holderOf first read the holder and before it decides what to drop.
+ */
+function otherSessionNamesDuringProfileCall(w: World, store: MergeLog, token: string, email: string, writes: (s: MergeLog) => void): { done: boolean } {
+  const probe = { done: false }
+  Object.defineProperty(w.owners, token, {
+    enumerable: true,
+    configurable: true,
+    get() {
+      if (!probe.done) {
+        probe.done = true
+        // Synchronous writes, as the other session's land in the shared store between two of this one's awaits.
+        writes(store)
+        store.log = []
+      }
+      return email
+    },
+  })
+  return probe
+}
+
+// Review R1 F1 [STALE-HOLDER-DECISION] (Opus, #34): every branch of holderOf that deletes a stored key on a new token
+// (another person: dropSignInUsage; the same person: usage-due), under one interleave: the other session names this
+// token while this session's profile call runs.
+const HOLDER_DROP_BRANCHES = [
+  { name: 'another person', token: 'tok-9', email: 'nine@example.com', keys: /^delete (usage|usage-due):1$/ },
+  { name: 'the same person under a new token', token: 'tok-7', email: 'one@example.com', keys: /^delete usage-due:1$/ },
+] as const
+
+for (const branch of HOLDER_DROP_BRANCHES) {
+  test(`${branch.name}: a check deletes nothing another session stored for this token during its profile call`, async ($, on) => {
+    const w = fresh()
+    w.keychain['Claude Code-credentials'] = blob('tok-1')
+    w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+    w.usage['tok-1'] = [20, 30]
+    w.usage['tok-2'] = [10, 30]
+    const store = new MergeLog(Object.entries(TWO_LOGINS))
+    const clock = world(on, w, store)
+    await start($, clock)
+    const named = { token: await fingerprint(`refresh-${branch.token}`), who: { email: branch.email } }
+    const probe = otherSessionNamesDuringProfileCall(w, store, branch.token, branch.email, s => {
+      s.set('holder:1', named)
+      s.set('usage:1', { sevenDay: { pct: 15, resetsAt: WEEK_RESET }, at: NOW, by: '1', v: 1, src: 'body' })
+      s.set('usage-due:1', { next: NOW + 10 * 60_000, fails: 0, at: NOW, v: 1 })
+    })
+    w.usage[branch.token] = [5, 15]
+    w.loginToken = branch.token
+    await $.command.run(LOGIN)
+    await clock.settle()
+    // The sweep inspected something: the other session's write ran inside this session's check.
+    expect(probe.done, `${branch.name}: the other session's write never ran inside this session's profile call`).toBe(true)
+    expect(
+      store.log.filter(e => branch.keys.test(e)),
+      `${branch.name}: holderOf deleted what another session stored for this token while the profile call ran (${store.log.join(', ')}). ` +
+        'Re-read holder:<id> after fetchIdentity; a holder that names this token is returned, nothing dropped.',
+    ).toEqual([])
+  })
+}
+
 // Review R1 of 181dc8e, footer_week_leave: the footer counts the week by the same setting the rotation does.
 test('the footer shows no room now on a login whose week is down to the Week setting, as the rotation counts it', async ($, on) => {
   const w = fresh()
@@ -2923,7 +3009,7 @@ test('a view kept from the code before a hot reload, which lacks what this code 
   w.usage['tok-1'] = [20, 30]
   w.owners = { 'tok-1': 'one@example.com' }
   const clock = world(on, w, TWO_LOGINS)
-  // A hot reload keeps the view as the version before this one wrote it, with no `holders`: the first read finds that.
+  // A hot reload keeps the view as the version before this one wrote it, lacking what this code added: the first read finds that.
   const before ={ accounts: TWO_LOGINS.accounts, readings: {}, health: {}, activeId: '1', footer: DEFAULT_FOOTER, rotateTo: 'reset', hasFontBlocks: false }
   let isKept = false
   on('state.get', async (_$, e, next) => {
