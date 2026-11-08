@@ -65,7 +65,7 @@ function rooms(view: View, a: Account, i: number, now: number): readonly [number
 /** A percent's room color, lighter while the pointer is over the footer. */
 const roomRun = (leftPct: number) => ({ color: roomColor(leftPct), lit: roomColor(leftPct, true) })
 
-/** Whether a login's usage said it has no 5-hour window, in its reading or, with none yet, in the store: it has no 5h row. */
+/** Whether a login's usage said it has no 5-hour window, in its reading or, with none yet, in the store: the plan's name infers Ultra from it. */
 function hasNoFiveHour(view: View, id: string): boolean {
   const r = view.readings[id]
   return r === undefined ? view.noFiveHour?.[id] === true : reportsNoFiveHour(r)
@@ -89,8 +89,8 @@ const MARKED: readonly string[] = ['login-needed', 'logging-in']
  * A login's glyph in a footer row, green with all of its room left to red with
  * none. The row that carries the marks says when a login needs a sign-in; a
  * login without the room (a plan with no 5-hour window or no weekly limit)
- * leaves its place blank, and one with no reading yet shows a dot in the
- * session row.
+ * leaves its place blank, and one known to have a 5-hour window with no room
+ * read yet shows a dot in the session row.
  */
 function glyphOf(view: View, a: Account, style: Glyphs, row: 0 | 1, room: number | undefined, carriesMark: boolean): FooterRun {
   const health = view.health[a.id]?.kind

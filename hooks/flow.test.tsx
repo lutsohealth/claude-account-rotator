@@ -5181,3 +5181,65 @@ for (const [key, value] of FIVE_HOUR_INPUTS) {
     expect([key, loginTwoLines(await paneText($)).includes('5h')]).toEqual([key, false])
   })
 }
+
+// Review opus-c7 A3 [UNEXERCISED-WRITER] (RULING 4498): the 5h limit press rewrites every reading in the view; a week
+// mark standing on a login with no 5-hour window stays through it, both ways.
+test('pressing the 5h limit off and on keeps a standing week mark on a login with no 5-hour window', async ($, on) => {
+  const { clock } = await fiveHourWorld($, on, [20, 40], [null, 30], { 'week-mark:2': { pct: 100, resetsAt: WEEK_RESET, at: NOW } })
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  const weekOfTwo = async () => {
+    await pane.redraw()
+    const texts = (await pane.findAll({ type: 'Text' })).map(t => t.text ?? '')
+    const lines = texts.slice(texts.indexOf('two@example.com'))
+    return lines[lines.indexOf('week') + 1]
+  }
+  const seen: string[] = [await weekOfTwo()]
+  for (const limit of ['off', 'on'] as const) {
+    await pane.press({ key: `five-hour-limit-${limit}` })
+    await clock.settle()
+    seen.push(await weekOfTwo())
+  }
+  await pane.unmount()
+  expect(seen).toEqual([`${longBar(0)} 0% left`, `${longBar(0)} 0% left`, `${longBar(0)} 0% left`])
+})
+
+// Review codex-c7 C7-R1-01 and opus-c7 F1 [LIMIT-DEPENDENT-KNOWLEDGE]: whether a login has a 5-hour window does not
+// depend on the 5h limit. Every input that says so, under both settings, on both surfaces hasFiveHour drives.
+/** Whether the pane draws a 5h row in `lines` and the footer its Session: label. */
+async function knownSurfaces($: Engine, lines: string[]): Promise<{ paneRow: boolean; footerSession: boolean }> {
+  const footer = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'SessionMode', props: { modes: [] } })
+  const footerSession = (await footer.findAll({ type: 'Text' })).map(t => t.text).includes('Session:')
+  await footer.unmount()
+  return { paneRow: lines.includes('5h'), footerSession }
+}
+for (const [key, value] of FIVE_HOUR_INPUTS) {
+  for (const limit of ['on', 'off'] as const) {
+    test(`${key} saying login 2 has a 5-hour window, with the 5h limit ${limit}, draws its 5h row and the footer's Session: row`, async ($, on) => {
+      await fiveHourWorld($, on, [null, 30], undefined, { 'five-hour-limit': limit, [key]: value })
+      const label = `${key} / limit ${limit}`
+      expect([label, await knownSurfaces($, loginTwoLines(await paneText($)))]).toEqual([label, { paneRow: true, footerSession: true }])
+    })
+  }
+}
+for (const limit of ['on', 'off'] as const) {
+  test(`a response listing login 1's 5-hour window, with no no-five-hour key and the 5h limit ${limit}, draws its 5h row and the footer's Session: row`, async ($, on) => {
+    const w = fresh()
+    w.keychain['Claude Code-credentials'] = blob('tok-1')
+    w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+    w.failing = { 'tok-1': 429 }
+    w.usage['tok-2'] = [null, 40]
+    w.weekResets = { 'tok-2': '2026-10-19T03:00:00Z' }
+    const week = { sevenDay: { pct: 30, resetsAt: WEEK_RESET }, at: NOW - 60_000, by: '1', v: 1, src: 'body' }
+    const clock = world(on, w, { ...TWO_LOGINS, 'rotate-to': 'off', 'five-hour-limit': limit, 'usage:1': week })
+    await start($, clock)
+    w.limits = [
+      { kind: 'five_hour', percentUsed: 20, resetsAt: '2026-10-12T12:00:00Z' },
+      { kind: 'seven_day', percentUsed: 30, resetsAt: WEEK_RESET },
+    ]
+    await respond($, clock, w)
+    const text = await paneText($)
+    const lines = text.slice(text.indexOf('one@example.com'), text.indexOf('two@example.com')).split('\n')
+    const label = `response / limit ${limit}`
+    expect([label, await knownSurfaces($, lines)]).toEqual([label, { paneRow: true, footerSession: true }])
+  })
+}
