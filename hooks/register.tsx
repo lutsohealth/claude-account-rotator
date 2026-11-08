@@ -1749,19 +1749,6 @@ function actions($: Host): Actions {
   }
 }
 
-/** How long a session's `writer:<sessionId>` record stays after it was written: a session restarts long before. */
-const WRITER_KEEP_MS = 24 * 3600_000
-
-/** Records, for every session, which version this session writes as; drops the records of sessions long gone. */
-async function noteWriter($: Host, sessionId: string, now: number): Promise<void> {
-  await $.store.set(`writer:${sessionId}`, { version: WRITER_VERSION, at: now })
-  for (const key of (await $.store.keys()).filter(k => k.startsWith('writer:') && k !== `writer:${sessionId}`)) {
-    const w = await $.store.get(key)
-    const at = typeof w === 'object' && w !== null ? (w as { at?: unknown }).at : undefined
-    if (typeof at !== 'number' || now - at > WRITER_KEEP_MS) await $.store.delete(key)
-  }
-}
-
 /** First run makes the normal login number 1; then: which login this session uses, and Claude in Chrome connected as the extension's account. */
 async function boot($: Host, isInteractive: boolean): Promise<void> {
   // Terminal.app is the terminal that names itself so and draws block characters from its font.
@@ -1783,7 +1770,6 @@ async function boot($: Host, isInteractive: boolean): Promise<void> {
   const activeId = active.id
   const sessionId = await $.session.id().catch(() => undefined)
   bootedAt = await $.clock.now()
-  await noteWriter($, sessionId ?? SELF, bootedAt)
   await mergeStore($)
   await setView($, v => ({ ...v, activeId, ...(sessionId === undefined ? {} : { sessionId }) }))
   isBooted = true
