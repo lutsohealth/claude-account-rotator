@@ -60,6 +60,12 @@ type World = {
   markAtStart?: string
   /** Claude Code's security policy refuses every variable but the slot. */
   refuseMark?: boolean
+  /** The folders that exist under the accounts folder, signed in or not. */
+  folders?: string[]
+  /** A look for a folder under the accounts folder is refused. */
+  existsFails?: boolean
+  /** Who a press's `claude auth login` signs in. */
+  loginEmail?: string
   /** How the store refuses the `store-id` key: its write, or its read and its write. */
   storeIdFails?: 'write' | 'read'
   /** What the mod wrote to the debug log. */
@@ -328,7 +334,10 @@ function world(on: On, w: World, store: Record<string, unknown> | Map<string, un
     if (names.length === 0) return { deny: `ENOENT: no such file or directory, scandir '${e.path}'` }
     return { value: names.map(p => ({ name: p.slice(e.path.length + 1), kind: 'file', size: (w.files[p] ?? '').length, mtimeMs: 0, isLink: false })) }
   })
-  on('fs.exists', (_$, e) => ({ value: e.path === '/System/Library/CoreServices/SystemVersion.plist' && w.system === 'macOS' }))
+  on('fs.exists', (_$, e) => {
+    if (w.existsFails && e.path.includes('/.claude/accounts/')) return { deny: `EACCES: permission denied, stat '${e.path}'` }
+    return { value: (e.path === '/System/Library/CoreServices/SystemVersion.plist' && w.system === 'macOS') || (w.folders ?? []).includes(e.path) }
+  })
   on('fs.read', async (_$, e) => {
     await w.readGate
     const text = w.files[e.path]
@@ -7406,4 +7415,107 @@ test('two sessions on one store, store-id: an add read from another store is lef
   w.files[`${REQUESTS}/${N2}.json`] = addRequest(N2, SLOT7, id, clock.now())
   await untilTick(clock)
   expect([resultOf(w, N2)?.ok, store.get('store-id')]).toEqual([true, id])
+})
+
+// puma-eslxj.30 (RULING 4683): a press and `account add` pick a folder by one rule, and a row wears nothing an old holder left.
+
+/** A session whose `claude auth login` signs the folder in as `w.loginEmail`, for a press of + Add an account. */
+async function pressWorld($: Engine, on: On, w: World = fresh(), beforeStart?: (store: Map<string, unknown>) => void): Promise<{ w: World; store: Map<string, unknown>; clock: MockClock; rowAtLogin: () => boolean }> {
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [10, 20]
+  w.usage['tok-2'] = [10, 20]
+  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off' }))
+  beforeStart?.(store)
+  const clock = world(on, w, store)
+  let isRowAtLogin = false
+  on('process.spawn', async function* (_$, e) {
+    w.spawned.push(e)
+    const slot = e.env?.CLAUDE_SECURESTORAGE_CONFIG_DIR ?? ''
+    isRowAtLogin = (store.get('accounts') as { slot: string }[]).some(a => a.slot === slot)
+    if (w.loginEmail !== undefined) await signInFolder(w, slot, w.loginEmail, 'tok-new')
+    return { value: { code: 0, signal: null } }
+  })
+  await start($, clock)
+  await clock.advance(60_000)
+  return { w, store, clock, rowAtLogin: () => isRowAtLogin }
+}
+
+async function pressAdd($: Engine, clock: MockClock): Promise<void> {
+  const pane = await mountPane($)
+  await pane.press({ key: 'add' })
+  await clock.settle()
+  await pane.unmount()
+}
+
+const accountsFolder = (n: number) => `${HOME}/.claude/accounts/${n}`
+
+test('a press takes the first number with no account, no slot and no folder, and signs in only there, after its row', async ($, on) => {
+  const { w, store, clock, rowAtLogin } = await pressWorld($, on)
+  // Folder 3 stays where an account was removed; folder 6 is a CLI's mid sign-in. Id 4 is another slot's, slot 5 another id's.
+  w.folders = [accountsFolder(3), accountsFolder(6)]
+  store.set('accounts', [...TWO_LOGINS.accounts, { id: '4', slot: accountsFolder(9), email: 'nine@example.com' }, { id: '90', slot: accountsFolder(5), email: 'five@example.com' }])
+  w.loginEmail = 'new@example.com'
+  await pressAdd($, clock)
+  expect(listedRow(store, '7')).toMatchObject({ slot: accountsFolder(7), email: 'new@example.com' })
+  expect(listedIds(store)).toEqual(['1', '2', '4', '90', '7'])
+  expect(w.spawned.map(s => s.env?.CLAUDE_SECURESTORAGE_CONFIG_DIR)).toEqual([accountsFolder(7)])
+  expect(rowAtLogin(), 'the row stands before the sign-in').toBe(true)
+  expect(Object.keys(w.files).filter(p => p.includes('/.claude/accounts/'))).toEqual([`${accountsFolder(7)}/README`])
+})
+
+test('two sessions on one store, accounts: a press keeps a row another session listed since this view, and takes the next number', async ($, on) => {
+  const { store, clock } = await pressWorld($, on)
+  store.set('accounts', [...TWO_LOGINS.accounts, { id: '3', slot: SLOT3, email: 'three@example.com' }])
+  await pressAdd($, clock)
+  expect(listedIds(store)).toEqual(['1', '2', '3', '4'])
+})
+
+test('a press drops what an old holder of the id left, then stands the health, then the row', async ($, on) => {
+  const { w, store, clock } = await pressWorld($, on)
+  for (const key of ACCOUNT_KEYS) store.set(`${key}:3`, { oldHolder: true })
+  let atRow: { left: string[]; health: unknown } | undefined
+  w.onStoreSet = (key, value) => {
+    if (key === 'accounts' && atRow === undefined && (value as { id: string }[]).some(a => a.id === '3')) {
+      atRow = { left: ACCOUNT_KEYS.filter(k => JSON.stringify(store.get(`${k}:3`)) === JSON.stringify({ oldHolder: true })), health: store.get('health:3') }
+    }
+  }
+  await pressAdd($, clock)
+  expect(atRow?.left, 'keys of the old holder at the row').toEqual([])
+  expect(atRow?.health).toMatchObject({ kind: 'login-needed' })
+})
+
+test('a press whose look for a folder is refused tells the person, and writes no row, no folder and no sign-in', async ($, on) => {
+  const { w, store, clock } = await pressWorld($, on)
+  w.existsFails = true
+  await pressAdd($, clock)
+  expect(listedIds(store)).toEqual(['1', '2'])
+  expect(w.spawned).toEqual([])
+  expect(Object.keys(w.files).filter(p => p.includes('/.claude/accounts/'))).toEqual([])
+  expect(w.toasts.join(' ')).toMatch(/Something went wrong/)
+})
+
+test('a press that signs in a login a row holds with its organization unread is a twin, as for account add', async ($, on) => {
+  const { w, store, clock } = await pressWorld($, on)
+  store.set('accounts', TWO_LOGINS.accounts)
+  w.loginEmail = 'two@example.com'
+  await pressAdd($, clock)
+  expect(store.get('health:3')).toMatchObject({ kind: 'login-needed' })
+  expect(JSON.stringify(store.get('health:3'))).toMatch(/account 2/)
+  expect((listedRow(store, '3') as { email?: string }).email).toBeUndefined()
+})
+
+test('a session started on a slot nobody listed takes the free id, wearing nothing an old holder left', async ($, on) => {
+  const w = fresh()
+  w.env.CLAUDE_SECURESTORAGE_CONFIG_DIR = accountsFolder(7)
+  expect(ACCOUNT_KEYS.length, 'the sweep lists no key').toBeGreaterThan(0)
+  let left: string[] | undefined
+  const { store } = await pressWorld($, on, w, entries => {
+    for (const key of ACCOUNT_KEYS) entries.set(`${key}:3`, { oldHolder: true })
+    w.onStoreSet = (key, value) => {
+      if (key === 'accounts' && left === undefined && (value as { id: string }[]).some(a => a.id === '3')) left = ACCOUNT_KEYS.filter(k => JSON.stringify(entries.get(`${k}:3`)) === JSON.stringify({ oldHolder: true }))
+    }
+  })
+  expect(listedRow(store, '3')).toMatchObject({ slot: accountsFolder(7) })
+  expect(left, 'keys of the old holder at the row').toEqual([])
 })
