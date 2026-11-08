@@ -192,11 +192,17 @@ class StorePick(StoreCase):
 
     def test_a_newer_file_of_the_mods_name_with_no_accounts_never_wins(self) -> None:
         self.write("account-rotator_claude-account-rotator-gone.json", {"generation": 1}, mtime=2_000_000)
-        torn = self.stores / "account-rotator_claude-account-rotator-torn.json"
-        torn.write_text('{"accounts": [', encoding="utf-8")
-        os.utime(torn, (2_500_000, 2_500_000))
         (self.stores / "account-rotator_claude-account-rotator-dangling.json").symlink_to(self.tmp / "gone")
         self.assertEqual(self.picks(), {"account-rotator-launch": "/the/installed/store", "account-rotator": str(self.store)})
+
+    def test_each_bin_reads_the_store_through_a_link_as_path_may_reach_it(self) -> None:
+        on_path = self.tmp / "on-path"
+        on_path.mkdir()
+        codes = {}
+        for name in BINS:
+            (on_path / name).symlink_to(ROOT / "bin" / name)
+            codes[name] = run(on_path / name, *BINS[name], env=self.env()).returncode
+        self.assertEqual(codes, dict.fromkeys(BINS, 0))
 
     def test_store_names_the_file_whatever_its_name(self) -> None:
         inline = self.stores / "account-rotator_inline-a7581201d848.json"

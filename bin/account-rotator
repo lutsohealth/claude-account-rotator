@@ -13,7 +13,6 @@ writes it. Exit 0 listed, 1 no store or an unreadable one, 2 a usage error.
 from __future__ import annotations
 
 import argparse
-import glob
 import json
 import math
 import os
@@ -22,7 +21,10 @@ import time
 import uuid
 from datetime import datetime, tzinfo
 
-STORE_GLOB = "account-rotator_claude-account-rotator-*.json"
+# The store module stands beside this file, which PATH may reach through a link.
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from account_rotator_store import STORE_GLOB, StoreError, is_instant, read  # noqa: E402
+
 EXIT_NO_STORE = 1
 EXIT_USAGE = 2
 MINUTE_MS = 60_000
@@ -30,32 +32,36 @@ OLDER_NOTE = "an older version of the mod stored some rows as text, their times 
 EXITS = "Exit 0 listed, 1 no store or an unreadable one, 2 a usage error (an unknown flag or verb, --agent not claude)."
 
 
-def is_number(value: object) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
+def is_run(run: object) -> bool:
+    """Whether a stored run is one the mod writes: text, or one {clock} or {until} instant."""
+    if isinstance(run, str):
+        return True
+    return isinstance(run, dict) and len(run) == 1 and any(is_instant(run.get(key)) for key in ("clock", "until"))
 
 
-def holds_accounts(path: str) -> bool:
-    """Whether a file is a store: a JSON object holding an accounts list. A stray file of the store's name is not."""
-    try:
-        with open(path, encoding="utf-8") as f:
-            data = json.load(f)
-    except (OSError, ValueError):
-        return False
-    return isinstance(data, dict) and isinstance(data.get("accounts"), list)
+def check(data: dict, path: str) -> None:
+    """Every value `list` reads, by type and range; a StoreError names the first the mod would never write."""
 
+    def damaged(what: str) -> StoreError:
+        return StoreError(f"{path}: {what}, which the mod never writes; a session rewrites it within a minute, or pass --store")
 
-def mtime(path: str) -> float:
-    try:
-        return os.path.getmtime(path)
-    except OSError:
-        return -1.0
-
-
-def default_store() -> str | None:
-    """The newest store of the installed mod in the Claude config folder; bin/account-rotator-launch picks it alike."""
-    config = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(os.path.expanduser("~"), ".claude")
-    found = sorted(glob.glob(os.path.join(config, "plugins", "store", STORE_GLOB)), key=mtime, reverse=True)
-    return next((path for path in found if holds_accounts(path)), None)
+    for n, account in enumerate(data["accounts"]):
+        if not isinstance(account, dict) or not isinstance(account.get("id"), str):
+            raise damaged(f"accounts[{n}] is no account with an id")
+    stored = data.get("rows")
+    if stored is not None:
+        if not isinstance(stored, dict) or not isinstance(stored.get("rows"), list):
+            raise damaged("rows holds no rows list")
+        if "at" in stored and not is_instant(stored["at"]):
+            raise damaged("rows.at is no time")
+        for row in stored["rows"]:
+            if not isinstance(row, dict) or not isinstance(row.get("id"), str) or not isinstance(row.get("lines"), list):
+                raise damaged("a row has no id or no lines")
+            if not all(isinstance(line, str) or (isinstance(line, list) and all(map(is_run, line))) for line in row["lines"]):
+                raise damaged(f"row {row['id']} holds a line of no known shape")
+    pick = data.get("launch-slot")
+    if pick is not None and (not isinstance(pick, dict) or ("at" in pick and not is_instant(pick["at"]))):
+        raise damaged("launch-slot is no pick")
 
 
 def clock_text(at_ms: float, zone: tzinfo | None) -> str:
@@ -72,23 +78,24 @@ def reset_text(at_ms: float, now_ms: float) -> str:
     return f"{hours}h {mins}m" if hours > 0 else f"{mins}m"
 
 
-def line_text(line: object, now_ms: float, zone: tzinfo | None) -> str | None:
-    """A stored line as text: its runs with each {clock} and {until} rendered; a string line as it was stored."""
+def line_text(line: str | list, now_ms: float, zone: tzinfo | None) -> str:
+    """A stored line as text: a string line as it was stored; else its runs, each {clock} and {until} rendered, and an
+    {until} already past as `passed` (hooks/model.ts storedLineText)."""
     if isinstance(line, str):
         return line
-    if not isinstance(line, list):
-        return None
     text = []
     for run in line:
         if isinstance(run, str):
             text.append(run)
-        elif isinstance(run, dict) and is_number(run.get("clock")):
+        elif "clock" in run:
             text.append(clock_text(run["clock"], zone))
-        elif isinstance(run, dict) and is_number(run.get("until")):
-            text.append(reset_text(run["until"], now_ms))
         else:
-            return None
+            text.append(reset_text(run["until"], now_ms) if run["until"] > now_ms else "passed")
     return "".join(text)
+
+
+def has_passed(line: str | list, now_ms: float) -> bool:
+    return isinstance(line, list) and any(isinstance(run, dict) and run.get("until", math.inf) <= now_ms for run in line)
 
 
 def who(account: dict) -> str:
@@ -98,63 +105,65 @@ def who(account: dict) -> str:
     return "your normal account" if account.get("slot") == "" else "not signed in yet"
 
 
-def account_lines(account: dict, rows: dict[str, object], now_ms: float, zone: tzinfo | None) -> tuple[list[str], bool]:
-    """An account's lines, and whether an older version of the mod stored them."""
-    stored = rows.get(account.get("id"))
-    lines = [line_text(line, now_ms, zone) for line in stored] if isinstance(stored, list) else []
-    if not lines or any(line is None for line in lines):
-        return [f"{who(account)}  no row stored yet"], False
-    return [line for line in lines if line is not None], any(isinstance(line, str) for line in stored)
+def account_lines(account: dict, rows: dict[str, list], now_ms: float, zone: tzinfo | None) -> tuple[list[str], bool, bool]:
+    """An account's lines, whether an older version of the mod stored them, and whether a reset in them has passed."""
+    stored = rows.get(account["id"])
+    if not stored:
+        return [f"{who(account)}  no row stored yet"], False, False
+    lines = [line_text(line, now_ms, zone) for line in stored]
+    return lines, any(isinstance(line, str) for line in stored), any(has_passed(line, now_ms) for line in stored)
 
 
 def minutes_ago(at_ms: object, now_ms: float) -> str:
-    return f"{round((now_ms - at_ms) / MINUTE_MS)} min ago" if is_number(at_ms) else "at an unknown time"
+    return f"{round((now_ms - at_ms) / MINUTE_MS)} min ago" if is_instant(at_ms) else "at an unknown time"
 
 
-def footer(data: dict, now_ms: float, zone: tzinfo | None, has_older: bool) -> str:
+def footer(data: dict, now_ms: float, zone: tzinfo | None, older: bool, passed: list[str]) -> str:
     """When the rows were written, and which account new sessions start on, as bin/account-rotator-launch words it."""
     stored = data.get("rows")
     at = stored.get("at") if isinstance(stored, dict) else None
-    written = f"rows written {clock_text(at, zone)} ({minutes_ago(at, now_ms)})" if is_number(at) else "no session has stored rows yet"
+    written = f"rows written {clock_text(at, zone)} ({minutes_ago(at, now_ms)})" if is_instant(at) else "no session has stored rows yet"
     pick = data.get("launch-slot")
     if isinstance(pick, dict) and isinstance(pick.get("id"), str):
         starts = f"new sessions start on account {pick['id']} ({pick.get('why', 'the setting picked it')}, picked {minutes_ago(pick.get('at'), now_ms)})"
     else:
         starts = "no account picked for new sessions"
-    return "; ".join([written, starts, *([OLDER_NOTE] if has_older else [])])
+    notes = [OLDER_NOTE] if older else []
+    if passed:
+        notes.append(f"a reset has passed since its row was written for account {', '.join(passed)}: no session has read it since, so its usage is as before the reset")
+    return "; ".join([written, starts, *notes])
 
 
-def accounts_of(data: dict) -> list[dict]:
-    return [a for a in data.get("accounts", []) if isinstance(a, dict) and isinstance(a.get("id"), str)]
-
-
-def rows_by_id(data: dict) -> dict[str, object]:
+def rows_by_id(data: dict) -> dict[str, list]:
     stored = data.get("rows")
-    rows = stored.get("rows") if isinstance(stored, dict) else None
-    return {r["id"]: r.get("lines") for r in rows or [] if isinstance(r, dict) and isinstance(r.get("id"), str)}
+    return {r["id"]: r["lines"] for r in stored["rows"]} if isinstance(stored, dict) else {}
+
+
+def listed(data: dict, now_ms: float, zone: tzinfo | None) -> list[tuple[dict, list[str], bool, bool]]:
+    rows = rows_by_id(data)
+    return [(a, *account_lines(a, rows, now_ms, zone)) for a in data["accounts"]]
 
 
 def list_text(data: dict, now_ms: float, zone: tzinfo | None) -> str:
-    rows = rows_by_id(data)
-    listed = [account_lines(a, rows, now_ms, zone) for a in accounts_of(data)]
-    blocks = ["\n".join(lines) for lines, _ in listed]
-    return "\n\n".join([*blocks, footer(data, now_ms, zone, any(older for _, older in listed))])
+    accounts = listed(data, now_ms, zone)
+    blocks = ["\n".join(lines) for _, lines, _, _ in accounts]
+    passed = [a["id"] for a, _, _, has in accounts if has]
+    return "\n\n".join([*blocks, footer(data, now_ms, zone, any(older for _, _, older, _ in accounts), passed)])
 
 
 def list_json(data: dict, store: str, now_ms: float, zone: tzinfo | None) -> dict:
     """Orca's envelope (`orca account list --json`), with the mod's own fields per account."""
-    rows = rows_by_id(data)
     accounts = []
-    for a in accounts_of(data):
-        lines, older = account_lines(a, rows, now_ms, zone)
+    for a, lines, older, passed in listed(data, now_ms, zone):
         health = data.get(f"health:{a['id']}")
         accounts.append({
             "id": a["id"], "email": a.get("email"), "orgId": a.get("orgId"), "orgName": a.get("orgName"), "plan": a.get("plan"),
             "tier": a.get("tier"), "slot": a.get("slot"), "system": a.get("slot") == "",
             "health": health.get("kind") if isinstance(health, dict) else None, "lines": lines, "olderLines": older,
+            "resetPassed": passed,
         })
-    pick = data.get("launch-slot") if isinstance(data.get("launch-slot"), dict) else None
-    active = pick.get("id") if pick is not None and isinstance(pick.get("id"), str) else None
+    pick = data.get("launch-slot")
+    active = pick.get("id") if isinstance(pick, dict) and isinstance(pick.get("id"), str) else None
     stored = data.get("rows")
     return {
         "id": str(uuid.uuid4()),
@@ -189,16 +198,6 @@ def parsers() -> tuple[argparse.ArgumentParser, argparse.ArgumentParser]:
     return root, account
 
 
-def read_store(path: str) -> dict | str:
-    """The store's data, or why it cannot be read."""
-    try:
-        with open(path, encoding="utf-8") as f:
-            data = json.load(f)
-    except (OSError, ValueError) as error:
-        return f"cannot read {path}: {error}"
-    return data if isinstance(data, dict) else f"{path} is not a store (its JSON is not an object)"
-
-
 def main(argv: list[str] | None = None, *, now: float | None = None, zone: tzinfo | None = None) -> int:
     """`now` (epoch ms) and `zone` stand in for this machine's clock and zone, for the tests."""
     root, account = parsers()
@@ -209,13 +208,11 @@ def main(argv: list[str] | None = None, *, now: float | None = None, zone: tzinf
     if args.agent != "claude":
         print(f"account-rotator: --agent {args.agent}: this mod keeps Claude accounts only; use --agent claude, or see --help", file=sys.stderr)
         return EXIT_USAGE
-    store = args.store or default_store()
-    if store is None or not os.path.isfile(store):
-        print(f"account-rotator: no account-rotator store found ({store or STORE_GLOB}); start one Claude Code session with the mod first, or pass --store", file=sys.stderr)
-        return EXIT_NO_STORE
-    data = read_store(store)
-    if isinstance(data, str):
-        print(f"account-rotator: {data}", file=sys.stderr)
+    try:
+        store, data = read(args.store)
+        check(data, store)
+    except StoreError as error:
+        print(f"account-rotator: {error}", file=sys.stderr)
         return EXIT_NO_STORE
     now_ms = time.time() * 1000 if now is None else now
     print(json.dumps(list_json(data, store, now_ms, zone), ensure_ascii=False, indent=2) if args.json else list_text(data, now_ms, zone))

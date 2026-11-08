@@ -939,6 +939,12 @@ export function clockText(at: number, timeZone?: string): string {
   return new Intl.DateTimeFormat('en-GB', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23', ...(timeZone === undefined ? {} : { timeZone }) }).format(at)
 }
 
+/**
+ * Two resets this close are one to the row: the Fable week's says nothing beside the week's. Judged on the instants,
+ * never on their text at `now`, so the stored row does not change with the writer's second.
+ */
+const SAME_RESET_MS = 60_000
+
 /** A reset ahead: the time left as the row says it, and when, in epoch milliseconds. */
 type Reset = { text: string; at: number }
 
@@ -997,7 +1003,7 @@ function usageLine(view: View, a: Account, now: number): RowPart[] {
   const resets =
     week === undefined
       ? fableReset === undefined ? undefined : ['  Fable resets ', fableReset]
-      : ['  resets ', week, ...(fableReset === undefined || fableReset.text === week.text ? [] : [' · Fable ', fableReset])]
+      : ['  resets ', week, ...(fableReset === undefined || Math.abs(fableReset.at - week.at) < SAME_RESET_MS ? [] : [' · Fable ', fableReset])]
   return [...usedParts('Used', r.sevenDay, now), ...fable, ...(resets === undefined ? [] : [resetsPart(resets)])]
 }
 
@@ -1058,9 +1064,13 @@ export function rowsOf(view: View, now: number): StoredRows['rows'] {
   return view.accounts.map(a => ({ id: a.id, lines: rowOf(view, a, now).lines.map(storedLine) }))
 }
 
-/** A stored line as a reader at `now` prints it, in `timeZone` or the machine's own: bin/account-rotator's rule. */
+/**
+ * A stored line as a reader at `now` prints it, in `timeZone` or the machine's own: bin/account-rotator's rule. A reset
+ * already past reads `passed`: the row was written before it, and no session has read the account since.
+ */
 export function storedLineText(line: readonly StoredRun[], now: number, timeZone?: string): string {
-  return line.map(r => (typeof r === 'string' ? r : 'clock' in r ? clockText(r.clock, timeZone) : resetText(r.until, now))).join('')
+  const until = (at: number) => (at > now ? resetText(at, now) : 'passed')
+  return line.map(r => (typeof r === 'string' ? r : 'clock' in r ? clockText(r.clock, timeZone) : until(r.until))).join('')
 }
 
 /** Whether the store's `rows` already hold these lines: then the merge writes nothing. */
