@@ -60,6 +60,10 @@ type World = {
   markAtStart?: string
   /** Claude Code's security policy refuses every variable but the slot. */
   refuseMark?: boolean
+  /** Names in a listed folder that are links, no plain files. */
+  linkFiles?: string[]
+  /** A look at a folder is refused. */
+  listFails?: boolean
   /** The folders that exist under the accounts folder, signed in or not. */
   folders?: string[]
   /** How a `mkdir` fails, where it does. */
@@ -339,8 +343,9 @@ function world(on: On, w: World, store: Record<string, unknown> | Map<string, un
   })
   on('fs.list', (_$, e) => {
     const names = Object.keys(w.files).filter(p => p.startsWith(`${e.path}/`) && !p.slice(e.path.length + 1).includes('/'))
+    if (w.listFails) return { deny: `EACCES: permission denied, scandir '${e.path}'` }
     if (names.length === 0) return { deny: `ENOENT: no such file or directory, scandir '${e.path}'` }
-    return { value: names.map(p => ({ name: p.slice(e.path.length + 1), kind: 'file', size: (w.files[p] ?? '').length, mtimeMs: 0, isLink: false })) }
+    return { value: names.map(p => ({ name: p.slice(e.path.length + 1), kind: (w.linkFiles ?? []).includes(p.slice(e.path.length + 1)) ? 'other' : 'file', size: (w.files[p] ?? '').length, mtimeMs: 0, isLink: false })) }
   })
   on('fs.exists', (_$, e) => ({ value: (e.path === '/System/Library/CoreServices/SystemVersion.plist' && w.system === 'macOS') || (w.folders ?? []).includes(e.path) }))
   on('fs.read', async (_$, e) => {
@@ -7420,6 +7425,66 @@ test('two sessions on one store, store-id: an add read from another store is lef
   w.files[`${REQUESTS}/${N2}.json`] = addRequest(N2, SLOT7, id, clock.now())
   await untilTick(clock)
   expect([resultOf(w, N2)?.ok, store.get('store-id')]).toEqual([true, id])
+})
+
+// puma-eslxj.25: what the session takes from the request folder, and what it says when it cannot look.
+const selectRequest = (nonce: string, storeId: unknown, at: number, pad = 0) => JSON.stringify({ kind: 'select', nonce, at, id: '2', store: storeId, pad: 'x'.repeat(pad) })
+const debugLines = (w: World, text: string) => (w.logged ?? []).filter(line => line.includes(text))
+
+test('a request over 4 KB is skipped unread, in one debug line, and one of exactly 4 KB is taken', async ($, on) => {
+  const { w, store, clock } = await selectWorld($, on)
+  const size = selectRequest(N1, store.get('store-id'), clock.now()).length
+  w.files[`${REQUESTS}/${N1}.json`] = selectRequest(N1, store.get('store-id'), clock.now(), 4097 - size)
+  await untilTick(clock)
+  w.files[`${REQUESTS}/${N1}.json`] = selectRequest(N1, store.get('store-id'), clock.now(), 4097 - size)
+  await untilTick(clock)
+  expect(resultOf(w, N1)).toBeUndefined()
+  expect(debugLines(w, N1).length).toBe(1)
+  w.files[`${REQUESTS}/${N2}.json`] = selectRequest(N2, store.get('store-id'), clock.now(), 4096 - size)
+  await untilTick(clock)
+  expect(resultOf(w, N2)?.ok).toBe(true)
+})
+
+test('an entry of a request name that is no plain file is skipped unread, in one debug line', async ($, on) => {
+  const { w, store, clock } = await selectWorld($, on)
+  w.files[`${REQUESTS}/${N1}.json`] = selectRequest(N1, store.get('store-id'), clock.now())
+  w.linkFiles = [`${N1}.json`]
+  await untilTick(clock)
+  await untilTick(clock)
+  expect(resultOf(w, N1)).toBeUndefined()
+  expect(debugLines(w, N1).length).toBe(1)
+})
+
+test('a failing look at the request folder says so once, and again only after it recovers', async ($, on) => {
+  const { w, store, clock } = await selectWorld($, on)
+  const line = 'requests folder'
+  w.logged = []
+  w.files[`${REQUESTS}/${N1}.json`] = selectRequest(N1, store.get('store-id'), clock.now())
+  await untilTick(clock)
+  w.listFails = true
+  await untilTick(clock)
+  await untilTick(clock)
+  expect(debugLines(w, line).length, 'one line while it fails').toBe(1)
+  w.listFails = false
+  await untilTick(clock)
+  w.listFails = true
+  await untilTick(clock)
+  expect(debugLines(w, line).length, 'again after it recovered').toBe(2)
+})
+
+// puma-eslxj.30's gap (RULING 4687): adoptSignIn's own-row exclusion.
+test('a re-login of a listed account is not its own twin', async ($, on) => {
+  const { w, store, clock } = await pressWorld($, on)
+  delete w.keychain[await keychainItem(SLOT2)]
+  await clock.advance(10 * 60_000)
+  await clock.settle()
+  expect(store.get('health:2'), 'the fixture lost its sign-in').toMatchObject({ kind: 'login-needed' })
+  w.loginEmail = 'two@example.com'
+  const pane = await mountPane($)
+  await pane.press({ key: 'sign-in-2' })
+  await clock.settle()
+  await pane.unmount()
+  expect(store.get('health:2')).toMatchObject({ kind: 'ok' })
 })
 
 // puma-eslxj.30 (RULING 4683): a press and `account add` pick a folder by one rule, and a row wears nothing an old holder left.
