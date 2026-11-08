@@ -891,6 +891,21 @@ class Add(RequestCase):
         _, stderr = child.communicate(timeout=10)
         self.assertEqual((child.returncode, "Traceback" in stderr, list(self.accounts.iterdir())), (130, False, []), stderr)
 
+    def test_a_signal_while_a_session_is_asked_withdraws_the_request_keeps_the_folder_and_names_the_way_back(self) -> None:
+        ours, theirs = pty.openpty()
+        self.addCleanup(os.close, ours)
+        child = subprocess.Popen([sys.executable, str(CLI), "account", "add", "--wait", "30"], stdin=theirs, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=self.add_env())
+        os.close(theirs)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not (self.requests.is_dir() and list(self.requests.glob("*.json"))):
+            time.sleep(0.02)
+        self.assertTrue(self.requests.is_dir() and list(self.requests.glob("*.json")), "the CLI wrote no request: the fixture did not reach the wait")
+        child.send_signal(signal.SIGTERM)
+        _, stderr = child.communicate(timeout=10)
+        slot = str(self.accounts / self.next_number)
+        self.assertEqual((child.returncode, list(self.requests.iterdir()), f"--folder {slot}" in stderr, "Traceback" in stderr), (130, [], True, False), stderr)
+        self.assertTrue(Path(slot).is_dir())
+
     def test_a_refusal_exits_4_in_the_sessions_words_and_keeps_the_folder(self) -> None:
         self.session(ok=False, message="that sign-in is account 2 already")
         done = self.add("--wait", "10")

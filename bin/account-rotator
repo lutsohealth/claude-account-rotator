@@ -435,7 +435,7 @@ def sign_in(folder: str, as_json: bool) -> str | None:
     return None if code == 0 else f"claude auth login exited {code}"
 
 
-def new_folder_signed_in(data: dict, store: str, as_json: bool) -> tuple[int, str | None]:
+def new_folder_signed_in(data: dict, as_json: bool) -> tuple[int, str | None]:
     """Makes a folder and signs it in; one that does not finish goes: nothing but this run ever held it."""
     try:
         folder = make_folder(data)
@@ -471,7 +471,7 @@ def add(data: dict, store: str, folder: str | None, wait_s: float, as_json: bool
         return no_store_id(store)
     stop_on_signals()
     if folder is None:
-        code, folder = new_folder_signed_in(data, store, as_json)
+        code, folder = new_folder_signed_in(data, as_json)
         if folder is None:
             return code
     way_back = f"; {folder} stays signed in: account add --folder {folder}"
@@ -584,11 +584,11 @@ def main(argv: list[str] | None = None, *, now: float | None = None, zone: tzinf
     except StoreError as error:
         print(f"account-rotator: {error}", file=sys.stderr)
         return EXIT_NO_STORE
-    if args.verb == "add":
-        return add(data, store, folder, args.wait, args.json)
     requesting = {"select": select, "use": use, "rm": remove}
-    if args.verb in requesting:
+    if args.verb in ("add", *requesting):
         try:
+            if args.verb == "add":
+                return add(data, store, folder, args.wait, args.json)
             return requesting[args.verb](data, store, args.account, args.wait, args.json)
         except KeyboardInterrupt:
             print("account-rotator: stopped, so any request is withdrawn; a session may have taken it in that same moment: run account list", file=sys.stderr)
