@@ -353,6 +353,12 @@ async function saveHealth($: Host, id: string, health: Health): Promise<Health |
   return before
 }
 
+/** A stored `holder:<id>` as the merge and a check both read it: a token and an email, or none. */
+function holderFrom(value: unknown): Holder | undefined {
+  const s = value as Holder | null | undefined
+  return typeof s === 'object' && s !== null && typeof s.token === 'string' && typeof s.who?.email === 'string' ? s : undefined
+}
+
 async function saveHolder($: Host, id: string, holder: Holder): Promise<void> {
   await $.store.set(`holder:${id}`, holder)
   await setView($, v => ({ ...v, holders: { ...v.holders, [id]: holder } }))
@@ -396,10 +402,8 @@ async function mergeStore($: Host): Promise<void> {
     if (goodAt !== undefined) readAt[a.id] = goodAt
     const h = await $.store.get(`health:${a.id}`)
     if (typeof h === 'object' && h !== null && typeof (h as Health).kind === 'string') health[a.id] = h as Health
-    const s = await $.store.get(`holder:${a.id}`)
-    if (typeof s === 'object' && s !== null && typeof (s as Holder).token === 'string' && typeof (s as Holder).who?.email === 'string') {
-      holders[a.id] = s as Holder
-    }
+    const s = holderFrom(await $.store.get(`holder:${a.id}`))
+    if (s !== undefined) holders[a.id] = s
   }
   const footer = footerStyleFrom(await $.store.get('footer'))
   const rotateTo = rotateToFrom(await $.store.get('rotate-to'))
@@ -672,7 +676,8 @@ async function announceStay($: Host): Promise<void> {
  */
 async function holderOf($: Host, account: Account, credential: Credential, isLive: boolean): Promise<Holder | undefined> {
   const token = await fingerprint(credential.refreshToken ?? credential.accessToken)
-  const known = (await getView($)).holders[account.id]
+  // The store's, not the view's: a sign-in another session named since this view's last merge is not taken for a new one.
+  const known = holderFrom(await $.store.get(`holder:${account.id}`))
   if (known?.token === token) return known
   if (!isLive) return undefined
   const { who, status } = await fetchIdentity($, credential.accessToken)
