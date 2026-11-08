@@ -2,6 +2,10 @@
 
 What each version of the account rotator changed. To get each one as Claude Code starts, turn on auto-update: in `/plugin`, open **Marketplaces**, pick **claude-account-rotator** and choose **Enable auto-update**. To update by hand, run `claude plugin marketplace update claude-account-rotator`, then `claude plugin update account-rotator@claude-account-rotator`, and start a new session.
 
+## 0.5.22-lutso.1 - 2026-11-08
+
+- **A usage-limit stop during an unproven switch no longer leaves an account marked spent by mistake** when you press **Use now** while its usage is being read. The mark goes back at your next switch, as it does in every other case.
+
 ## 0.5.21-lutso.1 - 2026-11-08
 
 - **A switch held back for a token about to refresh stands while the mod's code reloads**, where it used to be lost after you were told "in a few minutes". It is tried at each minute's check until it goes.
