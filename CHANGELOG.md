@@ -2,6 +2,12 @@
 
 What each version of the account rotator changed. To get each one as Claude Code starts, turn on auto-update: in `/plugin`, open **Marketplaces**, pick **claude-account-rotator** and choose **Enable auto-update**. To update by hand, run `claude plugin marketplace update claude-account-rotator`, then `claude plugin update account-rotator@claude-account-rotator`, and start a new session.
 
+## 0.5.11-lutso.1 - 2026-11-08
+
+- **Each account in the panel is two lines**: who it is, its Company and plan, then **updated HH:MM**; then **Used** with the week's bar and percent used, the Fable week's, and when they reset. A third line shows the 5-hour window where the account has one (**5h –** while the **5h limit** is off). The account numbers and the separate "its last usage check failed" line are gone: a read that failed ends line 1 with its time and **Failed to update (HTTP 429)**, and an account that needs a sign-in says **⚠ sign in needed** there. The percents are what is used, whatever the footer fills with.
+- **The panel opens wide enough for the two lines and the buttons.** On a narrower one, the buttons move to the end of line 2, then to a line of their own, and the company, then the middle of the email, shorten.
+- **What a tool outside Claude Code reads from the store follows each usage check at once**, from what every session stored.
+
 ## 0.5.10-lutso.1 - 2026-11-08
 
 - **Every session stores each account's row as text, for a tool outside Claude Code to read**: who the account is (email, Company, plan) with **updated HH:MM**, the time of its last usage read that worked, whichever session made it; then its week and Fable week used and when they reset; then its 5-hour window where it has one. A usage read that failed since shows its time and **Failed to update (HTTP 429)** instead, and an account that needs a sign-in says **sign in needed**. A response, or a usage answer that held no usage, no longer counts as a read that worked. The panel draws as before.
