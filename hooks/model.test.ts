@@ -7,7 +7,7 @@ import { companyOf, identityFromStatus, planName } from './model'
 import { laterMark, spentMark, withFableMark } from './model'
 import { EMPTY_VIEW, USAGE_IDLE_MS, fitRow, rowOf, rowsOf, rowText, storedLine, storedLineText } from './model'
 import ROWS_FIXTURE from '../tests/fixtures/rows'
-import { REQUEST_TTL_MS, holdsLogin, requestFrom, requestsDir } from './model'
+import { REQUEST_TTL_MS, holdsLogin, requestFrom, requestsDir, slotNumber } from './model'
 import { USAGE_BACKOFF_MAX_MS, USAGE_CLAIM_MS, USAGE_CLAIM_WAIT_MS, USAGE_EARLY_MS, WRITER_VERSION, afterUsage, claimDueReads, gatingDue, isUsageDue, mayForceUsage, mayReadSince, renewClaim, retryAfterFrom, usageDueFrom } from './model'
 import { DEFAULT_FOOTER, availableNow, braille, browsersFrom, chromeNote, continueTextFrom, counted, fiveHourLimitFrom, credentialFrom, credentialsFile, fableMark, fableSpentNotice, fableStay, footerStyleFrom, healthOf, identityFromProfile, isFableSpent, isFableStop, isNoBrowser, isPolicyRefusal, keepFable, keychainItem, legacyMark, markFrom, nextReset, pickTarget, pie, readingFromUsage, rotateToFrom, shouldLeave, roomColor, windowPct, withMark, withWeekMark } from './model'
 
@@ -1350,4 +1350,32 @@ test('the requests live in the Claude config folder of the session, CLAUDE_CONFI
 // Review C11-R1 F5 (Opus) [REQUEST-FOLDER] (RULING 4607): Python's `or` in bin/account_rotator_store.py takes an empty value as unset.
 test('an empty CLAUDE_CONFIG_DIR is the folder the CLI takes too, ~/.claude', () => {
   expect(requestsDir('', '/home/x')).toBe('/home/x/.claude/account-rotator-requests')
+})
+
+// C13 `add` (puma-eslxj.14, RULING 4660).
+const ADD = { kind: 'add', nonce: 'n0nce-1234', at: NOW, id: '7', store: 'store-abc', slot: '/home/x/.claude/accounts/7' }
+
+test('an add request is read back as it was written, while it is fresh', () => {
+  expect(requestFrom(ADD, NOW + REQUEST_TTL_MS)).toEqual(ADD)
+})
+
+test('an add with no slot it can name is no request', () => {
+  const cases: [string, unknown][] = [
+    ['no slot', { ...ADD, slot: undefined }],
+    ['an empty slot, Claude Code own login', { ...ADD, slot: '' }],
+    ['a slot of another type', { ...ADD, slot: 7 }],
+    ['stale', { ...ADD, at: NOW - REQUEST_TTL_MS - 1 }],
+  ]
+  expect(cases.filter(([, value]) => requestFrom(value, NOW) !== undefined).map(([name]) => name)).toEqual([])
+})
+
+test('a slot has a number only as a folder directly under the accounts folder, its name a number from 1 up', () => {
+  const home = '/home/x'
+  const root = `${home}/.claude/accounts`
+  expect(slotNumber(`${root}/7`, home)).toBe('7')
+  expect(slotNumber(`${root}/12`, home)).toBe('12')
+  // Review C13-R1 F7 [INPUT-EDGES]: the CLI's expanduser strips a HOME's trailing slash.
+  expect(slotNumber(`${root}/7`, `${home}/`)).toBe('7')
+  const bad = ['', root, `${root}/`, `${root}/0`, `${root}/007`, `${root}/abc`, `${root}/7/`, `${root}/7/8`, `${root}/../2`, `/other${root}/7`, `/home/y/.claude/accounts/7`]
+  expect(bad.filter(slot => slotNumber(slot, home) !== undefined)).toEqual([])
 })

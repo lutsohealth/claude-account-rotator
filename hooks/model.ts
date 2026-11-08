@@ -1313,7 +1313,16 @@ export function requestFrom(value: unknown, now: number): RotatorRequest | undef
     if (typeof slot !== 'string' || (email !== undefined && typeof email !== 'string') || (orgId !== undefined && typeof orgId !== 'string')) return undefined
     return { kind, nonce, at, id, store, slot, ...(email === undefined ? {} : { email }), ...(orgId === undefined ? {} : { orgId }) }
   }
+  if (kind === 'add') return typeof slot === 'string' && slot !== '' ? { kind, nonce, at, id, store, slot } : undefined
   return kind === 'use' && typeof session === 'string' && session !== '' ? { kind, nonce, at, id, store, session } : undefined
+}
+
+/** The number of a folder directly under the accounts folder, as `account add` makes and takes them; any other slot has none. */
+export function slotNumber(slot: string, home: string): string | undefined {
+  // A HOME's trailing slash: the CLI's expanduser strips it.
+  const root = `${home.replace(/\/+$/, '')}/.claude/accounts/`
+  const name = slot.startsWith(root) ? slot.slice(root.length) : ''
+  return /^[1-9][0-9]*$/.test(name) ? name : undefined
 }
 
 /** The requests folder: in the Claude config folder, CLAUDE_CONFIG_DIR or `~/.claude`, as bin/account_rotator_store.py finds it. */

@@ -57,6 +57,7 @@ export type RotatorRequest =
   | { kind: 'select'; nonce: string; at: number; id: string; store: string }
   | { kind: 'rm'; nonce: string; at: number; id: string; store: string; slot: string; email?: string; orgId?: string }
   | { kind: 'use'; nonce: string; at: number; id: string; store: string; session: string }
+  | { kind: 'add'; nonce: string; at: number; id: string; store: string; slot: string }
 
 /**
  * The rows every session's merge stores under `rows`, for the CLI: each login's lines as runs, when, and the writer's

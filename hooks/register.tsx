@@ -65,6 +65,7 @@ import {
   readingFromUsage,
   holdsLogin,
   sameLogin,
+  slotNumber,
   shouldLeave,
   WRITER_VERSION,
   whoseWeek,
@@ -528,10 +529,11 @@ async function takeRequest($: Host, resultPath: string, request: RotatorRequest,
 /**
  * What a request asks, done: `select` sets the login new sessions start on, as the panel's New on does. The result
  * names the pick that setting makes: a login with no room gives way to the next with room, or to Claude Code's login.
- * `use` moves this session. `rm` drops an account, as the panel's Remove does.
+ * `use` moves this session. `rm` drops an account, as the panel's Remove does. `add` lists a folder signed in.
  */
-async function applyRequest($: Host, request: RotatorRequest): Promise<{ ok: boolean; message: string; pickId?: string; activeId?: string }> {
+async function applyRequest($: Host, request: RotatorRequest): Promise<{ ok: boolean; message: string; pickId?: string; activeId?: string; accountId?: string }> {
   if (request.kind === 'rm') return removeAccount($, request.id, request)
+  if (request.kind === 'add') return adoptSlot($, request.slot)
   const target = (await getView($)).accounts.find(a => a.id === request.id)
   if (target === undefined) return { ok: false, message: `account ${request.id} is not listed in this store` }
   if (request.kind === 'use') return useAccount($, target)
@@ -1777,6 +1779,50 @@ async function addAccount($: Host): Promise<void> {
 }
 
 /**
+ * An `account add`: lists a folder the CLI signed in, under the folder's number while no other slot holds it. Who signed
+ * in is read here, then the list again, as the read takes seconds and another session can list either meanwhile. A
+ * twin goes by what is known of a row: a wrong refusal has a way back, a wrong acceptance makes a row nobody removes.
+ * The row wears nothing an old holder of its id left: a session not moved by an `rm` can write there after it. The
+ * health stands before the row: a session that merges between them would otherwise find it not signed in. The answer
+ * is the row the store holds after the write, as the store has no compare-and-set. The minute's check reads its usage.
+ */
+async function adoptSlot($: Host, slot: string): Promise<{ ok: boolean; message: string; accountId?: string; pickId?: string }> {
+  const number = slotNumber(slot, (await $.env.get('HOME')) ?? '')
+  if (number === undefined) return { ok: false, message: `${slot} is no numbered folder under ~/.claude/accounts, so nothing is added` }
+  const already = async (a: Account) => ({ ok: true, message: `already account ${a.id}`, accountId: a.id, pickId: (await pickAnswer($)).pickId })
+  const listed = (await loadAccounts($)).find(a => a.slot === slot)
+  if (listed !== undefined) return already(listed)
+  const who = await signedInAs($, slot)
+  if (who === undefined) return { ok: false, message: `could not read who ${slot} is signed in as, so nothing is added` }
+  const accounts = await loadAccounts($)
+  const meanwhile = accounts.find(a => a.slot === slot)
+  if (meanwhile !== undefined) return already(meanwhile)
+  const twin = accounts.find(a => isLoginOf(a, who))
+  if (twin !== undefined) {
+    return {
+      ok: false,
+      message: `that sign-in is account ${label(twin)} already${twin.orgId === undefined ? ', as far as is known: its organization is not read yet, so ask again once a check has read it' : ''}, so nothing is added. Sign out of claude.ai in your browser (or pick another organization), then run account add again. ${slot} stays signed in with no account on it: sign it out with CLAUDE_SECURESTORAGE_CONFIG_DIR=${slot} CLAUDE_CONFIG_DIR=${slot} claude auth logout`,
+    }
+  }
+  const account = withSignIn({ id: accounts.some(a => a.id === number) ? freeId(accounts) : number, slot }, who)
+  await dropAccountKeys($, account.id)
+  await saveHealth($, account.id, { kind: 'ok' })
+  await saveAccounts($, [...accounts, account])
+  await saveLaunchPick($)
+  const stood = (await loadAccounts($)).find(a => a.slot === slot)
+  if (stood === undefined || !isLoginOf(stood, who)) return { ok: false, message: `another session's write took the place of the row for ${slot}, so it is not listed as this sign-in` }
+  const { text, pickId } = await pickAnswer($)
+  return { ok: true, message: `account ${label(stood)} is added; ${text}`, accountId: stood.id, pickId }
+}
+
+/** Every store key of one account's own, each dropped when an account goes and before a row takes its id. */
+async function dropAccountKeys($: Host, id: string): Promise<void> {
+  for (const key of ['reading', 'usage', 'mark', 'no-five-hour', 'week-mark', 'fable-mark', 'check-error', 'health', 'holder', 'usage-due']) {
+    await $.store.delete(`${key}:${id}`)
+  }
+}
+
+/**
  * The second press of Remove, or an `account rm`: signs the slot out, then drops it from the list. It reads the list
  * from the store, as another session may have removed the account already. A logout that fails keeps the account: one
  * dropped from the list with its login still signed in is out of everyone's sight. Other sessions on it are not moved.
@@ -1808,16 +1854,7 @@ async function removeAccount($: Host, id: string, seen?: { slot: string; email?:
   await saveAccounts($, (await loadAccounts($)).filter(a => a.id !== id))
   if ((await $.store.get('chrome-account')) === id) await setChromeAccount($, undefined)
   await noteChromeAccount($, id, false)
-  await $.store.delete(`reading:${id}`)
-  await $.store.delete(`usage:${id}`)
-  await $.store.delete(`mark:${id}`)
-  await $.store.delete(`no-five-hour:${id}`)
-  await $.store.delete(`week-mark:${id}`)
-  await $.store.delete(`fable-mark:${id}`)
-  await $.store.delete(`check-error:${id}`)
-  await $.store.delete(`health:${id}`)
-  await $.store.delete(`holder:${id}`)
-  await $.store.delete(`usage-due:${id}`)
+  await dropAccountKeys($, id)
   await setView($, v => {
     const readings = { ...v.readings }
     const marks = { ...v.marks }
