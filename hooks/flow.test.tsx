@@ -5172,6 +5172,43 @@ test('the usage read a stop makes 90 s into an unproven switch stands once the s
 })
 
 // [UNDO-OWNERSHIP]: a move the stop itself makes is why the mark exists: the mark stays, whatever ends the switch after.
+// puma-eslxj.32 [PROVISIONAL-LOST-AT-RELOAD] (RULING 4719): a reload loses a module's variables, so the record lives in the
+// view. The kit cannot reload a module, and a stop needs a billed prompt live: these pin where the record is, at each end.
+test('a provisional stop\'s record is in the view after the stop, and gone after the undo', async ($, on) => {
+  const view = watchedView(on)
+  const { store, clock } = await stopDuringSwitch($, on, 40_000, 'Claude usage limit reached.')
+  expect([view()?.provisionalStop?.id, Object.keys(view()?.provisionalStop?.writes ?? {})]).toEqual(['2', ['mark:2']])
+  await useNow($, clock, '1')
+  expect([view()?.provisionalStop, store.get('mark:2')]).toEqual([undefined, undefined])
+})
+
+test('a provisional stop\'s record leaves the view once a response proves the switch, its mark kept', async ($, on) => {
+  const view = watchedView(on)
+  const { w, store, clock } = await stopDuringSwitch($, on, 40_000, 'Claude usage limit reached.')
+  expect(view()?.provisionalStop?.id).toBe('2')
+  w.limits = [{ kind: 'seven_day', percentUsed: 41, resetsAt: OTHER_WEEK }]
+  await respond($, clock, w)
+  expect([view()?.provisionalStop, store.get('mark:2') !== undefined]).toEqual([undefined, true])
+})
+
+test('a provisional stop\'s record leaves the view at the stop\'s own move, its mark kept', async ($, on) => {
+  const view = watchedView(on)
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [10, 40]
+  w.usage['tok-2'] = [10, 41]
+  w.weekResets = { 'tok-2': OTHER_WEEK }
+  const store = new Map<string, unknown>(Object.entries(TWO_LOGINS))
+  const clock = world(on, w, store)
+  await start($, clock)
+  await useNow($, clock, '2')
+  await clock.advance(40_000)
+  await $.classic.StopFailure({ error: 'rate_limit', last_assistant_message: 'Claude usage limit reached.' })
+  await clock.settle()
+  expect([view()?.provisionalStop, store.get('mark:2') !== undefined]).toEqual([undefined, true])
+})
+
 test('a stop that moves the session on from an unproven switch keeps its mark through the session\'s end', async ($, on) => {
   const w = fresh()
   w.keychain['Claude Code-credentials'] = blob('tok-1')
