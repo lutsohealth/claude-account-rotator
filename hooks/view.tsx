@@ -592,14 +592,14 @@ export function Band(ui: Ui, view: View, now: number, act: Actions) {
 /** A window's bar and percent at their widest ("▰▰▰▰▰▰▰▰▰▰ 100% left"), so the reset times line up. */
 const BAR_WIDTH = 20
 
+/** A window row's label column: its longest label, `Fable`, and a space. */
+const LABEL_WIDTH = 6
+
 /**
  * One usage window of a login, filled and colored as the footer draws it, and
  * when it resets: beside it, or under the bar on a narrow pane. A plan that
  * reports no such window (a Team seat's week) says so.
  */
-/** A window row's label column: its longest label, `Fable`, and a space. */
-const LABEL_WIDTH = 6
-
 function windowRow(ui: Ui, fill: Fill, isActive: boolean, name: string, hasReading: boolean, w: UsageWindow | undefined, now: number) {
   const { Box, Text } = ui
   const left = roomLeft(w, now)

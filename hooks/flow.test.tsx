@@ -5064,7 +5064,9 @@ for (const [endName, end] of F3_ENDS) {
     test(`${endName} of an unproven switch keeps the Fable mark another session's proven stop wrote after the provisional one, with ${theirName}`, async ($, on) => {
       const { w, store, clock } = await stopDuringSwitch($, on, 40_000, FABLE_STOP.last_assistant_message, undefined, { 'tok-2': [10, 41, 50] })
       expect(markOf(store.get('fable-mark:2'))).toEqual([100, FABLE_RESET])
-      // Exactly saveFableMark's store write in the other session, the harness running one engine.
+      // Exactly saveFableMark's store write in the other session, the harness running one engine, a second after the
+      // provisional stop.
+      await clock.advance(1000)
       store.set('fable-mark:2', laterMark(markFrom(store.get('fable-mark:2')), { pct: 100, resetsAt, at: clock.now() }))
       await end($, w, clock)
       const kept = markFrom(store.get('fable-mark:2'))

@@ -328,8 +328,7 @@ async function saveReading($: Host, id: string, read: Reading, src: ReadingSourc
 
 /** Moves an older version's mark to the mark's own key, unless the mark there already stands longer. */
 async function keepLegacyMark($: Host, id: string, legacy: Mark): Promise<void> {
-  const held = markFrom(await $.store.get(`mark:${id}`))
-  if (held !== undefined && Date.parse(held.resetsAt) >= Date.parse(legacy.resetsAt)) return
+  if (laterMark(markFrom(await $.store.get(`mark:${id}`)), legacy) !== legacy) return
   await $.store.set(`mark:${id}`, legacy)
   await setView($, v => ({ ...v, marks: { ...v.marks, [id]: legacy } }))
 }
@@ -418,18 +417,17 @@ async function mergeStore($: Host): Promise<void> {
     const nextHealth: Record<string, Health> = {}
     const nextHolders: Record<string, Holder> = {}
     for (const a of accounts) {
-      const mine = v.readings[a.id]
-      const theirs = readings[a.id]
-      const mark = marks[a.id] ?? v.marks?.[a.id]
+      // The reading, the marks and no-five-hour come from the store alone: every save writes the store before the
+      // view, and a key another session deleted (its undo, Remove, a sign-in as another account) leaves this view too.
+      const kept = readings[a.id]
+      const mark = marks[a.id]
       if (mark !== undefined) nextMarks[a.id] = mark
-      const none = noFiveHour[a.id] ?? v.noFiveHour?.[a.id]
+      const none = noFiveHour[a.id]
       if (none !== undefined) nextNoFiveHour[a.id] = none
-      const weekMark = weekMarks[a.id] ?? v.weekMarks?.[a.id]
+      const weekMark = weekMarks[a.id]
       if (weekMark !== undefined) nextWeekMarks[a.id] = weekMark
-      const fableMark = fableMarks[a.id] ?? v.fableMarks?.[a.id]
+      const fableMark = fableMarks[a.id]
       if (fableMark !== undefined) nextFableMarks[a.id] = fableMark
-      // On a tie the stored read wins: this session's copy is already counted, and may have lost a window.
-      const kept = mine !== undefined && (theirs === undefined || mine.at > theirs.at) ? mine : theirs
       // A stop's mark still in force counts with no reading under it: a reading dropped as no one's takes no mark along.
       const inForce = (m: Mark | undefined) => m !== undefined && Date.parse(m.resetsAt) > now
       const reading = kept ?? (inForce(mark) || inForce(weekMark) || inForce(fableMark) ? { at: now, by: a.id } : undefined)
