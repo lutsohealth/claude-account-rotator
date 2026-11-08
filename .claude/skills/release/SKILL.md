@@ -11,7 +11,7 @@ Claude Code updates an installed plugin only when the `version` in `.claude-plug
 
 - On `main`, not behind `origin`: `git fetch origin && git status -sb`. Commits ahead of it go out with the release.
 - Nothing uncommitted. Work another session left uncommitted gets a commit of its own first, with a message that says what it does, never folded into the release commit. If that session is still busy (`ListAgents`), ask the user before committing its work.
-- `claude plugin test .` and `claude plugin validate .` pass.
+- `claude plugin test .`, `python3 -m unittest discover -s tests` and `claude plugin validate .` pass.
 
 ## 2. Pick the version
 
