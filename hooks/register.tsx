@@ -796,8 +796,6 @@ async function requestUsage($: Host, account: Account, accessToken: string, gate
   const ok = usage.kind === 'ok' ? { kind: readingFromUsage(usage.body, at) === undefined ? ('empty' as const) : ('ok' as const), hasResponded } : undefined
   const outcome = ok ?? (usage.kind === 'rejected' ? usage : { kind: 'failed' as const, retryAfter: usage.retryAfter })
   await $.store.set(key, afterUsage(due, outcome, at))
-  // This session's own good read reaches its pane and its rows at once, not at the next minute's merge.
-  if (outcome.kind === 'ok') await setView($, v => ({ ...v, readAt: { ...v.readAt, [account.id]: at } }))
   return usage
 }
 
