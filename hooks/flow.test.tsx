@@ -2708,24 +2708,6 @@ test('a Chrome guess that finds no browser stores no miss once another session h
   expect(store.has('chrome-miss')).toBe(false)
 })
 
-test('a browser answering on Claude Code\'s login keeps the extension\'s account another session named meanwhile', async ($, on) => {
-  const w = fresh()
-  const store = new Map<string, unknown>(Object.entries(TWO_LOGINS))
-  // The other session names account 2 while this session's ask, answered on login 1, is in flight.
-  const extensions = Object.defineProperty([''], 'includes', {
-    value(this: string[], slot: string) {
-      store.set('chrome-account', '2')
-      return Array.prototype.includes.call(this, slot)
-    },
-  })
-  w.chrome = { extensions }
-  await spentOne(w)
-  const clock = world(on, w, store)
-  await start($, clock)
-  expect(w.chromeAsked).toEqual([''])
-  expect(store.get('chrome-account')).toBe('2')
-})
-
 // Review R1 CHROME-OWNER-REMOVE (Codex, #32): Remove clears chrome-account only while the store still names the removed account.
 test('Remove keeps a Chrome account another session named since this session last read the store', async ($, on) => {
   const w = fresh()
@@ -2747,26 +2729,141 @@ test('Remove keeps a Chrome account another session named since this session las
   await pane.unmount()
 })
 
-// Review R1 CHROME-OWNER-REMOVE, the class: a third account named meanwhile stays too.
-test('Remove keeps a third account another session named for Chrome since this session last read the store', async ($, on) => {
+// Review R1 F1 [STALE-VIEW-WRITE] (Opus, #32), the class: every write of `chrome-account` that this session's view
+// decided (Remove's forget, learnChrome's "none named yet") is decided by the store as it stands. Each case has another
+// session write `chrome-account` after this session's last merge and before the write. A new writer joins this table.
+type ChromeWriteCase = { name: string; run: ($: Engine, on: On) => Promise<{ got: unknown; want: unknown }> }
+
+const removeTwoWith = async ($: Engine, on: On, before: string | undefined, after: string): Promise<unknown> => {
   const w = fresh()
   w.keychain['Claude Code-credentials'] = blob('tok-1')
   w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
-  w.usage['tok-1'] = [20, 30]
-  w.usage['tok-2'] = [10, 30]
-  const store = new Map<string, unknown>(Object.entries({ ...THREE_LOGINS, 'rotate-to': 'off', 'chrome-account': '2' }))
+  w.keychain[await keychainItem(SLOT3)] = blob('tok-3')
+  w.usage['tok-1'] = [null, 40]
+  w.usage['tok-2'] = [null, 30]
+  w.usage['tok-3'] = [null, 30]
+  const three = { id: '3', slot: SLOT3, email: 'three@example.com' }
+  const seed: Record<string, unknown> = { accounts: [...TWO_LOGINS.accounts, three], ...(before === undefined ? {} : { 'chrome-account': before }) }
+  const store = new Map<string, unknown>(Object.entries(seed))
   const clock = world(on, w, store)
   await start($, clock)
-  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
-  store.set('chrome-account', '3')
+  const pane = await mountPane($)
+  store.set('chrome-account', after)
   await pane.press({ key: 'ask-remove-2' })
   await clock.settle()
   await pane.redraw()
   await pane.press({ key: 'remove-2' })
   await clock.settle()
-  expect(store.get('chrome-account')).toBe('3')
   await pane.unmount()
-})
+  return store.get('chrome-account')
+}
+
+const CHROME_WRITE_CASES: ChromeWriteCase[] = [
+  {
+    name: 'Remove of the account the view names, another session having named another since: that other stays',
+    run: async ($, on) => ({ got: await removeTwoWith($, on, '2', '3'), want: '3' }),
+  },
+  {
+    // freeId hands the removed id to the next account added: a name left on it would follow it there.
+    name: 'Remove of the account another session named since, the view naming none: the name goes with the account',
+    run: async ($, on) => ({ got: await removeTwoWith($, on, undefined, '2'), want: undefined }),
+  },
+  {
+    name: 'a browser answering as Claude Code\'s login, another session having named the extension\'s account since: that name stays',
+    run: async ($, on) => {
+      const w = fresh()
+      const store = new Map<string, unknown>(Object.entries(TWO_LOGINS))
+      // The other session names account 2 the extension's while this session asks Chrome; the browser answers as login 1.
+      const extensions = Object.defineProperty([''], 'includes', {
+        value(this: string[], slot: string) {
+          store.set('chrome-account', '2')
+          return Array.prototype.includes.call(this, slot)
+        },
+      })
+      w.chrome = { extensions }
+      await spentOne(w)
+      const clock = world(on, w, store)
+      await start($, clock)
+      return { got: store.get('chrome-account'), want: '2' }
+    },
+  },
+]
+
+for (const { name, run } of CHROME_WRITE_CASES) {
+  test(`chrome-account from the store: ${name}`, async ($, on) => {
+    const { got, want } = await run($, on)
+    expect(got, `chrome-account was written from this session's view: ${name}. Decide it by $.store.get('chrome-account') at the write`).toEqual(want)
+  })
+}
+
+/**
+ * The shared store, logging each merge (by `week-leave`, a key only mergeStore reads) and each write, in order.
+ * Map's constructor calls `set` before the field exists, hence the `?.`.
+ */
+class MergeLog extends Map<string, unknown> {
+  log: string[] = []
+  get(key: string): unknown {
+    if (key === 'week-leave') this.log.push('merge')
+    return super.get(key)
+  }
+  set(key: string, value: unknown): this {
+    this.log?.push(`set ${key}`)
+    return super.set(key, value)
+  }
+  delete(key: string): boolean {
+    this.log.push(`delete ${key}`)
+    return super.delete(key)
+  }
+}
+
+// Review R1 F2 [REDUNDANT-MERGE] (Opus, #32), the class: every way into maybeRotate or saveLaunchPick merges the store
+// at most once more than it reads anew; the minute's tick twice (its own merge, then the launch pick's after the checks).
+// Each event runs alone, the log emptied before it; a path that stacks a merge on a merge fails here.
+type MergeCostCase = { name: string; most: number; run: ($: Engine, clock: MockClock, w: World) => Promise<void> }
+
+const pressPane = async ($: Engine, clock: MockClock, keys: string[]): Promise<void> => {
+  const pane = await mountPane($)
+  for (const key of keys) {
+    await pane.press({ key })
+    await clock.settle()
+    await pane.redraw()
+  }
+  await pane.unmount()
+}
+
+const MERGE_COST_CASES: MergeCostCase[] = [
+  { name: 'the minute\'s tick', most: 2, run: async (_$, clock) => { await clock.advance(60_000); await clock.settle() } },
+  {
+    name: 'a response',
+    most: 1,
+    run: async ($, clock, w) => {
+      w.limits = [
+        { kind: 'five_hour', percentUsed: 20, resetsAt: '2026-10-12T12:00:00Z' },
+        { kind: 'seven_day', percentUsed: 30, resetsAt: WEEK_RESET },
+      ]
+      await respond($, clock, w)
+    },
+  },
+  { name: 'a Week press', most: 1, run: ($, clock) => pressPane($, clock, ['week-leave-up']) },
+  { name: 'Remove', most: 1, run: ($, clock) => pressPane($, clock, ['ask-remove-2', 'remove-2']) },
+]
+
+for (const { name, most, run } of MERGE_COST_CASES) {
+  test(`${name} merges the store at most ${most} time(s)`, async ($, on) => {
+    const w = fresh()
+    w.keychain['Claude Code-credentials'] = blob('tok-1')
+    w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+    w.usage['tok-1'] = [20, 30]
+    w.usage['tok-2'] = [10, 30]
+    const store = new MergeLog(Object.entries(TWO_LOGINS))
+    const clock = world(on, w, store)
+    await start($, clock)
+    store.log = []
+    await run($, clock, w)
+    const merges = store.log.filter(e => e === 'merge').length
+    expect(merges, `${name} merged the store ${merges} times (most ${most}): ${store.log.join(', ')}. A merge right after a merge reads nothing new`).toBeLessThanOrEqual(most)
+  })
+}
 
 // Review R1 of 181dc8e, footer_week_leave: the footer counts the week by the same setting the rotation does.
 test('the footer shows no room now on a login whose week is down to the Week setting, as the rotation counts it', async ($, on) => {
