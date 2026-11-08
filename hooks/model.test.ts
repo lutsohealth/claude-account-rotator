@@ -1233,6 +1233,37 @@ test('the stored rows hold no minute and no zone: two sessions a minute apart in
   expect(stored(ROWS_FIXTURE.now, TALLINN)).toEqual(rowsOf(FIXTURE_VIEW, ROWS_FIXTURE.now).map(r => r.lines))
 })
 
+/** The fixture's view with login 2's Fable week resetting `offsetMs` after its week. */
+function fableOffset(offsetMs: number): View {
+  const r = FIXTURE_VIEW.readings['2']
+  const fable = new Date(Date.parse(r?.sevenDay?.resetsAt ?? '') + offsetMs).toISOString()
+  return { ...FIXTURE_VIEW, readings: { ...FIXTURE_VIEW.readings, '2': { ...r, fable: { pct: 10, resetsAt: fable } } as View['readings'][string] } }
+}
+
+// Review C10-R1 F1 (Opus) [ROW-AT-ANOTHER-NOW] (RULING 4574): whether the Fable reset shows beside the week's is
+// decided on the two instants, so no stored row changes with the writer's second while no reset passes.
+test('two sessions 45 s apart store the same rows for a Fable week 20 s after the week', () => {
+  expect(JSON.stringify(rowsOf(fableOffset(20_000), ROWS_FIXTURE.now + 45_000))).toBe(JSON.stringify(rowsOf(fableOffset(20_000), ROWS_FIXTURE.now)))
+})
+
+test('no stored row changes with the writer\'s clock while no reset passes, at any Fable offset under a minute', () => {
+  const offsets = [0, 1, 500, 5_000, 20_000, 30_000, 45_000, 59_999, -20_000]
+  const phases = Array.from({ length: 12 }, (_, i) => i * 5_000)
+  const offenders: string[] = []
+  for (const off of offsets) {
+    const first = JSON.stringify(rowsOf(fableOffset(off), ROWS_FIXTURE.now))
+    for (const p of phases) if (JSON.stringify(rowsOf(fableOffset(off), ROWS_FIXTURE.now + p)) !== first) offenders.push(`Fable ${off} ms after the week, writer ${p} ms later`)
+  }
+  expect(offsets.length * phases.length).toBeGreaterThan(0)
+  expect(offenders).toEqual([])
+})
+
+// Review C10-R1 F4 (Opus) [ROW-AT-ANOTHER-NOW]: a stored reset read after it passed says so, as bin/account-rotator does.
+test('a stored reset read after it passed says passed, not 0m', () => {
+  const line3 = rowsOf(FIXTURE_VIEW, ROWS_FIXTURE.now).find(r => r.id === '2')?.lines[2] ?? []
+  expect(storedLineText(line3, ROWS_FIXTURE.now + 2 * 3_600_000, TALLINN)).toBe('5h ▰▰▰▰▰▱▱▱▱▱ 50%  resets passed')
+})
+
 test('a stored line read a minute later counts its resets down, and read in UTC says its times in UTC', () => {
   const [line1, line2] = rowsOf(FIXTURE_VIEW, ROWS_FIXTURE.now).find(r => r.id === '1')?.lines ?? []
   expect(storedLineText(line2 ?? [], ROWS_FIXTURE.now + MINUTE, TALLINN)).toBe('Used ▰▰▰▱▱▱▱▱▱▱ 31% Fable ▰▰▰▰▱▱▱▱▱▱ 38%  resets 2d 3h 13m · Fable 1d 3h 13m')

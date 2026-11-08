@@ -204,5 +204,100 @@ class StorePick(StoreCase):
         self.assertEqual(done.stdout.strip(), "/a/plugin-dir/store")
 
 
+BINS = {"account-rotator": ["account", "list"], "account-rotator-launch": []}
+ACCOUNT = {"id": "1", "slot": "", "email": "a@example.com"}
+HOUR_MS = 3_600_000
+MALFORMED = {
+    "no accounts list": json.dumps({"rows": {"rows": []}, "launch-slot": {"id": "1", "slot": "/slot", "why": "x", "at": 1}}),
+    "accounts null": '{"accounts": null}',
+    "accounts a number": '{"accounts": 5}',
+    "an account not an object": json.dumps({"accounts": [5]}),
+    "rows.rows a number": json.dumps({"accounts": [ACCOUNT], "rows": {"v": 1, "at": 0, "rows": 5}}),
+    "a line a number": json.dumps({"accounts": [ACCOUNT], "rows": {"v": 1, "at": 0, "rows": [{"id": "1", "lines": [5]}]}}),
+    "a run of no known shape": json.dumps({"accounts": [ACCOUNT], "rows": {"v": 1, "at": 0, "rows": [{"id": "1", "lines": [[{"x": 1}]]}]}}),
+    "a clock run out of range": json.dumps({"accounts": [ACCOUNT], "rows": {"v": 1, "at": 0, "rows": [{"id": "1", "lines": [[{"clock": 1e20}]]}]}}),
+    "rows.at out of range": json.dumps({"accounts": [ACCOUNT], "rows": {"v": 1, "at": 1e20, "rows": []}}),
+    "an until run of 1e400": '{"accounts": [{"id": "1", "slot": ""}], "rows": {"v": 1, "at": 0, "rows": [{"id": "1", "lines": [[{"until": 1e400}]]}]}}',
+    "launch-slot.at of 1e400": '{"accounts": [], "launch-slot": {"id": "1", "slot": "", "at": 1e400}}',
+}
+TORN = {"empty, truncated before the write": "", "cut mid-object": '{"accounts": [{"id": "1", "slot": ""'}
+
+
+class ReviewStoreReadContract(StoreCase):
+    """Review C10-R1 EXPLICIT-STORE-SHAPE (Codex), F2 and F3 (Opus) [STORE-READ-CONTRACT] (RULING 4574): what both bins
+    take as the store, and how they say they cannot: exit 1, one stderr line naming the file, never a traceback and
+    never an older file in place of a newest one that does not parse."""
+
+    def bin_run(self, name: str, *args: str) -> subprocess.CompletedProcess[str]:
+        return run(ROOT / "bin" / name, *BINS[name], *args, env=self.env())
+
+    def test_every_bin_refuses_a_store_it_is_named_that_holds_no_accounts_list(self) -> None:
+        named = self.tmp / "named.json"
+        named.write_text(MALFORMED["no accounts list"], encoding="utf-8")
+        codes = {name: self.bin_run(name, "--store", str(named)).returncode for name in BINS}
+        self.assertEqual(codes, dict.fromkeys(BINS, 1))
+
+    def test_every_bin_stops_at_a_newest_store_that_does_not_parse_and_names_it(self) -> None:
+        cases = [(name, form, text) for name in BINS for form, text in TORN.items()]
+        self.assertTrue(cases)
+        offenders = []
+        newest = self.stores / "account-rotator_claude-account-rotator-bbbbbbbbbbbb.json"
+        for name, form, text in cases:
+            newest.write_text(text, encoding="utf-8")
+            os.utime(newest, (4_000_000_000, 4_000_000_000))
+            done = self.bin_run(name)
+            if done.returncode != 1 or str(newest) not in done.stderr:
+                offenders.append(f"{name}, newest store {form}: exit {done.returncode}, stderr {done.stderr.strip()!r}")
+        self.assertEqual(offenders, [], "fix: a newest store that does not parse stops the pick with exit 1 naming it")
+
+    def test_no_bin_answers_a_malformed_store_with_a_traceback(self) -> None:
+        self.assertTrue(MALFORMED)
+        offenders = []
+        for name in BINS:
+            for form, text in MALFORMED.items():
+                store = self.tmp / "malformed.json"
+                store.write_text(text, encoding="utf-8")
+                done = self.bin_run(name, "--store", str(store))
+                if "Traceback" in done.stderr or (done.returncode == 1 and len(done.stderr.strip().splitlines()) != 1):
+                    offenders.append(f"{name}, {form}: exit {done.returncode}, {done.stderr.strip().splitlines()[-1:]}")
+        self.assertEqual(offenders, [], "fix: each bin answers a malformed store with one stderr line and exit 1")
+
+    def test_account_list_refuses_each_malformed_value_with_exit_1(self) -> None:
+        codes = {}
+        for form, text in MALFORMED.items():
+            store = self.tmp / "malformed.json"
+            store.write_text(text, encoding="utf-8")
+            codes[form] = self.bin_run("account-rotator", "--store", str(store)).returncode
+        self.assertEqual(codes, dict.fromkeys(MALFORMED, 1))
+
+
+class ReviewPassedReset(StoreCase):
+    """Review C10-R1 F4 (Opus), RESET-EXPIRY (Codex) [ROW-AT-ANOTHER-NOW] (RULING 4574): a stored reset read after it
+    passed says `passed`, and the last line names the account, never `0m`. The pane's line past a reset with no session
+    running is the known limit [ROWS-PAST-A-RESET]: the CLI does not redo the percent."""
+
+    def test_a_5h_reset_two_hours_past_reads_passed(self) -> None:
+        line = self.fixture["store"]["rows"]["rows"][1]["lines"][2]
+        until = next(r["until"] for r in line if isinstance(r, dict))
+        text = load_cli().line_text(line, until + 2 * HOUR_MS, ZoneInfo(self.fixture["zone"]))
+        self.assertEqual(text, "5h ▰▰▰▰▰▱▱▱▱▱ 50%  resets passed")
+
+    def test_no_stored_until_reads_as_due_now_once_it_has_passed(self) -> None:
+        cli, zone = load_cli(), ZoneInfo(self.fixture["zone"])
+        sites = [(row["id"], i, line, run["until"]) for row in self.fixture["store"]["rows"]["rows"]
+                 for i, line in enumerate(row["lines"]) for run in line if isinstance(run, dict) and "until" in run]
+        self.assertTrue(sites)
+        offenders = [f"account {rid} line {i + 1}: {cli.line_text(line, until + HOUR_MS, zone)!r}"
+                     for rid, i, line, until in sites if "passed" not in cli.line_text(line, until + HOUR_MS, zone)]
+        self.assertEqual(offenders, [], "fix: a passed {until} reads `passed`")
+
+    def test_the_last_line_names_each_account_whose_reset_passed(self) -> None:
+        out = io.StringIO()
+        with redirect_stdout(out):
+            load_cli().main(["account", "list", "--store", str(self.store)], now=self.fixture["now"] + 2 * HOUR_MS, zone=ZoneInfo("UTC"))
+        last = out.getvalue().rstrip("\n").split("\n")[-1]
+        self.assertIn("a reset has passed since its row was written for account 2", last)
+
+
 if __name__ == "__main__":
     unittest.main()
