@@ -48,9 +48,13 @@ export type Row = { id: string; lines: RowPart[][] }
  * A request `account-rotator account select` writes to `<nonce>.json` in the requests folder: new sessions start on
  * login `id`. `store` is the `store-id` of the store the CLI read; `at` is when it wrote the request, epoch ms. The
  * session that applies it writes `<nonce>.result.json`: `{ nonce, ok, message, pickId?, at }`, `pickId` the login new
- * sessions then start on, which is another where `id` has no room.
+ * sessions then start on, which is another where `id` has no room. `account use` writes one that moves the session
+ * whose mark is `session`, the ACCOUNT_ROTATOR_SESSION it set; its result carries `activeId`, the login that session is
+ * on after it, and no other session applies it.
  */
-export type RotatorRequest = { kind: 'select'; nonce: string; at: number; id: string; store: string }
+export type RotatorRequest =
+  | { kind: 'select'; nonce: string; at: number; id: string; store: string }
+  | { kind: 'use'; nonce: string; at: number; id: string; store: string; session: string }
 
 /**
  * The rows every session's merge stores under `rows`, for the CLI: each login's lines as runs, when, and the writer's

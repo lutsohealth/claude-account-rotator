@@ -6417,10 +6417,24 @@ test('a switch held for a token refresh answers ok, names the wait, and moves on
   await call.finish()
   expect(w.envSets).toEqual([])
   expect(resultOf(w, N1)).toMatchObject({ ok: true, activeId: '1' })
-  expect(resultOf(w, N1)?.message).toMatch(/this session moves to account 2 in a few minutes, once account 1's token has refreshed/)
+  expect(resultOf(w, N1)?.message).toMatch(/this session moves to account 2 .*in a few minutes, once account 1's token has refreshed/)
   w.keychain['Claude Code-credentials'] = blob('tok-1', clock.now() + 6 * HOUR)
   await untilTick(clock)
   expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
+})
+
+test('a use of the account in use, while a switch is held, drops the held switch: the latest ask stands', async ($, on) => {
+  const { w, store, clock } = await selectWorld($, on)
+  w.keychain['Claude Code-credentials'] = blob('tok-1', clock.now() + 60_000)
+  w.files[`${REQUESTS}/held-00001.json`] = useRequest('held-00001', '2', store.get('store-id'), clock.now(), ownMark(w))
+  await untilTick(clock)
+  expect(resultOf(w, 'held-00001')?.message).toMatch(/in a few minutes/)
+  w.files[`${REQUESTS}/${N1}.json`] = useRequest(N1, '1', store.get('store-id'), clock.now(), ownMark(w))
+  await untilTick(clock)
+  expect(resultOf(w, N1)).toMatchObject({ ok: true, activeId: '1' })
+  w.keychain['Claude Code-credentials'] = blob('tok-1', clock.now() + 6 * HOUR)
+  await untilTick(clock)
+  expect(w.envSets.filter(e => e.value === SLOT2), 'the held switch ran after a later use asked to stay').toEqual([])
 })
 
 test('a use of the account in use answers ok and moves nothing', async ($, on) => {
@@ -6434,7 +6448,7 @@ test('a use of the account in use answers ok and moves nothing', async ($, on) =
 
 test('a use of an account not listed, or one the panel offers no Use now for, answers not ok and moves nothing', async ($, on) => {
   const { w, store, clock } = await selectWorld($, on)
-  delete w.keychain[await keychainItem(SLOT2)]
+  store.set('health:2', { kind: 'login-needed', why: 'its sign-in has run out' })
   await untilTick(clock)
   w.files[`${REQUESTS}/gone-00001.json`] = useRequest('gone-00001', '9', store.get('store-id'), clock.now(), ownMark(w))
   w.files[`${REQUESTS}/${N1}.json`] = useRequest(N1, '2', store.get('store-id'), clock.now(), ownMark(w))
@@ -6442,7 +6456,7 @@ test('a use of an account not listed, or one the panel offers no Use now for, an
   expect(w.envSets).toEqual([])
   expect(resultOf(w, 'gone-00001')).toMatchObject({ ok: false, message: 'account 9 is not listed in this store' })
   expect(resultOf(w, N1)?.ok).toBe(false)
-  expect(resultOf(w, N1)?.message).toMatch(/account 2 cannot take over/)
+  expect(resultOf(w, N1)?.message).toMatch(/account 2 .*cannot take over: its sign-in has run out/)
 })
 
 test('a select during a Bash call that names account-rotator is applied within a beat too', async ($, on) => {

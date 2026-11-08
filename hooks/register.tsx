@@ -82,6 +82,7 @@ import {
   usageDueFrom,
   isSameRows,
   rowsOf,
+  REQUEST_POLL_MS,
   requestFrom,
   requestsDir,
 } from './model'
@@ -461,9 +462,27 @@ async function saveStoreId($: Host): Promise<void> {
 const takenRequests = new Set<string>()
 
 /**
+ * What this session's Bash children carry in ACCOUNT_ROTATOR_SESSION, for `account use` to name it by. Made at each
+ * boot, and no session id: /clear moves the id and not the variable, and two processes can resume one id.
+ */
+let sessionMark: string | undefined
+
+/** Sets the mark for every Bash child started after. Refused, it stays unset: `use` finds no session, the rest runs on. */
+async function setSessionMark($: Host): Promise<void> {
+  const mark = `session-${Math.random().toString(36).slice(2, 12)}`
+  try {
+    await $.env.set('ACCOUNT_ROTATOR_SESSION', mark)
+    sessionMark = mark
+  } catch (error) {
+    sessionMark = undefined
+    await debug($, `session mark refused: ${String(error)}`)
+  }
+}
+
+/**
  * Applies each request in the requests folder that names this store's `store-id` and has no result yet, oldest first
- * so the newest stands, and writes its result beside it. A request another store's CLI read, or a stale one, is left
- * for the CLI to withdraw.
+ * so the newest stands, and writes its result beside it. A request another store's CLI read, one aimed at another
+ * session, or a stale one, is left for the CLI to withdraw.
  */
 async function applyRequests($: Host): Promise<void> {
   const storeId = await $.store.get('store-id')
@@ -479,9 +498,12 @@ async function applyRequests($: Host): Promise<void> {
     // A file the CLI is still writing, or one that is no request, reads as none.
     const text = await $.fs.read(`${dir}/${name}`).catch(() => undefined)
     const request = requestFrom(parsed(typeof text === 'string' ? text : undefined), now)
-    if (request !== undefined && request.nonce === nonce && request.store === storeId) requests.push(request)
+    if (request === undefined || request.nonce !== nonce || request.store !== storeId) continue
+    if (request.kind === 'select' || request.session === sessionMark) requests.push(request)
   }
   for (const request of requests.sort((a, b) => a.at - b.at)) {
+    // The watch over a Bash call and the minute can read one listing: the first to reach a request takes it.
+    if (takenRequests.has(request.nonce)) continue
     takenRequests.add(request.nonce)
     await takeRequest($, `${dir}/${request.nonce}.result.json`, request, now)
   }
@@ -501,13 +523,41 @@ async function takeRequest($: Host, resultPath: string, request: RotatorRequest,
 /**
  * What a request asks, done: `select` sets the login new sessions start on, as the panel's New on does. The result
  * names the pick that setting makes: a login with no room gives way to the next with room, or to Claude Code's login.
+ * `use` moves this session.
  */
-async function applyRequest($: Host, request: RotatorRequest): Promise<{ ok: boolean; message: string; pickId?: string }> {
-  if (!(await getView($)).accounts.some(a => a.id === request.id)) return { ok: false, message: `account ${request.id} is not listed in this store` }
+async function applyRequest($: Host, request: RotatorRequest): Promise<{ ok: boolean; message: string; pickId?: string; activeId?: string }> {
+  const target = (await getView($)).accounts.find(a => a.id === request.id)
+  if (target === undefined) return { ok: false, message: `account ${request.id} is not listed in this store` }
+  if (request.kind === 'use') return useAccount($, target)
   await setLaunchOn($, `account:${request.id}`)
   const pick = (await $.store.get('launch-slot')) as LaunchPick | undefined
   if (pick === undefined) return { ok: true, message: "no account has room, so new sessions start on Claude Code's login" }
   return { ok: true, message: `new sessions start on account ${pick.id} (${pick.why})`, pickId: pick.id }
+}
+
+/** Moves this session as the panel's Use now does, under the same rule: only a login signed in. The result reads back where it stands. */
+async function useAccount($: Host, target: Account): Promise<{ ok: boolean; message: string; activeId: string }> {
+  const view = await getView($)
+  const name = label(target)
+  if (view.activeId === target.id && held === undefined) return { ok: true, message: `this session already uses account ${name}`, activeId: target.id }
+  const health = view.health[target.id]
+  if (health?.kind !== 'ok') return { ok: false, message: `account ${name} cannot take over: ${health?.kind === 'login-needed' ? health.why : 'it is not signed in yet'}`, activeId: view.activeId }
+  const hasMoved = await switchTo($, target, 'a command asked for it')
+  if (hasMoved) return { ok: true, message: `this session now uses account ${name}`, activeId: target.id }
+  // switchTo holds a switch for a token about to refresh, and otherwise declines only on a policy refusal.
+  if (held !== undefined) return { ok: true, message: `this session moves to account ${name} in a few minutes, once account ${view.activeId}'s token has refreshed`, activeId: view.activeId }
+  return { ok: false, message: blockedText(isOnNormalLogin(view)), activeId: view.activeId }
+}
+
+/** What a Bash command spells to be watched: both bins' names hold it. */
+const CLI_NAME = 'account-rotator'
+
+/** Applies requests each beat while `watch.isRunning`. Before boot has read the accounts, it would answer that none is listed. */
+async function watchRequests($: Host, watch: { isRunning: boolean }): Promise<void> {
+  while (watch.isRunning) {
+    await $.clock.sleep(REQUEST_POLL_MS)
+    if (isBooted && watch.isRunning) await applyRequests($).catch(error => debug($, `requests failed: ${String(error)}`))
+  }
 }
 
 /** JSON text as a value, or undefined where it does not parse. */
@@ -1868,6 +1918,7 @@ export const register: Register = on => {
     // A command typed at the prompt is the person's: it opens the pane as the footer's press does, with no mouse.
     // Awaited before next(e), so a session whose first prompt is /accounts finds it (the engine awaits the first start).
     await registerAccounts($)
+    await setSessionMark($)
     const started = await next(e)
     void boot($, e.isInteractive).catch(error => debug($, `start failed: ${String(error)}`))
     void $.ui.panes().then(panes => {
@@ -1918,6 +1969,20 @@ export const register: Register = on => {
     void checkActive($).catch(error => debug($, `check after /login failed: ${String(error)}`))
     return ran
   }).catch(($, e, next) => next(e))
+
+  // `account use` waits for its answer inside this call, so only a watch during the call can answer it in time. Every
+  // other way of running the CLI (`!`, a wrapper's name, a background Bash) has the minute's tick.
+  on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
+    if (e.tool !== 'Bash' || !e.command.includes(CLI_NAME)) return next(e)
+    const watch = { isRunning: true }
+    // A reload aborts the watch's sleep. The call runs on, and the minute of the reloaded module backs it up.
+    void watchRequests($, watch).catch(() => undefined)
+    try {
+      return await next(e)
+    } finally {
+      watch.isRunning = false
+    }
+  })
 
   // While Connect is under way a browser call would connect as the login being left: Claude waits, and is told when to carry on.
   on('tool.check', { tool: CHROME_TOOL }, async ($, e, next) => {

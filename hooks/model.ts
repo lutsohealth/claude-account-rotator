@@ -1292,10 +1292,11 @@ const NONCE = /^[A-Za-z0-9-]{6,64}$/
 /** A request read back from its file, while it is fresh; anything else is none. */
 export function requestFrom(value: unknown, now: number): RotatorRequest | undefined {
   if (typeof value !== 'object' || value === null) return undefined
-  const { kind, nonce, at, id, store } = value as Record<string, unknown>
-  if (kind !== 'select' || typeof nonce !== 'string' || !NONCE.test(nonce) || typeof id !== 'string' || typeof store !== 'string') return undefined
+  const { kind, nonce, at, id, store, session } = value as Record<string, unknown>
+  if (typeof nonce !== 'string' || !NONCE.test(nonce) || typeof id !== 'string' || typeof store !== 'string') return undefined
   if (typeof at !== 'number' || Math.abs(now - at) > REQUEST_TTL_MS) return undefined
-  return { kind, nonce, at, id, store }
+  if (kind === 'select') return { kind, nonce, at, id, store }
+  return kind === 'use' && typeof session === 'string' && session !== '' ? { kind, nonce, at, id, store, session } : undefined
 }
 
 /** The requests folder: in the Claude config folder, CLAUDE_CONFIG_DIR or `~/.claude`, as bin/account_rotator_store.py finds it. */
