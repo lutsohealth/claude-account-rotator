@@ -486,7 +486,10 @@ export function readingFromLimits(
   return { ...(fiveHour ? { fiveHour } : {}), ...(sevenDay ? { sevenDay } : {}), at: now }
 }
 
-/** The version of the store's shapes this mod writes, stamped as `v` on `usage:<id>`, `usage-due:<id>` and `rows`. */
+/**
+ * The version of the store's shapes this mod writes, stamped as `v` on `usage:<id>`, `usage-due:<id>` and `rows`,
+ * whose lines it does not version (`StoredRows`).
+ */
 export const WRITER_VERSION = 1
 
 /**

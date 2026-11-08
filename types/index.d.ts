@@ -62,6 +62,8 @@ export type RotatorRequest =
 /**
  * The rows every session's merge stores under `rows`, for the CLI: each login's lines as runs, when, and the writer's
  * version. A session older than this shape stored each line as one string, its times rendered by the writer.
+ * `v` does not version the lines: both shapes carry 1, so a reader tells them by each line's type. A new line shape
+ * takes a new key, as `usage:<id>` did, or versions on one store rewrite each other's rows until the older restarts.
  */
 export type StoredRows = { v: number; at: number; rows: { id: string; lines: StoredRun[][] }[] }
 

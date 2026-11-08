@@ -76,10 +76,13 @@ const fakeNow = (wall: number) => {
   return start + (wall - start) * SPEED
 }
 const iso = (offset: number) => new Date((start ?? 0) + offset).toISOString()
-/** Every 5-hour reset time handed out: a reading that carries none of them is the real session's. */
-const isImitated = (value: unknown) => {
-  const resetsAt = (value as { fiveHour?: { resetsAt?: unknown } } | null)?.fiveHour?.resetsAt
-  return logins.some(l => iso(l.fiveResets) === resetsAt)
+/** Every `resetsAt` a value holds, at any depth. */
+const resetsIn = (value: unknown): unknown[] =>
+  typeof value !== 'object' || value === null ? [] : Object.entries(value).flatMap(([key, v]) => (key === 'resetsAt' ? [v] : resetsIn(v)))
+/** Whether a value holds a reset no imitated login has: it is then the real session's usage, under any key. */
+const holdsRealUsage = (value: unknown) => {
+  const handedOut = logins.flatMap(l => [iso(l.fiveResets), iso(l.weekResets)])
+  return resetsIn(value).some(at => !handedOut.includes(at as string))
 }
 
 /** Fills the login in use for the time it drained since the last look. */
@@ -250,7 +253,7 @@ export const register: Register = on => {
   // The real responses' usage is the starting login's, not the imitated one in use: refused.
   on('store.set', async ($, e, next) => {
     if (next.origin.plugin !== MOD) return next(e)
-    if (e.key.startsWith('reading:') && !isImitated(e.value)) return { deny: 'the demo shows imitated usage only' }
+    if (holdsRealUsage(e.value)) return { deny: 'the demo shows imitated usage only' }
     store.set(e.key, e.value)
     return { value: undefined }
   })
