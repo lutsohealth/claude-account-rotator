@@ -5582,3 +5582,61 @@ test('the pane draws no id column and no separate failure line: a failed read en
   expect(lines['line-1-0']?.text).toMatch(/  \d\d:\d\d Failed to update \(HTTP 429\)$/)
   expect(lines['line-1-0']?.text).toBe(lineOne(store, '1'))
 })
+
+// Review C9-R1 ROWS-FROM-STALE-VIEW (Opus) [ROWS-FROM-STALE-VIEW] (RULING 4555): a check's rows are written from the
+// store as it stands then, never from this session's view merged before the check's claim wait.
+test('a check never puts back an older row over the one another session stored meanwhile', async ($, on) => {
+  const { store, clock } = await rowsWorld($, on)
+  // Login 1's schedule comes due at the next minute tick, so that tick's check claims it and waits.
+  store.set('usage-due:1', { ...(store.get('usage-due:1') as object), next: clock.now() })
+  await clock.advance(NOW + 2 * 60_000 - clock.now())
+  // The seed: the check holds its claim on login 1, its merge done.
+  expect((store.get('usage-due:1') as { claim?: string } | undefined)?.claim).toBe('session-1')
+  // Another session reads login 2 now and stores its row, as its merge does.
+  const bAt = clock.now()
+  store.set('usage-due:2', { ...(store.get('usage-due:2') as object), at: bAt, next: bAt + USAGE_IDLE_MS })
+  const newer = (rowsOf(store)?.rows ?? []).map(r => (r.id === '2' ? { ...r, lines: [(r.lines[0] ?? '').replace(/updated \d\d:\d\d$/, `updated ${localTime(bAt)}`), ...r.lines.slice(1)] } : r))
+  expect(newer.find(r => r.id === '2')?.lines[0]).toMatch(new RegExp(`updated ${localTime(bAt)}$`))
+  store.set('rows', { v: 1, at: bAt, rows: newer })
+  await clock.advance(USAGE_CLAIM_WAIT_MS + 1000)
+  expect(lineOne(store, '2')).toMatch(new RegExp(`updated ${localTime(bAt)}$`))
+})
+
+/** The shared store, checking every `rows` write against the store as it stands then: each `updated` is the last good read's. */
+class RowsWatch extends Map<string, unknown> {
+  offenders?: string[]
+  writes?: number
+  override set(key: string, value: unknown): this {
+    if (key === 'rows' && this.offenders !== undefined) {
+      this.writes = (this.writes ?? 0) + 1
+      for (const r of (value as RowsKey).rows ?? []) {
+        const shown = /updated (\d\d:\d\d)$/.exec(r.lines[0] ?? '')?.[1]
+        const at = (super.get(`usage-due:${r.id}`) as { at?: number } | undefined)?.at
+        if (shown !== undefined && at !== undefined && shown !== localTime(at)) this.offenders.push(`login ${r.id}: updated ${shown}, the store's last good read ${localTime(at)}`)
+      }
+    }
+    return super.set(key, value)
+  }
+}
+
+test('no rows write names a good read older than the store holds then, whichever path writes it', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [null, 30, 40]
+  w.usage['tok-2'] = [null, 40]
+  const store = new RowsWatch(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off' }))
+  store.offenders = []
+  const clock = world(on, w, store)
+  await start($, clock)
+  const otherReads = (at: number) => store.set('usage-due:2', { ...(store.get('usage-due:2') as object), at, next: at + USAGE_IDLE_MS })
+  for (let minute = 1; minute <= 11; minute++) {
+    // Login 1 comes due at each tick, so each tick's check claims it and waits; the other session reads login 2 in that wait.
+    store.set('usage-due:1', { ...(store.get('usage-due:1') as object), next: clock.now() })
+    await clock.advance(NOW + minute * 60_000 - clock.now())
+    otherReads(clock.now())
+    await clock.advance(USAGE_CLAIM_WAIT_MS + 1000)
+  }
+  expect(store.writes ?? 0).toBeGreaterThan(2)
+  expect([...new Set(store.offenders)]).toEqual([])
+})
