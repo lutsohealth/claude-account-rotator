@@ -5521,6 +5521,59 @@ test('a row\'s bars are drawn in the color of the room left: login 1\'s week, 30
   expect(colors).toEqual([roomColor(70)])
 })
 
+/** An element's whole text, its buttons' boxes included. */
+function rawText(node: unknown): string {
+  if (typeof node === 'string') return node
+  if (typeof node !== 'object' || node === null) return ''
+  return ((node as DrawnNode).children ?? []).map(rawText).join('')
+}
+/** The first element under `node` with `key`, or the first Text whose whole text is `text`. */
+function findDrawn(node: unknown, match: { key?: string; text?: string }): DrawnNode | undefined {
+  if (typeof node !== 'object' || node === null) return undefined
+  const n = node as DrawnNode
+  if ((match.key !== undefined && n.props?.key === match.key) || (match.text !== undefined && n.type === 'Text' && rawText(n) === match.text)) return n
+  for (const child of n.children ?? []) {
+    const found = findDrawn(child, match)
+    if (found !== undefined) return found
+  }
+  return undefined
+}
+
+// Review C9-R1 END-SLOT-UNDERCOUNTS-STATUS (Codex) and END-WIDTH-UNDERCOUNT (Opus) [END-WIDTH-UNDERCOUNT] (RULING 4555):
+// the end of a line is counted as wide as what lineEnd draws there, so the line with its end fits the row.
+for (const spare of [0, 1, 2]) {
+  test(`a signing-in status fits the line it ends, ${spare} cells over the slot's width`, async ($, on) => {
+    const { store, clock } = await rowsWorld($, on)
+    store.set('health:2', { kind: 'logging-in', since: NOW })
+    await clock.advance(61_000)
+    const bodyColumns = [...lineOne(store, '2')].length + 2 + 11 + 4 + spare
+    const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: { ...PANE_PROPS, bodyColumns } })
+    const tree = await pane.drawn()
+    await pane.unmount()
+    const line = findDrawn(tree, { key: 'line-2-0' })
+    const end = findDrawn(line, { key: 'end-2' })
+    const cells = [...shownText(line)].length + (end === undefined ? 0 : 2 + [...rawText(end)].length)
+    expect([spare, cells <= bodyColumns - 4]).toEqual([spare, true])
+  })
+}
+
+// Review C9-R1 FAILED-BAR-LOSES-COLOR (Codex) [FAILED-BAR-LOSES-COLOR] (RULING 4555): a failed row's bars stay in the
+// color of their room left, drawn dim.
+test('a failed row\'s bars keep the color of their room left, dim', async ($, on) => {
+  const { w, store, clock } = await rowsWorld($, on)
+  w.failing = { 'tok-1': 429, 'tok-2': 429 }
+  store.delete('usage-due:1')
+  store.delete('usage-due:2')
+  await clock.advance(61_000)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  const tree = await pane.drawn()
+  await pane.unmount()
+  for (const [id, text, left] of [['1', '▰▰▰▱▱▱▱▱▱▱ 30%', 70], ['2', '▰▰▰▰▱▱▱▱▱▱ 40%', 60]] as const) {
+    const bar = findDrawn(findDrawn(tree, { key: `line-${id}-1` }), { text })
+    expect([id, bar?.props?.dimColor, bar?.props?.color]).toEqual([id, true, roomColor(left)])
+  }
+})
+
 test('the pane draws no id column and no separate failure line: a failed read ends line 1 instead', async ($, on) => {
   const { store } = await rowsWorld($, on, true)
   const lines = await drawnLines($, 82)
