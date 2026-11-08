@@ -6832,24 +6832,29 @@ test('two sessions on one store: an rm keeps every key of an account another ses
   expect(lost, `another account's keys deleted: ${lost.join(', ')}`).toEqual([])
 })
 
-test('two sessions on one store: an account another session already removed answers ok with no logout, though this view still lists it', async ($, on) => {
+test('two sessions on one store: an rm of an account another session already removed answers ok with no logout', async ($, on) => {
   const { w, store, clock } = await selectWorld($, on)
   store.set('accounts', TWO_LOGINS.accounts.filter(a => a.id !== '2'))
-  store.set('health:2', { seeded: 'by a stale writer' })
-  const { result } = await removeBeforeMerge(w, store, clock, $)
+  w.files[`${REQUESTS}/${N1}.json`] = rmRequest(N1, '2', store.get('store-id'), clock.now())
+  await untilTick(clock)
   expect(w.logouts ?? []).toEqual([])
-  expect(result).toMatchObject({ ok: true })
-  expect(result?.message).toMatch(/account 2 is already gone/)
+  expect(resultOf(w, N1)).toMatchObject({ ok: true })
+  expect(resultOf(w, N1)?.message).toMatch(/account 2 is already gone/)
 })
 
-/** An rm reaching the request's apply before any merge, by the watch: this view still lists every account it did. */
-async function removeBeforeMerge(w: World, store: Map<string, unknown>, clock: MockClock, $: Engine): Promise<{ result: Record<string, unknown> | undefined }> {
-  const call = bashCall($, w, 'account-rotator account rm --account 2')
-  w.files[`${REQUESTS}/${N1}.json`] = rmRequest(N1, '2', store.get('store-id'), clock.now())
-  await beat(clock)
-  await call.finish()
-  return { result: resultOf(w, N1) }
-}
+test('two sessions on one store: a press of Remove from a view that still lists an account another session removed signs nothing out', async ($, on) => {
+  const { w, store, clock } = await selectWorld($, on)
+  const pane = await mountPane($)
+  await pane.press({ key: 'ask-remove-2' })
+  await clock.settle()
+  await pane.redraw()
+  // No minute has passed: this session's view still lists login 2, and the press has no merge before it.
+  store.set('accounts', TWO_LOGINS.accounts.filter(a => a.id !== '2'))
+  await pane.press({ key: 'remove-2' })
+  await clock.settle()
+  await pane.unmount()
+  expect(w.logouts ?? [], 'the press signed out a login the store no longer lists').toEqual([])
+})
 
 test('two sessions on one store: a session still on an account another session removed is not moved by it', async ($, on) => {
   const w = fresh()
