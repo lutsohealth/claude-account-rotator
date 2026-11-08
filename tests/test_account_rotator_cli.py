@@ -423,6 +423,20 @@ class Select(StoreCase):
                 offenders[name] = (left, child.returncode, stderr[-120:])
         self.assertEqual(offenders, {}, "fix: finally withdraws the request on every exit, one line, exit 130")
 
+    # Review C11-R2 (Codex) [SIGNAL-PRETRY-GAP]: a signal anywhere in the verb, the folder lookup before the write too.
+    def test_a_signal_during_the_folder_lookup_is_one_line_and_exit_130(self) -> None:
+        signals = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+        self.assertTrue(signals)
+        outcomes = {}
+        for signum in signals:
+            cli = load_cli()
+            with patch.object(cli, "requests_folder", side_effect=lambda _store, s=signum: os.kill(os.getpid(), s)), patch.dict(os.environ, self.env()), patch.object(sys, "stderr", io.StringIO()):
+                try:
+                    outcomes[signum.name] = cli.main(["account", "select", "--account", "2", "--wait", "1"])
+                except BaseException as error:  # noqa: BLE001: a test of what escapes
+                    outcomes[signum.name] = type(error).__name__
+        self.assertEqual(outcomes, {s.name: 130 for s in signals})
+
     # Review C11-R1 F7 (Opus) [REQUEST-LIFE]: an OSError on the write is one line and exit 1.
     def test_a_requests_folder_it_cannot_write_exits_1_in_one_line(self) -> None:
         self.requests.write_text("a file, not a folder", encoding="utf-8")
