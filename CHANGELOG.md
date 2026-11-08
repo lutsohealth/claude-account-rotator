@@ -2,6 +2,12 @@
 
 What each version of the account rotator changed. To get each one as Claude Code starts, turn on auto-update: in `/plugin`, open **Marketplaces**, pick **claude-account-rotator** and choose **Enable auto-update**. To update by hand, run `claude plugin marketplace update claude-account-rotator`, then `claude plugin update account-rotator@claude-account-rotator`, and start a new session.
 
+## 0.5.7-lutso.1 - 2026-11-08
+
+- **Each account shows its plan by name: Ultra, Max, Pro, Team or Enterprise**, where it showed the raw word ("max") or nothing. The name comes from the account's profile, else, on a Max plan, from its sign-in's tier (Max 20x is Ultra), else from its plan, with a Max whose usage reports no 5-hour window counted as Ultra. A plan word the mod does not know shows as it is.
+- **An account in the organization named for its own email shows no company**; an account in another organization shows it before the plan.
+- **A new sign-in on an account never shows the last one's plan**, so a new Pro or Max 5x sign-in never shows as Ultra. A sign-in as another account also drops the last one's usage, and is read at once. A token refresh keeps the account's reading.
+
 ## 0.5.6-lutso.1 - 2026-11-07
 
 - **A usage-limit stop while a switch is still unproven no longer leaves a guess behind.** When the switch ends with no response showing it took (it gives up, you switch again, or you quit Claude Code), the mark it put on the account moved to is dropped, with the 5-hour window and Fable state the stop changed. A mark another session made since stays, and so does one whose switch a response later proves. A switch the stop itself makes at once keeps it.
