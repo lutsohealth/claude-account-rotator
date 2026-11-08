@@ -2,6 +2,13 @@
 
 What each version of the account rotator changed. To get each one as Claude Code starts, turn on auto-update: in `/plugin`, open **Marketplaces**, pick **claude-account-rotator** and choose **Enable auto-update**. To update by hand, run `claude plugin marketplace update claude-account-rotator`, then `claude plugin update account-rotator@claude-account-rotator`, and start a new session.
 
+## 0.5.16-lutso.1 - 2026-11-08
+
+- **`account-rotator account add` signs a new account in from a terminal**, as **+ Add an account** does: you approve it in the browser, and a session of the mod on that store lists it within a minute. With no terminal, as in the Bash tool, it exits 2. It only ever signs in a new folder under `~/.claude/accounts`, so it never replaces a sign-in. [From a shell](README.md#from-a-shell) has the rest.
+- **A sign-in you approved is not lost:** every way out after it keeps the folder and names it, a failed sign-in (exit 5) too, and `account add --folder <path>` asks again. A later `add` takes the next number.
+- **A login some account may already hold is refused**, Claude Code's own among them, and exits 4. A row whose organization no session has read yet counts as that login: ask again once a check has read it. The refused folder stays signed in with no account on it, and the answer gives the sign-out command.
+- **Remove and `account rm` now drop one list of an account's stored values, and `add` drops the same list**, so a new account never shows what an earlier account under that number left. The panel's **+ Add an account** does not drop it yet.
+
 ## 0.5.15-lutso.1 - 2026-11-08
 
 - **`account-rotator account rm --account <id or email>` signs an account out and drops it from a shell**, as **Remove** does, through any session of the mod on that store, and says where new sessions start now. It refuses Claude Code's own login, and an account that holds another login than the command read, as far as it read one: where it read no email, whatever login that slot now holds goes; where it read an email and no organization, so does another organization under that email in that slot. [From a shell](README.md#from-a-shell) has the rest.
