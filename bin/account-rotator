@@ -2,11 +2,15 @@
 """account-rotator: the account-rotator mod's Claude accounts from a shell, in the words of Orca's `orca account`.
 
     account-rotator account list [--agent claude] [--json] [--store PATH]
+    account-rotator account select --account <id|email|system> [--agent claude] [--wait S] [--json] [--store PATH]
 
 `list` prints each account's row as the switcher pane draws it, from the store's `rows` key, which every session of
 the mod rewrites when a row changes: its times are stored as instants, rendered here at this clock and in this zone.
-Then one line says when the rows were written and which account new sessions start on. It reads the store and never
-writes it. Exit 0 listed, 1 no store or an unreadable one, 2 a usage error.
+Then one line says when the rows were written and which account new sessions start on.
+
+`select` sets the account new sessions start on, as the panel's New on does. Neither verb writes the store: `select`
+leaves a request file in the Claude config folder's account-rotator-requests, naming the store's `store-id`; a
+session of the installed mod on that store applies it within a minute and answers with a result file.
 """
 
 # Read as text, so `str | None` is no error on a macOS python3 older than 3.10.
@@ -24,13 +28,23 @@ from datetime import datetime, tzinfo
 # The store module stands beside this file. Run as a script, Python puts the file's own folder first on sys.path,
 # links resolved; this line is for a loader that does not, such as the tests' in-process import.
 sys.path.insert(0, os.path.dirname(__file__))
-from account_rotator_store import STORE_GLOB, StoreError, is_instant, read  # noqa: E402
+from account_rotator_store import STORE_GLOB, StoreError, is_instant, read, requests_folder  # noqa: E402
 
 EXIT_NO_STORE = 1
 EXIT_USAGE = 2
+EXIT_NO_SESSION = 3
+EXIT_REFUSED = 4
 MINUTE_MS = 60_000
+POLL_S = 0.25
 OLDER_NOTE = "an older version of the mod stored some rows as text, their times as of when it wrote them"
-EXITS = "Exit 0 listed, 1 no store or an unreadable one, 2 a usage error (an unknown flag or verb, --agent not claude)."
+EXITS = (
+    "Exit 0 done, 1 no store or a damaged one, 2 a usage error (an unknown flag or verb, --agent not claude, an --account"
+    " that names no account or several), 3 no session took the request within --wait, 4 a session refused it."
+)
+
+
+class UsageError(Exception):
+    """A usage error the bin answers with one stderr line and exit 2."""
 
 
 def is_run(run: object) -> bool:
@@ -175,25 +189,105 @@ def list_json(data: dict, store: str, now_ms: float, zone: tzinfo | None) -> dic
     }
 
 
+def resolve(data: dict, given: str) -> str:
+    """The id of the one account `--account` names: an id, `system` (the account on Claude Code's own login), or an
+    email, which may name several accounts in several organizations."""
+    accounts = data["accounts"]
+    if any(a["id"] == given for a in accounts):
+        return given
+    if given == "system":
+        found = [a["id"] for a in accounts if a.get("slot") == ""]
+    else:
+        found = [a["id"] for a in accounts if isinstance(a.get("email"), str) and a["email"].lower() == given.lower()]
+    if len(found) == 1:
+        return found[0]
+    if found:
+        raise UsageError(f"--account {given} names accounts {', '.join(found)}: pass one id")
+    named = ", ".join(f"{a['id']} ({a['email']})" if isinstance(a.get("email"), str) else a["id"] for a in accounts)
+    raise UsageError(f"--account {given} names no account; the accounts are {named}, or system")
+
+
+def answer(folder: str, nonce: str, wait_s: float) -> dict | None:
+    """The result a session wrote for the request, waiting at most `wait_s`; the request withdrawn either way."""
+    request, result = os.path.join(folder, f"{nonce}.json"), os.path.join(folder, f"{nonce}.result.json")
+    deadline = time.monotonic() + wait_s
+    while True:
+        try:
+            with open(result, encoding="utf-8") as f:
+                found = json.load(f)
+        except (OSError, ValueError):
+            found = None
+        if isinstance(found, dict) or time.monotonic() >= deadline:
+            for path in (request, result):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+            return found if isinstance(found, dict) else None
+        time.sleep(POLL_S)
+
+
+def select(data: dict, store: str, given: str, wait_s: float, as_json: bool) -> int:
+    """Leaves a select request for the sessions on this store, written whole by a rename, and waits for the answer."""
+    try:
+        account = resolve(data, given)
+    except UsageError as error:
+        print(f"account-rotator: {error}", file=sys.stderr)
+        return EXIT_USAGE
+    store_id = data.get("store-id")
+    if not isinstance(store_id, str):
+        print(f"account-rotator: {store} has no store-id: no session of this version of the mod has run on it; start one, then run again", file=sys.stderr)
+        return EXIT_NO_SESSION
+    folder, nonce = requests_folder(), uuid.uuid4().hex
+    os.makedirs(folder, exist_ok=True)
+    path = os.path.join(folder, f"{nonce}.json")
+    with open(f"{path}.tmp", "w", encoding="utf-8") as f:
+        json.dump({"kind": "select", "nonce": nonce, "at": time.time() * 1000, "id": account, "store": store_id}, f)
+    os.replace(f"{path}.tmp", path)
+    result = answer(folder, nonce, wait_s)
+    if result is None:
+        print(f"account-rotator: no session of the installed mod on {store} took the request within {wait_s:g} s, so it is withdrawn; one may have taken it in that same moment: run account list", file=sys.stderr)
+        return EXIT_NO_SESSION
+    message = str(result.get("message", ""))
+    if result.get("ok") is not True:
+        print(f"account-rotator: a session refused: {message}", file=sys.stderr)
+        return EXIT_REFUSED
+    if as_json:
+        envelope = {"account": account, "activeAccountId": account, "launchOn": f"account:{account}"}
+        print(json.dumps({"id": str(uuid.uuid4()), "ok": True, "result": envelope, "_meta": {"runtimeId": None, "store": store}}, indent=2))
+    else:
+        print(f"account-rotator: {message}")
+    return 0
+
+
 def parsers() -> tuple[argparse.ArgumentParser, argparse.ArgumentParser]:
     """The root parser, and the account group's, whose help a bare `account` prints."""
     root = argparse.ArgumentParser(
         prog="account-rotator",
-        description="The account-rotator mod's Claude accounts, from a shell. Verbs: account list.",
+        description="The account-rotator mod's Claude accounts, from a shell. Verbs: account list, account select.",
         epilog=EXITS,
     )
     groups = root.add_subparsers(dest="group", metavar="account")
-    account = groups.add_parser("account", help="the Claude accounts the mod keeps", description="Verbs: account list.", epilog=EXITS)
-    verbs = account.add_subparsers(dest="verb", metavar="list")
+    account = groups.add_parser("account", help="the Claude accounts the mod keeps", description="Verbs: account list, account select.", epilog=EXITS)
+    verbs = account.add_subparsers(dest="verb", metavar="list|select")
     listing = verbs.add_parser(
         "list",
         help="print each account's row as the switcher pane draws it",
         description="account list: print each account's row as the switcher pane draws it, then when the rows were written and where new sessions start. Reads the store, never writes it. --json prints Orca's envelope (orca account list --json) with the mod's own fields per account.",
         epilog=EXITS,
     )
-    listing.add_argument("--agent", default="claude", help="the agent whose accounts to list: claude, the only one the mod keeps")
-    listing.add_argument("--json", action="store_true", help="print Orca's JSON envelope instead of text")
-    listing.add_argument("--store", help="the mod's store file (default: the newest " + STORE_GLOB + " holding accounts, under the Claude config folder)")
+    selecting = verbs.add_parser(
+        "select",
+        help="set the account new sessions start on, as the panel's New on does",
+        description="account select: set the account new sessions start on, as the panel's New on does, through a session of the installed mod on the store, which applies the request within a minute. It never writes the store. A --plugin-dir or throwaway-config session keeps a store of its own and applies only a request read from that store (--store).",
+        epilog=EXITS,
+    )
+    selecting.add_argument("--account", required=True, help="the account: its id, its email (when one account has it), or system, the account on Claude Code's own login")
+    selecting.add_argument("--wait", type=float, default=90.0, help="seconds to wait for a session to take the request (default 90; a session looks once a minute)")
+    for verb in (listing, selecting):
+        verb.add_argument("--agent", default="claude", help="the agent whose accounts these are: claude, the only one the mod keeps")
+        verb.add_argument("--json", action="store_true", help="print Orca's JSON envelope instead of text")
+        verb.add_argument("--store", help="the mod's store file (default: the newest " + STORE_GLOB + " holding accounts, under the Claude config folder)")
     return root, account
 
 
@@ -213,6 +307,8 @@ def main(argv: list[str] | None = None, *, now: float | None = None, zone: tzinf
     except StoreError as error:
         print(f"account-rotator: {error}", file=sys.stderr)
         return EXIT_NO_STORE
+    if args.verb == "select":
+        return select(data, store, args.account, args.wait, args.json)
     now_ms = time.time() * 1000 if now is None else now
     print(json.dumps(list_json(data, store, now_ms, zone), ensure_ascii=False, indent=2) if args.json else list_text(data, now_ms, zone))
     return 0

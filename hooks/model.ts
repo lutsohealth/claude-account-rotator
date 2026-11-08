@@ -1,4 +1,4 @@
-import type { Account, Fill, FiveHourLimit, FooterStyle, Glyphs, Health, Highlight, LaunchOn, LaunchPick, Mark, PlanTier, Reading, RotateTo, Row, RowPart, StoredRows, StoredRun, UsageDue, UsageWindow, View } from '../types'
+import type { Account, Fill, FiveHourLimit, FooterStyle, Glyphs, Health, Highlight, LaunchOn, LaunchPick, Mark, PlanTier, Reading, RotateTo, RotatorRequest, Row, RowPart, StoredRows, StoredRun, UsageDue, UsageWindow, View } from '../types'
 
 /** Leave a login once its 5-hour window is this full (percent). */
 export const LEAVE_FIVE_HOUR = 90
@@ -1276,11 +1276,27 @@ export function afterUsage(due: UsageDue | undefined, outcome: UsageOutcome, now
   return { next: now + wait, fails: fails + 1, ...last, ...(outcome.retryAfter === undefined ? {} : { retryAfter: outcome.retryAfter }), v }
 }
 
-export const REQUEST_TTL_MS = 0
-export function requestFrom(_value: unknown, _now: number): unknown {
-  return undefined
+// ---------------------------------------------------------------- requests from bin/account-rotator
+// The CLI never writes the store: it drops a request file a session applies on its minute tick and answers with a
+// result file beside it. A request names the store it was read from by that store's `store-id`.
+
+/** How long a request waits for a session: a CLI that gave up or died leaves nothing a later session applies. */
+export const REQUEST_TTL_MS = 5 * 60_000
+
+/** A nonce the CLI writes: letters, digits and dashes, so it names a file in the requests folder and nothing else. */
+const NONCE = /^[A-Za-z0-9-]{6,64}$/
+
+/** A request read back from its file, while it is fresh; anything else is none. */
+export function requestFrom(value: unknown, now: number): RotatorRequest | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const { kind, nonce, at, id, store } = value as Record<string, unknown>
+  if (kind !== 'select' || typeof nonce !== 'string' || !NONCE.test(nonce) || typeof id !== 'string' || typeof store !== 'string') return undefined
+  if (typeof at !== 'number' || Math.abs(now - at) > REQUEST_TTL_MS) return undefined
+  return { kind, nonce, at, id, store }
 }
-export function requestsDir(_config: string | undefined, _home: string): string {
-  return ''
+
+/** The requests folder: in the Claude config folder, CLAUDE_CONFIG_DIR or `~/.claude`, as bin/account_rotator_store.py finds it. */
+export function requestsDir(configDir: string | undefined, home: string): string {
+  return `${configDir ?? `${home}/.claude`}/account-rotator-requests`
 }
 

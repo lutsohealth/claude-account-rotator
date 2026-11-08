@@ -10,7 +10,7 @@ import type {
   Timer,
 } from 'claude-code'
 
-import type { Account, CheckError, FiveHourLimit, FooterStyle, Health, Holder, LaunchOn, LaunchPick, Mark, Reading, ReadingSource, RotateTo, UsageDue, View } from '../types'
+import type { Account, CheckError, FiveHourLimit, FooterStyle, Health, Holder, LaunchOn, LaunchPick, Mark, Reading, ReadingSource, RotateTo, RotatorRequest, UsageDue, View } from '../types'
 import {
   CHROME_SERVER,
   CHROME_TOOL,
@@ -82,6 +82,8 @@ import {
   usageDueFrom,
   isSameRows,
   rowsOf,
+  requestFrom,
+  requestsDir,
 } from './model'
 import type { Credential, Identity, Need, StayReason } from './model'
 import { Band, Footer, PANE_COLUMNS, Pane } from './view'
@@ -443,6 +445,55 @@ async function mergeStore($: Host): Promise<void> {
     return { ...v, accounts, readings: nextReadings, marks: nextMarks, noFiveHour: nextNoFiveHour, weekMarks: nextWeekMarks, fableMarks: nextFableMarks, checkErrors, readAt, health: nextHealth, footer, rotateTo, fiveHourLimit, weekLeave, launchOn, fableContinueText, chromeAccountId, chromeAccountIds, hasOlderWriter }
   })
   await saveRows($, now)
+  await saveStoreId($)
+}
+
+/**
+ * Names this store for bin/account-rotator's requests, once: the first session that finds no `store-id` writes one.
+ * Two sessions writing at once settle on the last write, since each reads the id from the store when it applies.
+ */
+async function saveStoreId($: Host): Promise<void> {
+  if (typeof (await $.store.get('store-id')) === 'string') return
+  await $.store.set('store-id', `store-${Math.random().toString(36).slice(2, 12)}`)
+}
+
+/**
+ * Applies each request in the requests folder that names this store's `store-id` and has no result yet, and writes
+ * its result beside it. A request another store's CLI read, or a stale one, is left for the CLI to withdraw.
+ */
+async function applyRequests($: Host): Promise<void> {
+  const storeId = await $.store.get('store-id')
+  if (typeof storeId !== 'string') return
+  const dir = requestsDir(await $.env.get('CLAUDE_CONFIG_DIR'), (await $.env.get('HOME')) ?? '')
+  const entries = await $.fs.list(dir).catch(() => [])
+  const names = new Set(entries.map(e => e.name))
+  const now = await $.clock.now()
+  for (const name of names) {
+    const nonce = name.endsWith('.json') && !name.endsWith('.result.json') ? name.slice(0, -'.json'.length) : undefined
+    if (nonce === undefined || names.has(`${nonce}.result.json`)) continue
+    // A file the CLI is still writing, or one that is no request, reads as none.
+    const text = await $.fs.read(`${dir}/${name}`).catch(() => undefined)
+    const request = requestFrom(parsed(typeof text === 'string' ? text : undefined), now)
+    if (request === undefined || request.nonce !== nonce || request.store !== storeId) continue
+    const outcome = await applyRequest($, request)
+    await $.fs.write(`${dir}/${nonce}.result.json`, JSON.stringify({ nonce, ...outcome, at: now }))
+  }
+}
+
+/** What a request asks, done: `select` sets the login new sessions start on, as the panel's New on does. */
+async function applyRequest($: Host, request: RotatorRequest): Promise<{ ok: boolean; message: string }> {
+  if (!(await getView($)).accounts.some(a => a.id === request.id)) return { ok: false, message: `account ${request.id} is not listed in this store` }
+  await setLaunchOn($, `account:${request.id}`)
+  return { ok: true, message: `new sessions start on account ${request.id}` }
+}
+
+/** JSON text as a value, or undefined where it does not parse. */
+function parsed(text: string | undefined): unknown {
+  try {
+    return text === undefined ? undefined : JSON.parse(text)
+  } catch {
+    return undefined
+  }
 }
 
 /**
@@ -1801,6 +1852,7 @@ export const register: Register = on => {
     })
     $.clock.every(60_000, () => {
       void mergeStore($)
+        .then(() => applyRequests($))
         .then(() => settlePending($, false))
         .then(() => checkAll($, false))
         .catch(error => debug($, `sync failed: ${String(error)}`))

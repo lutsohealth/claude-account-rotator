@@ -6008,6 +6008,8 @@ test('no rows write names a good read older than the store holds then, whichever
 // C11 (puma-eslxj.12, RULING 4593 and 4595): `account-rotator account select` drops a request file in the config
 // folder's account-rotator-requests; a session's minute tick applies one only when it names this store's store-id.
 const REQUESTS = `${HOME}/.claude/account-rotator-requests`
+/** A nonce as the CLI writes one, a uuid's hex. */
+const N1 = '0f3c2a9e1b7d4c55a6e8f00112233445'
 /** A select request for login `id`, read from the store whose id is `storeId`, as bin/account-rotator writes it. */
 const selectRequest = (nonce: string, id: string, storeId: unknown, at: number) => JSON.stringify({ kind: 'select', nonce, at, id, store: storeId })
 const resultOf = (w: World, nonce: string): Record<string, unknown> | undefined => {
@@ -6044,30 +6046,30 @@ test('two sessions booting at once end with one store-id: this session keeps the
 
 test('a select request for this store is applied at the minute: launch-on, launch-slot and a result that says so', async ($, on) => {
   const { w, store, clock } = await selectWorld($, on)
-  w.files[`${REQUESTS}/n1.json`] = selectRequest('n1', '2', store.get('store-id'), clock.now())
+  w.files[`${REQUESTS}/${N1}.json`] = selectRequest(N1, '2', store.get('store-id'), clock.now())
   await clock.advance(60_000)
   expect([store.get('launch-on'), (store.get('launch-slot') as { id?: string } | undefined)?.id]).toEqual(['account:2', '2'])
-  expect(resultOf(w, 'n1')).toMatchObject({ nonce: 'n1', ok: true })
+  expect(resultOf(w, N1)).toMatchObject({ nonce: N1, ok: true })
 })
 
 test('a request read from another store, a stale one and one for a login not listed change nothing', async ($, on) => {
   const { w, store, clock } = await selectWorld($, on)
   const [id, now, before] = [store.get('store-id'), clock.now(), store.get('launch-on')]
-  w.files[`${REQUESTS}/other.json`] = selectRequest('other', '2', 'another-store', now)
-  w.files[`${REQUESTS}/stale.json`] = selectRequest('stale', '2', id, now - REQUEST_TTL_MS - 1)
-  w.files[`${REQUESTS}/gone.json`] = selectRequest('gone', '9', id, now)
+  w.files[`${REQUESTS}/other-0001.json`] = selectRequest('other-0001', '2', 'another-store', now)
+  w.files[`${REQUESTS}/stale-0001.json`] = selectRequest('stale-0001', '2', id, now - REQUEST_TTL_MS - 1)
+  w.files[`${REQUESTS}/gone-00001.json`] = selectRequest('gone-00001', '9', id, now)
   await clock.advance(60_000)
   expect(store.get('launch-on')).toBe(before)
-  expect([resultOf(w, 'other'), resultOf(w, 'stale'), resultOf(w, 'gone')?.ok]).toEqual([undefined, undefined, false])
+  expect([resultOf(w, 'other-0001'), resultOf(w, 'stale-0001'), resultOf(w, 'gone-00001')?.ok]).toEqual([undefined, undefined, false])
 })
 
 test('two sessions taking one request apply it once: one with a result already is not applied again', async ($, on) => {
   const { w, store, clock } = await selectWorld($, on)
-  w.files[`${REQUESTS}/n1.json`] = selectRequest('n1', '2', store.get('store-id'), clock.now())
+  w.files[`${REQUESTS}/${N1}.json`] = selectRequest(N1, '2', store.get('store-id'), clock.now())
   await clock.advance(60_000)
   // Another session's press sets launch-on since; the next minute must not put the request back.
   store.set('launch-on', 'room')
   await clock.advance(60_000)
   expect(store.get('launch-on')).toBe('room')
-  expect((w.writes ?? []).filter(p => p === `${REQUESTS}/n1.result.json`)).toHaveLength(1)
+  expect((w.writes ?? []).filter(p => p === `${REQUESTS}/${N1}.result.json`)).toHaveLength(1)
 })

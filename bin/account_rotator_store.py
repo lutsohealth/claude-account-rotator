@@ -31,6 +31,11 @@ def config_folder() -> str:
     return os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(os.path.expanduser("~"), ".claude")
 
 
+def requests_folder() -> str:
+    """Where `account select` leaves requests for the installed sessions: hooks/model.ts requestsDir."""
+    return os.path.join(config_folder(), "account-rotator-requests")
+
+
 def is_store(data: object) -> bool:
     return isinstance(data, dict) and isinstance(data.get("accounts"), list)
 
