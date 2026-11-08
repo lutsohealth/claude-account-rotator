@@ -683,7 +683,7 @@ class Remove(RequestCase):
     def test_help_names_the_verb_and_says_it_signs_out(self) -> None:
         self.assertIn("rm", run(CLI, "account", "--help").stdout)
         said = " ".join(run(CLI, "account", "rm", "--help").stdout.split())
-        for words in ("signs", "Other sessions", "not moved"):
+        for words in ("sign an account out", "Other sessions", "not moved", "keeps the account"):
             self.assertIn(words, said)
 
 

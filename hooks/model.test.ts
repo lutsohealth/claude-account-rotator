@@ -1281,7 +1281,7 @@ test('a select request is read back as it was written, while it is fresh', () =>
 test('a request of another kind, shape or age is no request', () => {
   const cases: [string, unknown][] = [
     ['not an object', 'select'],
-    ['another kind', { ...SELECT, kind: 'rm' }],
+    ['another kind', { ...SELECT, kind: 'add' }],
     ['no nonce', { ...SELECT, nonce: undefined }],
     ['a nonce that names a path', { ...SELECT, nonce: '../launch-slot' }],
     ['no account', { ...SELECT, id: 7 }],
@@ -1305,7 +1305,7 @@ test('a use request names a session or is no request, and a select request carri
     ['no mark', { ...USE, session: undefined }],
     ['an empty mark', { ...USE, session: '' }],
     ['a mark that is no string', { ...USE, session: 7 }],
-    ['another kind with a mark', { ...USE, kind: 'rm' }],
+    ['another kind with a mark', { ...USE, kind: 'add' }],
   ]
   expect(cases.filter(([, value]) => requestFrom(value, NOW) !== undefined).map(([name]) => name)).toEqual([])
   expect(requestFrom({ ...SELECT, session: 'session-abc' }, NOW)).toEqual(SELECT)

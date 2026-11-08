@@ -1298,7 +1298,7 @@ export function requestFrom(value: unknown, now: number): RotatorRequest | undef
   const { kind, nonce, at, id, store, session } = value as Record<string, unknown>
   if (typeof nonce !== 'string' || !NONCE.test(nonce) || typeof id !== 'string' || typeof store !== 'string') return undefined
   if (typeof at !== 'number' || Math.abs(now - at) > REQUEST_TTL_MS) return undefined
-  if (kind === 'select') return { kind, nonce, at, id, store }
+  if (kind === 'select' || kind === 'rm') return { kind, nonce, at, id, store }
   return kind === 'use' && typeof session === 'string' && session !== '' ? { kind, nonce, at, id, store, session } : undefined
 }
 

@@ -4,15 +4,17 @@
     account-rotator account list [--agent claude] [--json] [--store PATH]
     account-rotator account select --account <id|email|system> [--agent claude] [--wait S] [--json] [--store PATH]
     account-rotator account use --account <id|email|system> [--agent claude] [--wait S] [--json] [--store PATH]
+    account-rotator account rm --account <id|email> [--agent claude] [--wait S] [--json] [--store PATH]
 
 `list` prints each account's row as the switcher pane draws it, from the store's `rows` key, which every session of
 the mod rewrites when a row changes: its times are stored as instants, rendered here at this clock and in this zone.
 Then one line says when the rows were written and which account new sessions start on.
 
 `select` sets the account new sessions start on, as the panel's New on does. `use` moves the session running it, as
-Use now does. No verb writes the store: `select` and `use` leave a request file in the Claude config folder's
-account-rotator-requests, naming the store's `store-id`; a session of the mod on that store applies it and answers
-with a result file. `use` also names the session, by the mark the mod sets in its Bash children's environment.
+Use now does. `rm` signs an account out and drops it, as Remove does. No verb writes the store: these three leave a
+request file in the Claude config folder's account-rotator-requests, naming the store's `store-id`; a session of the
+mod on that store applies it and answers with a result file. `use` also names the session, by the mark the mod sets in
+its Bash children's environment.
 """
 
 # Read as text, so `str | None` is no error on a macOS python3 older than 3.10.
@@ -49,7 +51,7 @@ SLOT_VAR = "CLAUDE_SECURESTORAGE_CONFIG_DIR"
 OLDER_NOTE = "an older version of the mod stored some rows as text, their times as of when it wrote them"
 EXITS = (
     "Exit 0 done, 1 no store or a damaged one, 2 a usage error (an unknown flag or verb, --agent not claude, an --account"
-    " that names no account or several, a --wait not above 0 and at most 300, use outside a session of the mod), 3 no session"
+    " that names no account or several, a --wait not above 0 and at most 300, use outside a session of the mod, rm of Claude Code's own login), 3 no session"
     " took the request within --wait, or none has given the store a store-id yet, 4 a session refused it, 130 stopped, the"
     " request withdrawn."
 )
@@ -336,16 +338,34 @@ def use(data: dict, store: str, given: str, wait_s: float, as_json: bool) -> int
     return request_session(data, store, given, wait_s, as_json, fields, f"the session that ran this, on {store}, did not take", envelope)
 
 
+def remove(data: dict, store: str, given: str, wait_s: float, as_json: bool) -> int:
+    """Asks the sessions on this store to sign an account out and drop it. Claude Code's own login is not the mod's."""
+    try:
+        account = resolve(data, given)
+    except UsageError as error:
+        print(f"account-rotator: {error}", file=sys.stderr)
+        return EXIT_USAGE
+    if next(a.get("slot") for a in data["accounts"] if a["id"] == account) == "":
+        print(f"account-rotator: account {account} is Claude Code's own login, which the mod does not remove: sign it out with claude auth logout, or see --help", file=sys.stderr)
+        return EXIT_USAGE
+
+    def envelope(_account: str, result: dict) -> dict:
+        pick = result.get("pickId") if isinstance(result.get("pickId"), str) else None
+        return {"account": account, "activeAccountId": pick, "message": result["message"]}
+
+    return request_session(data, store, account, wait_s, as_json, {"kind": "rm"}, f"no session of the mod on {store} took", envelope)
+
+
 def parsers() -> tuple[argparse.ArgumentParser, argparse.ArgumentParser]:
     """The root parser, and the account group's, whose help a bare `account` prints."""
     root = argparse.ArgumentParser(
         prog="account-rotator",
-        description="The account-rotator mod's Claude accounts, from a shell. Verbs: account list, account select, account use.",
+        description="The account-rotator mod's Claude accounts, from a shell. Verbs: account list, account select, account use, account rm.",
         epilog=EXITS,
     )
     groups = root.add_subparsers(dest="group", metavar="account")
-    account = groups.add_parser("account", help="the Claude accounts the mod keeps", description="Verbs: account list, account select, account use.", epilog=EXITS)
-    verbs = account.add_subparsers(dest="verb", metavar="list|select|use")
+    account = groups.add_parser("account", help="the Claude accounts the mod keeps", description="Verbs: account list, account select, account use, account rm.", epilog=EXITS)
+    verbs = account.add_subparsers(dest="verb", metavar="list|select|use|rm")
     listing = verbs.add_parser(
         "list",
         help="print each account's row as the switcher pane draws it",
@@ -364,10 +384,16 @@ def parsers() -> tuple[argparse.ArgumentParser, argparse.ArgumentParser]:
         description=f"account use: move the session running this to an account, as the panel's Use now does: in the Bash tool's foreground, while the command runs; run any other way (`!`, under a wrapper's name, a background Bash), within a minute, so a --wait under 60 can exit 3. While Claude in Chrome connects it refuses, exit 4. It never writes the store. It finds its session by {SESSION_VAR}, which the mod sets in its Bash children's environment; with it unset this exits 2. A --plugin-dir or throwaway-config session keeps a store of its own: pass it with --store.",
         epilog=EXITS,
     )
-    for verb in (selecting, using):
+    removing = verbs.add_parser(
+        "rm",
+        help="sign an account out and drop it, as the panel's Remove does",
+        description="account rm: sign an account out and drop it, its keys and its place as where new sessions start, as the panel's Remove does, through any session of the mod on the store. It never writes the store. Other sessions on that account are not moved; their next check finds its sign-in gone. A session on it that applies this moves off first, and answers not ok with no other account to take over, while Claude in Chrome connects, or when the sign-out fails, which keeps the account. Claude Code's own login is not the mod's: exit 2.",
+        epilog=EXITS,
+    )
+    for verb in (selecting, using, removing):
         verb.add_argument("--account", required=True, help="the account: its id, its email (when one account has it), or system, the account on Claude Code's own login")
         verb.add_argument("--wait", type=wait_seconds, default=90.0, help="seconds to wait for a session to take the request, above 0 and at most 300 (default 90; a session looks once a minute)")
-    for verb in (listing, selecting, using):
+    for verb in (listing, selecting, using, removing):
         verb.add_argument("--agent", default="claude", help="the agent whose accounts these are: claude, the only one the mod keeps")
         verb.add_argument("--json", action="store_true", help="print Orca's JSON envelope instead of text")
         verb.add_argument("--store", help="the mod's store file (default: the newest " + STORE_GLOB + " holding accounts, under the Claude config folder)")
@@ -393,9 +419,10 @@ def main(argv: list[str] | None = None, *, now: float | None = None, zone: tzinf
     except StoreError as error:
         print(f"account-rotator: {error}", file=sys.stderr)
         return EXIT_NO_STORE
-    if args.verb in ("select", "use"):
+    requesting = {"select": select, "use": use, "rm": remove}
+    if args.verb in requesting:
         try:
-            return (select if args.verb == "select" else use)(data, store, args.account, args.wait, args.json)
+            return requesting[args.verb](data, store, args.account, args.wait, args.json)
         except KeyboardInterrupt:
             print("account-rotator: stopped, so any request is withdrawn; a session may have taken it in that same moment: run account list", file=sys.stderr)
             return EXIT_CANCELLED

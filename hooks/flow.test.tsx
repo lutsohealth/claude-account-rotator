@@ -6931,7 +6931,8 @@ for (const [name, failure] of [
     expect(resultOf(w, N1)?.message).toMatch(/account 2 .*could not be signed out/)
     if (failure.stderr !== '') expect(resultOf(w, N1)?.message).toMatch(/keychain is locked$/)
     expect((store.get('accounts') as { id: string }[]).map(a => a.id)).toEqual(['1', '2'])
-    const lost = ACCOUNT_KEYS.filter(key => !store.has(`${key}:2`))
+    // A usage read that works clears check-error, in the same minute.
+    const lost = ACCOUNT_KEYS.filter(key => key !== 'check-error' && !store.has(`${key}:2`))
     expect(lost, `keys deleted though the login stays signed in: ${lost.join(', ')}`).toEqual([])
   })
 }
