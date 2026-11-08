@@ -2,6 +2,14 @@
 
 What each version of the account rotator changed. To get each one as Claude Code starts, turn on auto-update: in `/plugin`, open **Marketplaces**, pick **claude-account-rotator** and choose **Enable auto-update**. To update by hand, run `claude plugin marketplace update claude-account-rotator`, then `claude plugin update account-rotator@claude-account-rotator`, and start a new session.
 
+## 0.5.12-lutso.1 - 2026-11-08
+
+- **`account-rotator account list` prints each account's lines from a shell**, as the panel draws them, then when they were written and which account new sessions start on; `--json` prints the envelope of Orca's `orca account list --json`. It reads the mod's store and never writes it. It is on the Bash tool's PATH while the mod is enabled; [From a shell](README.md#from-a-shell) gives the path for another terminal.
+- **The rows a tool outside Claude Code reads keep their times as instants**, shown on the reader's own clock and in its zone: sessions in different time zones store the same rows, the rows change only when a read, a failure or a reset does, and a reset that has passed since reads **passed**.
+- **`account-rotator-launch` reads the newest store that holds accounts**: a file of the store's name that holds none is skipped, and a newest store that does not parse, as while a session writes it, stops it with exit 1 and the file's name instead of falling back to an older store's pick.
+- **A session no longer puts back what another session changed**: the footer's look, the account list, where new sessions start and the Chrome extension's account are written from what the store holds, not from what the session last saw.
+- **The store keeps no record per session** of the version it runs, which nothing read.
+
 ## 0.5.11-lutso.1 - 2026-11-08
 
 - **Each account in the panel is two lines**: who it is, its Company and plan, then **updated HH:MM**; then **Used** with the week's bar and percent used, the Fable week's, and when they reset. A third line shows the 5-hour window where the account has one (**5h –** while the **5h limit** is off). The account numbers and the separate "its last usage check failed" line are gone: a read that failed ends line 1 with its time and **Failed to update (HTTP 429)**, and an account that needs a sign-in says **⚠ sign in needed** there. The percents are what is used, whatever the footer fills with.
