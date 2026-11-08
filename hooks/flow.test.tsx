@@ -2891,6 +2891,67 @@ test('a /login on a sign-in another session already named deletes none of the us
   expect(store.log.filter(e => /^delete (usage|no-five-hour|usage-due):1$/.test(e)), store.log.join(', ')).toEqual([])
 })
 
+/**
+ * The other session finishes its check of login 1 (names the sign-in, stores its usage and schedule) while this
+ * session's own check waits on the profile call: `owners[token]` is read inside that call, so its getter runs after
+ * holderOf first read the holder and before it decides what to drop.
+ */
+function otherSessionNamesDuringProfileCall(w: World, store: MergeLog, token: string, email: string, writes: (s: MergeLog) => void): { done: boolean } {
+  const probe = { done: false }
+  Object.defineProperty(w.owners, token, {
+    enumerable: true,
+    configurable: true,
+    get() {
+      if (!probe.done) {
+        probe.done = true
+        // Synchronous writes, as the other session's land in the shared store between two of this one's awaits.
+        writes(store)
+        store.log = []
+      }
+      return email
+    },
+  })
+  return probe
+}
+
+// Review R1 F1 [STALE-HOLDER-DECISION] (Opus, #34): every branch of holderOf that deletes a stored key on a new token
+// (another person: dropSignInUsage; the same person: usage-due), under one interleave: the other session names this
+// token while this session's profile call runs.
+const HOLDER_DROP_BRANCHES = [
+  { name: 'another person', token: 'tok-9', email: 'nine@example.com', keys: /^delete (usage|usage-due):1$/ },
+  { name: 'the same person under a new token', token: 'tok-7', email: 'one@example.com', keys: /^delete usage-due:1$/ },
+] as const
+
+for (const branch of HOLDER_DROP_BRANCHES) {
+  test(`${branch.name}: a check deletes nothing another session stored for this token during its profile call`, async ($, on) => {
+    const w = fresh()
+    w.keychain['Claude Code-credentials'] = blob('tok-1')
+    w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+    w.usage['tok-1'] = [20, 30]
+    w.usage['tok-2'] = [10, 30]
+    const store = new MergeLog(Object.entries(TWO_LOGINS))
+    const clock = world(on, w, store)
+    await start($, clock)
+    const named = { token: await fingerprint(`refresh-${branch.token}`), who: { email: branch.email } }
+    const probe = otherSessionNamesDuringProfileCall(w, store, branch.token, branch.email, s => {
+      s.set('holder:1', named)
+      s.set('usage:1', { sevenDay: { pct: 15, resetsAt: WEEK_RESET }, at: NOW, by: '1', v: 1, src: 'body' })
+      s.set('usage-due:1', { next: NOW + 10 * 60_000, fails: 0, at: NOW, v: 1 })
+    })
+    w.usage[branch.token] = [5, 15]
+    w.loginToken = branch.token
+    await $.command.run(LOGIN)
+    await clock.settle()
+    // The sweep inspected something: the other session's write ran inside this session's check.
+    expect(probe.done, `${branch.name}: the other session's write never ran inside this session's profile call`).toBe(true)
+    expect(
+      store.log.filter(e => branch.keys.test(e)),
+      `${branch.name}: holderOf deleted what another session stored for this token while the profile call ran (${store.log.join(', ')}). ` +
+        'Re-read holder:<id> after fetchIdentity; a holder that names this token is returned, nothing dropped.',
+    ).toEqual([])
+  })
+}
+
 // Review R1 of 181dc8e, footer_week_leave: the footer counts the week by the same setting the rotation does.
 test('the footer shows no room now on a login whose week is down to the Week setting, as the rotation counts it', async ($, on) => {
   const w = fresh()
