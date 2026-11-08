@@ -474,7 +474,6 @@ async function setSessionMark($: Host): Promise<void> {
     await $.env.set('ACCOUNT_ROTATOR_SESSION', mark)
     sessionMark = mark
   } catch (error) {
-    sessionMark = undefined
     await debug($, `session mark refused: ${String(error)}`)
   }
 }

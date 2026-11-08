@@ -1305,6 +1305,7 @@ test('a use request names a session or is no request, and a select request carri
     ['no mark', { ...USE, session: undefined }],
     ['an empty mark', { ...USE, session: '' }],
     ['a mark that is no string', { ...USE, session: 7 }],
+    ['another kind with a mark', { ...USE, kind: 'rm' }],
   ]
   expect(cases.filter(([, value]) => requestFrom(value, NOW) !== undefined).map(([name]) => name)).toEqual([])
   expect(requestFrom({ ...SELECT, session: 'session-abc' }, NOW)).toEqual(SELECT)

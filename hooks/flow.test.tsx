@@ -62,6 +62,8 @@ type World = {
   refuseMark?: boolean
   /** While set, a Bash call runs until it settles. */
   bashRuns?: Promise<void>
+  /** While set, a file read waits until it settles, so two readers overlap as the engine's hops can make them. */
+  readGate?: Promise<void>
   spawned: { argv: readonly string[]; env?: Record<string, string> }[]
   submitted: string[]
   /** Whether each line in `submitted` was sent as the person's own words (`asUser`), not under the mod's name. */
@@ -295,7 +297,8 @@ function world(on: On, w: World, store: Record<string, unknown> | Map<string, un
     return { value: names.map(p => ({ name: p.slice(e.path.length + 1), kind: 'file', size: (w.files[p] ?? '').length, mtimeMs: 0, isLink: false })) }
   })
   on('fs.exists', (_$, e) => ({ value: e.path === '/System/Library/CoreServices/SystemVersion.plist' && w.system === 'macOS' }))
-  on('fs.read', (_$, e) => {
+  on('fs.read', async (_$, e) => {
+    await w.readGate
     const text = w.files[e.path]
     if (text === null) return { deny: `EACCES: permission denied, open '${e.path}'` }
     return text === undefined ? { deny: `ENOENT: no such file or directory, open '${e.path}'` } : { value: text }
@@ -6160,6 +6163,7 @@ async function gatedWorld($: Engine, on: On): Promise<{ w: World; store: Map<str
   class GatedStore extends Map<string, unknown> {
     get(key: string): unknown {
       if (gate.failing === 'the launch-slot read' && key === 'launch-slot') throw new Error('store refused')
+      if (gate.failing === 'the store-id read' && key === 'store-id') throw new Error('store refused')
       return super.get(key)
     }
     set(key: string, value: unknown): this {
@@ -6480,20 +6484,36 @@ test('a select during a Bash call that names account-rotator is applied within a
   await call.finish()
 })
 
-test('the watch and the minute reaching one request at one instant apply it once', async ($, on) => {
+test('two Bash calls watching at once read one listing and apply its request once', async ($, on) => {
   const { w, store, clock } = await selectWorld($, on)
-  // The watch's beats, counted from its call, land on the minute's tick.
-  const untilMinute = 60_000 - ((clock.now() - NOW) % 60_000)
-  await clock.advance(untilMinute)
-  await clock.settle()
-  const call = bashCall($, w, USE_COMMAND)
-  await clock.advance(60_000 - 1)
+  const first = bashCall($, w, USE_COMMAND)
+  const second = bashCall($, w, USE_COMMAND)
   w.files[`${REQUESTS}/${N1}.json`] = useRequest(N1, '2', store.get('store-id'), clock.now(), ownMark(w))
-  await clock.advance(1)
+  let open = () => {}
+  w.readGate = new Promise<void>(resolve => {
+    open = resolve
+  })
+  await clock.advance(REQUEST_POLL_MS)
   await clock.settle()
-  await call.finish()
+  open()
+  w.readGate = undefined
+  await clock.settle()
   expect((w.writes ?? []).filter(p => p === `${REQUESTS}/${N1}.result.json`)).toHaveLength(1)
   expect(w.envSets).toHaveLength(1)
+  // The two calls may share one running command in the world: end both before waiting on either.
+  await Promise.all([first.finish(), second.finish()])
+})
+
+test('a failing look at the folder does not end the watch: the next beat applies the request', async ($, on) => {
+  const { w, store, clock, gate } = await gatedWorld($, on)
+  const call = bashCall($, w, USE_COMMAND)
+  gate.failing = 'the store-id read'
+  await beat(clock)
+  gate.failing = ''
+  w.files[`${REQUESTS}/${N1}.json`] = useRequest(N1, '2', store.get('store-id'), clock.now(), ownMark(w))
+  await beat(clock)
+  expect(resultOf(w, N1)?.ok, 'the watch stopped at its first failure').toBe(true)
+  await call.finish()
 })
 
 test('before boot has read the accounts, the watch takes no request: it would answer that no account is listed', async ($, on) => {
