@@ -62,8 +62,8 @@ type World = {
   refuseMark?: boolean
   /** The folders that exist under the accounts folder, signed in or not. */
   folders?: string[]
-  /** A look for a folder under the accounts folder is refused. */
-  existsFails?: boolean
+  /** How a `mkdir` fails, where it does. */
+  mkdirFails?: 'exit' | 'refused'
   /** Who a press's `claude auth login` signs in. */
   loginEmail?: string
   /** How the store refuses the `store-id` key: its write, or its read and its write. */
@@ -204,6 +204,14 @@ function world(on: On, w: World, store: Record<string, unknown> | Map<string, un
       const stored = w.keychain[e.argv[e.argv.length - 1] ?? '']
       return { value: stored === undefined ? ran(44, '') : ran(0, stored) }
     }
+    if (cmd === 'mkdir') {
+      if (w.mkdirFails === 'refused') return { deny: 'process (managed): mkdir is not for plugins to run' }
+      if (w.mkdirFails === 'exit') return { value: { ...ran(1, ''), stderr: 'mkdir: Permission denied' } }
+      if (sub === '-p') return { value: ran(0, '') }
+      if ((w.folders ?? []).includes(sub ?? '')) return { value: { ...ran(1, ''), stderr: 'mkdir: File exists' } }
+      w.folders = [...(w.folders ?? []), sub ?? '']
+      return { value: ran(0, '') }
+    }
     if (cmd === 'claude' && sub === 'auth' && verb === 'status') {
       w.statusAsked = [...(w.statusAsked ?? []), e.init?.env?.CLAUDE_SECURESTORAGE_CONFIG_DIR ?? '']
       w.onStatus?.()
@@ -334,10 +342,7 @@ function world(on: On, w: World, store: Record<string, unknown> | Map<string, un
     if (names.length === 0) return { deny: `ENOENT: no such file or directory, scandir '${e.path}'` }
     return { value: names.map(p => ({ name: p.slice(e.path.length + 1), kind: 'file', size: (w.files[p] ?? '').length, mtimeMs: 0, isLink: false })) }
   })
-  on('fs.exists', (_$, e) => {
-    if (w.existsFails && e.path.includes('/.claude/accounts/')) return { deny: `EACCES: permission denied, stat '${e.path}'` }
-    return { value: (e.path === '/System/Library/CoreServices/SystemVersion.plist' && w.system === 'macOS') || (w.folders ?? []).includes(e.path) }
-  })
+  on('fs.exists', (_$, e) => ({ value: (e.path === '/System/Library/CoreServices/SystemVersion.plist' && w.system === 'macOS') || (w.folders ?? []).includes(e.path) }))
   on('fs.read', async (_$, e) => {
     await w.readGate
     const text = w.files[e.path]
@@ -7450,7 +7455,8 @@ async function pressAdd($: Engine, clock: MockClock): Promise<void> {
 
 const accountsFolder = (n: number) => `${HOME}/.claude/accounts/${n}`
 
-test('a press takes the first number with no account, no slot and no folder, and signs in only there, after its row', async ($, on) => {
+// Review C30 SLOT-RACE: the claim is the mkdir itself, as the CLI's os.mkdir: a folder another process made a moment ago refuses it, with no look before it to go stale.
+test('a press claims the first number with no account, no slot and no folder by mkdir, and signs in only there, after its row', async ($, on) => {
   const { w, store, clock, rowAtLogin } = await pressWorld($, on)
   // Folder 3 stays where an account was removed; folder 6 is a CLI's mid sign-in. Id 4 is another slot's, slot 5 another id's.
   w.folders = [accountsFolder(3), accountsFolder(6)]
@@ -7485,14 +7491,24 @@ test('a press drops what an old holder of the id left, then stands the health, t
   expect(atRow?.health).toMatchObject({ kind: 'login-needed' })
 })
 
-test('a press whose look for a folder is refused tells the person, and writes no row, no folder and no sign-in', async ($, on) => {
+test('a press that cannot make its folder tells the person, each way it fails, and writes no row and no sign-in', async ($, on) => {
   const { w, store, clock } = await pressWorld($, on)
-  w.existsFails = true
+  for (const way of ['exit', 'refused'] as const) {
+    w.mkdirFails = way
+    w.toasts = []
+    await pressAdd($, clock)
+    expect(listedIds(store), way).toEqual(['1', '2'])
+    expect(w.spawned, way).toEqual([])
+    expect(Object.keys(w.files).filter(p => p.includes('/.claude/accounts/')), way).toEqual([])
+    expect(w.toasts.join(' '), way).toMatch(/Something went wrong/)
+  }
+})
+
+test('a press on a store with only Claude Code login takes folder 2', async ($, on) => {
+  const { store, clock } = await pressWorld($, on)
+  store.set('accounts', [TWO_LOGINS.accounts[0]])
   await pressAdd($, clock)
-  expect(listedIds(store)).toEqual(['1', '2'])
-  expect(w.spawned).toEqual([])
-  expect(Object.keys(w.files).filter(p => p.includes('/.claude/accounts/'))).toEqual([])
-  expect(w.toasts.join(' ')).toMatch(/Something went wrong/)
+  expect(listedRow(store, '2')).toMatchObject({ slot: accountsFolder(2) })
 })
 
 test('a press that signs in a login a row holds with its organization unread is a twin, as for account add', async ($, on) => {
