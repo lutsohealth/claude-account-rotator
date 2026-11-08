@@ -3,6 +3,7 @@ import { expect, test } from 'claude-code/testing'
 import type { RotateTo, View } from '../types'
 import { weekLeaveFrom, launchOnFrom, pickLaunch, isSessionStop } from './model'
 import { isSameWeek, whoseWeek } from './model'
+import { companyOf, identityFromStatus, planName } from './model'
 import { USAGE_BACKOFF_MAX_MS, USAGE_CLAIM_MS, USAGE_CLAIM_WAIT_MS, USAGE_EARLY_MS, WRITER_VERSION, afterUsage, claimDueReads, gatingDue, isUsageDue, mayForceUsage, mayReadSince, renewClaim, retryAfterFrom, usageDueFrom } from './model'
 import { DEFAULT_FOOTER, availableNow, braille, browsersFrom, chromeNote, continueTextFrom, counted, fiveHourLimitFrom, credentialFrom, credentialsFile, fableMark, fableSpentNotice, fableStay, footerStyleFrom, healthOf, identityFromProfile, isFableSpent, isFableStop, isNoBrowser, isPolicyRefusal, keepFable, keychainItem, legacyMark, markFrom, nextReset, pickTarget, pie, readingFromUsage, rotateToFrom, shouldLeave, roomColor, windowPct, withMark, withWeekMark } from './model'
 
@@ -815,4 +816,62 @@ test('five sessions on one store for an hour, two of them launched together: at 
   for (const id of ['2', '3', '4', '5']) {
     expect([id, calls[id]]).toEqual([id, 2])
   }
+})
+
+// puma-eslxj.6 (C5): every plan fixture, by the order the plan's name is read in.
+const PLAN_FIXTURES: [string, Parameters<typeof planName>[0], boolean, string | undefined][] = [
+  ['the profile\'s name wins over all', { plan: 'max', planName: 'Ultra', tier: 'default_claude_max_5x' }, false, 'Ultra'],
+  ['a Max 20x tier', { plan: 'max', tier: 'default_claude_max_20x' }, false, 'Ultra'],
+  ['claude auth status\'s Max 20x tier', { plan: 'max', tier: 'max_20x' }, false, 'Ultra'],
+  ['a Max 5x tier, even with no 5-hour window', { plan: 'max', tier: 'default_claude_max_5x' }, true, 'Max'],
+  ['an unknown tier falls through to the plan word', { plan: 'max', tier: 'default_claude_galaxy' }, true, 'Ultra'],
+  ['max with no 5-hour window', { plan: 'max' }, true, 'Ultra'],
+  ['max with one', { plan: 'max' }, false, 'Max'],
+  ['pro', { plan: 'pro' }, false, 'Pro'],
+  ['team', { plan: 'team' }, false, 'Team'],
+  ['enterprise', { plan: 'enterprise' }, false, 'Enterprise'],
+  ['an unknown word, as it is', { plan: 'galaxy' }, false, 'galaxy'],
+  ['nothing known', {}, true, undefined],
+  ['an empty profile name is none', { plan: 'pro', planName: '' }, false, 'Pro'],
+]
+test('a plan is named by the profile, else the sign-in\'s tier, else its plan word with Ultra where max reports no 5-hour window', () => {
+  const offenders = PLAN_FIXTURES.filter(([, a, noFive, want]) => planName(a, noFive) !== want).map(([name, a, noFive]) => `${name}: ${planName(a, noFive)}`)
+  expect(offenders).toEqual([])
+})
+
+test('the Company is the organization unless it is the one named for the account\'s own email', () => {
+  expect(companyOf({ email: 'a@b.c', orgName: "a@b.c's Organization" })).toBeUndefined()
+  expect(companyOf({ email: 'a@b.c', orgName: 'Lutso Health' })).toBe('Lutso Health')
+  expect(companyOf({ email: 'a@b.c', orgName: "x@y.z's Organization" })).toBe("x@y.z's Organization")
+  expect(companyOf({ email: 'a@b.c' })).toBeUndefined()
+})
+
+// Opus advisory TIER-TWO-SPELLINGS: the tier has one source, the credential; claude auth status's planTier is not read.
+test('the sign-in\'s tier comes from its rateLimitTier alone', () => {
+  const text = JSON.stringify({ claudeAiOauth: { accessToken: 't', expiresAt: 1, subscriptionType: 'max', rateLimitTier: 'default_claude_max_20x' } })
+  expect(credentialFrom(text)?.tier).toBe('default_claude_max_20x')
+  const status = JSON.stringify({ loggedIn: true, email: 'a@b.c', subscriptionType: 'max', planTier: 'max_20x' })
+  expect(identityFromStatus(status)?.tier).toBeUndefined()
+  const profile = { account: { email: 'a@b.c' }, organization: { uuid: 'o', name: 'N', plan_display_name: 'Ultra' } }
+  expect(identityFromProfile(profile)?.planName).toBe('Ultra')
+})
+
+// Review codex-c5 CROSS-PLAN-TIER (Opus advisory TEAM-TIER-PRECEDENCE): a Max-shaped tier names only a max plan, or one with no word.
+test('a Max tier never renames a Pro, Team, Enterprise or unknown plan', () => {
+  const expected = { pro: 'Pro', team: 'Team', enterprise: 'Enterprise', galaxy: 'galaxy' } as const
+  const bad = Object.entries(expected).flatMap(([plan, want]) =>
+    ['default_claude_max_20x', 'default_claude_max_5x', 'max_20x', 'max_5x'].flatMap(tier => {
+      const got = planName({ plan, tier }, false)
+      return got === want ? [] : [`${plan}/${tier}: ${got}`]
+    }))
+  expect(bad).toEqual([])
+  expect(planName({ tier: 'default_claude_max_20x' }, false)).toBe('Ultra')
+})
+
+// Review codex-c5 OWN-COMPANY-MATCH (Opus advisory COMPANY-EXACT-MATCH): the own organization matches whatever its spaces and the email's case.
+test('the organization named for the account\'s own email is no Company, whatever its outer spaces or the email\'s case', () => {
+  const names = [" a@b.c's Organization ", "A@B.C's Organization", "a@b.c's Organization ", "a@b.c's Organization"]
+  expect(names.filter(orgName => companyOf({ email: 'a@b.c', orgName }) !== undefined)).toEqual([])
+  expect(companyOf({ email: 'A@b.c', orgName: "a@b.c's Organization" })).toBeUndefined()
+  expect(companyOf({ email: 'a@b.c', orgName: "a@b.c's Organization Team" })).toBe("a@b.c's Organization Team")
 })

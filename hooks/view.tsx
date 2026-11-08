@@ -10,12 +10,14 @@ import {
   availableNow,
   blockedAdvice,
   canConnectChrome,
+  companyOf,
   fableSpentNotice,
   glyph,
   isOnNormalLogin,
   isSpent,
   longBar,
   nextReset,
+  planName,
   reportsNoFiveHour,
   resumeCommand,
   roomColor,
@@ -683,11 +685,10 @@ function accountRows(ui: Ui, view: View, a: Account, now: number, act: Actions) 
   const isActive = a.id === view.activeId
   const expiry = health?.kind === 'ok' ? health.refreshExpiresAt : undefined
   const failure = view.checkErrors?.[a.id]
-  // Its organization and plan, and whether the Chrome extension is signed in to it.
-  const about = [
-    ...(a.orgName === undefined ? [] : [a.plan ? `${a.orgName} · ${a.plan}` : a.orgName]),
-    ...(view.chromeAccountId === a.id ? ['Chrome'] : []),
-  ]
+  // Its Company (none for the organization named for its own email), its plan by name, and whether the Chrome
+  // extension is signed in to it.
+  const plan = planName(a, hasNoFiveHour(view, a.id))
+  const about = [companyOf(a), plan, view.chromeAccountId === a.id ? 'Chrome' : undefined].filter((s): s is string => s !== undefined)
   return (
     <Box key={`account-${a.id}`} flexDirection="column" marginBottom={1}>
       <Box flexDirection="row" flexWrap="wrap" columnGap={2}>

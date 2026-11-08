@@ -645,9 +645,32 @@ async function holderOf($: Host, account: Account, credential: Credential, isLiv
   }
   const holder = { token, who: { ...who, email: who.email, ...(credential.plan === undefined ? {} : { plan: credential.plan }) } }
   await saveHolder($, account.id, holder)
-  // The schedule, its back-off and its minute gate were the old sign-in's: the new one is read at once.
-  if (known !== undefined) await $.store.delete(`usage-due:${account.id}`)
+  // The schedule, its back-off and its minute gate were the old token's: the new one is read at once. What another
+  // account's usage said is its own, not this one's (its plan above all): it goes with it. The same account under a
+  // new token (a refresh, or the same person signing in again) keeps its reading.
+  const isOtherAccount = known !== undefined && (known.who.email !== who.email || known.who.orgId !== who.orgId)
+  if (isOtherAccount) await dropSignInUsage($, account.id)
+  else if (known !== undefined) await $.store.delete(`usage-due:${account.id}`)
   return holder
+}
+
+/**
+ * The account as `who`'s sign-in names it. The plan's name and the tier are the sign-in's own: what `who` names
+ * replaces them, and what it leaves out clears them, so a new sign-in never wears the last one's plan.
+ */
+function withSignIn(account: Account, who: Identity): Account {
+  const { planName: _planName, tier: _tier, ...rest } = account
+  return { ...rest, ...who }
+}
+
+/** Drops what the last sign-in's usage left on a login (its reading, its no-five-hour, its schedule), for every session. */
+async function dropSignInUsage($: Host, id: string): Promise<void> {
+  for (const key of [`usage:${id}`, `no-five-hour:${id}`, `usage-due:${id}`]) await $.store.delete(key)
+  await setView($, v => {
+    const { [id]: _reading, ...readings } = v.readings
+    const { [id]: _noFive, ...noFiveHour } = v.noFiveHour ?? {}
+    return { ...v, readings, noFiveHour }
+  })
 }
 
 /**
@@ -663,8 +686,9 @@ async function followSignIn($: Host, account: Account, who: Identity): Promise<A
   const isSame = own.email === undefined || isLoginOf(own, who)
   const twin = isSame ? undefined : accounts.find(a => a.id !== own.id && isLoginOf(a, who))
   if (twin !== undefined) return twin
-  const followed = { ...own, ...who }
-  if (followed.email !== own.email || followed.orgId !== own.orgId || followed.orgName !== own.orgName || followed.plan !== own.plan) {
+  const followed = withSignIn(own, who)
+  const fields = ['email', 'orgId', 'orgName', 'plan', 'planName', 'tier'] as const
+  if (fields.some(f => followed[f] !== own[f])) {
     await saveAccounts($, accounts.map(a => (a.id === own.id ? followed : a)))
   }
   if (!isSame) {
@@ -758,7 +782,9 @@ async function checkAccount($: Host, account: Account, gate: UsageGate): Promise
   if (health.kind === 'ok' && credential !== undefined) {
     const isLive = credential.expiresAt > now + 60_000
     const holder = await holderOf($, account, credential, isLive)
-    const twin = holder === undefined ? undefined : await followSignIn($, account, holder.who)
+    // The tier is the sign-in's own, read at every check: a holder named before it was kept lacks it.
+    const who = holder === undefined ? undefined : { ...holder.who, ...(credential.tier === undefined ? {} : { tier: credential.tier }) }
+    const twin = who === undefined ? undefined : await followSignIn($, account, who)
     if (twin !== undefined) health = { kind: 'login-needed', why: `signed in as account ${twin.id} now` }
     // A token no profile call has named may be another login's: its usage is read and stored once it is named.
     else if (isLive && holder !== undefined) {
@@ -1506,7 +1532,7 @@ async function adoptSignIn($: Host, account: Account): Promise<void> {
     )
     return
   }
-  const updated = accounts.map(a => (a.id === account.id && who !== undefined ? { ...a, ...who } : a))
+  const updated = accounts.map(a => (a.id === account.id && who !== undefined ? withSignIn(a, who) : a))
   await saveAccounts($, updated)
   await saveHealth($, account.id, { kind: 'ok' })
   const fresh = updated.find(a => a.id === account.id) ?? account
