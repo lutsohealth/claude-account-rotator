@@ -2,6 +2,12 @@
 
 What each version of the account rotator changed. To get each one as Claude Code starts, turn on auto-update: in `/plugin`, open **Marketplaces**, pick **claude-account-rotator** and choose **Enable auto-update**. To update by hand, run `claude plugin marketplace update claude-account-rotator`, then `claude plugin update account-rotator@claude-account-rotator`, and start a new session.
 
+## 0.5.14-lutso.1 - 2026-11-08
+
+- **`account-rotator account use --account <id, email or system>` moves the session running it from a shell**, as **Use now** does, and says where the session stands. In the Bash tool's foreground it is answered while the command runs; run any other way, within a minute. Outside a session of the mod it exits 2, and no other session applies it. `account list --json` now names the account this session is on. [From a shell](README.md#from-a-shell) has the rest.
+- **A switch Claude Code's security policy holds back no longer says it happened.** Under a hold the session stayed where it was while **Use now** and the rotation reported the move; both now show the notice that says switching is refused.
+- **`account select` in the Bash tool is answered while the command runs**, not at the session's next minute.
+
 ## 0.5.13-lutso.1 - 2026-11-08
 
 - **`account-rotator account select --account <id, email or system>` sets the account new sessions start on from a shell**, as **New on** does, and says which account they really start on: the next with room, where the one you named has none. A session of the mod on that store applies it within a minute. With no session running it exits 3 and takes its request back. [From a shell](README.md#from-a-shell) has the rest.
