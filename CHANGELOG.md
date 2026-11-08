@@ -2,6 +2,13 @@
 
 What each version of the account rotator changed. To get each one as Claude Code starts, turn on auto-update: in `/plugin`, open **Marketplaces**, pick **claude-account-rotator** and choose **Enable auto-update**. To update by hand, run `claude plugin marketplace update claude-account-rotator`, then `claude plugin update account-rotator@claude-account-rotator`, and start a new session.
 
+## 0.5.8-lutso.1 - 2026-11-08
+
+- **Each account shows its Fable week in the panel**, under its week: how much is left and when it resets, from the account's own usage. On Max and Ultra, which have a separate weekly limit for Fable, an account whose usage lists no Fable week yet shows **Fable –**: unknown, never 0%. Pro, Team and Enterprise show no Fable row unless their usage lists one.
+- **A Fable week a stop marked spent stays spent until its reset, for every session**, even when a usage check of the same week reads it lower, as the check can lag the stop. A check of a new week ends it, so a stop just before the week resets no longer holds the next week spent; the week a weekly stop marks works the same way.
+- **A mark another session drops leaves every session**, as when its switch ends with no response showing it took: the 5-hour, week and Fable marks, whether an account has a 5-hour window, and its usage. Before, each session kept its own copy until the mark's reset.
+- **Another session's real Fable stop is never taken back** when a switch in this session ends unproven.
+
 ## 0.5.7-lutso.1 - 2026-11-08
 
 - **Each account shows its plan by name: Ultra, Max, Pro, Team or Enterprise**, where it showed the raw word ("max") or nothing. The name comes from the account's profile, else, on a Max plan, from its sign-in's tier (Max 20x is Ultra), else from its plan, with a Max whose usage reports no 5-hour window counted as Ultra. A plan word the mod does not know shows as it is.
