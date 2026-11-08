@@ -1769,22 +1769,30 @@ const signInOne = ($: Host, id: string) =>
   })
 
 /**
- * The next free folder, by bin/account-rotator make_folder's rule: the first number from 2 with no account, no slot and
- * no folder. A sign-in run in a folder that exists would replace what it holds, and rm leaves its folder, so no id comes back.
+ * Makes the next free folder, by bin/account-rotator make_folder's rule: the first number from 2 with no account, no slot
+ * and no folder. A sign-in run in a folder that exists would replace what it holds, and rm leaves its folder, so no id
+ * comes back. The claim is a plain `mkdir`, which refuses a folder that exists: `$.fs` has no way to make one alone.
  */
-async function nextFreeSlot($: Host, accounts: readonly Account[]): Promise<Account> {
+async function claimNextSlot($: Host, accounts: readonly Account[]): Promise<Account> {
   const root = accountsRoot((await $.env.get('HOME')) ?? '')
+  await $.process.run(['mkdir', '-p', root], { timeoutMs: FOLDER_TIMEOUT_MS })
   for (let n = 2; ; n += 1) {
     const id = String(n)
     const slot = `${root}/${id}`
-    if (!accounts.some(a => a.id === id || a.slot === slot) && !(await $.fs.exists(slot))) return { id, slot }
+    if (accounts.some(a => a.id === id || a.slot === slot)) continue
+    const { exitCode, stderr } = await $.process.run(['mkdir', slot], { timeoutMs: FOLDER_TIMEOUT_MS })
+    if (exitCode === 0) return { id, slot }
+    // Taken by then is the next number's business; anything else no later number gets past.
+    if (!(await $.fs.exists(slot))) throw new Error(`cannot make ${slot}: ${stderr.trim() || `exit ${String(exitCode)}`}`)
   }
 }
+
+const FOLDER_TIMEOUT_MS = 5_000
 
 /** Adds a login in a new slot under ~/.claude/accounts and signs it in. */
 async function addAccount($: Host): Promise<void> {
   const accounts = await loadAccounts($)
-  const account = await nextFreeSlot($, accounts)
+  const account = await claimNextSlot($, accounts)
   const { id, slot } = account
   await $.fs.write(`${slot}/README`, `Claude account ${id}, kept by the account-rotator mod.\n`)
   await dropAccountKeys($, id)
