@@ -4,6 +4,7 @@ import type { RotateTo, View } from '../types'
 import { weekLeaveFrom, launchOnFrom, pickLaunch, isSessionStop } from './model'
 import { isSameWeek, whoseWeek } from './model'
 import { companyOf, identityFromStatus, planName } from './model'
+import { laterMark, spentMark, withFableMark } from './model'
 import { USAGE_BACKOFF_MAX_MS, USAGE_CLAIM_MS, USAGE_CLAIM_WAIT_MS, USAGE_EARLY_MS, WRITER_VERSION, afterUsage, claimDueReads, gatingDue, isUsageDue, mayForceUsage, mayReadSince, renewClaim, retryAfterFrom, usageDueFrom } from './model'
 import { DEFAULT_FOOTER, availableNow, braille, browsersFrom, chromeNote, continueTextFrom, counted, fiveHourLimitFrom, credentialFrom, credentialsFile, fableMark, fableSpentNotice, fableStay, footerStyleFrom, healthOf, identityFromProfile, isFableSpent, isFableStop, isNoBrowser, isPolicyRefusal, keepFable, keychainItem, legacyMark, markFrom, nextReset, pickTarget, pie, readingFromUsage, rotateToFrom, shouldLeave, roomColor, windowPct, withMark, withWeekMark } from './model'
 
@@ -874,4 +875,107 @@ test('the organization named for the account\'s own email is no Company, whateve
   expect(names.filter(orgName => companyOf({ email: 'a@b.c', orgName }) !== undefined)).toEqual([])
   expect(companyOf({ email: 'A@b.c', orgName: "a@b.c's Organization" })).toBeUndefined()
   expect(companyOf({ email: 'a@b.c', orgName: "a@b.c's Organization Team" })).toBe("a@b.c's Organization Team")
+})
+
+// C6 (puma-eslxj.7): the Fable week per account, and the mark a Fable stop leaves under its own key.
+
+/** A usage body shaped as C0 captured one (puma-eslxj.1 item 3): no 5-hour window, the week, and its `limits` rows. */
+const c0Body = (limits: unknown[]) => ({
+  five_hour: null,
+  seven_day: { utilization: 31, resets_at: WEEK_END },
+  seven_day_oauth_apps: null,
+  seven_day_opus: null,
+  seven_day_sonnet: { utilization: 12, resets_at: WEEK_END },
+  limits,
+  spend: null,
+  extra_usage: null,
+  weekly_scoped_shares: [],
+  seven_day_breakdown: [],
+})
+const c0Row = (model: string, percent: number) => ({ kind: 'weekly_scoped', group: 'weekly', percent, resets_at: FABLE_END, scope: { model: { display_name: model } } })
+
+test('a C0-shaped usage body yields its Fable week, and one with no Fable row yields none: account 4 read from a response alone', () => {
+  expect(readingFromUsage(c0Body([c0Row('Sonnet', 100), c0Row('Fable 5.1', 34)]), NOW)?.fable).toEqual({ pct: 34, resetsAt: FABLE_END })
+  expect(readingFromUsage(c0Body([c0Row('Sonnet', 100)]), NOW)?.fable).toBeUndefined()
+})
+
+const fableAt = (pct: number, resetsAt = FABLE_END) => ({ at: NOW, sevenDay: { pct: 30, resetsAt: WEEK_END }, fable: { pct, resetsAt } })
+const stopMark = (resetsAt = FABLE_END) => ({ pct: 100, resetsAt, at: NOW })
+
+test('a Fable stop\'s mark lays its spent week on the reading until its reset, whatever lower percent a body of the same week reads', () => {
+  expect(withFableMark(fableAt(80), stopMark(), NOW)?.fable).toEqual({ pct: 100, resetsAt: FABLE_END, isStop: true })
+  expect(withFableMark(fableAt(80), stopMark(), Date.parse(FABLE_END))).toEqual(fableAt(80))
+  expect(withFableMark(fableAt(80), undefined, NOW)).toEqual(fableAt(80))
+  // A login with no reading takes the mark alone.
+  expect(withFableMark(undefined, stopMark(), NOW)).toEqual({ at: NOW, fable: { pct: 100, resetsAt: FABLE_END, isStop: true } })
+})
+
+test('a body whose Fable week resets over an hour after the mark\'s reads a new week, which ends the mark', () => {
+  const next = new Date(Date.parse(FABLE_END) + 2 * HOUR).toISOString()
+  expect(withFableMark(fableAt(5, next), stopMark(), NOW)).toEqual(fableAt(5, next))
+  const near = new Date(Date.parse(FABLE_END) + HOUR / 2).toISOString()
+  expect(withFableMark(fableAt(5, near), stopMark(), NOW)?.fable?.pct).toBe(100)
+})
+
+test('a mark that guessed a week from the stop ends at the earlier reset a body of its week reads', () => {
+  const guessed = new Date(NOW + 7 * 24 * HOUR).toISOString()
+  expect(withFableMark(fableAt(40), stopMark(guessed), NOW)?.fable).toEqual({ pct: 100, resetsAt: FABLE_END, isStop: true })
+  expect(withFableMark(fableAt(40), stopMark(guessed), Date.parse(FABLE_END))).toEqual(fableAt(40))
+  // A body that lists no Fable week leaves the guess standing.
+  expect(withFableMark({ at: NOW }, stopMark(guessed), NOW)?.fable?.resetsAt).toBe(guessed)
+})
+
+test('a stored Fable week that reset before the stop is an older week: it leaves the mark whole', () => {
+  const guessed = new Date(NOW + 7 * 24 * HOUR).toISOString()
+  const older = new Date(NOW - HOUR).toISOString()
+  expect(withFableMark(fableAt(100, older), stopMark(guessed), NOW)?.fable).toEqual({ pct: 100, resetsAt: guessed, isStop: true })
+})
+
+// Review opus-c6 F1 [MARK-OUTLIVES-WEEK] (RULING 4481): a stop that guessed its week (no reset known) under an hour
+// before the real reset holds the NEXT week spent; both mark functions, every lead before the reset.
+const HOUR_LEADS = [60_000, HOUR / 2, HOUR - 60_000, HOUR + 60_000, 6 * HOUR, 24 * HOUR, 6 * 24 * HOUR]
+const STORED_WEEKS = [undefined, { pct: 40, resetsAt: new Date(NOW - HOUR).toISOString() }]
+const WEEK = 7 * 24 * HOUR
+
+test('a mark that guessed its week ends once a body reads the week after the real reset, wherever in its week the stop fell', () => {
+  const offenders: string[] = []
+  let cases = 0
+  for (const lead of HOUR_LEADS) {
+    for (const read of STORED_WEEKS) {
+      const realReset = NOW + lead
+      const now = realReset + 60_000
+      const next = new Date(realReset + WEEK).toISOString()
+      const guessedFable = fableMark(read, NOW)
+      const fable = withFableMark({ at: now, fable: { pct: 0, resetsAt: next } }, { pct: 100, resetsAt: guessedFable.resetsAt as string, at: NOW }, now)
+      const guessedWeek = spentMark(read, NOW, WEEK)
+      const week = withWeekMark({ at: now, sevenDay: { pct: 0, resetsAt: next } }, { pct: 100, resetsAt: guessedWeek.resetsAt as string, at: NOW }, now)
+      const where = `stop ${lead / 60_000} min before the reset, stored ${read === undefined ? 'none' : 'a past week'}`
+      cases += 1
+      if (isFableSpent(fable, now)) offenders.push(`Fable: ${where}`)
+      if (week?.sevenDay?.isStop === true) offenders.push(`week: ${where}`)
+    }
+  }
+  expect(cases).toBe(HOUR_LEADS.length * STORED_WEEKS.length)
+  expect(offenders).toEqual([])
+})
+
+test('a stop\'s mark stands over a lagging body of its own week, the week that began before the stop', () => {
+  const now = NOW + HOUR
+  expect(withFableMark(fableAt(40), stopMark(), now)?.fable?.pct).toBe(100)
+  expect(withWeekMark({ at: now, sevenDay: { pct: 40, resetsAt: WEEK_END } }, { pct: 100, resetsAt: WEEK_END, at: NOW }, now)?.sevenDay?.isStop).toBe(true)
+})
+
+// Review opus-c6 F2 [UNDO-OWNERSHIP] (RULING 4481): a held mark that stands takes the later `at`, so a write that keeps
+// it is no longer byte-equal to the provisional stop's own.
+test('a held Fable mark that stands takes the later of the two marks\' times', () => {
+  const held = { pct: 100, resetsAt: FABLE_END, at: NOW }
+  expect(laterMark(held, { pct: 100, resetsAt: FABLE_END, at: NOW + 5 })).toEqual({ ...held, at: NOW + 5 })
+  expect(laterMark(held, { pct: 100, resetsAt: '2026-10-16T03:00:00Z', at: NOW + 5 })).toEqual({ ...held, at: NOW + 5 })
+})
+
+test('of two Fable marks the one that ends later stands, and of one, that one', () => {
+  const later = new Date(Date.parse(FABLE_END) + HOUR).toISOString()
+  expect(laterMark(stopMark(), stopMark(later))).toEqual(stopMark(later))
+  expect(laterMark(stopMark(later), stopMark())).toEqual(stopMark(later))
+  expect(laterMark(undefined, stopMark())).toEqual(stopMark())
 })
