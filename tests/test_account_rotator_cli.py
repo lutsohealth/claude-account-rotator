@@ -455,6 +455,12 @@ class Select(StoreCase):
         done = self.select("--account", "2", "--store", str(named), "--wait", "10")
         self.assertEqual(done.returncode, 0, done.stderr)
 
+    def test_a_store_outside_a_config_takes_the_request_to_this_shells_folder(self) -> None:
+        named = self.tmp / "elsewhere.json"
+        named.write_text(self.store.read_text(encoding="utf-8"), encoding="utf-8")
+        self.answer(True, "ok")
+        self.assertEqual(self.select("--account", "2", "--store", str(named), "--wait", "10").returncode, 0)
+
     def answer(self, ok: bool, message: str, pick_id: str | None = None) -> threading.Thread:
         """A session that answers the first request it finds, as the mod's minute tick does."""
 

@@ -6173,14 +6173,13 @@ test('with no request, the minute reads a usage that fell due', async ($, on) =>
   expect(w.usageCalls.length, 'the control read no usage: the fixture no longer reaches checkAll').toBeGreaterThan(before)
 })
 
-test('a result the session cannot write leaves the minute\'s usage read standing', async ($, on) => {
+test('a request the session fails to apply is answered with its failure', async ($, on) => {
   const { w, store, clock, gate } = await gatedWorld($, on)
-  gate.failing = 'the result write'
+  gate.failing = 'the launch-on write'
   w.files[`${REQUESTS}/${N1}.json`] = selectRequest(N1, '2', store.get('store-id'), clock.now())
-  dueSoon(store, clock)
-  const before = w.usageCalls.length
-  await tickAndClaim(clock)
-  expect(w.usageCalls.length, 'applyRequests threw, so settlePending and checkAll never ran this minute').toBeGreaterThan(before)
+  await clock.advance(60_000)
+  await clock.settle()
+  expect(resultOf(w, N1)?.ok).toBe(false)
 })
 
 test('a request whose result cannot be written is not applied again over a later press', async ($, on) => {
