@@ -460,7 +460,7 @@ async function saveRows($: Host, now: number): Promise<void> {
 
 /** Changes the footer's look for every session. */
 async function setFooter($: Host, change: Partial<FooterStyle>): Promise<void> {
-  const footer = { ...(await getView($)).footer, ...change }
+  const footer = { ...footerStyleFrom(await $.store.get('footer')), ...change }
   await $.store.set('footer', footer)
   await setView($, v => ({ ...v, footer }))
 }
@@ -508,6 +508,8 @@ async function setLaunchOn($: Host, launchOn: LaunchOn): Promise<void> {
  * now, for `bin/account-rotator-launch`; none, while no login has room.
  */
 async function saveLaunchPick($: Host): Promise<void> {
+  // Picked from the store as it stands: a setting or account another session changed since this view last read it counts.
+  await mergeStore($)
   const now = await $.clock.now()
   const pick = pickLaunch(await getView($), now)
   const held = await $.store.get('launch-slot')
@@ -1349,7 +1351,7 @@ async function noteChrome($: Host, as: Account, answer: ChromeAnswer): Promise<v
   }))
   await noteChromeAccount($, as.id, isPaired)
   if (isPaired) await learnChrome($, as)
-  else if ((await getView($)).chromeAccountId === undefined && as.slot === '') await $.store.set('chrome-miss', as.id)
+  else if ((await $.store.get('chrome-account')) === undefined && as.slot === '') await $.store.set('chrome-miss', as.id)
 }
 
 /**
@@ -1631,7 +1633,7 @@ async function removeAccount($: Host, id: string): Promise<void> {
     }
   }
   await $.process.run(['claude', 'auth', 'logout'], { env: slotEnv(account.slot), timeoutMs: 20_000 })
-  await saveAccounts($, view.accounts.filter(a => a.id !== id))
+  await saveAccounts($, (await loadAccounts($)).filter(a => a.id !== id))
   if (view.chromeAccountId === id) await setChromeAccount($, undefined)
   await noteChromeAccount($, id, false)
   await $.store.delete(`reading:${id}`)
