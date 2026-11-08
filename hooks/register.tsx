@@ -875,9 +875,9 @@ async function checkAll($: Host, isEvery = true): Promise<void> {
       await saveCheckError($, account.id, `the check failed (${kind}); the debug log has the rest`).catch(() => undefined)
     }
   }
-  // The rows carry what this check read, for a session that ends before the next merge: a merge writes them from the
-  // store as it stands, where every save went first and another session's reads since this check began are too.
-  await mergeStore($)
+  // The rows carry what this check read, for a session that ends before the next merge: maybeRotate's launch pick
+  // merges first, which writes them from the store as it stands, where every save went first and another session's
+  // reads since this check began are too.
   await maybeRotate($)
 }
 
@@ -1804,7 +1804,6 @@ export const register: Register = on => {
       void mergeStore($)
         .then(() => settlePending($, false))
         .then(() => checkAll($, false))
-        .then(() => maybeRotate($))
         .catch(error => debug($, `sync failed: ${String(error)}`))
     })
     $.clock.every(10 * 60_000, () => {
