@@ -2,6 +2,10 @@
 
 What each version of the account rotator changed. To get each one as Claude Code starts, turn on auto-update: in `/plugin`, open **Marketplaces**, pick **claude-account-rotator** and choose **Enable auto-update**. To update by hand, run `claude plugin marketplace update claude-account-rotator`, then `claude plugin update account-rotator@claude-account-rotator`, and start a new session.
 
+## 0.5.10-lutso.1 - 2026-11-08
+
+- **Every session stores each account's row as text, for a tool outside Claude Code to read**: who the account is (email, Company, plan) with **updated HH:MM**, the time of its last usage read that worked, whichever session made it; then its week and Fable week used and when they reset; then its 5-hour window where it has one. A usage read that failed since shows its time and **Failed to update (HTTP 429)** instead, and an account that needs a sign-in says **sign in needed**. A response, or a usage answer that held no usage, no longer counts as a read that worked. The panel draws as before.
+
 ## 0.5.9-lutso.1 - 2026-11-08
 
 - **An account shows a 5-hour window only where it is known to have one**: its usage reported one, or a stop marked one. An account not read yet, such as one whose usage check keeps answering HTTP 429, no longer shows an empty **5h** row "no reading yet", and with no account known to have a 5-hour window the footer leaves out its top row and the panel its **5h limit** row (which stays while it is set to **off**, so it can be set on again).
