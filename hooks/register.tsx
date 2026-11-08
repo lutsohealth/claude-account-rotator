@@ -7,7 +7,6 @@ import type {
   ProcessSpawnResult,
   Register,
   SessionRateLimit,
-  Timer,
 } from 'claude-code'
 
 import type { Account, CheckError, FiveHourLimit, FooterStyle, Health, Holder, LaunchOn, LaunchPick, Mark, Reading, ReadingSource, RotateTo, RotatorRequest, UsageDue, View } from '../types'
@@ -204,12 +203,6 @@ let signInQueue: Promise<void> = Promise.resolve()
 type CarryOn = { need?: Need }
 /** When the switch began whose landing a turn that died before it already carries on after. */
 let carriedFor: number | undefined
-/**
- * A switch the refresh guard holds back: the latest one asked for, tried again
- * each minute until it goes. A Fable stop's carry-on waits in it, and goes out
- * once the held switch lands; a plain stop's does not.
- */
-let held: { target: Account; why: string; timer: Timer; carry?: CarryOn; isRotation: boolean } | undefined
 /** How many switches this session has made: a carry-on goes out only if no switch came after the one it follows. */
 let moves = 0
 /** Logins a switch to did not take this session: the rotation leaves them be; Use now still tries. */
@@ -579,8 +572,7 @@ async function useAccount($: Host, target: Account): Promise<{ ok: boolean; mess
   const name = label(target)
   if (isConnectingChrome) return { ok: false, message: CONNECTING_TEXT, activeId: view.activeId }
   if (view.activeId === target.id) {
-    held?.timer.cancel()
-    held = undefined
+    await setView($, v => ({ ...v, held: undefined }))
     return { ok: true, message: `this session already uses account ${name}`, activeId: target.id }
   }
   const health = view.health[target.id]
@@ -588,7 +580,7 @@ async function useAccount($: Host, target: Account): Promise<{ ok: boolean; mess
   const hasMoved = await switchTo($, target, 'a command asked for it')
   if (hasMoved) return { ok: true, message: `this session now uses account ${name}`, activeId: target.id }
   // switchTo holds a switch for a token about to refresh, and otherwise declines only on a policy refusal.
-  if (held !== undefined) return { ok: true, message: `this session moves to account ${name} in a few minutes, once account ${view.activeId}'s token has refreshed`, activeId: view.activeId }
+  if ((await getView($)).held !== undefined) return { ok: true, message: `this session moves to account ${name} in a few minutes, once account ${view.activeId}'s token has refreshed`, activeId: view.activeId }
   return { ok: false, message: blockedText(isOnNormalLogin(view)), activeId: view.activeId }
 }
 
@@ -1107,7 +1099,7 @@ async function maybeRotate($: Host, need?: Need, carry?: CarryOn): Promise<boole
   const now = await $.clock.now()
   const view = await getView($)
   // A tick or a response is no stop: it leaves a held Fable recovery where it is going, to a login with Fable room.
-  if (need === undefined && carry === undefined && held?.carry !== undefined) return false
+  if (need === undefined && carry === undefined && view.held?.carry !== undefined) return false
   // A settling switch holds every tick and response; a stop (it carries on) may move the session on from it.
   const isSettling = view.pending !== undefined && carry === undefined
   if (isConnectingChrome || view.rotateTo === 'off' || view.isSwitchBlocked || isSettling || !shouldLeave(view, now, need)) return false
@@ -1138,13 +1130,13 @@ async function refreshingSoon($: Host, view: View, target: Account, now: number)
  * Connect holds the session, it waits for the next minute. One the person pressed for goes.
  */
 async function retryHeld($: Host): Promise<void> {
-  const h = held
+  const view = await getView($)
+  const h = view.held
   if (h === undefined) return
   if (h.isRotation) {
-    const view = await getView($)
     if (view.rotateTo === 'off' || view.isSwitchBlocked) {
-      h.timer.cancel()
-      if (held === h) held = undefined
+      // A press that took its place meanwhile is no rotation's: it stands.
+      await setView($, v => (v.held?.isRotation === true ? { ...v, held: undefined } : v))
       return
     }
     if (isConnectingChrome) return
@@ -1174,17 +1166,14 @@ async function switchTo($: Host, target: Account, why: string, isQuiet = false, 
     // Where the held switch goes, what it carries on with and who asked for it are one intent, replaced together:
     // a later stop or press brings its own (a plain stop's, a press's, carries on with nothing); the retry brings the held one's.
     const owes = carry?.need === 'fable' ? carry : undefined
-    if (held === undefined) {
-      tell($, `Switching to Claude account ${target.id} in a few minutes, once account ${active.id}'s token has refreshed.`)
-      const retry = () => void retryHeld($).catch(error => debug($, `held switch retry failed: ${String(error)}`))
-      held = { target, why, timer: $.clock.every(60_000, retry), carry: owes, isRotation }
-    } else held = { ...held, target, why, carry: owes, isRotation }
+    const wasHeld = (await getView($)).held !== undefined
+    await setView($, v => ({ ...v, held: { target, why, carry: owes, isRotation } }))
+    if (!wasHeld) tell($, `Switching to Claude account ${target.id} in a few minutes, once account ${active.id}'s token has refreshed.`)
     return false
   }
   // A switch carries on with what it was asked to: the retry passes the held switch's own carry-on, a press none.
   const owed = carry
-  held?.timer.cancel()
-  held = undefined
+  await setView($, v => ({ ...v, held: undefined }))
   await keepChrome($)
   try {
     await useSlot($, target.slot)
@@ -2056,6 +2045,8 @@ export const register: Register = on => {
       isPaneShown = panes.some(p => p.id === PANE && p.isShown)
     })
     $.clock.every(60_000, () => {
+      // Armed again by a reload, which keeps the view and cancels every wait. Its own catch: a failing merge skips no retry.
+      void retryHeld($).catch(error => debug($, `held switch retry failed: ${String(error)}`))
       void mergeStore($)
         .then(() => applyRequests($).catch(error => debug($, `requests failed: ${String(error)}`)))
         .then(() => settlePending($, false))
