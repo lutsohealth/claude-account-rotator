@@ -2889,6 +2889,11 @@ test('a /login on a sign-in another session already named deletes none of the us
   await $.command.run(LOGIN)
   await clock.settle()
   expect(store.log.filter(e => /^delete (usage|no-five-hour|usage-due):1$/.test(e)), store.log.join(', ')).toEqual([])
+  // The check ran (it stored login 1's health), and what the other session stored stands (Review R1 [ABSENCE-ONLY-PIN],
+  // Opus, #34): its schedule says the next read is ten minutes off, so no usage is read now.
+  expect(store.log, `the /login checked nothing: ${store.log.join(', ')}`).toContain('set health:1')
+  expect(store.get('holder:1')).toEqual({ token: await fingerprint('refresh-tok-9'), who: { email: 'nine@example.com' } })
+  expect(store.get('usage:1')).toMatchObject({ sevenDay: { pct: 15 }, by: '1' })
 })
 
 /**
