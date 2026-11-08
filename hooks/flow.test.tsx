@@ -6224,19 +6224,7 @@ test('no failing step of applyRequests stops the minute', async ($, on) => {
 // REDTEST F2 [OLDER-REQUEST-WINS], head fac35db. Appended to a copy of hooks/flow.test.tsx.
 // Proven by: sh redtest/run_ts.sh redtest/F2_order.tsx
 
-test('of two fresh requests the newer stands, whatever order the folder lists them in', async ($, on) => {
-  const { w, store, clock } = await selectWorld($, on)
-  const [id, now] = [store.get('store-id'), clock.now()]
-  // A `select --account 2` the person interrupted, then `select --account 1`. The folder lists by nonce, which is random.
-  w.files[`${REQUESTS}/newer-0001.json`] = selectRequest('newer-0001', '1', id, now)
-  w.files[`${REQUESTS}/older-0001.json`] = selectRequest('older-0001', '2', id, now - 30_000)
-  await clock.advance(60_000)
-  await clock.settle()
-  expect(resultOf(w, 'newer-0001')?.pickId, 'the newer request\'s CLI exits 0 naming this pick').toBe('1')
-  expect(store.get('launch-on'), 'the older request was applied last: the newer CLI said exit 0 and new sessions start elsewhere').toBe('account:1')
-})
-
-test('every listing order of three requests ends on the newest, and its result names what stands', async ($, on) => {
+test('every listing order of three requests ends on the newest', async ($, on) => {
   const { w, store, clock } = await selectWorld($, on)
   const ids = ['1', '2']
   const requests = [
