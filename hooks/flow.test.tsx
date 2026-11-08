@@ -7428,26 +7428,26 @@ test('two sessions on one store, store-id: an add read from another store is lef
 })
 
 // puma-eslxj.25: what the session takes from the request folder, and what it says when it cannot look.
-const selectRequest = (nonce: string, storeId: unknown, at: number, pad = 0) => JSON.stringify({ kind: 'select', nonce, at, id: '2', store: storeId, pad: 'x'.repeat(pad) })
+const paddedSelect = (nonce: string, storeId: unknown, at: number, pad = 0) => JSON.stringify({ kind: 'select', nonce, at, id: '2', store: storeId, pad: 'x'.repeat(pad) })
 const debugLines = (w: World, text: string) => (w.logged ?? []).filter(line => line.includes(text))
 
 test('a request over 4 KB is skipped unread, in one debug line, and one of exactly 4 KB is taken', async ($, on) => {
   const { w, store, clock } = await selectWorld($, on)
-  const size = selectRequest(N1, store.get('store-id'), clock.now()).length
-  w.files[`${REQUESTS}/${N1}.json`] = selectRequest(N1, store.get('store-id'), clock.now(), 4097 - size)
+  const size = paddedSelect(N1, store.get('store-id'), clock.now()).length
+  w.files[`${REQUESTS}/${N1}.json`] = paddedSelect(N1, store.get('store-id'), clock.now(), 4097 - size)
   await untilTick(clock)
-  w.files[`${REQUESTS}/${N1}.json`] = selectRequest(N1, store.get('store-id'), clock.now(), 4097 - size)
+  w.files[`${REQUESTS}/${N1}.json`] = paddedSelect(N1, store.get('store-id'), clock.now(), 4097 - size)
   await untilTick(clock)
   expect(resultOf(w, N1)).toBeUndefined()
   expect(debugLines(w, N1).length).toBe(1)
-  w.files[`${REQUESTS}/${N2}.json`] = selectRequest(N2, store.get('store-id'), clock.now(), 4096 - size)
+  w.files[`${REQUESTS}/${N2}.json`] = paddedSelect(N2, store.get('store-id'), clock.now(), 4096 - size)
   await untilTick(clock)
   expect(resultOf(w, N2)?.ok).toBe(true)
 })
 
 test('an entry of a request name that is no plain file is skipped unread, in one debug line', async ($, on) => {
   const { w, store, clock } = await selectWorld($, on)
-  w.files[`${REQUESTS}/${N1}.json`] = selectRequest(N1, store.get('store-id'), clock.now())
+  w.files[`${REQUESTS}/${N1}.json`] = paddedSelect(N1, store.get('store-id'), clock.now())
   w.linkFiles = [`${N1}.json`]
   await untilTick(clock)
   await untilTick(clock)
@@ -7459,7 +7459,7 @@ test('a failing look at the request folder says so once, and again only after it
   const { w, store, clock } = await selectWorld($, on)
   const line = 'requests folder'
   w.logged = []
-  w.files[`${REQUESTS}/${N1}.json`] = selectRequest(N1, store.get('store-id'), clock.now())
+  w.files[`${REQUESTS}/${N1}.json`] = paddedSelect(N1, store.get('store-id'), clock.now())
   await untilTick(clock)
   w.listFails = true
   await untilTick(clock)
