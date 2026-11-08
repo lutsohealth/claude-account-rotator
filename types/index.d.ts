@@ -28,6 +28,15 @@ export type Mark = { pct: number; resetsAt: string; at: number }
 /** A usage check that failed: what failed (a stage and an HTTP status, or the error), and when, in epoch milliseconds. */
 export type CheckError = { why: string; at: number }
 
+/** A run of a row's text, and how it is drawn: dim, or as a warning; plain where no tone is named. */
+export type RowPart = { text: string; tone?: 'dim' | 'warning' }
+
+/** A login's row: who it is with the last read's state, its week and Fable week used, then its 5-hour window where it has one. */
+export type Row = { id: string; lines: RowPart[][] }
+
+/** The rows every session's merge stores under `rows`, for the CLI: each login's lines as text, when, and the writer's version. */
+export type StoredRows = { v: number; at: number; rows: { id: string; lines: string[] }[] }
+
 /**
  * When a login's usage is next read, for every session, under `usage-due:<id>`: every usage call goes through it.
  * `next` is when a read is due, `at` when the last good one came, both epoch milliseconds; `fails` counts the failed
@@ -138,6 +147,8 @@ export type View = {
   fableMarks?: Record<string, Mark>
   /** Each login's last usage check that failed, under `check-error:<id>`, until one succeeds: what failed, and when. */
   checkErrors?: Record<string, CheckError>
+  /** When each login's last good usage read came, as its schedule `usage-due:<id>` holds it (`UsageDue.at`). */
+  readAt?: Record<string, number>
   health: Record<string, Health>
   /** Who each login's sign-in belongs to: a /login in a session on a login signs in there, whoever it signs in. */
   holders: Record<string, Holder>

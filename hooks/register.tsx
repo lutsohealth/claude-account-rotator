@@ -80,6 +80,8 @@ import {
   renewClaim,
   retryAfterFrom,
   usageDueFrom,
+  isSameRows,
+  rowsOf,
 } from './model'
 import type { Credential, Identity, Need, StayReason } from './model'
 import { Band, Footer, Pane } from './view'
@@ -367,6 +369,7 @@ async function mergeStore($: Host): Promise<void> {
   const weekMarks: Record<string, Mark> = {}
   const fableMarks: Record<string, Mark> = {}
   const checkErrors: Record<string, CheckError> = {}
+  const readAt: Record<string, number> = {}
   const health: Record<string, Health> = {}
   const holders: Record<string, Holder> = {}
   let hasOlderWriter = false
@@ -390,6 +393,9 @@ async function mergeStore($: Host): Promise<void> {
     if (f !== undefined) fableMarks[a.id] = f
     const e = await $.store.get(`check-error:${a.id}`)
     if (typeof e === 'object' && e !== null && typeof (e as CheckError).why === 'string' && typeof (e as CheckError).at === 'number') checkErrors[a.id] = e as CheckError
+    // The last good usage read, any session's: a response rewrites `usage:<id>` and its `at`, so the schedule says it.
+    const goodAt = usageDueFrom(await $.store.get(`usage-due:${a.id}`))?.at
+    if (goodAt !== undefined) readAt[a.id] = goodAt
     const h = await $.store.get(`health:${a.id}`)
     if (typeof h === 'object' && h !== null && typeof (h as Health).kind === 'string') health[a.id] = h as Health
     const s = await $.store.get(`holder:${a.id}`)
@@ -439,7 +445,27 @@ async function mergeStore($: Host): Promise<void> {
       const holder = holders[a.id] ?? v.holders[a.id]
       if (holder !== undefined) nextHolders[a.id] = holder
     }
-    return { ...v, accounts, readings: nextReadings, marks: nextMarks, noFiveHour: nextNoFiveHour, weekMarks: nextWeekMarks, fableMarks: nextFableMarks, checkErrors, health: nextHealth, holders: nextHolders, footer, rotateTo, fiveHourLimit, weekLeave, launchOn, fableContinueText, chromeAccountId, chromeAccountIds, hasOlderWriter }
+    return { ...v, accounts, readings: nextReadings, marks: nextMarks, noFiveHour: nextNoFiveHour, weekMarks: nextWeekMarks, fableMarks: nextFableMarks, checkErrors, readAt, health: nextHealth, holders: nextHolders, footer, rotateTo, fiveHourLimit, weekLeave, launchOn, fableContinueText, chromeAccountId, chromeAccountIds, hasOlderWriter }
+  })
+  await saveRows($, now)
+}
+
+/**
+ * Stores every login's row under `rows`, for the CLI, when the lines differ from what the store holds: whichever
+ * session wrote them, so sessions that see the same store write them once between them.
+ */
+async function saveRows($: Host, now: number): Promise<void> {
+  const rows = rowsOf(await getView($), now)
+  if (isSameRows(await $.store.get('rows'), rows)) return
+  await $.store.set('rows', { v: WRITER_VERSION, at: now, rows })
+}
+
+/** Drops a login's schedule, for every session: its next read is due at once, and no good read is known. */
+async function dropUsageDue($: Host, id: string): Promise<void> {
+  await $.store.delete(`usage-due:${id}`)
+  await setView($, v => {
+    const { [id]: _at, ...readAt } = v.readAt ?? {}
+    return { ...v, readAt }
   })
 }
 
@@ -672,7 +698,7 @@ async function holderOf($: Host, account: Account, credential: Credential, isLiv
   // new token (a refresh, or the same person signing in again) keeps its reading.
   const isOtherAccount = known !== undefined && (known.who.email !== who.email || known.who.orgId !== who.orgId)
   if (isOtherAccount) await dropSignInUsage($, account.id)
-  else if (known !== undefined) await $.store.delete(`usage-due:${account.id}`)
+  else if (known !== undefined) await dropUsageDue($, account.id)
   return holder
 }
 
@@ -687,7 +713,8 @@ function withSignIn(account: Account, who: Identity): Account {
 
 /** Drops what the last sign-in's usage left on a login (its reading, its no-five-hour, its schedule), for every session. */
 async function dropSignInUsage($: Host, id: string): Promise<void> {
-  for (const key of [`usage:${id}`, `no-five-hour:${id}`, `usage-due:${id}`]) await $.store.delete(key)
+  for (const key of [`usage:${id}`, `no-five-hour:${id}`]) await $.store.delete(key)
+  await dropUsageDue($, id)
   await setView($, v => {
     const { [id]: _reading, ...readings } = v.readings
     const { [id]: _noFive, ...noFiveHour } = v.noFiveHour ?? {}
@@ -779,6 +806,7 @@ async function requestUsage($: Host, account: Account, accessToken: string, gate
   const at = await $.clock.now()
   const outcome = usage.kind === 'ok' ? { kind: 'ok' as const, hasResponded } : usage.kind === 'rejected' ? usage : { kind: 'failed' as const, retryAfter: usage.retryAfter }
   await $.store.set(key, afterUsage(due, outcome, at))
+  if (outcome.kind === 'ok') await setView($, v => ({ ...v, readAt: { ...v.readAt, [account.id]: at } }))
   return usage
 }
 
@@ -1623,7 +1651,7 @@ async function removeAccount($: Host, id: string): Promise<void> {
   await $.store.delete(`check-error:${id}`)
   await $.store.delete(`health:${id}`)
   await $.store.delete(`holder:${id}`)
-  await $.store.delete(`usage-due:${id}`)
+  await dropUsageDue($, id)
   await setView($, v => {
     const readings = { ...v.readings }
     const marks = { ...v.marks }
