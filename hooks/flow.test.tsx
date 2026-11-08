@@ -2147,8 +2147,7 @@ test('a switch held back for a token about to refresh is said once and made once
   await pane.unmount()
 })
 
-// puma-eslxj.29 [HELD-LOST-AT-RELOAD] (RULING 4708): a reload cancels the module's waits and loses its variables, and
-// the kit cannot reload a module. So these pin what survives one: the view holds the switch, and session.start's tick retries it.
+// puma-eslxj.29 [HELD-LOST-AT-RELOAD] (RULING 4708): the kit cannot reload a module, so these pin what survives one.
 function watchedView(on: On): () => View | undefined {
   let view: View | undefined
   on('state.set', async (_$, e, next) => {
@@ -2161,11 +2160,7 @@ function watchedView(on: On): () => View | undefined {
 
 test('a switch held back is in the view until it lands, and session.start\'s minute tick lands it', async ($, on) => {
   const w = fresh()
-  w.keychain['Claude Code-credentials'] = blob('tok-1', NOW + 5 * 60_000)
-  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
-  w.usage['tok-1'] = [20, 30]
-  w.usage['tok-2'] = [10, 30]
-  const clock = world(on, w, TWO_LOGINS)
+  const clock = await guarded(on, w, {}, [20, 30])
   const view = watchedView(on)
   await start($, clock)
   // Between two ticks, so a wait of the switch's own would come due after the next one.
@@ -2174,7 +2169,7 @@ test('a switch held back is in the view until it lands, and session.start\'s min
   await pane.press({ key: 'rotate' })
   await clock.settle()
   expect([view()?.activeId, view()?.held?.target.id, w.envSets]).toEqual(['1', '2', []])
-  w.keychain['Claude Code-credentials'] = blob('tok-1', NOW + 8 * HOUR)
+  refresh(w)
   await clock.set(NOW + 121_000)
   expect([view()?.held, w.envSets]).toEqual([undefined, [{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }]])
   await pane.unmount()
@@ -2182,17 +2177,13 @@ test('a switch held back is in the view until it lands, and session.start\'s min
 
 test('a held switch\'s retry that throws is logged', async ($, on) => {
   const w = fresh()
-  w.keychain['Claude Code-credentials'] = blob('tok-1', NOW + 5 * 60_000)
-  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
-  w.usage['tok-1'] = [20, 30]
-  w.usage['tok-2'] = [10, 30]
-  const clock = world(on, w, TWO_LOGINS)
+  const clock = await guarded(on, w, {}, [20, 30])
   await start($, clock)
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
   await pane.press({ key: 'use-2' })
   await clock.settle()
   w.breakEnv = true
-  w.keychain['Claude Code-credentials'] = blob('tok-1', NOW + 8 * HOUR)
+  refresh(w)
   await clock.advance(60_000)
   expect((w.logged ?? []).filter(line => line.includes('held switch retry failed'))).toHaveLength(1)
   await pane.unmount()
