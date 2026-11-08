@@ -651,6 +651,32 @@ class Remove(RequestCase):
                 self.assertIn("account 2 is removed", done.stdout)
                 self.assertEqual(sorted(p.name for p in self.requests.iterdir()), [])
 
+    def test_the_request_carries_what_this_read_of_the_account_saw(self) -> None:
+        # Review C12-rm ID-REUSE (Codex) [RM-TARGET-NOT-SEEN]: the session compares them before it signs anything out.
+        account = next(a for a in self.fixture["store"]["accounts"] if a["id"] == "2")
+        self.answer(True, "account 2 is removed")
+        self.assertEqual(self.rm("--account", "2", "--wait", "10").returncode, 0)
+        self.assertEqual((self.seen["slot"], self.seen["email"]), (account["slot"], account["email"]))
+
+    def test_an_account_with_no_email_sends_none(self) -> None:
+        store = json.loads(self.store.read_text(encoding="utf-8"))
+        del next(a for a in store["accounts"] if a["id"] == "2")["email"]
+        self.write(STORE, store)
+        self.answer(True, "account 2 is removed")
+        self.assertEqual(self.rm("--account", "2", "--wait", "10").returncode, 0)
+        self.assertNotIn("email", self.seen)
+
+    def test_a_row_with_no_slot_exits_1_and_leaves_no_file(self) -> None:
+        # Review C12-rm MALFORMED-ACCOUNT (Codex) [RM-TARGET-NOT-SEEN]: no writer in the mod makes one, and a session filters it out and would answer "already gone".
+        store = json.loads(self.store.read_text(encoding="utf-8"))
+        rows = [a for a in store["accounts"] if a["id"] == "2"]
+        self.assertTrue(rows)
+        del rows[0]["slot"]
+        self.write(STORE, store)
+        done = self.rm("--account", "2", "--wait", "1")
+        self.assertEqual((done.returncode, "no slot" in done.stderr, "Traceback" in done.stderr), (1, True, False), done.stderr)
+        self.assertFalse(self.requests.exists())
+
     def test_it_needs_no_session_of_its_own(self) -> None:
         env = {k: v for k, v in self.env().items() if k != SESSION_VAR}
         self.answer(True, "account 2 is removed")

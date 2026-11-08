@@ -1311,10 +1311,18 @@ test('a use request names a session or is no request, and a select request carri
   expect(requestFrom({ ...SELECT, session: 'session-abc' }, NOW)).toEqual(SELECT)
 })
 
-test('an rm request is read back as it was written, and it carries no mark', () => {
-  const RM = { kind: 'rm', nonce: 'n0nce-9012', at: NOW, id: '2', store: 'store-abc' }
+test('an rm request is read back with what the CLI saw of the account, and it carries no mark', () => {
+  const RM = { kind: 'rm', nonce: 'n0nce-9012', at: NOW, id: '2', store: 'store-abc', slot: '/slot/2', email: 'two@example.com' }
   expect(requestFrom(RM, NOW)).toEqual(RM)
   expect(requestFrom({ ...RM, session: 'session-abc' }, NOW)).toEqual(RM)
+  const { email: _email, ...noEmail } = RM
+  expect(requestFrom(noEmail, NOW), 'an account not signed in yet has no email').toEqual(noEmail)
+  const cases: [string, unknown][] = [
+    ['no slot', { ...RM, slot: undefined }],
+    ['a slot that is no string', { ...RM, slot: 7 }],
+    ['an email that is no string', { ...RM, email: 7 }],
+  ]
+  expect(cases.filter(([, value]) => requestFrom(value, NOW) !== undefined).map(([name]) => name)).toEqual([])
 })
 
 test('the requests live in the Claude config folder of the session, CLAUDE_CONFIG_DIR or ~/.claude', () => {

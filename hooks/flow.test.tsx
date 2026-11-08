@@ -6786,7 +6786,13 @@ test('a finished call must not take any later select or use before the minute', 
 
 // C12 `rm` (puma-eslxj.13, RULING 4640): `account rm` drops an account through any session on the store, as Remove does.
 
-const rmRequest = (nonce: string, id: string, storeId: unknown, at: number) => JSON.stringify({ kind: 'rm', nonce, at, id, store: storeId })
+/** What the CLI read of each login these tests remove. */
+const SEEN: Record<string, { slot: string; email: string }> = {
+  '1': { slot: '', email: 'one@example.com' },
+  '2': { slot: SLOT2, email: 'two@example.com' },
+  '3': { slot: SLOT3, email: 'three@example.com' },
+}
+const rmRequest = (nonce: string, id: string, storeId: unknown, at: number) => JSON.stringify({ kind: 'rm', nonce, at, id, store: storeId, ...SEEN[id] })
 const LOGIN3 = { id: '3', slot: SLOT3, email: 'three@example.com' }
 /** Every store key `rm` deletes for an account. */
 const ACCOUNT_KEYS = ['reading', 'usage', 'mark', 'no-five-hour', 'week-mark', 'fable-mark', 'check-error', 'health', 'holder', 'usage-due']
@@ -6854,6 +6860,39 @@ test('two sessions on one store: a press of Remove from a view that still lists 
   await clock.settle()
   await pane.unmount()
   expect(w.logouts ?? [], 'the press signed out a login the store no longer lists').toEqual([])
+})
+
+// Review C12-rm ID-REUSE (Codex) [RM-TARGET-NOT-SEEN]: a request waits, so its id can change holder before it is applied.
+test('an rm of an id that holds another login than the CLI read signs nothing out and deletes nothing', async ($, on) => {
+  const { w, store, clock } = await selectWorld($, on)
+  const offenders: string[] = []
+  const holders = [{ id: '2', slot: SLOT2, email: 'new@example.com' }, { id: '2', slot: `${HOME}/.claude/accounts/9`, email: 'two@example.com' }, { id: '2', slot: SLOT2 }]
+  expect(holders.length, 'the sweep lists no holder').toBeGreaterThan(0)
+  let serial = 0
+  for (const holder of holders) {
+    store.set('accounts', [TWO_LOGINS.accounts[0], holder])
+    store.set('reading:2', { theirs: true })
+    const nonce = `reuse-${String(++serial).padStart(4, '0')}`
+    w.files[`${REQUESTS}/${nonce}.json`] = rmRequest(nonce, '2', store.get('store-id'), clock.now())
+    await untilTick(clock)
+    const isKept = (store.get('accounts') as { id: string }[]).some(a => a.id === '2') && store.has('reading:2')
+    if ((w.logouts ?? []).length > 0 || !isKept || resultOf(w, nonce)?.ok !== false) offenders.push(JSON.stringify(holder))
+    w.logouts = []
+    delete w.files[`${REQUESTS}/${nonce}.json`]
+  }
+  expect(offenders, `holders of id 2 an old rm removed; compare what the CLI saw before the logout: ${offenders.join('; ')}`).toEqual([])
+})
+
+// Review C12-rm SHARED-SLOT (Codex) [RM-TARGET-NOT-SEEN].
+test('an rm of an account that shares its slot with one that stays signs nothing out', async ($, on) => {
+  const { w, store, clock } = await selectWorld($, on)
+  store.set('accounts', [...TWO_LOGINS.accounts, { id: '3', slot: SLOT2, email: 'same-slot@example.com' }])
+  w.files[`${REQUESTS}/${N1}.json`] = rmRequest(N1, '2', store.get('store-id'), clock.now())
+  await untilTick(clock)
+  expect(w.logouts ?? [], 'the logout signed out account 3, which stays listed').toEqual([])
+  expect(resultOf(w, N1)?.ok).toBe(false)
+  expect(resultOf(w, N1)?.message).toMatch(/account 2 shares its sign-in with account 3/)
+  expect((store.get('accounts') as unknown[]).length).toBe(3)
 })
 
 test('two sessions on one store: a session still on an account another session removed is not moved by it', async ($, on) => {
