@@ -649,17 +649,25 @@ const ROW_COLUMNS = 82
 /** The body width the pane asks for: a row's width and the accounts box's frame around it. */
 export const PANE_COLUMNS = ROW_COLUMNS + SECTION_FRAME
 
+/** The cells the slot takes as lineEnd draws it: a status wider than `[ Use now ]` widens it. */
+function slotWidthOf(view: View, a: Account): number {
+  const health = view.health[a.id]?.kind
+  const status = health === 'logging-in' ? '◌ signing in…' : a.id === view.activeId && view.chromeConnecting === a.id ? '◌ Connecting Chrome…' : ''
+  return Math.max(USE_WIDTH, [...status].length)
+}
+
 /** The cells the buttons at a login's line end take, as lineEnd draws them: Remove where it shows, then the slot. */
 function endWidthOf(view: View, a: Account): number {
   const health = view.health[a.id]?.kind
-  if (a.slot === '' || health === 'logging-in') return USE_WIDTH
+  if (a.slot === '' || health === 'logging-in') return slotWidthOf(view, a)
   const remove = `[ ${view.removing === a.id ? 'Press again to remove' : 'Remove'} ]`.length
-  return remove + BUTTON_GAP + USE_WIDTH
+  return remove + BUTTON_GAP + slotWidthOf(view, a)
 }
 
 /** How a row part is drawn: its tone, a bar in the color of its room left, and the login in use bright, the rest dim. */
 function partStyle(p: RowPart, isActive: boolean) {
-  if (p.tone === 'dim') return { dimColor: true }
+  // A failed row's bar stays in its room's color, drawn dim.
+  if (p.tone === 'dim') return p.used === undefined ? { dimColor: true } : { dimColor: true, color: roomColor(100 - p.used) }
   if (p.tone === 'warning') return { color: 'warning' }
   if (p.used !== undefined) return { color: roomColor(100 - p.used) }
   return { bold: isActive && p.shrink === 'email', dimColor: !isActive }
