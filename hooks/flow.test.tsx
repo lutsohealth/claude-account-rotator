@@ -4,6 +4,7 @@ import type { On, ProcessRunResult, SessionRateLimit, ToolCallArgs } from 'claud
 
 import { DEFAULT_FOOTER, USAGE_CLAIM_WAIT_MS, USAGE_FORCE_AFTER_MS, USAGE_IDLE_MS, keychainItem, roomColor } from './model'
 import { laterMark, longBar, markFrom } from './model'
+import { PANE_COLUMNS } from './view'
 
 const NOW = Date.parse('2026-10-12T10:00:00Z')
 const HOUR = 3600_000
@@ -633,7 +634,7 @@ const FABLE_STOP = {
 }
 
 /** Login 1's 5-hour window as the pane draws it at 20% used, and the week at 30%. */
-const ONE_AT_20 = /^▰{8}▱{2} 80% left$/
+const ONE_AT_20 = /^▰{2}▱{8} 20%$/
 
 test('a Fable stop moves to the login with Fable room and carries on, and the toast names the Fable week, not the 5-hour window', async ($, on) => {
   const w = fresh()
@@ -1275,8 +1276,8 @@ test('a switch is confirmed once a response reports the new login usage, and an 
   await clock.settle()
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
   // Room left, as the footer counts it: login 2 has used 20% of its 5-hour window and 30% of its week.
-  expect(await pane.find({ text: /^▰{8}▱{2} 80% left$/ })).toBeDefined()
-  expect(await pane.find({ text: /^▰{7}▱{3} 70% left$/ })).toBeDefined()
+  expect(await pane.find({ text: /^▰{2}▱{8} 20%$/ })).toBeDefined()
+  expect(await pane.find({ text: /^▰{3}▱{7} 30%$/ })).toBeDefined()
   expect(w.toasts.filter(t => /has not shown/.test(t))).toEqual([])
   await pane.unmount()
 })
@@ -1519,14 +1520,14 @@ test('a plain usage-limit stop on an account that reports no 5-hour window moves
   const clock = world(on, w, { ...TWO_LOGINS, 'five-hour-limit': 'off' })
   await start($, clock)
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
-  expect(await pane.findAll({ type: 'Text', text: /^5h$/ })).toHaveLength(0)
+  expect(await pane.findAll({ type: 'Text', text: /^5h(?: | –)$/ })).toHaveLength(0)
   await $.classic.StopFailure({ error: 'rate_limit', last_assistant_message: 'Claude usage limit reached.' })
   await clock.settle()
   expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
   expect(w.toasts.filter(t => /: account 1 has 0% of its week left\.$/.test(t))).toHaveLength(1)
   await pane.redraw()
-  expect(await pane.find({ text: /^resets in 5h/ })).toBeUndefined()
-  expect(await pane.findAll({ type: 'Text', text: /^5h$/ })).toHaveLength(0)
+  expect(await pane.find({ text: /^  resets [0-9]+h/ })).toBeUndefined()
+  expect(await pane.findAll({ type: 'Text', text: /^5h(?: | –)$/ })).toHaveLength(0)
   await pane.unmount()
 })
 
@@ -1546,8 +1547,8 @@ test('a session that starts on a login whose week is spent moves at once; a turn
   await $.classic.StopFailure(WEEKLY_STOP)
   await clock.settle()
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
-  expect(await pane.findAll({ type: 'Text', text: /^5h$/ })).toHaveLength(0)
-  expect(await pane.find({ text: /^resets in 5h/ })).toBeUndefined()
+  expect(await pane.findAll({ type: 'Text', text: /^5h(?: | –)$/ })).toHaveLength(0)
+  expect(await pane.find({ text: /^  resets [0-9]+h/ })).toBeUndefined()
   await pane.unmount()
   expect(w.envSets).toHaveLength(1)
   expect(w.submitted).toEqual([])
@@ -1573,7 +1574,7 @@ test('a 5-hour stop mark already stored on a login whose usage reports no 5-hour
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
   const isClear = async () => {
     await pane.redraw()
-    return (await pane.findAll({ type: 'Text', text: /^5h$/ })).length === 0 && (await pane.find({ text: /^resets in [0-9]+h/ })) === undefined
+    return (await pane.findAll({ type: 'Text', text: /^5h(?: | –)$/ })).length === 0 && (await pane.find({ text: /^  resets [0-9]+h/ })) === undefined
   }
   expect(await isClear()).toBe(true)
   // A session on an older version saves login 3's reading as it reads it, knowing nothing of the 5-hour window it lacks.
@@ -1636,8 +1637,8 @@ test('a turn that dies on the weekly limit marks the week spent, never a 5-hour 
   expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
   expect(w.toasts.filter(t => /^Switched to Claude account 2.*: account 1 has 0% of its week left\.$/.test(t))).toHaveLength(1)
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
-  expect(await pane.findAll({ type: 'Text', text: /^5h$/ })).toHaveLength(0)
-  expect(await pane.find({ text: /^resets in 5h/ })).toBeUndefined()
+  expect(await pane.findAll({ type: 'Text', text: /^5h(?: | –)$/ })).toHaveLength(0)
+  expect(await pane.find({ text: /^  resets [0-9]+h/ })).toBeUndefined()
   await pane.unmount()
 })
 
@@ -1654,8 +1655,8 @@ test('a stored stop mark with no reset time, on an account whose token is not li
   // C7 (puma-eslxj.8), a changed expected value. SOURCE: the bead's decision "Draw a 5h line only when the newest
   // accepted body or response lists a window, or a stop mark stands" (RULING 4490). Login 1 reports no 5-hour window;
   // login 2's only window was an older version's stop mark, passed, and no body said it has one: neither draws a 5h row.
-  expect(await pane.findAll({ type: 'Text', text: /none reported$/ })).toHaveLength(0)
-  expect(await pane.findAll({ type: 'Text', text: /^5h$/ })).toHaveLength(0)
+  expect(await pane.findAll({ type: 'Text', text: /^5h(?: | –)$/ })).toHaveLength(0)
+  expect(await pane.findAll({ type: 'Text', text: /^5h(?: | –)$/ })).toHaveLength(0)
   await pane.press({ key: 'rotate' })
   await clock.settle()
   expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
@@ -1694,7 +1695,8 @@ test('a stop\'s mark on a login that reports a 5-hour window stands when the 5-h
   await clock.settle()
   await pane.redraw()
   // Login 2's read window is dropped; login 1's mark stays until its reset.
-  expect(await pane.findAll({ type: 'Text', text: /none reported$/ })).toHaveLength(1)
+  // With the limit off, the login known to have a 5-hour window keeps its line, its window dropped from the count.
+  expect(await pane.findAll({ type: 'Text', text: /^5h –$/ })).toHaveLength(1)
   await pane.unmount()
 })
 
@@ -1711,10 +1713,10 @@ test('a plain stop\'s week mark on an account that reports no 5-hour window stan
   await $.classic.StopFailure({ error: 'rate_limit', last_assistant_message: 'Claude usage limit reached.' })
   await clock.settle()
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
-  expect(await pane.find({ text: /^▱{10} 0% left$/ })).toBeDefined()
+  expect(await pane.find({ text: /^▰{10} 100%$/ })).toBeDefined()
   await clock.advance(11 * 60_000)
   await pane.redraw()
-  expect(await pane.find({ text: /^▱{10} 0% left$/ })).toBeDefined()
+  expect(await pane.find({ text: /^▰{10} 100%$/ })).toBeDefined()
   await pane.unmount()
 })
 
@@ -1739,7 +1741,7 @@ test('a stop\'s week mark on an account that reports no 5-hour window stands thr
   }
   const markVisible = async () => {
     await pane.redraw()
-    return (await pane.find({ text: /^▱{10} 0% left$/ })) !== undefined
+    return (await pane.find({ text: /^▰{10} 100%$/ })) !== undefined
   }
   const offenders: string[] = []
   for (const rotateTo of ['reset', 'room', 'order', 'off'] as const) {
@@ -1774,13 +1776,13 @@ test('turning the 5-hour limit off and back on restores a reported 5-hour window
   const clock = world(on, w, TWO_LOGINS)
   await start($, clock)
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
-  expect(await pane.find({ text: /^▰{2}▱{8} 20% left$/ })).toBeDefined()
+  expect(await pane.find({ text: /^▰{8}▱{2} 80%$/ })).toBeDefined()
   await pane.press({ key: 'five-hour-limit-off' })
   await clock.settle()
   await pane.press({ key: 'five-hour-limit-on' })
   await clock.settle()
   await pane.redraw()
-  expect(await pane.find({ text: /^▰{2}▱{8} 20% left$/ })).toBeDefined()
+  expect(await pane.find({ text: /^▰{8}▱{2} 80%$/ })).toBeDefined()
   await pane.unmount()
 })
 
@@ -1793,11 +1795,11 @@ test('a read saved while the 5-hour limit is off keeps its 5-hour window in the 
   const clock = world(on, w, { ...TWO_LOGINS, 'five-hour-limit': 'off' })
   await start($, clock)
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
-  expect(await pane.find({ text: /^▰{2}▱{8} 20% left$/ })).toBeUndefined()
+  expect(await pane.find({ text: /^▰{8}▱{2} 80%$/ })).toBeUndefined()
   await pane.press({ key: 'five-hour-limit-on' })
   await clock.settle()
   await pane.redraw()
-  expect(await pane.find({ text: /^▰{2}▱{8} 20% left$/ })).toBeDefined()
+  expect(await pane.find({ text: /^▰{8}▱{2} 80%$/ })).toBeDefined()
   await pane.unmount()
 })
 
@@ -1811,13 +1813,13 @@ test('another session turning the 5-hour limit on shows this session\'s reported
   const clock = world(on, w, store)
   await start($, clock)
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
-  expect(await pane.find({ text: /^▰{2}▱{8} 20% left$/ })).toBeUndefined()
+  expect(await pane.find({ text: /^▰{8}▱{2} 80%$/ })).toBeUndefined()
   // Another session's press.
   store.set('five-hour-limit', 'on')
   await clock.advance(61_000)
   await clock.settle()
   await pane.redraw()
-  expect(await pane.find({ text: /^▰{2}▱{8} 20% left$/ })).toBeDefined()
+  expect(await pane.find({ text: /^▰{8}▱{2} 80%$/ })).toBeDefined()
   await pane.unmount()
 })
 
@@ -1833,7 +1835,7 @@ test('with the 5-hour limit off, a plain stop on a login that reports a 5-hour w
   await clock.settle()
   expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
-  expect(await pane.find({ text: /^resets in 2h 0m$/ })).toBeDefined()
+  expect(await pane.find({ text: /^  resets 2h 0m$/ })).toBeDefined()
   await pane.unmount()
 })
 
@@ -1852,7 +1854,7 @@ test('a Fable stop while the 5-hour limit is off keeps the login\'s reported 5-h
   await pane.press({ key: 'five-hour-limit-on' })
   await clock.settle()
   await pane.redraw()
-  expect(await pane.find({ text: /^▰{5}▱{5} 50% left$/ })).toBeDefined()
+  expect(await pane.find({ text: /^▰{5}▱{5} 50%$/ })).toBeDefined()
   await pane.unmount()
 })
 
@@ -1898,7 +1900,7 @@ test('another session\'s stop mark, landing as a response saves the reading, sta
   expect(store.get('mark:1')).toEqual(OTHER_MARK)
   await clock.advance(61_000)
   await pane.redraw()
-  expect(await pane.find({ text: /^▱{10} 0% left$/ })).toBeDefined()
+  expect(await pane.find({ text: /^▰{10} 100%$/ })).toBeDefined()
   await pane.unmount()
 })
 
@@ -1928,7 +1930,7 @@ test('another session\'s stop mark stands through every save of a reading on the
     await clock.settle()
     await clock.advance(61_000)
     await pane.redraw()
-    const isShown = (await pane.find({ text: /^▱{10} 0% left$/ })) !== undefined
+    const isShown = (await pane.find({ text: /^▰{10} 100%$/ })) !== undefined
     if (JSON.stringify(store.get('mark:1')) !== JSON.stringify(OTHER_MARK) || !isShown) offenders.push(site)
   }
   await pane.unmount()
@@ -1955,7 +1957,7 @@ test('a Fable stop on a login with a standing 5-hour mark leaves the mark standi
   await clock.settle()
   await clock.advance(61_000)
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
-  expect(await pane.find({ text: /^▱{10} 0% left$/ })).toBeDefined()
+  expect(await pane.find({ text: /^▰{10} 100%$/ })).toBeDefined()
   await pane.unmount()
 })
 
@@ -2012,7 +2014,7 @@ test('a reported 5-hour window survives a save, the limit off and on, and a stor
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
   const visible = async () => {
     await pane.redraw()
-    return (await pane.find({ text: /^▰{2}▱{8} 20% left$/ })) !== undefined
+    return (await pane.find({ text: /^▰{8}▱{2} 80%$/ })) !== undefined
   }
   const offenders: string[] = []
   for (const rotateTo of ['reset', 'room', 'order', 'off'] as const) {
@@ -2086,12 +2088,12 @@ test('a usage check that fails shows its HTTP status on the login\'s line and in
   const clock = world(on, w, store)
   await start($, clock)
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
-  expect((await pane.findAll({ type: 'Text', text: /its last usage check failed: the usage call answered HTTP 429$/ })).length).toBe(1)
+  expect((await pane.findAll({ type: 'Text', text: /^\d\d:\d\d Failed to update \(HTTP 429\)$/ })).length).toBe(1)
   expect(store.get('check-error:2')).toEqual({ why: 'the usage call answered HTTP 429', at: NOW + USAGE_CLAIM_WAIT_MS })
   w.failing = {}
   await clock.advance(10 * 60_000)
   await pane.redraw()
-  expect(await pane.find({ text: /its last usage check failed/ })).toBeUndefined()
+  expect(await pane.find({ text: /Failed to update/ })).toBeUndefined()
   expect(store.has('check-error:2')).toBe(false)
   await pane.unmount()
 })
@@ -2178,10 +2180,10 @@ test('a login whose usage reports no 5-hour window has no 5h row in the pane; a 
   const clock = world(on, w, TWO_LOGINS)
   await start($, clock)
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
-  expect(await pane.findAll({ type: 'Text', text: /^5h$/ })).toHaveLength(1)
-  expect(await pane.findAll({ type: 'Text', text: /^week$/ })).toHaveLength(2)
-  expect(await pane.find({ text: /none reported$/ })).toBeUndefined()
-  expect(await pane.find({ text: /^▰{9}▱ 90% left$/ })).toBeDefined()
+  expect(await pane.findAll({ type: 'Text', text: /^5h $/ })).toHaveLength(1)
+  expect(await pane.findAll({ type: 'Text', text: /^Used $/ })).toHaveLength(2)
+  expect(await pane.find({ text: /^5h –$/ })).toBeUndefined()
+  expect(await pane.find({ text: /^▰{1}▱{9} 10%$/ })).toBeDefined()
   await pane.unmount()
 })
 
@@ -2300,7 +2302,7 @@ test('a login with no reading yet whose store says it has no 5-hour window has n
   const clock = world(on, w, { ...TWO_LOGINS, 'no-five-hour:2': true })
   await start($, clock)
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
-  expect(await pane.findAll({ type: 'Text', text: /^5h$/ })).toHaveLength(1)
+  expect(await pane.findAll({ type: 'Text', text: /^5h $/ })).toHaveLength(1)
   await pane.unmount()
 })
 
@@ -2399,7 +2401,8 @@ test('the pane picks each footer row\'s style for every session, and previews it
   const [usedOne, usedTwo] = painted((await footer.find(GLYPHS))?.children[2])
   expect(usedOne).toMatchObject({ color: roomColor(70) })
   expect(usedTwo).toMatchObject({ color: roomColor(40) })
-  expect(await pane.find({ text: /^▰{2}▱{8} 20% used$/ })).toBeDefined()
+  // The pane's bars draw the percent used whatever the footer fills with.
+  expect(await pane.find({ text: /^▰{2}▱{8} 20%$/ })).toBeDefined()
   await pane.unmount()
   await footer.unmount()
 })
@@ -2463,7 +2466,7 @@ test('a /login in a session on login 3 that signs in login 2\'s account leaves 3
   w.keychain[await keychainItem(SLOT3)] = blob('tok-2b', NOW + 30 * 60_000)
   await clock.advance(41 * 60_000)
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
-  expect(await pane.find({ text: /^⚠ signed in as account 2 now$/ })).toBeDefined()
+  expect(await pane.find({ text: /^⚠ sign in needed$/ })).toBeDefined()
   await pane.unmount()
   expect(w.envSets).toHaveLength(1)
 })
@@ -2761,7 +2764,8 @@ test('before the rotation moves the session off Claude Code\'s login, Claude in 
   await clock.advance(61_000)
   const pane = await mountPane($)
   // C5: the plan by its name; a max with a 5-hour window is Max.
-  expect(await pane.find({ type: 'Text', text: 'Org · Max · Chrome' })).toBeDefined()
+  const shown = (await pane.findAll({ type: 'Text' })).map(t => t.text ?? '')
+  expect(aboutAfter(shown, shown.indexOf('one@example.com'))).toBe('Org · Max · Chrome')
   expect(await pane.find({ type: 'Text', text: 'Active Claude extension accounts from your Chrome windows:' })).toBeDefined()
   expect((await pane.find({ key: 'chrome-row-1' }))?.text).toMatch(/● in use$/)
   expect(await pane.find({ key: 'chrome-use-1' })).toBeUndefined()
@@ -3562,7 +3566,7 @@ test('a later stop still counts when an earlier reading came from a session cloc
   const clock = world(on, w, store)
   await start($, clock)
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
-  expect(await pane.find({ text: /^▱{10} 0% left$/ })).toBeDefined()
+  expect(await pane.find({ text: /^▰{10} 100%$/ })).toBeDefined()
   await pane.unmount()
 })
 
@@ -3580,7 +3584,7 @@ test('a later stop survives clock skew at every view recount site', async ($, on
   await start($, clock)
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
   const offenders: string[] = []
-  const marked = async () => { await pane.redraw(); return (await pane.find({ text: /^▱{10} 0% left$/ })) !== undefined }
+  const marked = async () => { await pane.redraw(); return (await pane.find({ text: /^▰{10} 100%$/ })) !== undefined }
   if (!(await marked())) offenders.push('mergeStore at boot')
   await pane.press({ key: 'five-hour-limit-off' })
   await clock.settle()
@@ -3607,7 +3611,7 @@ test('a current usage check preserves an unexpired 0.4 stop mark left in a readi
   const clock = world(on, w, store)
   await start($, clock)
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
-  expect(await pane.find({ text: /^▱{10} 0% left$/ })).toBeDefined()
+  expect(await pane.find({ text: /^▰{10} 100%$/ })).toBeDefined()
   await pane.unmount()
 })
 
@@ -3661,7 +3665,7 @@ test('a Fable stop does not restamp an older 5-hour window over a mark written s
   await clock.settle()
   await clock.advance(61_000)
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
-  expect(await pane.find({ text: /^▱{10} 0% left$/ })).toBeDefined()
+  expect(await pane.find({ text: /^▰{10} 100%$/ })).toBeDefined()
   await pane.unmount()
 })
 
@@ -3683,11 +3687,11 @@ test('a Fable stop preserves an unseen concurrent mark through every 5-hour limi
   await clock.advance(61_000)
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
   const offenders: string[] = []
-  if (!(await pane.find({ text: /^▱{10} 0% left$/ }))) offenders.push('Fable stop / limit off / mergeStore')
+  if (!(await pane.find({ text: /^▰{10} 100%$/ }))) offenders.push('Fable stop / limit off / mergeStore')
   await pane.press({ key: 'five-hour-limit-on' })
   await clock.settle()
   await pane.redraw()
-  if (!(await pane.find({ text: /^▱{10} 0% left$/ }))) offenders.push('Fable stop / limit on / setFiveHourLimit')
+  if (!(await pane.find({ text: /^▰{10} 100%$/ }))) offenders.push('Fable stop / limit on / setFiveHourLimit')
   await pane.unmount()
   expect(offenders).toEqual([])
 })
@@ -3726,13 +3730,13 @@ test('a stop\'s mark stands until its reset through a newer reported 5-hour wind
   await $.session.measure({ context: { window: 200_000 }, rateLimits: w.limits, changed: ['rateLimits'] })
   await clock.settle()
   await pane.redraw()
-  expect(await pane.find({ text: /^▱{10} 0% left$/ })).toBeDefined()
+  expect(await pane.find({ text: /^▰{10} 100%$/ })).toBeDefined()
   await clock.advance(61_000)
   w.limits = [{ kind: 'seven_day', percentUsed: 40, resetsAt: '2026-10-18T03:00:00Z' }]
   await $.session.measure({ context: { window: 200_000 }, rateLimits: w.limits, changed: ['rateLimits'] })
   await clock.settle()
   await pane.redraw()
-  expect(await pane.find({ text: /^▱{10} 0% left$/ })).toBeDefined()
+  expect(await pane.find({ text: /^▰{10} 100%$/ })).toBeDefined()
   await pane.unmount()
 })
 
@@ -3748,7 +3752,7 @@ test('a stop\'s mark stands until its reset through every reading writer, whethe
   await start($, clock)
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
   const offenders: string[] = []
-  const marked = async () => { await pane.redraw(); return (await pane.find({ text: /^▱{10} 0% left$/ })) !== undefined }
+  const marked = async () => { await pane.redraw(); return (await pane.find({ text: /^▰{10} 100%$/ })) !== undefined }
   if (!(await marked())) offenders.push('usage check with a window')
   w.limits = [{ kind: 'five_hour', percentUsed: 30, resetsAt: '2026-10-12T12:00:00Z' }]
   await $.session.measure({ context: { window: 200_000 }, rateLimits: w.limits, changed: ['rateLimits'] })
@@ -3834,7 +3838,7 @@ test('a week mark spends a login whose stored reading has no owner: the pane sho
   await start($, clock)
   expect((store.get('launch-slot') as { id?: string } | undefined)?.id).not.toBe('1')
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
-  expect(await pane.find({ text: /^▱+ 0% left$/ })).toBeDefined()
+  expect(await pane.find({ text: /^▰+ 100%$/ })).toBeDefined()
   await pane.unmount()
 })
 
@@ -3875,7 +3879,7 @@ test('a stored reading no login can be shown to own is dropped, and a login whos
   await start($, clock)
   expect((store.get('launch-slot') as { id?: string } | undefined)?.id).toBe('2')
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
-  expect(await pane.find({ text: /89% left/ })).toBeUndefined()
+  expect(await pane.find({ text: /^▰▱{9} 11%$/ })).toBeUndefined()
   await pane.unmount()
 })
 
@@ -4263,7 +4267,7 @@ test('readings stored with no owner, as an older version left accounts 3 and 5, 
   const clock = world(on, w, store)
   await start($, clock)
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
-  expect(await pane.find({ text: /8[79]% left/ })).toBeUndefined()
+  expect(await pane.find({ text: /^▰▱{9} 1[13]%$/ })).toBeUndefined()
   await pane.unmount()
 })
 
@@ -4422,7 +4426,8 @@ for (const status of [429, 500, 401]) {
     await clock.advance(10 * 60_000)
     expect(callsWith(w, 'tok-2')).toBe(0)
     expect((store.get('check-error:2') as { why?: string } | undefined)?.why).toMatch(new RegExp(`profile call answered HTTP ${status}`))
-    expect(await paneText($)).toMatch(new RegExp(`profile call answered HTTP ${status}`))
+    // The row says the update failed; the profile call's status is not the usage call's, so it names none.
+    expect(await paneText($)).toMatch(/^\d\d:\d\d Failed to update$/m)
   })
 }
 
@@ -4719,7 +4724,14 @@ async function aboutOne(on: On, $: Engine, w: World): Promise<string[]> {
   const texts = (await pane.findAll({ type: 'Text' })).map(t => t.text ?? '')
   await pane.unmount()
   const at = texts.indexOf('one@example.com')
-  return at < 0 ? texts : texts.slice(at + 1, at + 2)
+  return at < 0 ? texts : [aboutAfter(texts, at) ?? '']
+}
+
+/** What a row's line 1 says after the email at `at`: its ` · Company`, ` · Plan` and ` · Chrome` parts, joined. */
+function aboutAfter(texts: string[], at: number): string | undefined {
+  const parts: string[] = []
+  for (let i = at + 1; texts[i]?.startsWith(' · '); i += 1) parts.push(texts[i] ?? '')
+  return parts.length === 0 ? undefined : parts.join('').slice(' · '.length)
 }
 
 /** Login 1 signed in by `blobOne`, its usage `usage`; login 2 not signed in. */
@@ -4756,7 +4768,7 @@ test('an account stored before the tier was kept, all else the same, reads Ultra
   const kept = { accounts: [{ id: '1', slot: '', email: 'one@example.com', orgId: 'org-one@example.com', plan: 'max' }, TWO_LOGINS.accounts[1]] }
   const clock = world(on, w, { ...kept, 'rotate-to': 'off' })
   await start($, clock)
-  expect(await paneText($)).toMatch(/^Ultra$/m)
+  expect(await paneText($)).toMatch(/^ · Ultra$/m)
 })
 
 test('an account in the organization named for its own email draws no Company', async ($, on) => {
@@ -4780,7 +4792,7 @@ async function aboutOf($: Engine, email: string): Promise<string | undefined> {
   const texts = (await pane.findAll({ type: 'Text' })).map(t => t.text ?? '')
   await pane.unmount()
   const at = texts.indexOf(email)
-  return at < 0 ? `(no row for ${email})` : texts[at + 1]
+  return at < 0 ? `(no row for ${email})` : aboutAfter(texts, at)
 }
 
 // Review codex-c5 STALE-PLAN-NAME and STALE-TIER: a stored account another sign-in now holds keeps neither.
@@ -4798,7 +4810,7 @@ for (const [plan, tier, want] of [
       await start($, clock)
       const stored = (store.get('accounts') as Record<string, unknown>[])[0]
       expect([plan, field, field === 'tier' && tier !== undefined ? undefined : stored[field]]).toEqual([plan, field, undefined])
-      expect([plan, field, await paneText($)]).toEqual([plan, field, expect.stringMatching(new RegExp(`^${want}$`, 'm'))])
+      expect([plan, field, await paneText($)]).toEqual([plan, field, expect.stringMatching(new RegExp(`^ · ${want}$`, 'm'))])
     })
   }
 }
@@ -4843,13 +4855,13 @@ test('a minute after a /login as another max login whose read fails, the row sho
   w.loginPlan = 'max'
   const clock = world(on, w, { accounts: [{ id: '1', slot: '', email: 'one@example.com' }], 'rotate-to': 'off' })
   await start($, clock)
-  expect(await paneText($)).toMatch(/70% left/)
+  expect(await paneText($)).toMatch(/^▰{3}▱{7} 30%$/m)
   w.failing = { 'tok-9': 503 }
   await $.command.run(LOGIN)
   await clock.settle()
   await clock.advance(61_000)
   const text = await paneText($)
-  expect([/70% left/.test(text), await aboutOf($, 'nine@example.com')]).toEqual([false, 'Org · Max'])
+  expect([/^▰{3}▱{7} 30%$/m.test(text), await aboutOf($, 'nine@example.com')]).toEqual([false, 'Org · Max'])
 })
 
 // [SIGN-IN-OWNED-STATE], RULING 4455: a refresh of the same account (a new refresh token, the profile naming the same
@@ -4899,27 +4911,27 @@ for (const status of [503, 429, 500]) {
 /** What the pane draws after each `Fable` row's label, in order: one entry per row. */
 async function fableRows($: Engine): Promise<string[]> {
   const texts = (await paneText($)).split('\n')
-  return texts.flatMap((t, i) => (t === 'Fable' ? [texts[i + 1] ?? ''] : []))
+  return texts.flatMap((t, i) => (t === ' Fable ' ? [texts[i + 1] ?? ''] : t === ' Fable –' ? ['–'] : []))
 }
 
 test('a reading with Fable 66% draws a Fable row under the week with its bar at 66%', async ($, on) => {
   const w = planWorld(blob('tok-1'), [10, 30, 66])
   const clock = world(on, w, { ...TWO_LOGINS, 'rotate-to': 'off', footer: { ...DEFAULT_FOOTER, fill: 'used' } })
   await start($, clock)
-  expect(await fableRows($)).toEqual([`${longBar(66)} 66% used`])
+  expect(await fableRows($)).toEqual([`${longBar(66)} 66%`])
   const text = await paneText($)
-  expect(text.indexOf('Fable')).toBeGreaterThan(text.indexOf('week'))
+  expect(text.indexOf(' Fable ')).toBeGreaterThan(text.indexOf('Used '))
 })
 
 const FABLE_ROW_CASES: [string, () => World, string[]][] = [
   ['Max whose usage lists no Fable week', () => planWorld(blob('tok-1'), [10, 30]), ['–']],
   ['Ultra whose usage lists no Fable week', () => planWorld(blob('tok-1'), [null, 30]), ['–']],
-  ['Max with its Fable week at 66%', () => planWorld(blob('tok-1'), [10, 30, 66]), [`${longBar(34)} 34% left`]],
+  ['Max with its Fable week at 66%', () => planWorld(blob('tok-1'), [10, 30, 66]), [`${longBar(66)} 66%`]],
   ['Pro whose usage lists no Fable week', () => planWorld(blob('tok-1', NOW + 6 * HOUR, 'pro'), [10, 30]), []],
   ['Team whose usage lists no Fable week', () => planWorld(blob('tok-1', NOW + 6 * HOUR, 'team'), [10, 30]), []],
   ['Enterprise whose usage lists no Fable week', () => planWorld(blob('tok-1', NOW + 6 * HOUR, 'enterprise'), [10, 30]), []],
   ['a plan word the mod does not know, with no Fable week', () => planWorld(blob('tok-1', NOW + 6 * HOUR, 'galaxy'), [10, 30]), []],
-  ['Pro whose usage lists a Fable week at 50%', () => planWorld(blob('tok-1', NOW + 6 * HOUR, 'pro'), [10, 30, 50]), [`${longBar(50)} 50% left`]],
+  ['Pro whose usage lists a Fable week at 50%', () => planWorld(blob('tok-1', NOW + 6 * HOUR, 'pro'), [10, 30, 50]), [`${longBar(50)} 50%`]],
 ]
 for (const [name, make, expected] of FABLE_ROW_CASES) {
   test(`the pane's Fable rows for ${name}: ${JSON.stringify(expected)}`, async ($, on) => {
@@ -4960,12 +4972,12 @@ test('a Fable stop marks its week spent under fable-mark:<id>, and neither the s
   expect((store.get('usage:1') as { src?: unknown } | undefined)?.src).toBe('response')
   expect(fableOf(store.get('usage:1'))).toEqual({ pct: 60, resetsAt: FABLE_RESET })
   // The pane still draws login 1's Fable week spent, by the mark.
-  expect((await fableRows($))[0]).toBe(`${longBar(0)} 0% left`)
+  expect((await fableRows($))[0]).toBe(`${longBar(100)} 100%`)
 })
 
 test('a Fable mark another session stored is laid on the login\'s reading, over a lower body of the same week', async ($, on) => {
   await fableStopStays($, on, { 'fable-mark:1': { pct: 100, resetsAt: FABLE_RESET, at: NOW } })
-  expect((await fableRows($))[0]).toBe(`${longBar(0)} 0% left`)
+  expect((await fableRows($))[0]).toBe(`${longBar(100)} 100%`)
 })
 
 test('a Fable stop writing its mark keeps a mark another session stored since that ends later', async ($, on) => {
@@ -4996,7 +5008,7 @@ test('a Fable stop before any response proves a switch marks fable-mark on the l
   expect(w.toasts.some(t => /did not take/.test(t))).toBe(true)
   expect(store.get('fable-mark:2')).toBeUndefined()
   // This session's view drops it too: login 2 draws its body's week again.
-  expect(await fableRows($)).toEqual(['–', `${longBar(50)} 50% left`])
+  expect(await fableRows($)).toEqual(['–', `${longBar(50)} 50%`])
 })
 
 test('a check whose usage lists no Fable week after a Fable stop keeps the stored week in usage:<id>, never the mark', async ($, on) => {
@@ -5018,7 +5030,7 @@ test('a Fable mark another session stored on a login with no reading yet counts:
   w.failing = { 'tok-2': 429 }
   const clock = world(on, w, { ...TWO_LOGINS, 'rotate-to': 'off', 'fable-mark:2': { pct: 100, resetsAt: FABLE_RESET, at: NOW } })
   await start($, clock)
-  expect(await fableRows($)).toEqual([`${longBar(90)} 90% left`, `${longBar(0)} 0% left`])
+  expect(await fableRows($)).toEqual([`${longBar(10)} 10%`, `${longBar(100)} 100%`])
 })
 
 // Review codex-c6 MARK-RETAINED and opus-c6 F3 [VIEW-OUTLIVES-STORE-DELETE] (RULING 4481): a store key another session
@@ -5107,9 +5119,13 @@ async function fiveHourWorld($: Engine, on: On, one: World['usage'][string] | un
 /** The pane's lines from login 2's email to the end of the accounts box. */
 const loginTwoLines = (text: string) => text.slice(text.indexOf('two@example.com'), text.indexOf(' Accounts ')).split('\n')
 
+/** A row's 5-hour line starts with its label: `5h ` before a bar, or `5h –` where the 5h limit set off drops the window. */
+const isFiveHourText = (t: string) => t === '5h ' || t === '5h –'
+const hasFiveHourText = (lines: string[]) => lines.some(isFiveHourText)
+
 test('a login with no reading, no no-five-hour key and a usage call answering 429 draws no 5h row', async ($, on) => {
   await fiveHourWorld($, on, [20, 30], undefined)
-  expect(loginTwoLines(await paneText($))).not.toContain('5h')
+  expect(hasFiveHourText(loginTwoLines(await paneText($)))).toBe(false)
 })
 
 test('with every account unknown, the footer has no Session: label and the pane no 5h limit row', async ($, on) => {
@@ -5149,11 +5165,11 @@ test('with the session glyphs off and its percent on, the login in use without a
 // Kept green: Claude's own words name the 5-hour window, so its account draws the row, whatever its usage said.
 test('a 5-hour stop on a login whose usage said it has no 5-hour window draws its 5h row', async ($, on) => {
   const { clock } = await fiveHourWorld($, on, [null, 30], [20, 40])
-  expect((await paneText($)).split('\n').filter(l => l === '5h')).toHaveLength(1)
+  expect((await paneText($)).split('\n').filter(isFiveHourText)).toHaveLength(1)
   await pastLastRead(clock)
   await $.classic.StopFailure({ error: 'rate_limit', last_assistant_message: "You've hit your session limit" })
   await clock.settle()
-  expect((await paneText($)).split('\n').filter(l => l === '5h')).toHaveLength(2)
+  expect((await paneText($)).split('\n').filter(isFiveHourText)).toHaveLength(2)
 })
 
 // C6's lesson, per input of the predicate: a key another session deletes turns the row back to unknown.
@@ -5165,7 +5181,7 @@ const FIVE_HOUR_INPUTS: [string, unknown][] = [
 for (const [key, value] of FIVE_HOUR_INPUTS) {
   test(`${key} saying login 2 has a 5-hour window draws its 5h row`, async ($, on) => {
     await fiveHourWorld($, on, [20, 30], undefined, { [key]: value })
-    expect([key, loginTwoLines(await paneText($)).includes('5h')]).toEqual([key, true])
+    expect([key, hasFiveHourText(loginTwoLines(await paneText($)))]).toEqual([key, true])
   })
   test(`${key} another session deletes leaves login 2 with no 5h row at the next merge`, async ($, on) => {
     const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off', [key]: value }))
@@ -5178,7 +5194,7 @@ for (const [key, value] of FIVE_HOUR_INPUTS) {
     await start($, clock)
     store.delete(key)
     await clock.advance(61_000)
-    expect([key, loginTwoLines(await paneText($)).includes('5h')]).toEqual([key, false])
+    expect([key, hasFiveHourText(loginTwoLines(await paneText($)))]).toEqual([key, false])
   })
 }
 
@@ -5191,7 +5207,7 @@ test('pressing the 5h limit off and on keeps a standing week mark on a login wit
     await pane.redraw()
     const texts = (await pane.findAll({ type: 'Text' })).map(t => t.text ?? '')
     const lines = texts.slice(texts.indexOf('two@example.com'))
-    return lines[lines.indexOf('week') + 1]
+    return lines[lines.indexOf('Used ') + 1]
   }
   const seen: string[] = [await weekOfTwo()]
   for (const limit of ['off', 'on'] as const) {
@@ -5200,7 +5216,7 @@ test('pressing the 5h limit off and on keeps a standing week mark on a login wit
     seen.push(await weekOfTwo())
   }
   await pane.unmount()
-  expect(seen).toEqual([`${longBar(0)} 0% left`, `${longBar(0)} 0% left`, `${longBar(0)} 0% left`])
+  expect(seen).toEqual([`${longBar(100)} 100%`, `${longBar(100)} 100%`, `${longBar(100)} 100%`])
 })
 
 // Review codex-c7 C7-R1-01 and opus-c7 F1 [LIMIT-DEPENDENT-KNOWLEDGE]: whether a login has a 5-hour window does not
@@ -5210,7 +5226,7 @@ async function knownSurfaces($: Engine, lines: string[]): Promise<{ paneRow: boo
   const footer = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'SessionMode', props: { modes: [] } })
   const footerSession = (await footer.findAll({ type: 'Text' })).map(t => t.text).includes('Session:')
   await footer.unmount()
-  return { paneRow: lines.includes('5h'), footerSession }
+  return { paneRow: hasFiveHourText(lines), footerSession }
 }
 for (const [key, value] of FIVE_HOUR_INPUTS) {
   for (const limit of ['on', 'off'] as const) {
@@ -5306,12 +5322,16 @@ test('another session\'s good read of login 2 moves this session\'s row to that 
   expect(localTime(theirs)).not.toBe(localTime(NOW))
 })
 
-test('login 2\'s schedule another session deletes leaves this session\'s row with no updated time', async ($, on) => {
+test('login 2\'s schedule another session deletes is read again at once, and the row says that read\'s time', async ($, on) => {
   const { store, clock } = await rowsWorld($, on)
-  expect(lineOne(store, '2')).toMatch(/  updated \d\d:\d\d$/)
+  const before = goodReadAt(store, '2')
+  expect(lineOne(store, '2')).toMatch(new RegExp(`  updated ${localTime(before)}$`))
+  await clock.advance(4 * 60_000)
   store.delete('usage-due:2')
   await clock.advance(60_000)
-  expect(lineOne(store, '2')).not.toMatch(/updated/)
+  // The seed: with no schedule the login was read again, later than before.
+  expect(goodReadAt(store, '2')).toBeGreaterThan(before)
+  expect(lineOne(store, '2')).toMatch(new RegExp(`  updated ${localTime(goodReadAt(store, '2'))}$`))
 })
 
 test('a failure another session stores for login 2 shows on this session\'s row, and its delete brings the updated time back', async ($, on) => {
@@ -5387,4 +5407,236 @@ test('a login whose only usage answer stored no reading draws no updated time ov
   // The seed: login 2 was read, and stored no reading.
   expect([w.usageCalls.includes('tok-2'), store.has('usage:2')]).toEqual([true, false])
   expect(lineOne(store, '2')).not.toMatch(/updated/)
+})
+
+// Review C8-R1 boot-stale (Codex) [ROWS-LAG-ONE-MERGE] (RULING 4521, 4538): a session's own read reaches the rows at
+// once, not at the next minute's merge, so a session that ends within that minute leaves them current.
+test('boot success refreshes the exported row before the first minute tick', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.usage['tok-1'] = [null, 30]
+  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off' }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  expect(store.has('usage:1')).toBe(true)
+  expect((store.get('usage-due:1') as { at?: number } | undefined)?.at).toBeDefined()
+  expect(lineOne(store, '1')).toMatch(/  updated \d\d:\d\d$/)
+})
+
+test('boot failure refreshes the exported row before the first minute tick', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.failing = { 'tok-1': 429 }
+  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off' }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  expect(store.get('check-error:1')).toMatchObject({ why: expect.stringMatching(/HTTP 429/) })
+  expect(lineOne(store, '1')).toMatch(/Failed to update \(HTTP 429\)$/)
+})
+
+// C9 (puma-eslxj.10, problem g part 2): the pane draws each account's row fitted to its body's width, the buttons at
+// the end of the line that holds them, with no id column and no separate failure line.
+
+type DrawnNode = { type?: string; props?: Record<string, unknown>; children?: unknown[] }
+/** The text an element shows: its strings, and its Texts' strings, in order; the buttons' box at a line's end left out. */
+const shownText = (n: unknown): string => {
+  if (typeof n === 'string') return n
+  if (typeof n !== 'object' || n === null) return ''
+  const { type, props, children } = n as DrawnNode
+  if (type === 'Button' || String(props?.key ?? '').startsWith('end-')) return ''
+  return (children ?? []).map(shownText).join('')
+}
+/** The Buttons under an element, by key. */
+const buttonsIn = (n: unknown): string[] => {
+  if (typeof n !== 'object' || n === null) return []
+  const { type, props, children } = n as DrawnNode
+  return type === 'Button' ? [String(props?.key ?? '')] : (children ?? []).flatMap(buttonsIn)
+}
+/** The pane's row lines at `bodyColumns`, by their Box's key `line-<id>-<n>`: each line's text and its Buttons. */
+async function drawnLines($: Engine, bodyColumns: number): Promise<Record<string, { text: string; buttons: string[] }>> {
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: { ...PANE_PROPS, bodyColumns } })
+  const tree = await pane.drawn()
+  await pane.unmount()
+  const out: Record<string, { text: string; buttons: string[] }> = {}
+  const walk = (n: unknown): void => {
+    if (typeof n !== 'object' || n === null) return
+    const { type, props, children } = n as DrawnNode
+    const key = props?.key
+    if (type === 'Box' && typeof key === 'string' && key.startsWith('line-')) out[key] = { text: shownText(n), buttons: buttonsIn(n) }
+    ;(children ?? []).forEach(walk)
+  }
+  walk(tree)
+  return out
+}
+
+test('at 82 columns the pane draws each account\'s two row lines as the rows key holds them, the buttons ending line 1', async ($, on) => {
+  const { store } = await rowsWorld($, on)
+  const lines = await drawnLines($, 82)
+  const stored = rowsOf(store)?.rows ?? []
+  // The seed: both accounts have stored rows.
+  expect(stored.map(r => r.id)).toEqual(['1', '2'])
+  for (const r of stored) {
+    expect([r.id, [lines[`line-${r.id}-0`]?.text, lines[`line-${r.id}-1`]?.text]]).toEqual([r.id, r.lines])
+  }
+  // Login 2, not in use, ends line 1 with Remove and Use now.
+  expect(lines['line-2-0']?.buttons).toEqual(['ask-remove-2', 'use-2'])
+  expect(Object.keys(lines).filter(k => k.startsWith('line-2-'))).toEqual(['line-2-0', 'line-2-1'])
+})
+
+test('a pane too narrow for any row line and its buttons gives the buttons a line of their own after line 2', async ($, on) => {
+  const { store } = await rowsWorld($, on)
+  const lines = await drawnLines($, 50)
+  expect([lines['line-2-0']?.buttons, lines['line-2-1']?.buttons, lines['line-2-2']?.text]).toEqual([[], [], ''])
+  expect(lines['line-2-2']?.buttons).toContain('ask-remove-2')
+  expect(lines['line-2-1']?.text).toBe(rowsOf(store)?.rows?.find(r => r.id === '2')?.lines[1])
+})
+
+// Mutations V1 and V2 survived: the buttons' place is decided by the row's width less the accounts box's frame (4) and
+// by Remove's width beside the slot (23 in all, after a gap of 2).
+test('login 2\'s buttons end line 1 only where the pane, less its frame, holds line 1, the gap and Remove with Use now', async ($, on) => {
+  const { store } = await rowsWorld($, on)
+  const width = [...lineOne(store, '2')].length + 2 + 23 + 4
+  expect((await drawnLines($, width))['line-2-0']?.buttons).toEqual(['ask-remove-2', 'use-2'])
+  expect((await drawnLines($, width - 1))['line-2-0']?.buttons).toEqual([])
+})
+
+// Mutation V4 survived: the pane asks for the operator's 82-cell row and the accounts box's frame around it.
+test('the pane asks the dock for the operator\'s 82-cell row and the 4 cells of the accounts box\'s frame', () => {
+  expect(PANE_COLUMNS).toBe(82 + 4)
+})
+
+// Mutation P1 survived: a bar is drawn in the color of the room its account has left.
+test('a row\'s bars are drawn in the color of the room left: login 1\'s week, 30% used, in the color of 70% left', async ($, on) => {
+  await rowsWorld($, on)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: { ...PANE_PROPS, bodyColumns: 86 } })
+  const colors: unknown[] = []
+  const walk = (n: unknown): void => {
+    if (typeof n !== 'object' || n === null) return
+    const { type, props, children } = n as DrawnNode
+    if (type === 'Text' && shownText(n) === '▰▰▰▱▱▱▱▱▱▱ 30%') colors.push(props?.color)
+    ;(children ?? []).forEach(walk)
+  }
+  walk(await pane.drawn())
+  await pane.unmount()
+  expect(colors).toEqual([roomColor(70)])
+})
+
+/** An element's whole text, its buttons' boxes included. */
+function rawText(node: unknown): string {
+  if (typeof node === 'string') return node
+  if (typeof node !== 'object' || node === null) return ''
+  return ((node as DrawnNode).children ?? []).map(rawText).join('')
+}
+/** The first element under `node` with `key`, or the first Text whose whole text is `text`. */
+function findDrawn(node: unknown, match: { key?: string; text?: string }): DrawnNode | undefined {
+  if (typeof node !== 'object' || node === null) return undefined
+  const n = node as DrawnNode
+  if ((match.key !== undefined && n.props?.key === match.key) || (match.text !== undefined && n.type === 'Text' && rawText(n) === match.text)) return n
+  for (const child of n.children ?? []) {
+    const found = findDrawn(child, match)
+    if (found !== undefined) return found
+  }
+  return undefined
+}
+
+// Review C9-R1 END-SLOT-UNDERCOUNTS-STATUS (Codex) and END-WIDTH-UNDERCOUNT (Opus) [END-WIDTH-UNDERCOUNT] (RULING 4555):
+// the end of a line is counted as wide as what lineEnd draws there, so the line with its end fits the row.
+for (const spare of [0, 1, 2]) {
+  test(`a signing-in status fits the line it ends, ${spare} cells over the slot's width`, async ($, on) => {
+    const { store, clock } = await rowsWorld($, on)
+    store.set('health:2', { kind: 'logging-in', since: NOW })
+    await clock.advance(61_000)
+    const bodyColumns = [...lineOne(store, '2')].length + 2 + 11 + 4 + spare
+    const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: { ...PANE_PROPS, bodyColumns } })
+    const tree = await pane.drawn()
+    await pane.unmount()
+    const line = findDrawn(tree, { key: 'line-2-0' })
+    const end = findDrawn(line, { key: 'end-2' })
+    const cells = [...shownText(line)].length + (end === undefined ? 0 : 2 + [...rawText(end)].length)
+    expect([spare, cells <= bodyColumns - 4]).toEqual([spare, true])
+  })
+}
+
+// Review C9-R1 FAILED-BAR-LOSES-COLOR (Codex) [FAILED-BAR-LOSES-COLOR] (RULING 4555): a failed row's bars stay in the
+// color of their room left, drawn dim.
+test('a failed row\'s bars keep the color of their room left, dim', async ($, on) => {
+  const { w, store, clock } = await rowsWorld($, on)
+  w.failing = { 'tok-1': 429, 'tok-2': 429 }
+  store.delete('usage-due:1')
+  store.delete('usage-due:2')
+  await clock.advance(61_000)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  const tree = await pane.drawn()
+  await pane.unmount()
+  for (const [id, text, left] of [['1', '▰▰▰▱▱▱▱▱▱▱ 30%', 70], ['2', '▰▰▰▰▱▱▱▱▱▱ 40%', 60]] as const) {
+    const bar = findDrawn(findDrawn(tree, { key: `line-${id}-1` }), { text })
+    expect([id, bar?.props?.dimColor, bar?.props?.color]).toEqual([id, true, roomColor(left)])
+  }
+})
+
+test('the pane draws no id column and no separate failure line: a failed read ends line 1 instead', async ($, on) => {
+  const { store } = await rowsWorld($, on, true)
+  const lines = await drawnLines($, 82)
+  const text = await paneText($)
+  expect([text.includes('its last usage check failed'), text.split('\n').includes('1'), text.split('\n').includes('2')]).toEqual([false, false, false])
+  expect(lines['line-1-0']?.text).toMatch(/  \d\d:\d\d Failed to update \(HTTP 429\)$/)
+  expect(lines['line-1-0']?.text).toBe(lineOne(store, '1'))
+})
+
+// Review C9-R1 ROWS-FROM-STALE-VIEW (Opus) [ROWS-FROM-STALE-VIEW] (RULING 4555): a check's rows are written from the
+// store as it stands then, never from this session's view merged before the check's claim wait.
+test('a check never puts back an older row over the one another session stored meanwhile', async ($, on) => {
+  const { store, clock } = await rowsWorld($, on)
+  // Login 1's schedule comes due at the next minute tick, so that tick's check claims it and waits.
+  store.set('usage-due:1', { ...(store.get('usage-due:1') as object), next: clock.now() })
+  await clock.advance(NOW + 2 * 60_000 - clock.now())
+  // The seed: the check holds its claim on login 1, its merge done.
+  expect((store.get('usage-due:1') as { claim?: string } | undefined)?.claim).toBe('session-1')
+  // Another session reads login 2 now and stores its row, as its merge does.
+  const bAt = clock.now()
+  store.set('usage-due:2', { ...(store.get('usage-due:2') as object), at: bAt, next: bAt + USAGE_IDLE_MS })
+  const newer = (rowsOf(store)?.rows ?? []).map(r => (r.id === '2' ? { ...r, lines: [(r.lines[0] ?? '').replace(/updated \d\d:\d\d$/, `updated ${localTime(bAt)}`), ...r.lines.slice(1)] } : r))
+  expect(newer.find(r => r.id === '2')?.lines[0]).toMatch(new RegExp(`updated ${localTime(bAt)}$`))
+  store.set('rows', { v: 1, at: bAt, rows: newer })
+  await clock.advance(USAGE_CLAIM_WAIT_MS + 1000)
+  expect(lineOne(store, '2')).toMatch(new RegExp(`updated ${localTime(bAt)}$`))
+})
+
+/** The shared store, checking every `rows` write against the store as it stands then: each `updated` is the last good read's. */
+class RowsWatch extends Map<string, unknown> {
+  offenders?: string[]
+  writes?: number
+  override set(key: string, value: unknown): this {
+    if (key === 'rows' && this.offenders !== undefined) {
+      this.writes = (this.writes ?? 0) + 1
+      for (const r of (value as RowsKey).rows ?? []) {
+        const shown = /updated (\d\d:\d\d)$/.exec(r.lines[0] ?? '')?.[1]
+        const at = (super.get(`usage-due:${r.id}`) as { at?: number } | undefined)?.at
+        if (shown !== undefined && at !== undefined && shown !== localTime(at)) this.offenders.push(`login ${r.id}: updated ${shown}, the store's last good read ${localTime(at)}`)
+      }
+    }
+    return super.set(key, value)
+  }
+}
+
+test('no rows write names a good read older than the store holds then, whichever path writes it', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [null, 30, 40]
+  w.usage['tok-2'] = [null, 40]
+  const store = new RowsWatch(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off' }))
+  store.offenders = []
+  const clock = world(on, w, store)
+  await start($, clock)
+  const otherReads = (at: number) => store.set('usage-due:2', { ...(store.get('usage-due:2') as object), at, next: at + USAGE_IDLE_MS })
+  for (let minute = 1; minute <= 11; minute++) {
+    // Login 1 comes due at each tick, so each tick's check claims it and waits; the other session reads login 2 in that wait.
+    store.set('usage-due:1', { ...(store.get('usage-due:1') as object), next: clock.now() })
+    await clock.advance(NOW + minute * 60_000 - clock.now())
+    otherReads(clock.now())
+    await clock.advance(USAGE_CLAIM_WAIT_MS + 1000)
+  }
+  expect(store.writes ?? 0).toBeGreaterThan(2)
+  expect([...new Set(store.offenders)]).toEqual([])
 })

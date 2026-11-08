@@ -1,27 +1,25 @@
 import type { Elements, RenderChildren, RenderSurface } from 'claude-code'
 
-import type { Account, Fill, FiveHourLimit, FooterRun, FooterStyle, Glyphs, Highlight, LaunchOn, RotateTo, UsageWindow, View } from '../types'
+import type { Account, Fill, FiveHourLimit, FooterRun, FooterStyle, Glyphs, Highlight, LaunchOn, RotateTo, RowPart, View } from '../types'
 import {
   DEFAULT_LAUNCH_ON,
   DEFAULT_WEEK_LEAVE,
+  END_GAP,
   GLYPHS,
-  HAS_FABLE_WEEK,
   SIGN_IN_WARN_MS,
   WEEK_LEAVE_MAX,
   availableNow,
   blockedAdvice,
   canConnectChrome,
-  companyOf,
   fableSpentNotice,
+  fitRow,
   glyph,
   hasFiveHour,
-  hasNoFiveHour,
   isOnNormalLogin,
   isSpent,
-  longBar,
   nextReset,
-  planName,
   resumeCommand,
+  rowOf,
   roomColor,
   roomLeft,
   shown,
@@ -588,62 +586,6 @@ export function Band(ui: Ui, view: View, now: number, act: Actions) {
   return undefined
 }
 
-/** A window's bar and percent at their widest ("▰▰▰▰▰▰▰▰▰▰ 100% left"), so the reset times line up. */
-const BAR_WIDTH = 20
-
-/** A window row's label column: its longest label, `Fable`, and a space. */
-const LABEL_WIDTH = 6
-
-/**
- * One usage window of a login, filled and colored as the footer draws it, and
- * when it resets: beside it, or under the bar on a narrow pane. A plan that
- * reports no such window (a Team seat's week) says so.
- */
-function windowRow(ui: Ui, fill: Fill, isActive: boolean, name: string, hasReading: boolean, w: UsageWindow | undefined, now: number) {
-  const { Box, Text } = ui
-  const left = roomLeft(w, now)
-  return (
-    <Box flexDirection="row" marginLeft={3}>
-      <Box width={LABEL_WIDTH} flexShrink={0}>
-        <Text dimColor={!isActive}>{name}</Text>
-      </Box>
-      <Box flexDirection="row" flexWrap="wrap" columnGap={2}>
-        <Box minWidth={BAR_WIDTH}>
-          {left === undefined ? (
-            <Text dimColor>
-              {longBar(undefined)}
-              {hasReading ? ' none reported' : ' no reading yet'}
-            </Text>
-          ) : (
-            <Text color={roomColor(left)}>{`${longBar(shown(fill, left))} ${shown(fill, left)}% ${fill === 'left' ? 'left' : 'used'}`}</Text>
-          )}
-        </Box>
-        {w?.resetsAt !== undefined && left !== undefined && left < 100 && <Text dimColor={!isActive}>resets {untilText(w.resetsAt, now)}</Text>}
-      </Box>
-    </Box>
-  )
-}
-
-/**
- * A login's Fable week: the one its reading holds, on any plan, as a body listed it or a stop marked it; else on Max
- * and Ultra a dash, as the week is unknown, never 0%; else nothing.
- */
-function fableRow(ui: Ui, view: View, a: Account, isActive: boolean, now: number) {
-  const { Box, Text } = ui
-  const fable = view.readings[a.id]?.fable
-  if (fable !== undefined) return windowRow(ui, view.footer.fill, isActive, 'Fable', true, fable, now)
-  const plan = planName(a, hasNoFiveHour(view, a.id))
-  if (plan === undefined || !HAS_FABLE_WEEK.test(plan)) return undefined
-  return (
-    <Box flexDirection="row" marginLeft={3}>
-      <Box width={LABEL_WIDTH} flexShrink={0}>
-        <Text dimColor={!isActive}>Fable</Text>
-      </Box>
-      <Text dimColor>–</Text>
-    </Box>
-  )
-}
-
 /** The slot at the right end of a login's line: as wide as a button the terminal draws, `[ Use now ]`, so the Removes beside it line up. */
 const USE_WIDTH = '[ Use now ]'.length
 
@@ -670,8 +612,8 @@ function lineEnd(ui: Ui, view: View, a: Account, act: Actions) {
   )
   switch (health?.kind) {
     case 'login-needed':
+      // The row's line 1 says the sign-in is needed.
       return [
-        <Text color="error">⚠ {health.why}</Text>,
         remove,
         use(<Button key={`sign-in-${a.id}`} variant="primary" onPress={() => act.signInOne(a.id)}>Sign in</Button>),
       ]
@@ -695,45 +637,71 @@ function lineEnd(ui: Ui, view: View, a: Account, act: Actions) {
   }
 }
 
+/** The gap between two buttons at a line's end. */
+const BUTTON_GAP = 2
+
+/** The cells the accounts box's frame takes from each row: its border and its padding, one each side. */
+const SECTION_FRAME = 4
+
+/** The width the operator's row is drawn for: its two lines, the buttons at line 1's end. */
+const ROW_COLUMNS = 82
+
+/** The body width the pane asks for: a row's width and the accounts box's frame around it. */
+export const PANE_COLUMNS = ROW_COLUMNS + SECTION_FRAME
+
+/** The cells the slot takes as lineEnd draws it: a status wider than `[ Use now ]` widens it. */
+function slotWidthOf(view: View, a: Account): number {
+  const health = view.health[a.id]?.kind
+  const status = health === 'logging-in' ? '◌ signing in…' : a.id === view.activeId && view.chromeConnecting === a.id ? '◌ Connecting Chrome…' : ''
+  return Math.max(USE_WIDTH, [...status].length)
+}
+
+/** The cells the buttons at a login's line end take, as lineEnd draws them: Remove where it shows, then the slot. */
+function endWidthOf(view: View, a: Account): number {
+  const health = view.health[a.id]?.kind
+  if (a.slot === '' || health === 'logging-in') return slotWidthOf(view, a)
+  const remove = `[ ${view.removing === a.id ? 'Press again to remove' : 'Remove'} ]`.length
+  return remove + BUTTON_GAP + slotWidthOf(view, a)
+}
+
+/** How a row part is drawn: its tone, a bar in the color of its room left, and the login in use bright, the rest dim. */
+function partStyle(p: RowPart, isActive: boolean) {
+  // A failed row's bar stays in its room's color, drawn dim.
+  if (p.tone === 'dim') return p.used === undefined ? { dimColor: true } : { dimColor: true, color: roomColor(100 - p.used) }
+  if (p.tone === 'warning') return { color: 'warning' }
+  if (p.used !== undefined) return { color: roomColor(100 - p.used) }
+  return { bold: isActive && p.shrink === 'email', dimColor: !isActive }
+}
+
 /**
- * One login: who it is at the left of its first line, its state and presses
- * at the right (under it, still at the right, on a pane too narrow for both),
- * then its windows: the 5-hour one where it has one, the week, the Fable week. The login in use is drawn bright, the rest dim.
+ * One login: its row (rowOf, as the rows key stores it) fitted to the pane's width, the buttons at the end of the line
+ * that holds them, then the warning that its sign-in runs out soon.
  */
-function accountRows(ui: Ui, view: View, a: Account, now: number, act: Actions) {
+function accountRow(ui: Ui, view: View, a: Account, now: number, act: Actions, columns: number) {
   const { Box, Text } = ui
   const health = view.health[a.id]
-  const r = view.readings[a.id]
   const isActive = a.id === view.activeId
   const expiry = health?.kind === 'ok' ? health.refreshExpiresAt : undefined
-  const failure = view.checkErrors?.[a.id]
-  // Its Company (none for the organization named for its own email), its plan by name, and whether the Chrome
-  // extension is signed in to it.
-  const plan = planName(a, hasNoFiveHour(view, a.id))
-  const about = [companyOf(a), plan, view.chromeAccountId === a.id ? 'Chrome' : undefined].filter((s): s is string => s !== undefined)
+  const { lines, endLine } = fitRow(rowOf(view, a, now), columns, endWidthOf(view, a))
   return (
     <Box key={`account-${a.id}`} flexDirection="column" marginBottom={1}>
-      <Box flexDirection="row" flexWrap="wrap" columnGap={2}>
-        <Box flexDirection="row" flexShrink={1}>
-          <Box width={3} flexShrink={0}>
-            <Text bold={isActive} dimColor={!isActive}>{a.id}</Text>
-          </Box>
-          <Box flexDirection="row" flexWrap="wrap" columnGap={2}>
-            <Text bold={isActive} dimColor={!isActive}>{a.email ?? (a.slot === '' ? 'your normal account' : 'not signed in yet')}</Text>
-            {about.length > 0 && <Text dimColor>{about.join(' · ')}</Text>}
-          </Box>
+      {lines.map((line, n) => (
+        <Box key={`line-${a.id}-${n}`} flexDirection="row" flexWrap="wrap">
+          {line.map((p, k) => (
+            <Text key={`part-${a.id}-${n}-${k}`} {...partStyle(p, isActive)}>
+              {p.text}
+            </Text>
+          ))}
+          {n === endLine && (
+            <Box key={`end-${a.id}`} flexDirection="row" flexGrow={1} justifyContent="flex-end" columnGap={BUTTON_GAP} marginLeft={END_GAP}>
+              {lineEnd(ui, view, a, act)}
+            </Box>
+          )}
         </Box>
-        <Box flexDirection="row" flexGrow={1} flexWrap="wrap" justifyContent="flex-end" columnGap={2}>
-          {lineEnd(ui, view, a, act)}
-        </Box>
-      </Box>
-      {hasFiveHour(view, a.id) && windowRow(ui, view.footer.fill, isActive, '5h', r !== undefined, r?.fiveHour, now)}
-      {windowRow(ui, view.footer.fill, isActive, 'week', r !== undefined, r?.sevenDay, now)}
-      {fableRow(ui, view, a, isActive, now)}
+      ))}
       {expiry !== undefined && expiry - now < SIGN_IN_WARN_MS && (
-        <Text color="warning">   sign-in runs out {untilText(expiry, now)}; signing in again renews it</Text>
+        <Text color="warning">sign-in runs out {untilText(expiry, now)}; signing in again renews it</Text>
       )}
-      {failure !== undefined && <Text color="warning">   its last usage check failed: {failure.why}</Text>}
     </Box>
   )
 }
@@ -753,10 +721,10 @@ function blockedRule(view: View): string {
  * Claude in Chrome in a session that has it, where the rotation moves to, and
  * the footer's settings, each group in its box.
  */
-export function Pane(ui: Ui, view: View, now: number, act: Actions) {
+export function Pane(ui: Ui, view: View, now: number, act: Actions, columns: number) {
   const { Box, Text, Button } = ui
   const accounts = [
-    ...view.accounts.map(a => accountRows(ui, view, a, now, act)),
+    ...view.accounts.map(a => accountRow(ui, view, a, now, act, columns - SECTION_FRAME)),
     <Box key="add-row" flexDirection="row" columnGap={2}>
       <Button key="add" onPress={act.add}>+ Add an account</Button>
       {view.accounts.length > 1 && <Button key="rotate" onPress={act.rotate}>Rotate now</Button>}
