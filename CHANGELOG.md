@@ -2,6 +2,12 @@
 
 What each version of the account rotator changed. To get each one as Claude Code starts, turn on auto-update: in `/plugin`, open **Marketplaces**, pick **claude-account-rotator** and choose **Enable auto-update**. To update by hand, run `claude plugin marketplace update claude-account-rotator`, then `claude plugin update account-rotator@claude-account-rotator`, and start a new session.
 
+## 0.5.18-lutso.1 - 2026-11-08
+
+- **+ Add an account never signs in a folder that exists**, so it never replaces a sign-in. It and `account add` pick a folder by one rule: the first number from 2 with no account on it and no folder. Removing an account leaves its folder, so neither takes that number again.
+- **A sign-in from the panel now refuses a login some account may already hold** by the rule `account add` uses: a row whose organization no session has read yet counts as that login, so sign in again once a check has read it.
+- **A new account wears nothing an earlier account under its number left**, from **+ Add an account** and from a session started on a folder nobody listed.
+
 ## 0.5.17-lutso.1 - 2026-11-08
 
 - **`account-rotator account list --json` gives an account with no row stored empty `lines` and `hasRow` false**, where `lines` held a placeholder. Every other account has `hasRow` true. The plain `list` still says so in words.
