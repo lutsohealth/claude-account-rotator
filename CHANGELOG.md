@@ -2,6 +2,10 @@
 
 What each version of the account rotator changed. To get each one as Claude Code starts, turn on auto-update: in `/plugin`, open **Marketplaces**, pick **claude-account-rotator** and choose **Enable auto-update**. To update by hand, run `claude plugin marketplace update claude-account-rotator`, then `claude plugin update account-rotator@claude-account-rotator`, and start a new session.
 
+## 0.5.21-lutso.1 - 2026-11-08
+
+- **A switch held back for a token about to refresh stands while the mod's code reloads**, where it used to be lost after you were told "in a few minutes". It is tried at each minute's check until it goes.
+
 ## 0.5.20-lutso.1 - 2026-11-08
 
 - **The demo harness refuses to store a real usage reading under any key**, by the reset times it hands out. A demo recording shows imitated usage only.
