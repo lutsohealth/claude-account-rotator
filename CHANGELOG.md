@@ -2,6 +2,11 @@
 
 What each version of the account rotator changed. To get each one as Claude Code starts, turn on auto-update: in `/plugin`, open **Marketplaces**, pick **claude-account-rotator** and choose **Enable auto-update**. To update by hand, run `claude plugin marketplace update claude-account-rotator`, then `claude plugin update account-rotator@claude-account-rotator`, and start a new session.
 
+## 0.5.17-lutso.1 - 2026-11-08
+
+- **`account-rotator account list --json` gives an account with no row stored empty `lines` and `hasRow` false**, where `lines` held a placeholder. Every other account has `hasRow` true. The plain `list` still says so in words.
+- **A refused read or write of the store's `store-id` no longer stops a session's minute:** it still settles a switch and checks its accounts, a session started then still boots, and the next minute tries again.
+
 ## 0.5.16-lutso.1 - 2026-11-08
 
 - **`account-rotator account add` signs a new account in from a terminal**, as **+ Add an account** does: you approve it in the browser, and a session of the mod on that store lists it within a minute. With no terminal, as in the Bash tool, it exits 2. It only ever signs in a new folder under `~/.claude/accounts`, so it never replaces a sign-in. [From a shell](README.md#from-a-shell) has the rest.
