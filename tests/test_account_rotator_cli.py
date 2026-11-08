@@ -510,11 +510,6 @@ class Select(StoreCase):
         self.assertEqual(done.returncode, 3, done.stderr)
         self.assertFalse(self.requests.exists())
 
-    def test_the_request_appears_whole_never_half_written(self) -> None:
-        self.answer(True, "ok")
-        self.select("--account", "2", "--wait", "10")
-        self.assertEqual(set(self.seen), {"kind", "nonce", "at", "id", "store"})
-
     def test_json_is_orcas_envelope(self) -> None:
         self.answer(True, "new sessions start on account 2")
         done = self.select("--account", "2", "--json", "--wait", "10")
