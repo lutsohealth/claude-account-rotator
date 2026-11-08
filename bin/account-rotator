@@ -10,7 +10,7 @@ Then one line says when the rows were written and which account new sessions sta
 
 `select` sets the account new sessions start on, as the panel's New on does. Neither verb writes the store: `select`
 leaves a request file in the Claude config folder's account-rotator-requests, naming the store's `store-id`; a
-session of the installed mod on that store applies it within a minute and answers with a result file.
+session of the mod on that store applies it within a minute and answers with a result file.
 """
 
 # Read as text, so `str | None` is no error on a macOS python3 older than 3.10.
@@ -246,7 +246,7 @@ def select(data: dict, store: str, given: str, wait_s: float, as_json: bool) -> 
     os.replace(f"{path}.tmp", path)
     result = answer(folder, nonce, wait_s)
     if result is None:
-        print(f"account-rotator: no session of the installed mod on {store} took the request within {wait_s:g} s, so it is withdrawn; one may have taken it in that same moment: run account list", file=sys.stderr)
+        print(f"account-rotator: no session of the mod on {store} took the request within {wait_s:g} s, so it is withdrawn; one may have taken it in that same moment: run account list", file=sys.stderr)
         return EXIT_NO_SESSION
     message = str(result.get("message", ""))
     if result.get("ok") is not True:
@@ -280,7 +280,7 @@ def parsers() -> tuple[argparse.ArgumentParser, argparse.ArgumentParser]:
     selecting = verbs.add_parser(
         "select",
         help="set the account new sessions start on, as the panel's New on does",
-        description="account select: set the account new sessions start on, as the panel's New on does, through a session of the installed mod on the store, which applies the request within a minute. It never writes the store. A --plugin-dir or throwaway-config session keeps a store of its own and applies only a request read from that store (--store).",
+        description="account select: set the account new sessions start on, as the panel's New on does, through a session of the mod on the store, which applies the request within a minute. It never writes the store. A --plugin-dir or throwaway-config session keeps a store of its own and applies only a request read from that store (--store).",
         epilog=EXITS,
     )
     selecting.add_argument("--account", required=True, help="the account: its id, its email (when one account has it), or system, the account on Claude Code's own login")

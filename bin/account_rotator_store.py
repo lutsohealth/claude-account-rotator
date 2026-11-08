@@ -32,7 +32,7 @@ def config_folder() -> str:
 
 
 def requests_folder() -> str:
-    """Where `account select` leaves requests for the installed sessions: hooks/model.ts requestsDir."""
+    """Where `account select` leaves requests for the mod's sessions: hooks/model.ts requestsDir."""
     return os.path.join(config_folder(), "account-rotator-requests")
 
 
