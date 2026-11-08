@@ -20,6 +20,7 @@ import argparse
 import json
 import math
 import os
+import signal
 import sys
 import time
 import uuid
@@ -34,12 +35,16 @@ EXIT_NO_STORE = 1
 EXIT_USAGE = 2
 EXIT_NO_SESSION = 3
 EXIT_REFUSED = 4
+EXIT_CANCELLED = 130
 MINUTE_MS = 60_000
 POLL_S = 0.25
+# hooks/model.ts REQUEST_TTL_MS: past it no session takes a request, so --wait stops there.
+REQUEST_TTL_S = 300
 OLDER_NOTE = "an older version of the mod stored some rows as text, their times as of when it wrote them"
 EXITS = (
     "Exit 0 done, 1 no store or a damaged one, 2 a usage error (an unknown flag or verb, --agent not claude, an --account"
-    " that names no account or several), 3 no session took the request within --wait, 4 a session refused it."
+    " that names no account or several, a --wait not above 0 and at most 300), 3 no session took the request within --wait,"
+    " or none has given the store a store-id yet, 4 a session refused it, 130 stopped, the request withdrawn."
 )
 
 
@@ -207,9 +212,22 @@ def resolve(data: dict, given: str) -> str:
     raise UsageError(f"--account {given} names no account; the accounts are {named}, or system")
 
 
+def wait_seconds(text: str) -> float:
+    """--wait: finite, above 0, at most the time a session takes a request; a NaN fails the comparison too."""
+    value = float(text)
+    if not 0 < value <= REQUEST_TTL_S:
+        raise argparse.ArgumentTypeError(f"{text} is not above 0 and at most {REQUEST_TTL_S}")
+    return value
+
+
+def is_answer(found: object, nonce: str) -> bool:
+    """Whether a result file's content answers this request: its own nonce, ok a bool, message a string."""
+    return isinstance(found, dict) and found.get("nonce") == nonce and isinstance(found.get("ok"), bool) and isinstance(found.get("message"), str)
+
+
 def answer(folder: str, nonce: str, wait_s: float) -> dict | None:
-    """The result a session wrote for the request, waiting at most `wait_s`; the request withdrawn either way."""
-    request, result = os.path.join(folder, f"{nonce}.json"), os.path.join(folder, f"{nonce}.result.json")
+    """The result a session wrote for the request, waiting at most `wait_s`."""
+    result = os.path.join(folder, f"{nonce}.result.json")
     deadline = time.monotonic() + wait_s
     while True:
         try:
@@ -217,14 +235,33 @@ def answer(folder: str, nonce: str, wait_s: float) -> dict | None:
                 found = json.load(f)
         except (OSError, ValueError):
             found = None
-        if isinstance(found, dict) or time.monotonic() >= deadline:
-            for path in (request, result):
-                try:
-                    os.remove(path)
-                except OSError:
-                    pass
-            return found if isinstance(found, dict) else None
+        if is_answer(found, nonce):
+            return found
+        if time.monotonic() >= deadline:
+            return None
         time.sleep(POLL_S)
+
+
+def cancelled(signum: int, _frame: object) -> None:
+    """SIGTERM and SIGHUP stop the wait as Ctrl-C does, so `select`'s finally withdraws the request."""
+    raise KeyboardInterrupt(signal.Signals(signum).name)
+
+
+def ask(folder: str, request: dict, wait_s: float) -> dict | None:
+    """Writes a request whole, by a rename, and waits for its answer; the request is withdrawn on every way out."""
+    path = os.path.join(folder, f"{request['nonce']}.json")
+    try:
+        os.makedirs(folder, exist_ok=True)
+        with open(f"{path}.tmp", "w", encoding="utf-8") as f:
+            json.dump(request, f)
+        os.replace(f"{path}.tmp", path)
+        return answer(folder, request["nonce"], wait_s)
+    finally:
+        for leftover in (f"{path}.tmp", path, os.path.join(folder, f"{request['nonce']}.result.json")):
+            try:
+                os.remove(leftover)
+            except OSError:
+                pass
 
 
 def select(data: dict, store: str, given: str, wait_s: float, as_json: bool) -> int:
@@ -238,18 +275,22 @@ def select(data: dict, store: str, given: str, wait_s: float, as_json: bool) -> 
     if not isinstance(store_id, str):
         print(f"account-rotator: {store} has no store-id: no session of this version of the mod has run on it; start one, then run again", file=sys.stderr)
         return EXIT_NO_SESSION
-    folder, nonce = requests_folder(), uuid.uuid4().hex
-    os.makedirs(folder, exist_ok=True)
-    path = os.path.join(folder, f"{nonce}.json")
-    with open(f"{path}.tmp", "w", encoding="utf-8") as f:
-        json.dump({"kind": "select", "nonce": nonce, "at": time.time() * 1000, "id": account, "store": store_id}, f)
-    os.replace(f"{path}.tmp", path)
-    result = answer(folder, nonce, wait_s)
+    for signum in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(signum, cancelled)
+    folder, nonce = requests_folder(store), uuid.uuid4().hex
+    try:
+        result = ask(folder, {"kind": "select", "nonce": nonce, "at": time.time() * 1000, "id": account, "store": store_id}, wait_s)
+    except KeyboardInterrupt:
+        print("account-rotator: stopped, so the request is withdrawn; a session may have taken it in that same moment: run account list", file=sys.stderr)
+        return EXIT_CANCELLED
+    except OSError as error:
+        print(f"account-rotator: cannot write a request in {folder}: {error.strerror or error}", file=sys.stderr)
+        return EXIT_NO_STORE
     if result is None:
         print(f"account-rotator: no session of the mod on {store} took the request within {wait_s:g} s, so it is withdrawn; one may have taken it in that same moment: run account list", file=sys.stderr)
         return EXIT_NO_SESSION
-    message = str(result.get("message", ""))
-    if result.get("ok") is not True:
+    message = result["message"]
+    if not result["ok"]:
         print(f"account-rotator: a session refused: {message}", file=sys.stderr)
         return EXIT_REFUSED
     if as_json:
@@ -284,7 +325,7 @@ def parsers() -> tuple[argparse.ArgumentParser, argparse.ArgumentParser]:
         epilog=EXITS,
     )
     selecting.add_argument("--account", required=True, help="the account: its id, its email (when one account has it), or system, the account on Claude Code's own login")
-    selecting.add_argument("--wait", type=float, default=90.0, help="seconds to wait for a session to take the request (default 90; a session looks once a minute)")
+    selecting.add_argument("--wait", type=wait_seconds, default=90.0, help="seconds to wait for a session to take the request, above 0 and at most 300 (default 90; a session looks once a minute)")
     for verb in (listing, selecting):
         verb.add_argument("--agent", default="claude", help="the agent whose accounts these are: claude, the only one the mod keeps")
         verb.add_argument("--json", action="store_true", help="print Orca's JSON envelope instead of text")

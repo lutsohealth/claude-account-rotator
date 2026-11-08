@@ -1297,6 +1297,6 @@ export function requestFrom(value: unknown, now: number): RotatorRequest | undef
 
 /** The requests folder: in the Claude config folder, CLAUDE_CONFIG_DIR or `~/.claude`, as bin/account_rotator_store.py finds it. */
 export function requestsDir(configDir: string | undefined, home: string): string {
-  return `${configDir ?? `${home}/.claude`}/account-rotator-requests`
+  return `${configDir || `${home}/.claude`}/account-rotator-requests`
 }
 

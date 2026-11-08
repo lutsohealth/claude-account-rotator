@@ -457,9 +457,13 @@ async function saveStoreId($: Host): Promise<void> {
   await $.store.set('store-id', `store-${Math.random().toString(36).slice(2, 12)}`)
 }
 
+/** The requests this session has taken: one whose result it could not write is not applied again over a later press. */
+const takenRequests = new Set<string>()
+
 /**
- * Applies each request in the requests folder that names this store's `store-id` and has no result yet, and writes
- * its result beside it. A request another store's CLI read, or a stale one, is left for the CLI to withdraw.
+ * Applies each request in the requests folder that names this store's `store-id` and has no result yet, oldest first
+ * so the newest stands, and writes its result beside it. A request another store's CLI read, or a stale one, is left
+ * for the CLI to withdraw.
  */
 async function applyRequests($: Host): Promise<void> {
   const storeId = await $.store.get('store-id')
@@ -468,15 +472,29 @@ async function applyRequests($: Host): Promise<void> {
   const entries = await $.fs.list(dir).catch(() => [])
   const names = new Set(entries.map(e => e.name))
   const now = await $.clock.now()
+  const requests: RotatorRequest[] = []
   for (const name of names) {
     const nonce = name.endsWith('.json') && !name.endsWith('.result.json') ? name.slice(0, -'.json'.length) : undefined
-    if (nonce === undefined || names.has(`${nonce}.result.json`)) continue
+    if (nonce === undefined || names.has(`${nonce}.result.json`) || takenRequests.has(nonce)) continue
     // A file the CLI is still writing, or one that is no request, reads as none.
     const text = await $.fs.read(`${dir}/${name}`).catch(() => undefined)
     const request = requestFrom(parsed(typeof text === 'string' ? text : undefined), now)
-    if (request === undefined || request.nonce !== nonce || request.store !== storeId) continue
-    const outcome = await applyRequest($, request)
-    await $.fs.write(`${dir}/${nonce}.result.json`, JSON.stringify({ nonce, ...outcome, at: now }))
+    if (request !== undefined && request.nonce === nonce && request.store === storeId) requests.push(request)
+  }
+  for (const request of requests.sort((a, b) => a.at - b.at)) {
+    takenRequests.add(request.nonce)
+    await takeRequest($, `${dir}/${request.nonce}.result.json`, request, now)
+  }
+}
+
+/** Applies one request and writes its result. A failure of either is logged, so the minute's other work still runs. */
+async function takeRequest($: Host, resultPath: string, request: RotatorRequest, now: number): Promise<void> {
+  const result = (outcome: object) => $.fs.write(resultPath, JSON.stringify({ nonce: request.nonce, ...outcome, at: now }))
+  try {
+    await result(await applyRequest($, request))
+  } catch (error) {
+    await debug($, `request ${request.nonce} failed: ${String(error)}`)
+    await result({ ok: false, message: `the session failed to apply it: ${String(error)}` }).catch(() => undefined)
   }
 }
 
@@ -1857,7 +1875,7 @@ export const register: Register = on => {
     })
     $.clock.every(60_000, () => {
       void mergeStore($)
-        .then(() => applyRequests($))
+        .then(() => applyRequests($).catch(error => debug($, `requests failed: ${String(error)}`)))
         .then(() => settlePending($, false))
         .then(() => checkAll($, false))
         .catch(error => debug($, `sync failed: ${String(error)}`))
