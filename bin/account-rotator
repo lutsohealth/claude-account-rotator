@@ -280,9 +280,6 @@ def select(data: dict, store: str, given: str, wait_s: float, as_json: bool) -> 
     folder, nonce = requests_folder(store), uuid.uuid4().hex
     try:
         result = ask(folder, {"kind": "select", "nonce": nonce, "at": time.time() * 1000, "id": account, "store": store_id}, wait_s)
-    except KeyboardInterrupt:
-        print("account-rotator: stopped, so the request is withdrawn; a session may have taken it in that same moment: run account list", file=sys.stderr)
-        return EXIT_CANCELLED
     except OSError as error:
         print(f"account-rotator: cannot write a request in {folder}: {error.strerror or error}", file=sys.stderr)
         return EXIT_NO_STORE
@@ -350,7 +347,11 @@ def main(argv: list[str] | None = None, *, now: float | None = None, zone: tzinf
         print(f"account-rotator: {error}", file=sys.stderr)
         return EXIT_NO_STORE
     if args.verb == "select":
-        return select(data, store, args.account, args.wait, args.json)
+        try:
+            return select(data, store, args.account, args.wait, args.json)
+        except KeyboardInterrupt:
+            print("account-rotator: stopped, so any request is withdrawn; a session may have taken it in that same moment: run account list", file=sys.stderr)
+            return EXIT_CANCELLED
     now_ms = time.time() * 1000 if now is None else now
     print(json.dumps(list_json(data, store, now_ms, zone), ensure_ascii=False, indent=2) if args.json else list_text(data, now_ms, zone))
     return 0
