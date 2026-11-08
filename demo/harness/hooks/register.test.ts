@@ -67,3 +67,23 @@ test('another plugin\'s write goes through, whatever it holds', async () => {
   expect(await set('usage:other', REAL_READING, 'another-plugin')).toEqual({ value: 'passed on' })
   expect(await held('usage:other')).toBe(undefined)
 })
+
+// puma-eslxj.31 (RULING 4705): `$.env.set` resolves to the engine's EnvSetResult, `{}` once the variable is set.
+const SLOT_NAME = 'CLAUDE_SECURESTORAGE_CONFIG_DIR'
+const SLOT_2 = '/home/you/.claude/accounts/2'
+const setSlot = async (value: string) => ((await call('env.set', { name: SLOT_NAME, value })) as Answer).value
+const slotInUse = async () => ((await call('env.get', { name: SLOT_NAME })) as Answer).value
+
+test('a switch answers as the engine does and moves the imitated login', async () => {
+  await setSlot('/home/you/.claude/accounts/3')
+  expect([await setSlot(SLOT_2), await slotInUse()]).toEqual([{}, SLOT_2])
+})
+
+test('the slot in use answers as the engine does and stays', async () => {
+  await setSlot(SLOT_2)
+  expect([await setSlot(SLOT_2), await slotInUse()]).toEqual([{}, SLOT_2])
+})
+
+test('another variable goes on to the engine', async () => {
+  expect(await call('env.set', { name: 'ACCOUNT_ROTATOR_SESSION', value: 'mark' })).toEqual({ value: 'passed on' })
+})
