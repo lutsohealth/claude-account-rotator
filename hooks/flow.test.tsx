@@ -7174,6 +7174,22 @@ test('two sessions on one store, accounts: a write that took the place of the ne
   expect(String(resultOf(w, N2)?.message)).toMatch(/account 9 /)
 })
 
+// Review C13-R2 RED-READBACK-IDENTITY [AFTER-SIGN-IN]: the slot alone is not the sign-in this session read.
+test('two sessions on one store, accounts: a write that gave the new row another login answers not ok', async ($, on) => {
+  const { w, store, clock } = await selectWorld($, on)
+  await signInFolder(w, SLOT7, 'seven@example.com')
+  let replaced = false
+  w.afterStoreSet = key => {
+    if (key !== 'accounts' || replaced) return
+    replaced = true
+    store.set('accounts', (store.get('accounts') as { slot: string }[]).map(a => (a.slot === SLOT7 ? { ...a, email: 'eight@example.com', orgId: 'org-eight@example.com' } : a)))
+  }
+  w.files[`${REQUESTS}/${N1}.json`] = addRequest(N1, SLOT7, store.get('store-id'), clock.now())
+  await untilTick(clock)
+  expect(replaced, 'the fixture reached the write').toBe(true)
+  expect(resultOf(w, N1)?.ok).toBe(false)
+})
+
 // Review C13-R1 F9 [STALE-ID-KEY]: an account on `rm` is not moved, so a session on it can write under the id after the rm.
 test('a row an add lists wears no key an old holder of that id left, by the list rm drops', async ($, on) => {
   const { w, store, clock } = await selectWorld($, on)

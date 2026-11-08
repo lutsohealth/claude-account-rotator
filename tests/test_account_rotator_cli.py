@@ -798,7 +798,8 @@ class Add(RequestCase):
         return json.loads(self.store.read_text(encoding="utf-8"))
 
     def session(self, ok: bool = True, message: str = "account added", account_id: str | None = None) -> threading.Thread:
-        """A session that takes the first add it finds and answers."""
+        """A session that takes the first add it finds and answers. It lists nothing, as the CLI reads no store after an
+        answer: the session's own read back is held by the flow tests. These tests hold how the CLI forwards an answer."""
 
         def respond() -> None:
             deadline = time.monotonic() + 20
