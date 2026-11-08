@@ -4289,19 +4289,20 @@ test('a login whose only reading is an older version\'s is read at boot, though 
   expect(storedOf(store, '1')?.sevenDay?.pct).toBe(20)
 })
 
-test('a session records the version it writes as, and drops the records of sessions gone a day', async ($, on) => {
+// puma-eslxj.16: nothing reads writer:<sessionId>, so boot writes none; an older version's records stay as they stand.
+test('a session writes no writer: key at boot, and leaves the writer: records of older versions as they stand', async ($, on) => {
   const w = fresh()
   w.keychain['Claude Code-credentials'] = blob('tok-1')
   w.usage['tok-1'] = [10, 20]
+  const old = { 'writer:gone': { version: 1, at: NOW - 25 * HOUR }, 'writer:recent': { version: 1, at: NOW - HOUR } }
   const store = new Map<string, unknown>(Object.entries({
     accounts: [{ id: '1', slot: '', email: 'one@example.com' }],
-    'writer:gone': { version: 1, at: NOW - 25 * HOUR },
-    'writer:recent': { version: 1, at: NOW - HOUR },
+    ...old,
   }))
   const clock = world(on, w, store)
   await start($, clock)
-  expect(store.get('writer:session-1')).toEqual({ version: 1, at: NOW })
-  expect([store.has('writer:gone'), store.has('writer:recent')]).toEqual([false, true])
+  await clock.advance(61_000)
+  expect(Object.fromEntries([...store].filter(([key]) => key.startsWith('writer:')))).toEqual(old)
 })
 
 /** Every text the pane draws, one per line. */

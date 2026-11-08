@@ -487,7 +487,7 @@ export function readingFromLimits(
   return { ...(fiveHour ? { fiveHour } : {}), ...(sevenDay ? { sevenDay } : {}), at: now }
 }
 
-/** The version of the store's shapes this mod writes, stamped on `usage:<id>` and `writer:<sessionId>`. */
+/** The version of the store's shapes this mod writes, stamped as `v` on `usage:<id>`, `usage-due:<id>` and `rows`. */
 export const WRITER_VERSION = 1
 
 /**
