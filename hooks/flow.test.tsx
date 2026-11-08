@@ -1520,14 +1520,14 @@ test('a plain usage-limit stop on an account that reports no 5-hour window moves
   const clock = world(on, w, { ...TWO_LOGINS, 'five-hour-limit': 'off' })
   await start($, clock)
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
-  expect(await pane.findAll({ type: 'Text', text: /^5h$/ })).toHaveLength(0)
+  expect(await pane.findAll({ type: 'Text', text: /^5h(?: | –)$/ })).toHaveLength(0)
   await $.classic.StopFailure({ error: 'rate_limit', last_assistant_message: 'Claude usage limit reached.' })
   await clock.settle()
   expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
   expect(w.toasts.filter(t => /: account 1 has 0% of its week left\.$/.test(t))).toHaveLength(1)
   await pane.redraw()
-  expect(await pane.find({ text: /^resets in 5h/ })).toBeUndefined()
-  expect(await pane.findAll({ type: 'Text', text: /^5h$/ })).toHaveLength(0)
+  expect(await pane.find({ text: /^  resets [0-9]+h/ })).toBeUndefined()
+  expect(await pane.findAll({ type: 'Text', text: /^5h(?: | –)$/ })).toHaveLength(0)
   await pane.unmount()
 })
 
@@ -1547,8 +1547,8 @@ test('a session that starts on a login whose week is spent moves at once; a turn
   await $.classic.StopFailure(WEEKLY_STOP)
   await clock.settle()
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
-  expect(await pane.findAll({ type: 'Text', text: /^5h$/ })).toHaveLength(0)
-  expect(await pane.find({ text: /^resets in 5h/ })).toBeUndefined()
+  expect(await pane.findAll({ type: 'Text', text: /^5h(?: | –)$/ })).toHaveLength(0)
+  expect(await pane.find({ text: /^  resets [0-9]+h/ })).toBeUndefined()
   await pane.unmount()
   expect(w.envSets).toHaveLength(1)
   expect(w.submitted).toEqual([])
@@ -1574,7 +1574,7 @@ test('a 5-hour stop mark already stored on a login whose usage reports no 5-hour
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
   const isClear = async () => {
     await pane.redraw()
-    return (await pane.findAll({ type: 'Text', text: /^5h$/ })).length === 0 && (await pane.find({ text: /^resets in [0-9]+h/ })) === undefined
+    return (await pane.findAll({ type: 'Text', text: /^5h(?: | –)$/ })).length === 0 && (await pane.find({ text: /^  resets [0-9]+h/ })) === undefined
   }
   expect(await isClear()).toBe(true)
   // A session on an older version saves login 3's reading as it reads it, knowing nothing of the 5-hour window it lacks.
@@ -1637,8 +1637,8 @@ test('a turn that dies on the weekly limit marks the week spent, never a 5-hour 
   expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
   expect(w.toasts.filter(t => /^Switched to Claude account 2.*: account 1 has 0% of its week left\.$/.test(t))).toHaveLength(1)
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
-  expect(await pane.findAll({ type: 'Text', text: /^5h$/ })).toHaveLength(0)
-  expect(await pane.find({ text: /^resets in 5h/ })).toBeUndefined()
+  expect(await pane.findAll({ type: 'Text', text: /^5h(?: | –)$/ })).toHaveLength(0)
+  expect(await pane.find({ text: /^  resets [0-9]+h/ })).toBeUndefined()
   await pane.unmount()
 })
 
@@ -1655,8 +1655,8 @@ test('a stored stop mark with no reset time, on an account whose token is not li
   // C7 (puma-eslxj.8), a changed expected value. SOURCE: the bead's decision "Draw a 5h line only when the newest
   // accepted body or response lists a window, or a stop mark stands" (RULING 4490). Login 1 reports no 5-hour window;
   // login 2's only window was an older version's stop mark, passed, and no body said it has one: neither draws a 5h row.
-  expect(await pane.findAll({ type: 'Text', text: /none reported$/ })).toHaveLength(0)
-  expect(await pane.findAll({ type: 'Text', text: /^5h$/ })).toHaveLength(0)
+  expect(await pane.findAll({ type: 'Text', text: /^5h(?: | –)$/ })).toHaveLength(0)
+  expect(await pane.findAll({ type: 'Text', text: /^5h(?: | –)$/ })).toHaveLength(0)
   await pane.press({ key: 'rotate' })
   await clock.settle()
   expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
@@ -2093,7 +2093,7 @@ test('a usage check that fails shows its HTTP status on the login\'s line and in
   w.failing = {}
   await clock.advance(10 * 60_000)
   await pane.redraw()
-  expect(await pane.find({ text: /its last usage check failed/ })).toBeUndefined()
+  expect(await pane.find({ text: /Failed to update/ })).toBeUndefined()
   expect(store.has('check-error:2')).toBe(false)
   await pane.unmount()
 })
@@ -2182,7 +2182,7 @@ test('a login whose usage reports no 5-hour window has no 5h row in the pane; a 
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
   expect(await pane.findAll({ type: 'Text', text: /^5h $/ })).toHaveLength(1)
   expect(await pane.findAll({ type: 'Text', text: /^Used $/ })).toHaveLength(2)
-  expect(await pane.find({ text: /none reported$/ })).toBeUndefined()
+  expect(await pane.find({ text: /^5h –$/ })).toBeUndefined()
   expect(await pane.find({ text: /^▰{1}▱{9} 10%$/ })).toBeDefined()
   await pane.unmount()
 })
