@@ -195,6 +195,7 @@ class StorePick(StoreCase):
         torn = self.stores / "account-rotator_claude-account-rotator-torn.json"
         torn.write_text('{"accounts": [', encoding="utf-8")
         os.utime(torn, (2_500_000, 2_500_000))
+        (self.stores / "account-rotator_claude-account-rotator-dangling.json").symlink_to(self.tmp / "gone")
         self.assertEqual(self.picks(), {"account-rotator-launch": "/the/installed/store", "account-rotator": str(self.store)})
 
     def test_store_names_the_file_whatever_its_name(self) -> None:
