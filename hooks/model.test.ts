@@ -4,7 +4,7 @@ import type { RotateTo, View } from '../types'
 import { weekLeaveFrom, launchOnFrom, pickLaunch, isSessionStop } from './model'
 import { isSameWeek, whoseWeek } from './model'
 import { companyOf, identityFromStatus, planName } from './model'
-import { laterMark, withFableMark } from './model'
+import { laterMark, spentMark, withFableMark } from './model'
 import { USAGE_BACKOFF_MAX_MS, USAGE_CLAIM_MS, USAGE_CLAIM_WAIT_MS, USAGE_EARLY_MS, WRITER_VERSION, afterUsage, claimDueReads, gatingDue, isUsageDue, mayForceUsage, mayReadSince, renewClaim, retryAfterFrom, usageDueFrom } from './model'
 import { DEFAULT_FOOTER, availableNow, braille, browsersFrom, chromeNote, continueTextFrom, counted, fiveHourLimitFrom, credentialFrom, credentialsFile, fableMark, fableSpentNotice, fableStay, footerStyleFrom, healthOf, identityFromProfile, isFableSpent, isFableStop, isNoBrowser, isPolicyRefusal, keepFable, keychainItem, legacyMark, markFrom, nextReset, pickTarget, pie, readingFromUsage, rotateToFrom, shouldLeave, roomColor, windowPct, withMark, withWeekMark } from './model'
 
@@ -929,6 +929,48 @@ test('a stored Fable week that reset before the stop is an older week: it leaves
   const guessed = new Date(NOW + 7 * 24 * HOUR).toISOString()
   const older = new Date(NOW - HOUR).toISOString()
   expect(withFableMark(fableAt(100, older), stopMark(guessed), NOW)?.fable).toEqual({ pct: 100, resetsAt: guessed, isStop: true })
+})
+
+// Review opus-c6 F1 [MARK-OUTLIVES-WEEK] (RULING 4481): a stop that guessed its week (no reset known) under an hour
+// before the real reset holds the NEXT week spent; both mark functions, every lead before the reset.
+const HOUR_LEADS = [60_000, HOUR / 2, HOUR - 60_000, HOUR + 60_000, 6 * HOUR, 24 * HOUR, 6 * 24 * HOUR]
+const STORED_WEEKS = [undefined, { pct: 40, resetsAt: new Date(NOW - HOUR).toISOString() }]
+const WEEK = 7 * 24 * HOUR
+
+test('a mark that guessed its week ends once a body reads the week after the real reset, wherever in its week the stop fell', () => {
+  const offenders: string[] = []
+  let cases = 0
+  for (const lead of HOUR_LEADS) {
+    for (const read of STORED_WEEKS) {
+      const realReset = NOW + lead
+      const now = realReset + 60_000
+      const next = new Date(realReset + WEEK).toISOString()
+      const guessedFable = fableMark(read, NOW)
+      const fable = withFableMark({ at: now, fable: { pct: 0, resetsAt: next } }, { pct: 100, resetsAt: guessedFable.resetsAt as string, at: NOW }, now)
+      const guessedWeek = spentMark(read, NOW, WEEK)
+      const week = withWeekMark({ at: now, sevenDay: { pct: 0, resetsAt: next } }, { pct: 100, resetsAt: guessedWeek.resetsAt as string, at: NOW }, now)
+      const where = `stop ${lead / 60_000} min before the reset, stored ${read === undefined ? 'none' : 'a past week'}`
+      cases += 1
+      if (isFableSpent(fable, now)) offenders.push(`Fable: ${where}`)
+      if (week?.sevenDay?.isStop === true) offenders.push(`week: ${where}`)
+    }
+  }
+  expect(cases).toBe(HOUR_LEADS.length * STORED_WEEKS.length)
+  expect(offenders).toEqual([])
+})
+
+test('a stop\'s mark stands over a lagging body of its own week, the week that began before the stop', () => {
+  const now = NOW + HOUR
+  expect(withFableMark(fableAt(40), stopMark(), now)?.fable?.pct).toBe(100)
+  expect(withWeekMark({ at: now, sevenDay: { pct: 40, resetsAt: WEEK_END } }, { pct: 100, resetsAt: WEEK_END, at: NOW }, now)?.sevenDay?.isStop).toBe(true)
+})
+
+// Review opus-c6 F2 [UNDO-OWNERSHIP] (RULING 4481): a held mark that stands takes the later `at`, so a write that keeps
+// it is no longer byte-equal to the provisional stop's own.
+test('a held Fable mark that stands takes the later of the two marks\' times', () => {
+  const held = { pct: 100, resetsAt: FABLE_END, at: NOW }
+  expect(laterMark(held, { pct: 100, resetsAt: FABLE_END, at: NOW + 5 })).toEqual({ ...held, at: NOW + 5 })
+  expect(laterMark(held, { pct: 100, resetsAt: '2026-10-16T03:00:00Z', at: NOW + 5 })).toEqual({ ...held, at: NOW + 5 })
 })
 
 test('of two Fable marks the one that ends later stands, and of one, that one', () => {

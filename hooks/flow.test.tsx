@@ -3,7 +3,7 @@ import type { Engine, MockClock } from 'claude-code/testing'
 import type { On, ProcessRunResult, SessionRateLimit, ToolCallArgs } from 'claude-code'
 
 import { DEFAULT_FOOTER, USAGE_CLAIM_WAIT_MS, USAGE_FORCE_AFTER_MS, USAGE_IDLE_MS, keychainItem, roomColor } from './model'
-import { longBar } from './model'
+import { laterMark, longBar, markFrom } from './model'
 
 const NOW = Date.parse('2026-10-12T10:00:00Z')
 const HOUR = 3600_000
@@ -5010,3 +5010,66 @@ test('a Fable mark another session stored on a login with no reading yet counts:
   await start($, clock)
   expect(await fableRows($)).toEqual([`${longBar(90)} 90% left`, `${longBar(0)} 0% left`])
 })
+
+// Review codex-c6 MARK-RETAINED and opus-c6 F3 [VIEW-OUTLIVES-STORE-DELETE] (RULING 4481): a store key another session
+// deletes (its provisional-stop undo, Remove, a sign-in as another account) leaves this session's view at the next
+// merge, at every key mergeStore folds that some path deletes.
+const DELETED_KEYS: [string, unknown][] = [
+  ['mark:2', { pct: 100, resetsAt: FABLE_RESET, at: NOW }],
+  ['week-mark:2', { pct: 100, resetsAt: FABLE_RESET, at: NOW }],
+  ['fable-mark:2', { pct: 100, resetsAt: FABLE_RESET, at: NOW }],
+  ['no-five-hour:2', true],
+  ['usage:2', { sevenDay: { pct: 30, resetsAt: WEEK_RESET }, fable: { pct: 40, resetsAt: FABLE_RESET }, at: NOW - 60_000, by: '2', v: 1, src: 'body' }],
+]
+/** Login 2's lines in the pane, its usage call answering 429, with `seed` in the store and then, where `deleted`, gone from it as another session deletes it. */
+async function loginTwoAfter($: Engine, on: On, seed: Record<string, unknown>, deleted: string | undefined): Promise<string> {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [20, 30, 10]
+  w.failing = { 'tok-2': 429 }
+  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off', ...seed }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  if (deleted !== undefined) store.delete(deleted)
+  await clock.advance(61_000)
+  const text = await paneText($)
+  return text.slice(text.indexOf('two@example.com'), text.indexOf(' Accounts '))
+}
+/** Login 2's lines with nothing seeded: the reference every deleted key returns to; set by the test below, which runs first. */
+let neverSet = '(the reference test did not run)'
+test('with nothing seeded, login 2 draws no reading yet: the reference a deleted key returns to', async ($, on) => {
+  neverSet = await loginTwoAfter($, on, {}, undefined)
+  expect(neverSet).toMatch(/no reading yet/)
+})
+for (const [key, value] of DELETED_KEYS) {
+  // The seed shows while it stands, or its deleted case proves nothing.
+  test(`${key} seeded by another session shows in this session's pane`, async ($, on) => {
+    expect([key, await loginTwoAfter($, on, { [key]: value }, undefined)]).not.toEqual([key, neverSet])
+  })
+  test(`${key} another session deletes leaves this session's pane as if it was never set`, async ($, on) => {
+    expect([key, await loginTwoAfter($, on, { [key]: value }, key)]).toEqual([key, neverSet])
+  })
+}
+
+// Review opus-c6 F2 [UNDO-OWNERSHIP] (RULING 4481): another session's proven Fable stop on the login, written after a
+// provisional one, is that session's write: no end of the unproven switch takes it back, whatever reset it carries.
+const THEIR_RESETS: [string, string][] = [
+  ['the same reset', FABLE_RESET],
+  ['a sooner reset', '2026-10-16T03:00:00Z'],
+  ['a later reset', '2026-10-19T03:00:00Z'],
+]
+for (const [endName, end] of F3_ENDS) {
+  for (const [theirName, resetsAt] of THEIR_RESETS) {
+    test(`${endName} of an unproven switch keeps the Fable mark another session's proven stop wrote after the provisional one, with ${theirName}`, async ($, on) => {
+      const { w, store, clock } = await stopDuringSwitch($, on, 40_000, FABLE_STOP.last_assistant_message, undefined, { 'tok-2': [10, 41, 50] })
+      expect(markOf(store.get('fable-mark:2'))).toEqual([100, FABLE_RESET])
+      // Exactly saveFableMark's store write in the other session, the harness running one engine.
+      store.set('fable-mark:2', laterMark(markFrom(store.get('fable-mark:2')), { pct: 100, resetsAt, at: clock.now() }))
+      await end($, w, clock)
+      const kept = markFrom(store.get('fable-mark:2'))
+      const isKept = kept !== undefined && Date.parse(kept.resetsAt) >= Date.parse(resetsAt)
+      expect([endName, theirName, isKept ? 'kept' : `dropped: ${JSON.stringify(store.get('fable-mark:2'))}`]).toEqual([endName, theirName, 'kept'])
+    })
+  }
+}
