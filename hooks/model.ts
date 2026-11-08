@@ -1,4 +1,4 @@
-import type { Account, Fill, FiveHourLimit, FooterStyle, Glyphs, Health, Highlight, LaunchOn, LaunchPick, Mark, PlanTier, Reading, RotateTo, Row, RowPart, StoredRows, UsageDue, UsageWindow, View } from '../types'
+import type { Account, Fill, FiveHourLimit, FooterStyle, Glyphs, Health, Highlight, LaunchOn, LaunchPick, Mark, PlanTier, Reading, RotateTo, Row, RowPart, StoredRows, StoredRun, UsageDue, UsageWindow, View } from '../types'
 
 /** Leave a login once its 5-hour window is this full (percent). */
 export const LEAVE_FIVE_HOUR = 90
@@ -923,9 +923,12 @@ export function hasFiveHour(view: View, id: string): boolean {
 /** The plans with a separate weekly limit for Fable: on these, a login whose usage lists no Fable week draws it unknown. */
 export const HAS_FABLE_WEEK = /^(max|ultra)\b/i
 
-/** "2d 3h 14m", "20h 27m", "27m": the time until `at`, the days dropped under a day and the hours under an hour. */
-export function resetText(at: string, now: number): string {
-  const minutes = Math.max(0, Math.round((Date.parse(at) - now) / 60_000))
+/**
+ * "2d 3h 14m", "20h 27m", "27m": the time until `at` (ISO 8601 or epoch milliseconds), the days dropped under a day
+ * and the hours under an hour. bin/account-rotator renders a stored `until` by the same rule, rounding a half minute up.
+ */
+export function resetText(at: string | number, now: number): string {
+  const minutes = Math.max(0, Math.round(((typeof at === 'string' ? Date.parse(at) : at) - now) / 60_000))
   const [days, hours, mins] = [Math.floor(minutes / 1440), Math.floor((minutes % 1440) / 60), minutes % 60]
   if (days > 0) return `${days}d ${hours}h ${mins}m`
   return hours > 0 ? `${hours}h ${mins}m` : `${mins}m`
@@ -936,9 +939,25 @@ export function clockText(at: number, timeZone?: string): string {
   return new Intl.DateTimeFormat('en-GB', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23', ...(timeZone === undefined ? {} : { timeZone }) }).format(at)
 }
 
+/**
+ * Two resets this close are one to the row: the Fable week's says nothing beside the week's. Judged on the instants,
+ * never on their text at `now`, so the stored row does not change with the writer's second.
+ */
+const SAME_RESET_MS = 60_000
+
+/** A reset ahead: the time left as the row says it, and when, in epoch milliseconds. */
+type Reset = { text: string; at: number }
+
 /** A window's reset, while it lies ahead. */
-const resetAhead = (w: UsageWindow | undefined, now: number): string | undefined =>
-  w?.resetsAt !== undefined && Date.parse(w.resetsAt) > now ? resetText(w.resetsAt, now) : undefined
+function resetAhead(w: UsageWindow | undefined, now: number): Reset | undefined {
+  const at = w?.resetsAt === undefined ? NaN : Date.parse(w.resetsAt)
+  return at > now ? { text: resetText(at, now), at } : undefined
+}
+
+/** One part of text and resets: its text now, and its runs, each reset an {until} for `rows` to store. */
+function resetsPart(pieces: (string | Reset)[]): RowPart {
+  return { text: pieces.map(p => (typeof p === 'string' ? p : p.text)).join(''), runs: pieces.map(p => (typeof p === 'string' ? p : { until: p.at })) }
+}
 
 /**
  * A window as the row draws it: its label, then a ten-cell bar and the percent used, whatever the footer fills with,
@@ -965,10 +984,12 @@ function statePart(view: View, a: Account, timeZone: string | undefined): RowPar
   // A good read clears the failure, so one standing at the good read's own millisecond came after it.
   if (failure !== undefined && (readAt === undefined || failure.at >= readAt)) {
     const status = HTTP_STATUS.exec(failure.why)?.[1]
-    return { text: `${clockText(failure.at, timeZone)} Failed to update${status === undefined ? '' : ` (HTTP ${status})`}`, tone: 'warning' }
+    const failed = ` Failed to update${status === undefined ? '' : ` (HTTP ${status})`}`
+    return { text: `${clockText(failure.at, timeZone)}${failed}`, tone: 'warning', runs: [{ clock: failure.at }, failed] }
   }
   // A time over no reading would name a read the row cannot show.
-  return readAt === undefined || view.readings[a.id] === undefined ? undefined : { text: `updated ${clockText(readAt, timeZone)}` }
+  if (readAt === undefined || view.readings[a.id] === undefined) return undefined
+  return { text: `updated ${clockText(readAt, timeZone)}`, runs: ['updated ', { clock: readAt }] }
 }
 
 /** Line 2: the week used, the Fable week used (a dash on Max and Ultra where no body listed it), and the resets ahead. */
@@ -980,8 +1001,10 @@ function usageLine(view: View, a: Account, now: number): RowPart[] {
   const fable = isFable ? usedParts(' Fable', r.fable, now) : []
   const [week, fableReset] = [resetAhead(r.sevenDay, now), resetAhead(r.fable, now)]
   const resets =
-    week === undefined ? (fableReset === undefined ? undefined : `Fable resets ${fableReset}`) : `resets ${week}${fableReset === undefined || fableReset === week ? '' : ` · Fable ${fableReset}`}`
-  return [...usedParts('Used', r.sevenDay, now), ...fable, ...(resets === undefined ? [] : [{ text: `  ${resets}` }])]
+    week === undefined
+      ? fableReset === undefined ? undefined : ['  Fable resets ', fableReset]
+      : ['  resets ', week, ...(fableReset === undefined || Math.abs(fableReset.at - week.at) < SAME_RESET_MS ? [] : [' · Fable ', fableReset])]
+  return [...usedParts('Used', r.sevenDay, now), ...fable, ...(resets === undefined ? [] : [resetsPart(resets)])]
 }
 
 /**
@@ -993,7 +1016,7 @@ function fiveHourLine(view: View, a: Account, now: number): RowPart[] | undefine
   const w = view.readings[a.id]?.fiveHour
   if (w === undefined) return [{ text: '5h –', tone: 'dim' }]
   const reset = resetAhead(w, now)
-  return [...usedParts('5h', w, now), ...(reset === undefined ? [] : [{ text: `  resets ${reset}` }])]
+  return [...usedParts('5h', w, now), ...(reset === undefined ? [] : [resetsPart(['  resets ', reset])])]
 }
 
 /**
@@ -1023,9 +1046,31 @@ export function rowText(row: Row): string[] {
   return row.lines.map(line => line.map(p => p.text).join(''))
 }
 
-/** Every login's row as text, as the merge stores it under `rows`, in the machine's own zone. */
+/**
+ * A row line as `rows` stores it: its text in runs, each time of day as {clock} and each reset as {until}, so the
+ * stored bytes hold neither the writer's zone nor its minute, and every session on a store writes the same ones.
+ */
+export function storedLine(line: readonly RowPart[]): StoredRun[] {
+  return line
+    .flatMap(p => p.runs ?? [p.text])
+    .reduce<StoredRun[]>((runs, r) => {
+      const last = runs.at(-1)
+      return typeof r === 'string' && typeof last === 'string' ? [...runs.slice(0, -1), last + r] : [...runs, r]
+    }, [])
+}
+
+/** Every login's row, as the merge stores it under `rows`. */
 export function rowsOf(view: View, now: number): StoredRows['rows'] {
-  return view.accounts.map(a => ({ id: a.id, lines: rowText(rowOf(view, a, now)) }))
+  return view.accounts.map(a => ({ id: a.id, lines: rowOf(view, a, now).lines.map(storedLine) }))
+}
+
+/**
+ * A stored line as a reader at `now` prints it, in `timeZone` or the machine's own: bin/account-rotator's rule. A reset
+ * already past reads `passed`: the row was written before it, and no session has read the account since.
+ */
+export function storedLineText(line: readonly StoredRun[], now: number, timeZone?: string): string {
+  const until = (at: number) => (at > now ? resetText(at, now) : 'passed')
+  return line.map(r => (typeof r === 'string' ? r : 'clock' in r ? clockText(r.clock, timeZone) : until(r.until))).join('')
 }
 
 /** Whether the store's `rows` already hold these lines: then the merge writes nothing. */

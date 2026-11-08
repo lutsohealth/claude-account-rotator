@@ -1,0 +1,222 @@
+#!/usr/bin/env python3
+"""account-rotator: the account-rotator mod's Claude accounts from a shell, in the words of Orca's `orca account`.
+
+    account-rotator account list [--agent claude] [--json] [--store PATH]
+
+`list` prints each account's row as the switcher pane draws it, from the store's `rows` key, which every session of
+the mod rewrites when a row changes: its times are stored as instants, rendered here at this clock and in this zone.
+Then one line says when the rows were written and which account new sessions start on. It reads the store and never
+writes it. Exit 0 listed, 1 no store or an unreadable one, 2 a usage error.
+"""
+
+# Read as text, so `str | None` is no error on a macOS python3 older than 3.10.
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import os
+import sys
+import time
+import uuid
+from datetime import datetime, tzinfo
+
+# The store module stands beside this file. Run as a script, Python puts the file's own folder first on sys.path,
+# links resolved; this line is for a loader that does not, such as the tests' in-process import.
+sys.path.insert(0, os.path.dirname(__file__))
+from account_rotator_store import STORE_GLOB, StoreError, is_instant, read  # noqa: E402
+
+EXIT_NO_STORE = 1
+EXIT_USAGE = 2
+MINUTE_MS = 60_000
+OLDER_NOTE = "an older version of the mod stored some rows as text, their times as of when it wrote them"
+EXITS = "Exit 0 listed, 1 no store or an unreadable one, 2 a usage error (an unknown flag or verb, --agent not claude)."
+
+
+def is_run(run: object) -> bool:
+    """Whether a stored run is one the mod writes: text, or one {clock} or {until} instant."""
+    if isinstance(run, str):
+        return True
+    return isinstance(run, dict) and len(run) == 1 and any(is_instant(run.get(key)) for key in ("clock", "until"))
+
+
+def check(data: dict, path: str) -> None:
+    """Every value `list` reads, by type and range; a StoreError names the first the mod would never write."""
+
+    def damaged(what: str) -> StoreError:
+        return StoreError(f"{path}: {what}, which the mod never writes; a session rewrites it within a minute, or pass --store")
+
+    for n, account in enumerate(data["accounts"]):
+        if not isinstance(account, dict) or not isinstance(account.get("id"), str):
+            raise damaged(f"accounts[{n}] is no account with an id")
+    stored = data.get("rows")
+    if stored is not None:
+        if not isinstance(stored, dict) or not isinstance(stored.get("rows"), list):
+            raise damaged("rows holds no rows list")
+        if "at" in stored and not is_instant(stored["at"]):
+            raise damaged("rows.at is no time")
+        for row in stored["rows"]:
+            if not isinstance(row, dict) or not isinstance(row.get("id"), str) or not isinstance(row.get("lines"), list):
+                raise damaged("a row has no id or no lines")
+            if not all(isinstance(line, str) or (isinstance(line, list) and all(map(is_run, line))) for line in row["lines"]):
+                raise damaged(f"row {row['id']} holds a line of no known shape")
+    pick = data.get("launch-slot")
+    if pick is not None and (not isinstance(pick, dict) or ("at" in pick and not is_instant(pick["at"]))):
+        raise damaged("launch-slot is no pick")
+
+
+def clock_text(at_ms: float, zone: tzinfo | None) -> str:
+    """HH:MM on a 24-hour clock in `zone`, else in this machine's own: hooks/model.ts clockText."""
+    return datetime.fromtimestamp(at_ms / 1000, zone).strftime("%H:%M")
+
+
+def reset_text(at_ms: float, now_ms: float) -> str:
+    """The time until `at_ms`, as hooks/model.ts resetText says it, a half minute rounded up as JavaScript rounds."""
+    minutes = max(0, math.floor((at_ms - now_ms) / MINUTE_MS + 0.5))
+    days, hours, mins = minutes // 1440, minutes % 1440 // 60, minutes % 60
+    if days > 0:
+        return f"{days}d {hours}h {mins}m"
+    return f"{hours}h {mins}m" if hours > 0 else f"{mins}m"
+
+
+def line_text(line: str | list, now_ms: float, zone: tzinfo | None) -> str:
+    """A stored line as text: a string line as it was stored (its characters are its runs); else its runs, each {clock}
+    and {until} rendered, and an {until} already past as `passed` (hooks/model.ts storedLineText)."""
+    text = []
+    for run in line:
+        if isinstance(run, str):
+            text.append(run)
+        elif "clock" in run:
+            text.append(clock_text(run["clock"], zone))
+        else:
+            text.append(reset_text(run["until"], now_ms) if run["until"] > now_ms else "passed")
+    return "".join(text)
+
+
+def has_passed(line: str | list, now_ms: float) -> bool:
+    return isinstance(line, list) and any(isinstance(run, dict) and run.get("until", math.inf) <= now_ms for run in line)
+
+
+def who(account: dict) -> str:
+    """The account's name on its row's first line: hooks/model.ts rowOf."""
+    if isinstance(account.get("email"), str):
+        return account["email"]
+    return "your normal account" if account.get("slot") == "" else "not signed in yet"
+
+
+def account_lines(account: dict, rows: dict[str, list], now_ms: float, zone: tzinfo | None) -> tuple[list[str], bool, bool]:
+    """An account's lines, whether an older version of the mod stored them, and whether a reset in them has passed."""
+    stored = rows.get(account["id"])
+    if not stored:
+        return [f"{who(account)}  no row stored yet"], False, False
+    lines = [line_text(line, now_ms, zone) for line in stored]
+    return lines, any(isinstance(line, str) for line in stored), any(has_passed(line, now_ms) for line in stored)
+
+
+def minutes_ago(at_ms: object, now_ms: float) -> str:
+    return f"{round((now_ms - at_ms) / MINUTE_MS)} min ago" if is_instant(at_ms) else "at an unknown time"
+
+
+def footer(data: dict, now_ms: float, zone: tzinfo | None, older: bool, passed: list[str]) -> str:
+    """When the rows were written, and which account new sessions start on, as bin/account-rotator-launch words it."""
+    stored = data.get("rows")
+    at = stored.get("at") if isinstance(stored, dict) else None
+    written = f"rows written {clock_text(at, zone)} ({minutes_ago(at, now_ms)})" if is_instant(at) else "no session has stored rows yet"
+    pick = data.get("launch-slot")
+    if isinstance(pick, dict) and isinstance(pick.get("id"), str):
+        starts = f"new sessions start on account {pick['id']} ({pick.get('why', 'the setting picked it')}, picked {minutes_ago(pick.get('at'), now_ms)})"
+    else:
+        starts = "no account picked for new sessions"
+    notes = [OLDER_NOTE] if older else []
+    if passed:
+        notes.append(f"a reset has passed since its row was written for account {', '.join(passed)}: no session has read it since, so its usage is as before the reset")
+    return "; ".join([written, starts, *notes])
+
+
+def rows_by_id(data: dict) -> dict[str, list]:
+    stored = data.get("rows")
+    return {r["id"]: r["lines"] for r in stored["rows"]} if isinstance(stored, dict) else {}
+
+
+def listed(data: dict, now_ms: float, zone: tzinfo | None) -> list[tuple[dict, list[str], bool, bool]]:
+    rows = rows_by_id(data)
+    return [(a, *account_lines(a, rows, now_ms, zone)) for a in data["accounts"]]
+
+
+def list_text(data: dict, now_ms: float, zone: tzinfo | None) -> str:
+    accounts = listed(data, now_ms, zone)
+    blocks = ["\n".join(lines) for _, lines, _, _ in accounts]
+    passed = [a["id"] for a, _, _, has in accounts if has]
+    return "\n\n".join([*blocks, footer(data, now_ms, zone, any(older for _, _, older, _ in accounts), passed)])
+
+
+def list_json(data: dict, store: str, now_ms: float, zone: tzinfo | None) -> dict:
+    """Orca's envelope (`orca account list --json`), with the mod's own fields per account."""
+    accounts = []
+    for a, lines, older, passed in listed(data, now_ms, zone):
+        health = data.get(f"health:{a['id']}")
+        accounts.append({
+            "id": a["id"], "email": a.get("email"), "orgId": a.get("orgId"), "orgName": a.get("orgName"), "plan": a.get("plan"),
+            "tier": a.get("tier"), "slot": a.get("slot"), "system": a.get("slot") == "",
+            "health": health.get("kind") if isinstance(health, dict) else None, "lines": lines, "olderLines": older,
+            "resetPassed": passed,
+        })
+    pick = data.get("launch-slot")
+    active = pick.get("id") if isinstance(pick, dict) and isinstance(pick.get("id"), str) else None
+    stored = data.get("rows")
+    return {
+        "id": str(uuid.uuid4()),
+        "ok": True,
+        "result": {
+            "accounts": accounts, "activeAccountId": active, "activeAccountIdsByRuntime": {"host": active, "wsl": {}},
+            "launchOn": data.get("launch-on"), "launchPick": pick,
+        },
+        "_meta": {"runtimeId": None, "store": store, "rowsAt": stored.get("at") if isinstance(stored, dict) else None},
+    }
+
+
+def parsers() -> tuple[argparse.ArgumentParser, argparse.ArgumentParser]:
+    """The root parser, and the account group's, whose help a bare `account` prints."""
+    root = argparse.ArgumentParser(
+        prog="account-rotator",
+        description="The account-rotator mod's Claude accounts, from a shell. Verbs: account list.",
+        epilog=EXITS,
+    )
+    groups = root.add_subparsers(dest="group", metavar="account")
+    account = groups.add_parser("account", help="the Claude accounts the mod keeps", description="Verbs: account list.", epilog=EXITS)
+    verbs = account.add_subparsers(dest="verb", metavar="list")
+    listing = verbs.add_parser(
+        "list",
+        help="print each account's row as the switcher pane draws it",
+        description="account list: print each account's row as the switcher pane draws it, then when the rows were written and where new sessions start. Reads the store, never writes it. --json prints Orca's envelope (orca account list --json) with the mod's own fields per account.",
+        epilog=EXITS,
+    )
+    listing.add_argument("--agent", default="claude", help="the agent whose accounts to list: claude, the only one the mod keeps")
+    listing.add_argument("--json", action="store_true", help="print Orca's JSON envelope instead of text")
+    listing.add_argument("--store", help="the mod's store file (default: the newest " + STORE_GLOB + " holding accounts, under the Claude config folder)")
+    return root, account
+
+
+def main(argv: list[str] | None = None, *, now: float | None = None, zone: tzinfo | None = None) -> int:
+    """`now` (epoch ms) and `zone` stand in for this machine's clock and zone, for the tests."""
+    root, account = parsers()
+    args = root.parse_args(argv)
+    if args.group is None or args.verb is None:
+        (root if args.group is None else account).print_help(sys.stderr)
+        return EXIT_USAGE
+    if args.agent != "claude":
+        print(f"account-rotator: --agent {args.agent}: this mod keeps Claude accounts only; use --agent claude, or see --help", file=sys.stderr)
+        return EXIT_USAGE
+    try:
+        store, data = read(args.store)
+        check(data, store)
+    except StoreError as error:
+        print(f"account-rotator: {error}", file=sys.stderr)
+        return EXIT_NO_STORE
+    now_ms = time.time() * 1000 if now is None else now
+    print(json.dumps(list_json(data, store, now_ms, zone), ensure_ascii=False, indent=2) if args.json else list_text(data, now_ms, zone))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
