@@ -1276,3 +1276,11 @@ export function afterUsage(due: UsageDue | undefined, outcome: UsageOutcome, now
   return { next: now + wait, fails: fails + 1, ...last, ...(outcome.retryAfter === undefined ? {} : { retryAfter: outcome.retryAfter }), v }
 }
 
+export const REQUEST_TTL_MS = 0
+export function requestFrom(_value: unknown, _now: number): unknown {
+  return undefined
+}
+export function requestsDir(_config: string | undefined, _home: string): string {
+  return ''
+}
+

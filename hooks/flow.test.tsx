@@ -5,6 +5,7 @@ import type { StoredRows } from '../types'
 
 import { DEFAULT_FOOTER, USAGE_CLAIM_WAIT_MS, USAGE_FORCE_AFTER_MS, USAGE_IDLE_MS, fingerprint, keychainItem, roomColor } from './model'
 import { laterMark, longBar, markFrom, storedLineText } from './model'
+import { REQUEST_TTL_MS } from './model'
 import { PANE_COLUMNS } from './view'
 
 const NOW = Date.parse('2026-10-12T10:00:00Z')
@@ -20,8 +21,10 @@ type World = {
   system: 'macOS' | 'Linux'
   /** keychain item name -> stored JSON */
   keychain: Record<string, string>
-  /** credentials file -> stored text, or null where it cannot be read */
+  /** credentials file -> stored text, or null where it cannot be read; `$.fs.write` writes here too */
   files: Record<string, string | null>
+  /** every path `$.fs.write` wrote, in order */
+  writes?: string[]
   /**
    * access token -> [5-hour %, or null where the account reports no 5-hour window, week %, or null where the
    * plan reports no weekly limit], and the Fable week's % as a third member where the usage endpoint lists one
@@ -261,7 +264,16 @@ function world(on: On, w: World, store: Record<string, unknown> | Map<string, un
     w.panes = w.panes.filter(id => id !== e.id)
     return { value: undefined }
   })
-  on('fs.write', () => ({ value: undefined }))
+  on('fs.write', (_$, e) => {
+    w.files[e.path] = e.text
+    w.writes = [...(w.writes ?? []), e.path]
+    return { value: undefined }
+  })
+  on('fs.list', (_$, e) => {
+    const names = Object.keys(w.files).filter(p => p.startsWith(`${e.path}/`) && !p.slice(e.path.length + 1).includes('/'))
+    if (names.length === 0) return { deny: `ENOENT: no such file or directory, scandir '${e.path}'` }
+    return { value: names.map(p => ({ name: p.slice(e.path.length + 1), kind: 'file', size: (w.files[p] ?? '').length, mtimeMs: 0, isLink: false })) }
+  })
   on('fs.exists', (_$, e) => ({ value: e.path === '/System/Library/CoreServices/SystemVersion.plist' && w.system === 'macOS' }))
   on('fs.read', (_$, e) => {
     const text = w.files[e.path]
@@ -5991,4 +6003,71 @@ test('no rows write names a good read older than the store holds then, whichever
   }
   expect(store.writes ?? 0).toBeGreaterThan(2)
   expect([...new Set(store.offenders)]).toEqual([])
+})
+
+// C11 (puma-eslxj.12, RULING 4593 and 4595): `account-rotator account select` drops a request file in the config
+// folder's account-rotator-requests; a session's minute tick applies one only when it names this store's store-id.
+const REQUESTS = `${HOME}/.claude/account-rotator-requests`
+/** A select request for login `id`, read from the store whose id is `storeId`, as bin/account-rotator writes it. */
+const selectRequest = (nonce: string, id: string, storeId: unknown, at: number) => JSON.stringify({ kind: 'select', nonce, at, id, store: storeId })
+const resultOf = (w: World, nonce: string): Record<string, unknown> | undefined => {
+  const text = w.files[`${REQUESTS}/${nonce}.result.json`]
+  return typeof text === 'string' ? (JSON.parse(text) as Record<string, unknown>) : undefined
+}
+
+/** Two logins with room, a session started on login 1, a minute's merge done. */
+async function selectWorld($: Engine, on: On): Promise<{ w: World; store: Map<string, unknown>; clock: MockClock }> {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [10, 20]
+  w.usage['tok-2'] = [10, 20]
+  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off' }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  await clock.advance(60_000)
+  return { w, store, clock }
+}
+
+test('a store holds a store-id, which the first session that finds none writes', async ($, on) => {
+  const { store } = await selectWorld($, on)
+  expect(typeof store.get('store-id')).toBe('string')
+})
+
+test('two sessions booting at once end with one store-id: this session keeps the one the store holds', async ($, on) => {
+  const { store, clock } = await selectWorld($, on)
+  // The other session's write of its own id lands after this session's.
+  store.set('store-id', 'theirs')
+  await clock.advance(60_000)
+  expect(store.get('store-id')).toBe('theirs')
+})
+
+test('a select request for this store is applied at the minute: launch-on, launch-slot and a result that says so', async ($, on) => {
+  const { w, store, clock } = await selectWorld($, on)
+  w.files[`${REQUESTS}/n1.json`] = selectRequest('n1', '2', store.get('store-id'), clock.now())
+  await clock.advance(60_000)
+  expect([store.get('launch-on'), (store.get('launch-slot') as { id?: string } | undefined)?.id]).toEqual(['account:2', '2'])
+  expect(resultOf(w, 'n1')).toMatchObject({ nonce: 'n1', ok: true })
+})
+
+test('a request read from another store, a stale one and one for a login not listed change nothing', async ($, on) => {
+  const { w, store, clock } = await selectWorld($, on)
+  const [id, now, before] = [store.get('store-id'), clock.now(), store.get('launch-on')]
+  w.files[`${REQUESTS}/other.json`] = selectRequest('other', '2', 'another-store', now)
+  w.files[`${REQUESTS}/stale.json`] = selectRequest('stale', '2', id, now - REQUEST_TTL_MS - 1)
+  w.files[`${REQUESTS}/gone.json`] = selectRequest('gone', '9', id, now)
+  await clock.advance(60_000)
+  expect(store.get('launch-on')).toBe(before)
+  expect([resultOf(w, 'other'), resultOf(w, 'stale'), resultOf(w, 'gone')?.ok]).toEqual([undefined, undefined, false])
+})
+
+test('two sessions taking one request apply it once: one with a result already is not applied again', async ($, on) => {
+  const { w, store, clock } = await selectWorld($, on)
+  w.files[`${REQUESTS}/n1.json`] = selectRequest('n1', '2', store.get('store-id'), clock.now())
+  await clock.advance(60_000)
+  // Another session's press sets launch-on since; the next minute must not put the request back.
+  store.set('launch-on', 'room')
+  await clock.advance(60_000)
+  expect(store.get('launch-on')).toBe('room')
+  expect((w.writes ?? []).filter(p => p === `${REQUESTS}/n1.result.json`)).toHaveLength(1)
 })

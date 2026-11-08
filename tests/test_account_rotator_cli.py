@@ -14,6 +14,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 import uuid
 from contextlib import redirect_stdout
@@ -310,6 +312,86 @@ class ReviewPassedReset(StoreCase):
             load_cli().main(["account", "list", "--store", str(self.store)], now=self.fixture["now"] + 2 * HOUR_MS, zone=ZoneInfo("UTC"))
         last = out.getvalue().rstrip("\n").split("\n")[-1]
         self.assertIn("a reset has passed since its row was written for account 2", last)
+
+
+class Select(StoreCase):
+    """C11 (puma-eslxj.12, RULING 4593 and 4595): `account select` writes a request file in the config folder's
+    account-rotator-requests, naming the store's store-id, and waits for the result file a session writes."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        store = json.loads(json.dumps(self.fixture["store"]))
+        store["store-id"] = "store-abc"
+        self.store = self.write(STORE, store)
+        self.requests = self.tmp / "account-rotator-requests"
+
+    def select(self, *args: str) -> subprocess.CompletedProcess[str]:
+        return run(CLI, "account", "select", *args, env=self.env())
+
+    def answer(self, ok: bool, message: str) -> threading.Thread:
+        """A session that answers the first request it finds, as the mod's minute tick does."""
+
+        def respond() -> None:
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline:
+                found = [p for p in self.requests.glob("*.json") if not p.name.endswith(".result.json")] if self.requests.is_dir() else []
+                if found:
+                    request = json.loads(found[0].read_text(encoding="utf-8"))
+                    self.seen = request
+                    (self.requests / f"{request['nonce']}.result.json").write_text(json.dumps({"nonce": request["nonce"], "ok": ok, "message": message}), encoding="utf-8")
+                    return
+                time.sleep(0.05)
+
+        thread = threading.Thread(target=respond)
+        thread.start()
+        self.addCleanup(thread.join)
+        return thread
+
+    def test_an_id_an_email_and_system_each_name_one_account(self) -> None:
+        for given, expected in (("2", "2"), ("two@example.com", "2"), ("TWO@example.com", "2"), ("system", "1")):
+            with self.subTest(account=given):
+                self.answer(True, f"new sessions start on account {expected}")
+                done = self.select("--account", given, "--wait", "10")
+                self.assertEqual((done.returncode, self.seen["id"], self.seen["store"], self.seen["kind"]), (0, expected, "store-abc", "select"), done.stderr)
+                self.assertEqual(sorted(p.name for p in self.requests.iterdir()), [], "the CLI removes both files once it has the result")
+
+    def test_an_account_no_listed_one_names_or_an_email_two_share_exits_2_naming_the_ids(self) -> None:
+        store = json.loads(self.store.read_text(encoding="utf-8"))
+        store["accounts"].append({"id": "3", "slot": "/home/test/.claude/accounts/3", "email": "two@example.com"})
+        self.write(STORE, store)
+        shared, unknown = self.select("--account", "two@example.com"), self.select("--account", "nobody@example.com")
+        self.assertEqual((shared.returncode, "2, 3" in shared.stderr), (2, True), shared.stderr)
+        self.assertEqual((unknown.returncode, "two@example.com" in unknown.stderr), (2, True), unknown.stderr)
+        self.assertFalse(self.requests.exists(), "a refused --account writes no request")
+
+    def test_a_session_that_refuses_gives_exit_4_with_its_reason(self) -> None:
+        self.answer(False, "account 2 is not listed")
+        done = self.select("--account", "2", "--wait", "10")
+        self.assertEqual((done.returncode, "account 2 is not listed" in done.stderr), (4, True), done.stderr)
+
+    def test_no_session_within_wait_gives_exit_3_and_withdraws_the_request(self) -> None:
+        done = self.select("--account", "2", "--wait", "0.3")
+        self.assertEqual((done.returncode, "account list" in done.stderr), (3, True), done.stderr)
+        self.assertEqual(list(self.requests.iterdir()), [])
+
+    def test_a_store_no_session_has_given_a_store_id_gives_exit_3_and_writes_nothing(self) -> None:
+        store = json.loads(self.store.read_text(encoding="utf-8"))
+        del store["store-id"]
+        self.write(STORE, store)
+        done = self.select("--account", "2", "--wait", "0.3")
+        self.assertEqual(done.returncode, 3, done.stderr)
+        self.assertFalse(self.requests.exists())
+
+    def test_the_request_appears_whole_never_half_written(self) -> None:
+        self.answer(True, "ok")
+        self.select("--account", "2", "--wait", "10")
+        self.assertEqual(set(self.seen), {"kind", "nonce", "at", "id", "store"})
+
+    def test_json_is_orcas_envelope(self) -> None:
+        self.answer(True, "new sessions start on account 2")
+        done = self.select("--account", "2", "--json", "--wait", "10")
+        data = json.loads(done.stdout)
+        self.assertEqual((done.returncode, data["ok"], data["result"]["activeAccountId"], data["result"]["launchOn"]), (0, True, "2", "account:2"))
 
 
 if __name__ == "__main__":
