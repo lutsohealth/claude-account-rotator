@@ -761,6 +761,8 @@ class Sweep(RequestCase):
         with patch.object(cli.os, "listdir", return_value=["aaaaaaaaaa.json", later.name]):
             cli.sweep(str(self.requests))
         self.assertFalse(later.exists())
+        with patch.object(cli.os, "listdir", side_effect=PermissionError):
+            self.assertIsNone(cli.sweep(str(self.requests)), "a failing list fails no verb")
 
 
 class ListThisSession(StoreCase):
