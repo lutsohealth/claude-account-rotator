@@ -1024,8 +1024,12 @@ export function rowText(row: Row): string[] {
 }
 
 /** Every login's row as text, as the merge stores it under `rows`, in the machine's own zone. */
-export function rowsOf(view: View, now: number): StoredRows['rows'] {
+export function rowsOf(view: View, now: number, _timeZone?: string): StoredRows['rows'] {
   return view.accounts.map(a => ({ id: a.id, lines: rowText(rowOf(view, a, now)) }))
+}
+
+export function storedLineText(line: unknown, _now: number, _timeZone?: string): string {
+  return String(line)
 }
 
 /** Whether the store's `rows` already hold these lines: then the merge writes nothing. */

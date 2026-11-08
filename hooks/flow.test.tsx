@@ -1,9 +1,10 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { Engine, MockClock } from 'claude-code/testing'
 import type { On, ProcessRunResult, SessionRateLimit, ToolCallArgs } from 'claude-code'
+import type { StoredRows } from '../types'
 
 import { DEFAULT_FOOTER, USAGE_CLAIM_WAIT_MS, USAGE_FORCE_AFTER_MS, USAGE_IDLE_MS, keychainItem, roomColor } from './model'
-import { laterMark, longBar, markFrom } from './model'
+import { laterMark, longBar, markFrom, storedLineText } from './model'
 import { PANE_COLUMNS } from './view'
 
 const NOW = Date.parse('2026-10-12T10:00:00Z')
@@ -5498,9 +5499,12 @@ for (const limit of ['on', 'off'] as const) {
 // C8 (puma-eslxj.9, problem g part 1): every session's merge writes each login's row under `rows`, for the CLI, built
 // from the store alone. The updated time is the last good usage read's (`usage-due:<id>.at`), never a response's.
 
-type RowsKey = { v?: number; at?: number; rows?: { id: string; lines: string[] }[] }
+type RowsKey = Partial<StoredRows>
 const rowsOf = (store: Map<string, unknown>) => store.get('rows') as RowsKey | undefined
-const lineOne = (store: Map<string, unknown>, id: string) => rowsOf(store)?.rows?.find(r => r.id === id)?.lines[0] ?? '(no row)'
+/** Each login's stored lines as a reader in this machine's zone prints them at `now`, by default when they were written. */
+const rowsText = (store: Map<string, unknown>, now = rowsOf(store)?.at ?? NaN) =>
+  rowsOf(store)?.rows?.map(r => ({ id: r.id, lines: r.lines.map(l => storedLineText(l, now)) }))
+const lineOne = (store: Map<string, unknown>, id: string) => rowsText(store)?.find(r => r.id === id)?.lines[0] ?? '(no row)'
 /** When a login's last good usage read came, as its schedule holds it. */
 const goodReadAt = (store: Map<string, unknown>, id: string) => (store.get(`usage-due:${id}`) as { at?: number } | undefined)?.at ?? NaN
 /** HH:MM of `at` in this machine's zone, as a session writes the rows. */
@@ -5528,7 +5532,7 @@ test('the merge stores each login\'s row lines under rows, stamped with when and
   const rows = rowsOf(store)
   expect([rows?.v, typeof rows?.at, rows?.rows?.map(r => r.id)]).toEqual([1, 'number', ['1', '2']])
   expect(lineOne(store, '1')).toMatch(new RegExp(`^one@example\\.com.*  updated ${localTime(goodReadAt(store, '1'))}$`))
-  expect(rows?.rows?.[0]?.lines[1]).toBe('Used ▰▰▰▱▱▱▱▱▱▱ 30% Fable ▰▰▰▰▱▱▱▱▱▱ 40%  resets 5d 16h 59m · Fable 4d 16h 59m')
+  expect(rowsText(store)?.[0]?.lines[1]).toBe('Used ▰▰▰▱▱▱▱▱▱▱ 30% Fable ▰▰▰▰▱▱▱▱▱▱ 40%  resets 5d 16h 59m · Fable 4d 16h 59m')
   expect(clock.now()).toBeLessThan(NOW + 2 * 60_000)
 })
 
@@ -5599,6 +5603,27 @@ test('rows another session stored with other lines are written again from the st
   await clock.advance(60_000)
   const now = rowsOf(store)
   expect([now?.rows, now?.at === 1]).toEqual([ours?.rows, false])
+})
+
+// C10 (puma-eslxj.11; [STORED-RELATIVE-TIME], [WRITER-ZONE-PINGPONG], RULING 4566): the rows hold their times as epoch
+// ms, so a minute that reads nothing new changes no byte of them, and the sessions on one store write them once.
+test('a minute on with nothing new read, the merge leaves rows as they stand', async ($, on) => {
+  const { store, clock } = await rowsWorld($, on)
+  const ours = rowsOf(store)
+  await clock.advance(60_000)
+  expect(rowsOf(store)).toEqual(ours)
+})
+
+test('rows a 0.5.11 session stored as text are written again as runs, which read as the same lines', async ($, on) => {
+  const { store, clock } = await rowsWorld($, on)
+  const [ours, at] = [rowsOf(store), clock.now()]
+  const asText = rowsText(store, at)
+  // The seed: the older session's text is what these rows read as.
+  expect(asText?.every(r => r.lines.every(l => typeof l === 'string' && l.length > 0))).toBe(true)
+  store.set('rows', { v: 1, at: 1, rows: asText })
+  await clock.advance(60_000)
+  expect([rowsOf(store)?.rows, rowsOf(store)?.at === 1]).toEqual([ours?.rows, false])
+  expect(rowsText(store, at)).toEqual(asText)
 })
 
 // Review C8-R1 F1 (Opus) [UPDATED-WITHOUT-READING] (RULING 4521): a usage answer that stores no reading is no good
@@ -5719,11 +5744,11 @@ test('at 82 columns the pane draws each account\'s two row lines as the rows key
 })
 
 test('a pane too narrow for any row line and its buttons gives the buttons a line of their own after line 2', async ($, on) => {
-  const { store } = await rowsWorld($, on)
+  const { store, clock } = await rowsWorld($, on)
   const lines = await drawnLines($, 50)
   expect([lines['line-2-0']?.buttons, lines['line-2-1']?.buttons, lines['line-2-2']?.text]).toEqual([[], [], ''])
   expect(lines['line-2-2']?.buttons).toContain('ask-remove-2')
-  expect(lines['line-2-1']?.text).toBe(rowsOf(store)?.rows?.find(r => r.id === '2')?.lines[1])
+  expect(lines['line-2-1']?.text).toBe(rowsText(store, clock.now())?.find(r => r.id === '2')?.lines[1])
 })
 
 // Mutations V1 and V2 survived: the buttons' place is decided by the row's width less the accounts box's frame (4) and
@@ -5830,8 +5855,9 @@ test('a check never puts back an older row over the one another session stored m
   // Another session reads login 2 now and stores its row, as its merge does.
   const bAt = clock.now()
   store.set('usage-due:2', { ...(store.get('usage-due:2') as object), at: bAt, next: bAt + USAGE_IDLE_MS })
-  const newer = (rowsOf(store)?.rows ?? []).map(r => (r.id === '2' ? { ...r, lines: [(r.lines[0] ?? '').replace(/updated \d\d:\d\d$/, `updated ${localTime(bAt)}`), ...r.lines.slice(1)] } : r))
-  expect(newer.find(r => r.id === '2')?.lines[0]).toMatch(new RegExp(`updated ${localTime(bAt)}$`))
+  const atRead = (run: StoredRows['rows'][number]['lines'][number][number]) => (typeof run === 'object' && 'clock' in run ? { clock: bAt } : run)
+  const newer = (rowsOf(store)?.rows ?? []).map(r => (r.id === '2' ? { ...r, lines: [(r.lines[0] ?? []).map(atRead), ...r.lines.slice(1)] } : r))
+  expect(storedLineText(newer.find(r => r.id === '2')?.lines[0] ?? [], bAt)).toMatch(new RegExp(`updated ${localTime(bAt)}$`))
   store.set('rows', { v: 1, at: bAt, rows: newer })
   await clock.advance(USAGE_CLAIM_WAIT_MS + 1000)
   expect(lineOne(store, '2')).toMatch(new RegExp(`updated ${localTime(bAt)}$`))
@@ -5845,7 +5871,7 @@ class RowsWatch extends Map<string, unknown> {
     if (key === 'rows' && this.offenders !== undefined) {
       this.writes = (this.writes ?? 0) + 1
       for (const r of (value as RowsKey).rows ?? []) {
-        const shown = /updated (\d\d:\d\d)$/.exec(r.lines[0] ?? '')?.[1]
+        const shown = /updated (\d\d:\d\d)$/.exec(storedLineText(r.lines[0] ?? [], 0))?.[1]
         const at = (super.get(`usage-due:${r.id}`) as { at?: number } | undefined)?.at
         if (shown !== undefined && at !== undefined && shown !== localTime(at)) this.offenders.push(`login ${r.id}: updated ${shown}, the store's last good read ${localTime(at)}`)
       }

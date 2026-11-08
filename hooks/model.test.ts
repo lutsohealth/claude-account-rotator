@@ -5,7 +5,8 @@ import { weekLeaveFrom, launchOnFrom, pickLaunch, isSessionStop } from './model'
 import { isSameWeek, whoseWeek } from './model'
 import { companyOf, identityFromStatus, planName } from './model'
 import { laterMark, spentMark, withFableMark } from './model'
-import { EMPTY_VIEW, USAGE_IDLE_MS, fitRow, rowOf, rowText } from './model'
+import { EMPTY_VIEW, USAGE_IDLE_MS, fitRow, rowOf, rowsOf, rowText, storedLineText } from './model'
+import ROWS_FIXTURE from '../tests/fixtures/rows'
 import { USAGE_BACKOFF_MAX_MS, USAGE_CLAIM_MS, USAGE_CLAIM_WAIT_MS, USAGE_EARLY_MS, WRITER_VERSION, afterUsage, claimDueReads, gatingDue, isUsageDue, mayForceUsage, mayReadSince, renewClaim, retryAfterFrom, usageDueFrom } from './model'
 import { DEFAULT_FOOTER, availableNow, braille, browsersFrom, chromeNote, continueTextFrom, counted, fiveHourLimitFrom, credentialFrom, credentialsFile, fableMark, fableSpentNotice, fableStay, footerStyleFrom, healthOf, identityFromProfile, isFableSpent, isFableStop, isNoBrowser, isPolicyRefusal, keepFable, keychainItem, legacyMark, markFrom, nextReset, pickTarget, pie, readingFromUsage, rotateToFrom, shouldLeave, roomColor, windowPct, withMark, withWeekMark } from './model'
 
@@ -1205,4 +1206,35 @@ test('a failure of another call draws Failed to update with no status: the statu
 
 test('the account the Chrome extension is signed in to says Chrome after its plan', () => {
   expect(rowLines(rowView({ chromeAccountId: '1' }))[0]).toBe('andres@lutsohealth.com · Company · Ultra · Chrome  updated 18:34')
+})
+
+// C10 (puma-eslxj.11; [STORED-RELATIVE-TIME], [WRITER-ZONE-PINGPONG], RULING 4566): `rows` stores each time as epoch
+// ms, a time of day as {clock} and a reset as {until}, which the reader renders at its own clock and zone. The fixture
+// is the Python suite's too (tests/test_account_rotator_cli.py), so the pane, the stored rows and the CLI agree.
+const FIXTURE_VIEW = { ...EMPTY_VIEW, ...ROWS_FIXTURE.view } as View
+const FIXTURE_LINES = ROWS_FIXTURE.lines as Record<string, string[]>
+/** Each login's stored lines as a reader at `now` in the fixture's zone prints them. */
+const storedLines = (v: View, now: number) => rowsOf(v, now).map(r => ({ id: r.id, lines: r.lines.map(l => storedLineText(l, now, ROWS_FIXTURE.zone)) }))
+
+test('the merge stores the fixture\'s rows: text runs, each time of day and each reset as epoch ms', () => {
+  expect(FIXTURE_VIEW.accounts).toEqual(ROWS_FIXTURE.store.accounts)
+  expect(rowsOf(FIXTURE_VIEW, ROWS_FIXTURE.now, ROWS_FIXTURE.zone)).toEqual(ROWS_FIXTURE.store.rows.rows)
+})
+
+test('the pane draws the fixture\'s lines, and the stored rows read at the same clock and zone are those lines', () => {
+  const pane = FIXTURE_VIEW.accounts.map(a => ({ id: a.id, lines: rowText(rowOf(FIXTURE_VIEW, a, ROWS_FIXTURE.now, ROWS_FIXTURE.zone)) }))
+  expect(pane).toEqual(Object.entries(FIXTURE_LINES).map(([id, lines]) => ({ id, lines })))
+  expect(storedLines(FIXTURE_VIEW, ROWS_FIXTURE.now)).toEqual(pane)
+})
+
+test('the stored rows hold no minute and no zone: two sessions a minute apart in two zones store the same rows', () => {
+  const ours = rowsOf(FIXTURE_VIEW, ROWS_FIXTURE.now, TALLINN)
+  expect(rowsOf(FIXTURE_VIEW, ROWS_FIXTURE.now + MINUTE, 'America/New_York')).toEqual(ours)
+  expect(JSON.stringify(ours)).toContain('"clock"')
+})
+
+test('a stored line read a minute later counts its resets down, and read in UTC says its times in UTC', () => {
+  const [line1, line2] = rowsOf(FIXTURE_VIEW, ROWS_FIXTURE.now).find(r => r.id === '1')?.lines ?? []
+  expect(storedLineText(line2 ?? [], ROWS_FIXTURE.now + MINUTE, TALLINN)).toBe('Used ▰▰▰▱▱▱▱▱▱▱ 31% Fable ▰▰▰▰▱▱▱▱▱▱ 38%  resets 2d 3h 13m · Fable 1d 3h 13m')
+  expect(storedLineText(line1 ?? [], ROWS_FIXTURE.now, 'UTC')).toBe('andres@lutsohealth.com · Company · Ultra  updated 16:34')
 })
