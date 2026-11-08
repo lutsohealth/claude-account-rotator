@@ -1810,7 +1810,7 @@ async function adoptSlot($: Host, slot: string): Promise<{ ok: boolean; message:
   await saveAccounts($, [...accounts, account])
   await saveLaunchPick($)
   const stood = (await loadAccounts($)).find(a => a.slot === slot)
-  if (stood === undefined) return { ok: false, message: `another session's write took the place of the row for ${slot}, so it is not listed` }
+  if (stood === undefined || !isLoginOf(stood, who)) return { ok: false, message: `another session's write took the place of the row for ${slot}, so it is not listed as this sign-in` }
   const { text, pickId } = await pickAnswer($)
   return { ok: true, message: `account ${label(stood)} is added; ${text}`, accountId: stood.id, pickId }
 }
