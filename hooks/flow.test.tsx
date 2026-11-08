@@ -60,6 +60,12 @@ type World = {
   markAtStart?: string
   /** Claude Code's security policy refuses every variable but the slot. */
   refuseMark?: boolean
+  /** The slot of each `claude auth status` the mod ran. */
+  statusAsked?: string[]
+  /** Runs inside a `claude auth status`: what another session writes while this one waits on it. */
+  onStatus?: () => void
+  /** How a `claude auth status` fails, where it does. */
+  statusFails?: 'refused' | 'exit' | 'garbage'
   /** The slot of each `claude auth logout` the mod ran. */
   logouts?: string[]
   /** What a `claude auth logout` answers, where it fails. */
@@ -182,6 +188,11 @@ function world(on: On, w: World, store: Record<string, unknown> | Map<string, un
       return { value: stored === undefined ? ran(44, '') : ran(0, stored) }
     }
     if (cmd === 'claude' && sub === 'auth' && verb === 'status') {
+      w.statusAsked = [...(w.statusAsked ?? []), e.init?.env?.CLAUDE_SECURESTORAGE_CONFIG_DIR ?? '']
+      w.onStatus?.()
+      if (w.statusFails === 'refused') return { deny: 'process (managed): claude is not for plugins to run' }
+      if (w.statusFails === 'exit') return { value: ran(1, '') }
+      if (w.statusFails === 'garbage') return { value: ran(0, 'not json') }
       const email = w.emails[e.init?.env?.CLAUDE_SECURESTORAGE_CONFIG_DIR ?? '']
       const status = email ? { loggedIn: true, email, orgId: `org-${email}`, orgName: 'Org', subscriptionType: 'max' } : { loggedIn: false }
       return { value: ran(0, JSON.stringify(status)) }
@@ -7024,3 +7035,269 @@ test('an rm that leaves no room anywhere says new sessions start on Claude Code\
   expect(resultOf(w, N1)?.message).toMatch(/account 2 is removed; no account has room, so new sessions start on Claude Code's login/)
   expect(resultOf(w, N1)?.pickId).toBeUndefined()
 })
+
+// C13 `add` (puma-eslxj.14, RULING 4660): `account add` signs a new folder in, and any session on the store lists it.
+
+const SLOT7 = `${HOME}/.claude/accounts/7`
+const N2 = '1f3c2a9e1b7d4c55a6e8f00112233445'
+const addRequest = (nonce: string, slot: string, storeId: unknown, at: number) =>
+  JSON.stringify({ kind: 'add', nonce, at, id: slot.split('/').pop(), store: storeId, slot })
+const listedIds = (store: Map<string, unknown>) => (store.get('accounts') as { id: string }[]).map(a => a.id)
+const listedRow = (store: Map<string, unknown>, id: string) => (store.get('accounts') as { id: string }[]).find(a => a.id === id)
+
+/** A folder signed in as `email`, its usage readable, listed by no account. */
+async function signInFolder(w: World, slot: string, email: string, token = 'tok-7'): Promise<void> {
+  w.emails[slot] = email
+  w.owners[token] = email
+  w.usage[token] = [15, 25]
+  w.keychain[await keychainItem(slot)] = blob(token)
+}
+
+test('an add lists the folder under its number with who signed in, for a session to answer and the minute to read', async ($, on) => {
+  const { w, store, clock } = await selectWorld($, on)
+  await signInFolder(w, SLOT7, 'seven@example.com')
+  w.files[`${REQUESTS}/${N1}.json`] = addRequest(N1, SLOT7, store.get('store-id'), clock.now())
+  await untilTick(clock)
+  expect(listedRow(store, '7')).toMatchObject({ id: '7', slot: SLOT7, email: 'seven@example.com', orgId: 'org-seven@example.com', plan: 'max' })
+  expect(store.get('health:7')).toEqual({ kind: 'ok' })
+  expect(resultOf(w, N1)).toMatchObject({ nonce: N1, ok: true, accountId: '7' })
+  expect(resultOf(w, N1)?.message).toMatch(/account 7 .*seven@example\.com.* is added/)
+  expect(w.usageCalls, 'the same minute reads the new account: it needs no read of its own').toContain('tok-7')
+  await untilTick(clock)
+  expect(store.get('health:7')).toEqual({ kind: 'ok' })
+})
+
+test('an add during a Bash call that names the CLI is applied at once', async ($, on) => {
+  const { w, store, clock } = await selectWorld($, on)
+  await signInFolder(w, SLOT7, 'seven@example.com')
+  const call = bashCall($, w, `account-rotator account add --folder ${SLOT7}`)
+  w.files[`${REQUESTS}/${N1}.json`] = addRequest(N1, SLOT7, store.get('store-id'), clock.now())
+  await beat(clock)
+  await call.finish()
+  expect(listedIds(store)).toEqual(['1', '2', '7'])
+  expect(resultOf(w, N1)?.ok).toBe(true)
+})
+
+test('an account an add listed is in this session at once: a later request in the same minute finds it', async ($, on) => {
+  const { w, store, clock } = await selectWorld($, on)
+  await signInFolder(w, SLOT7, 'seven@example.com')
+  w.files[`${REQUESTS}/${N1}.json`] = addRequest(N1, SLOT7, store.get('store-id'), clock.now())
+  w.files[`${REQUESTS}/${N2}.json`] = JSON.stringify({ kind: 'select', nonce: N2, at: clock.now() + 1, id: '7', store: store.get('store-id') })
+  await untilTick(clock)
+  expect([resultOf(w, N1)?.ok, resultOf(w, N2)?.ok]).toEqual([true, true])
+})
+
+test('an add of a folder an account already lists says which, and changes nothing', async ($, on) => {
+  const { w, store, clock } = await selectWorld($, on)
+  const before = JSON.stringify(store.get('accounts'))
+  w.statusAsked = []
+  w.files[`${REQUESTS}/${N1}.json`] = addRequest(N1, SLOT2, store.get('store-id'), clock.now())
+  await untilTick(clock)
+  expect(resultOf(w, N1)).toMatchObject({ ok: true, accountId: '2', message: 'already account 2' })
+  expect(JSON.stringify(store.get('accounts'))).toBe(before)
+})
+
+test('an add of a login an account already holds is refused, Claude Code own login too, and names the folder left signed in', async ($, on) => {
+  const { w, store, clock } = await selectWorld($, on)
+  const rows = [{ id: '1', slot: '', email: 'one@example.com', orgId: 'org-one@example.com' }, { id: '2', slot: SLOT2, email: 'two@example.com', orgId: 'org-two@example.com' }]
+  const offenders: string[] = []
+  let serial = 0
+  for (const twin of rows) {
+    store.set('accounts', rows)
+    await signInFolder(w, SLOT7, twin.email)
+    const nonce = `twin-${String(++serial).padStart(4, '0')}`
+    w.files[`${REQUESTS}/${nonce}.json`] = addRequest(nonce, SLOT7, store.get('store-id'), clock.now())
+    await untilTick(clock)
+    const result = resultOf(w, nonce)
+    const said = String(result?.message)
+    if (result?.ok !== false || !said.includes(`account ${twin.id}`) || !said.includes(SLOT7) || !said.includes('claude auth logout')) offenders.push(`${twin.id}: ${said}`)
+    if (listedIds(store).includes('7') || store.has('health:7')) offenders.push(`${twin.id}: listed`)
+    delete w.files[`${REQUESTS}/${nonce}.json`]
+  }
+  expect(offenders).toEqual([])
+})
+
+test('[TWIN-ORG-UNSEEN] an add under an email a row holds with its organization unread is another login to sameLogin, so it is listed', async ($, on) => {
+  const { w, store, clock } = await selectWorld($, on)
+  store.set('accounts', TWO_LOGINS.accounts)
+  await signInFolder(w, SLOT7, 'two@example.com')
+  w.files[`${REQUESTS}/${N1}.json`] = addRequest(N1, SLOT7, store.get('store-id'), clock.now())
+  await untilTick(clock)
+  expect(listedIds(store)).toContain('7')
+})
+
+test('an add of a folder with no sign-in that can be read lists nothing, in each way the read fails', async ($, on) => {
+  const { w, store, clock } = await selectWorld($, on)
+  const ways = [undefined, 'exit', 'garbage', 'refused'] as const
+  const offenders: string[] = []
+  let serial = 0
+  for (const way of ways) {
+    w.statusFails = way
+    const nonce = `none-${String(++serial).padStart(4, '0')}`
+    w.files[`${REQUESTS}/${nonce}.json`] = addRequest(nonce, SLOT7, store.get('store-id'), clock.now())
+    await untilTick(clock)
+    if (resultOf(w, nonce)?.ok !== false || listedIds(store).includes('7') || store.has('health:7')) offenders.push(String(way))
+    delete w.files[`${REQUESTS}/${nonce}.json`]
+  }
+  expect(offenders).toEqual([])
+})
+
+test('an add of anything but a numbered folder under the accounts folder lists nothing and runs nothing on it', async ($, on) => {
+  const { w, store, clock } = await selectWorld($, on)
+  const bad = ['/etc', `${HOME}/.claude/accounts/`, `${HOME}/.claude/accounts/0`, `${HOME}/.claude/accounts/7/`, `${HOME}/.claude/accounts/7/../2`, `${HOME}/.claude/accounts/abc`]
+  const offenders: string[] = []
+  let serial = 0
+  for (const slot of bad) {
+    w.emails[slot] = `someone${serial}@example.com`
+    w.statusAsked = []
+    const nonce = `slot-${String(++serial).padStart(4, '0')}`
+    w.files[`${REQUESTS}/${nonce}.json`] = addRequest(nonce, slot, store.get('store-id'), clock.now())
+    await untilTick(clock)
+    const asked = w.statusAsked.includes(slot)
+    if (resultOf(w, nonce)?.ok !== false || asked || (store.get('accounts') as { slot: string }[]).some(a => a.slot === slot)) offenders.push(slot)
+    delete w.files[`${REQUESTS}/${nonce}.json`]
+  }
+  expect(offenders).toEqual([])
+})
+
+test('an add whose number another slot holds takes the free id', async ($, on) => {
+  const { w, store, clock } = await selectWorld($, on)
+  store.set('accounts', [...TWO_LOGINS.accounts, { id: '7', slot: `${HOME}/.claude/accounts/9`, email: 'nine@example.com' }])
+  await signInFolder(w, SLOT7, 'seven@example.com')
+  w.files[`${REQUESTS}/${N1}.json`] = addRequest(N1, SLOT7, store.get('store-id'), clock.now())
+  await untilTick(clock)
+  expect(listedRow(store, '3')).toMatchObject({ slot: SLOT7, email: 'seven@example.com' })
+  expect(resultOf(w, N1)).toMatchObject({ ok: true, accountId: '3' })
+})
+
+// freeId and holdsLogin (C12): an adopted id can be one a waiting rm names, whose CLI read another holder.
+test('a waiting rm of an id an add gave another slot signs nothing out, by the slot', async ($, on) => {
+  const { w, store, clock } = await selectWorld($, on)
+  store.set('accounts', [...TWO_LOGINS.accounts, { id: '7', slot: `${HOME}/.claude/accounts/9`, email: 'nine@example.com' }])
+  await signInFolder(w, SLOT7, 'seven@example.com')
+  w.files[`${REQUESTS}/${N1}.json`] = addRequest(N1, SLOT7, store.get('store-id'), clock.now())
+  w.files[`${REQUESTS}/${N2}.json`] = JSON.stringify({ kind: 'rm', nonce: N2, at: clock.now() + 1, id: '3', store: store.get('store-id'), slot: SLOT3, email: 'three@example.com' })
+  await untilTick(clock)
+  expect(listedRow(store, '3')).toMatchObject({ slot: SLOT7 })
+  expect([w.logouts ?? [], resultOf(w, N2)?.ok]).toEqual([[], false])
+})
+
+test('a waiting rm of a slot an add listed with another login signs nothing out, by the email', async ($, on) => {
+  const { w, store, clock } = await selectWorld($, on)
+  await signInFolder(w, SLOT3, 'new@example.com')
+  w.files[`${REQUESTS}/${N1}.json`] = addRequest(N1, SLOT3, store.get('store-id'), clock.now())
+  w.files[`${REQUESTS}/${N2}.json`] = JSON.stringify({ kind: 'rm', nonce: N2, at: clock.now() + 1, id: '3', store: store.get('store-id'), slot: SLOT3, email: 'three@example.com' })
+  await untilTick(clock)
+  expect(listedRow(store, '3')).toMatchObject({ slot: SLOT3, email: 'new@example.com' })
+  expect([w.logouts ?? [], resultOf(w, N2)?.ok]).toEqual([[], false])
+})
+
+// Two sessions on one store, per key the add reads or writes: `accounts`, `health:<id>`, `launch-slot`, `rows`, `store-id`.
+test('two sessions on one store, accounts: a session that lists the folder while this one reads who signed in leaves one row', async ($, on) => {
+  const { w, store, clock } = await selectWorld($, on)
+  await signInFolder(w, SLOT7, 'seven@example.com')
+  w.onStatus = () => {
+    if ((store.get('accounts') as { slot: string }[]).some(a => a.slot === SLOT7)) return
+    store.set('accounts', [...(store.get('accounts') as object[]), { id: '7', slot: SLOT7, email: 'seven@example.com' }])
+  }
+  w.files[`${REQUESTS}/${N1}.json`] = addRequest(N1, SLOT7, store.get('store-id'), clock.now())
+  await untilTick(clock)
+  expect(listedIds(store)).toEqual(['1', '2', '7'])
+  expect(resultOf(w, N1)).toMatchObject({ ok: true, accountId: '7', message: 'already account 7' })
+})
+
+test('two sessions on one store, accounts: an account another session listed while this one read who signed in stays', async ($, on) => {
+  const { w, store, clock } = await selectWorld($, on)
+  await signInFolder(w, SLOT7, 'seven@example.com')
+  w.onStatus = () => {
+    if (listedIds(store).includes('8')) return
+    store.set('accounts', [...(store.get('accounts') as object[]), { id: '8', slot: `${HOME}/.claude/accounts/8`, email: 'eight@example.com' }])
+  }
+  w.files[`${REQUESTS}/${N1}.json`] = addRequest(N1, SLOT7, store.get('store-id'), clock.now())
+  await untilTick(clock)
+  expect(listedIds(store)).toEqual(['1', '2', '8', '7'])
+})
+
+test('two sessions on one store, accounts: a login another session listed while this one read who signed in is a twin', async ($, on) => {
+  const { w, store, clock } = await selectWorld($, on)
+  await signInFolder(w, SLOT7, 'eight@example.com')
+  w.onStatus = () => {
+    if (listedIds(store).includes('8')) return
+    store.set('accounts', [...(store.get('accounts') as object[]), { id: '8', slot: `${HOME}/.claude/accounts/8`, email: 'eight@example.com', orgId: 'org-eight@example.com' }])
+  }
+  w.files[`${REQUESTS}/${N1}.json`] = addRequest(N1, SLOT7, store.get('store-id'), clock.now())
+  await untilTick(clock)
+  expect(resultOf(w, N1)?.ok).toBe(false)
+  expect(listedIds(store)).not.toContain('7')
+})
+
+test('two sessions on one store, accounts: the session that takes one request second answers already', async ($, on) => {
+  const { w, store, clock } = await selectWorld($, on)
+  await signInFolder(w, SLOT7, 'seven@example.com')
+  w.files[`${REQUESTS}/${N1}.json`] = addRequest(N1, SLOT7, store.get('store-id'), clock.now())
+  w.files[`${REQUESTS}/${N2}.json`] = addRequest(N2, SLOT7, store.get('store-id'), clock.now() + 1)
+  await untilTick(clock)
+  expect(listedIds(store)).toEqual(['1', '2', '7'])
+  expect([resultOf(w, N1)?.accountId, resultOf(w, N2)?.message]).toEqual(['7', 'already account 7'])
+})
+
+test('two sessions on one store, health: the health stands before the row, so a session that merges between them never finds the account not signed in', async ($, on) => {
+  const { w, store, clock } = await selectWorld($, on)
+  await signInFolder(w, SLOT7, 'seven@example.com')
+  let healthAtRow: unknown = 'no row written'
+  const set = store.set.bind(store)
+  store.set = (key: string, value: unknown) => {
+    if (key === 'accounts' && (value as { id: string }[]).some(a => a.id === '7') && healthAtRow === 'no row written') healthAtRow = store.get('health:7')
+    return set(key, value)
+  }
+  w.files[`${REQUESTS}/${N1}.json`] = addRequest(N1, SLOT7, store.get('store-id'), clock.now())
+  await untilTick(clock)
+  expect(healthAtRow).toEqual({ kind: 'ok' })
+})
+
+test('two sessions on one store, launch-slot: the pick counts the setting another session changed, and the answer names it', async ($, on) => {
+  const { w, store, clock } = await selectWorld($, on)
+  await signInFolder(w, SLOT7, 'seven@example.com')
+  w.onStatus = () => store.set('launch-on', 'account:2')
+  w.files[`${REQUESTS}/${N1}.json`] = addRequest(N1, SLOT7, store.get('store-id'), clock.now())
+  await untilTick(clock)
+  w.onStatus = undefined
+  expect((store.get('launch-slot') as { id?: string } | undefined)?.id).toBe('2')
+  expect(resultOf(w, N1)).toMatchObject({ ok: true, pickId: '2' })
+})
+
+test('two sessions on one store, launch-slot: an add is a pick as the setting says, so the new account starts sessions when it has the most room', async ($, on) => {
+  const { w, store, clock } = await selectWorld($, on, [90, 90], [90, 90])
+  await signInFolder(w, SLOT7, 'seven@example.com')
+  w.files[`${REQUESTS}/${N1}.json`] = addRequest(N1, SLOT7, store.get('store-id'), clock.now())
+  await untilTick(clock)
+  await untilTick(clock)
+  expect((store.get('launch-slot') as { id?: string } | undefined)?.id).toBe('7')
+})
+
+test('two sessions on one store, rows: the rows the add leaves name the new account beside every other', async ($, on) => {
+  const { w, store, clock } = await selectWorld($, on)
+  await signInFolder(w, SLOT7, 'seven@example.com')
+  w.files[`${REQUESTS}/${N1}.json`] = addRequest(N1, SLOT7, store.get('store-id'), clock.now())
+  await beatUntilResult(w, N1, clock)
+  const rows = (store.get('rows') as StoredRows).rows.map(r => r.id)
+  expect(rows).toEqual(['1', '2', '7'])
+})
+
+test('two sessions on one store, store-id: an add read from another store is left alone, and an add changes no store-id', async ($, on) => {
+  const { w, store, clock } = await selectWorld($, on)
+  const id = store.get('store-id')
+  await signInFolder(w, SLOT7, 'seven@example.com')
+  w.files[`${REQUESTS}/${N1}.json`] = addRequest(N1, SLOT7, 'another-store', clock.now())
+  await untilTick(clock)
+  expect([resultOf(w, N1), listedIds(store).includes('7')]).toEqual([undefined, false])
+  w.files[`${REQUESTS}/${N2}.json`] = addRequest(N2, SLOT7, id, clock.now())
+  await untilTick(clock)
+  expect([resultOf(w, N2)?.ok, store.get('store-id')]).toEqual([true, id])
+})
+
+/** Ticks until a session has answered the request: at most two minutes. */
+async function beatUntilResult(w: World, nonce: string, clock: MockClock): Promise<void> {
+  for (let n = 0; n < 2 && resultOf(w, nonce) === undefined; n += 1) await untilTick(clock)
+  expect(resultOf(w, nonce), 'no session answered').toBeDefined()
+}

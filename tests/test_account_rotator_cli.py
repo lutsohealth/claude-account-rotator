@@ -10,6 +10,7 @@ import importlib.util
 import io
 import json
 import os
+import pty
 import shutil
 import signal
 import subprocess
@@ -746,6 +747,217 @@ class ListThisSession(StoreCase):
         self.assertIsNone(self.session()["thisSessionAccountId"], "no mark: this shell is in no session")
         self.assertIsNone(self.session(**{SLOT_VAR: slot})["thisSessionAccountId"], "a slot with no mark is no session of the mod")
         self.assertIsNone(self.session(**{SESSION_VAR: MARK, SLOT_VAR: "/nowhere"})["thisSessionAccountId"])
+
+
+# Stands in for `claude`: says what it was run with, prints a line as the real sign-in does, runs STUB_THEN, exits STUB_EXIT.
+STUB_CLAUDE = """#!/bin/sh
+{ printf 'argv=%s\\n' "$*"; printf 'slot=%s\\n' "$CLAUDE_SECURESTORAGE_CONFIG_DIR"; printf 'config=%s\\n' "$CLAUDE_CONFIG_DIR"
+  if [ -t 0 ]; then echo tty=yes; else echo tty=no; fi; } >> "$STUB_LOG"
+echo "stub: opening your browser"
+if [ -n "$STUB_THEN" ]; then sh -c "$STUB_THEN"; fi
+exit "${STUB_EXIT:-0}"
+"""
+
+
+class Add(RequestCase):
+    """C13 (puma-eslxj.14, RULING 4660): `account add` signs a new folder in, in the foreground, and a session lists it."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.home = self.tmp / "home"
+        self.accounts = self.home / ".claude" / "accounts"
+        self.accounts.mkdir(parents=True)
+        self.stub_log = self.tmp / "stub.log"
+        stubs = self.tmp / "stubs"
+        stubs.mkdir()
+        stub = stubs / "claude"
+        stub.write_text(STUB_CLAUDE, encoding="utf-8")
+        stub.chmod(0o755)
+        self.path = f"{stubs}{os.pathsep}{os.environ['PATH']}"
+        self.next_number = str(1 + max(int(a["id"]) for a in self.fixture["store"]["accounts"]))
+
+    def add_env(self, **more: str) -> dict[str, str]:
+        return {**self.env(), "HOME": str(self.home), "PATH": self.path, "STUB_LOG": str(self.stub_log), **more}
+
+    def add(self, *args: str, has_terminal: bool = True, **stub: str) -> subprocess.CompletedProcess[str]:
+        """`account add` on a real terminal, or on none."""
+        command = [sys.executable, str(CLI), "account", "add", *args]
+        if not has_terminal:
+            return subprocess.run(command, stdin=subprocess.DEVNULL, capture_output=True, text=True, env=self.add_env(**stub), timeout=30)
+        ours, theirs = pty.openpty()
+        self.addCleanup(os.close, ours)
+        try:
+            return subprocess.run(command, stdin=theirs, capture_output=True, text=True, env=self.add_env(**stub), timeout=30)
+        finally:
+            os.close(theirs)
+
+    def stub_said(self) -> list[str]:
+        return self.stub_log.read_text(encoding="utf-8").splitlines() if self.stub_log.exists() else []
+
+    def stored(self) -> dict:
+        return json.loads(self.store.read_text(encoding="utf-8"))
+
+    def session(self, ok: bool = True, message: str = "account added", is_listed: bool = True) -> threading.Thread:
+        """A session that takes the first add it finds: it lists the slot in the store before it answers."""
+
+        def respond() -> None:
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline:
+                found = [p for p in self.requests.glob("*.json") if not p.name.endswith(".result.json")] if self.requests.is_dir() else []
+                if found:
+                    request = json.loads(found[0].read_text(encoding="utf-8"))
+                    self.seen = request
+                    if ok and is_listed:
+                        store = self.stored()
+                        store["accounts"].append({"id": request["id"], "slot": request["slot"]})
+                        self.write(STORE, store)
+                    answered = {"nonce": request["nonce"], "ok": ok, "message": message, "accountId": request["id"], "pickId": "1"}
+                    (self.requests / f"{request['nonce']}.result.json").write_text(json.dumps(answered), encoding="utf-8")
+                    return
+                time.sleep(0.05)
+
+        thread = threading.Thread(target=respond)
+        thread.start()
+        self.addCleanup(thread.join)
+        return thread
+
+    def test_with_no_terminal_it_exits_2_before_any_folder_or_sign_in_naming_the_way_out(self) -> None:
+        done = self.add(has_terminal=False)
+        self.assertEqual((done.returncode, "--folder" in done.stderr, "--help" in done.stderr, "Traceback" in done.stderr), (2, True, True, False), done.stderr)
+        self.assertEqual((list(self.accounts.iterdir()), self.stub_said(), self.requests.exists()), ([], [], False))
+
+    def test_a_store_with_no_store_id_exits_3_before_any_folder_or_sign_in(self) -> None:
+        store = self.stored()
+        del store["store-id"]
+        self.write(STORE, store)
+        done = self.add("--wait", "1")
+        self.assertEqual((done.returncode, "store-id" in done.stderr), (3, True), done.stderr)
+        self.assertEqual((list(self.accounts.iterdir()), self.stub_said()), ([], []))
+
+    def test_it_signs_the_next_free_folder_in_on_this_terminal_and_asks_a_session_to_list_it(self) -> None:
+        self.session()
+        done = self.add("--wait", "10")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        slot = str(self.accounts / self.next_number)
+        self.assertEqual(self.stub_said(), ["argv=auth login --claudeai", f"slot={slot}", f"config={slot}", "tty=yes"])
+        self.assertEqual((self.seen["kind"], self.seen["slot"], self.seen["id"], self.seen["store"]), ("add", slot, self.next_number, "store-abc"))
+        self.assertTrue((self.accounts / self.next_number / "README").is_file(), "the folder says whose it is, as the panel's add does")
+        self.assertEqual(sorted(p.name for p in self.requests.iterdir()), [])
+        self.assertIn("account added", done.stdout)
+
+    def test_it_never_signs_in_a_folder_that_exists_or_a_number_or_slot_the_store_lists(self) -> None:
+        # Review of the bead against 00f0d864b: on vox ids 1 to 5 are listed and folder 6 exists, unlisted.
+        n = int(self.next_number)
+        existing = self.accounts / str(n)
+        existing.mkdir()
+        (existing / "theirs").write_text("kept", encoding="utf-8")
+        store = self.stored()
+        store["accounts"].append({"id": str(n + 1), "slot": "/elsewhere/9"})
+        store["accounts"].append({"id": "90", "slot": str(self.accounts / str(n + 2))})
+        self.write(STORE, store)
+        self.session()
+        self.assertEqual(self.add("--wait", "10").returncode, 0)
+        self.assertEqual(self.seen["slot"], str(self.accounts / str(n + 3)))
+        self.assertEqual((existing / "theirs").read_text(encoding="utf-8"), "kept")
+
+    def test_a_failed_sign_in_exits_5_removes_its_own_folder_and_asks_nothing(self) -> None:
+        done = self.add("--wait", "1", STUB_EXIT="7")
+        self.assertEqual((done.returncode, "Traceback" in done.stderr, "--help" in done.stderr), (5, False, True), done.stderr)
+        self.assertEqual((list(self.accounts.iterdir()), self.requests.exists()), ([], False))
+
+    def test_no_claude_to_run_exits_5_and_removes_its_own_folder(self) -> None:
+        done = self.add("--wait", "1", PATH="/nowhere")
+        self.assertEqual((done.returncode, "claude" in done.stderr, "Traceback" in done.stderr), (5, True, False), done.stderr)
+        self.assertEqual(list(self.accounts.iterdir()), [])
+
+    def test_a_folder_it_cannot_make_exits_1_with_no_sign_in(self) -> None:
+        self.accounts.rmdir()
+        self.accounts.write_text("", encoding="utf-8")
+        done = self.add("--wait", "1")
+        self.assertEqual((done.returncode, "Traceback" in done.stderr, self.stub_said()), (1, False, []), done.stderr)
+
+    def test_a_signal_during_the_sign_in_exits_130_and_removes_its_own_folder(self) -> None:
+        ours, theirs = pty.openpty()
+        self.addCleanup(os.close, ours)
+        started = self.tmp / "started"
+        child = subprocess.Popen([sys.executable, str(CLI), "account", "add"], stdin=theirs, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                 env=self.add_env(STUB_THEN=f"touch {started}; sleep 20"))
+        os.close(theirs)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not started.exists():
+            time.sleep(0.02)
+        self.assertTrue(started.exists(), "the stub never started: the fixture did not reach the sign-in")
+        child.send_signal(signal.SIGTERM)
+        _, stderr = child.communicate(timeout=10)
+        self.assertEqual((child.returncode, "Traceback" in stderr, list(self.accounts.iterdir())), (130, False, []), stderr)
+
+    def test_a_refusal_exits_4_in_the_sessions_words_and_keeps_the_folder(self) -> None:
+        self.session(ok=False, message="that sign-in is account 2 already")
+        done = self.add("--wait", "10")
+        self.assertEqual((done.returncode, "account 2 already" in done.stderr), (4, True), done.stderr)
+        self.assertTrue((self.accounts / self.next_number).is_dir())
+
+    def test_no_session_exits_3_withdraws_the_request_keeps_the_folder_and_names_the_way_back(self) -> None:
+        done = self.add("--wait", "0.3")
+        slot = str(self.accounts / self.next_number)
+        self.assertEqual((done.returncode, f"--folder {slot}" in done.stderr, len(done.stderr.strip().splitlines())), (3, True, 1), done.stderr)
+        self.assertEqual(list(self.requests.iterdir()), [])
+        self.assertTrue(Path(slot).is_dir())
+
+    def test_a_session_that_answers_ok_with_the_store_not_listing_the_folder_exits_1_naming_the_way_back(self) -> None:
+        # Two sessions on one store, `accounts`: no compare-and-set, so another session's write can take this one's place.
+        self.session(is_listed=False)
+        done = self.add("--wait", "10")
+        slot = str(self.accounts / self.next_number)
+        self.assertEqual((done.returncode, f"--folder {slot}" in done.stderr, "Traceback" in done.stderr), (1, True, False), done.stderr)
+
+    def test_the_request_names_the_store_id_as_it_stands_after_the_sign_in(self) -> None:
+        # Two sessions on one store, `store-id`: a sign-in takes minutes, and two sessions booting at once settle on the last write.
+        after = self.stored()
+        after["store-id"] = "store-later"
+        later = self.tmp / "later.json"
+        later.write_text(json.dumps(after), encoding="utf-8")
+        self.session()
+        self.assertEqual(self.add("--wait", "10", STUB_THEN=f"cp {later} {self.store}").returncode, 0)
+        self.assertEqual(self.seen["store"], "store-later")
+
+    def test_folder_takes_a_folder_already_signed_in_with_no_terminal_and_no_sign_in(self) -> None:
+        slot = self.accounts / "12"
+        slot.mkdir()
+        for given in (str(slot), f"{slot}/", os.path.relpath(slot)):
+            with self.subTest(given=given):
+                store = self.stored()
+                store["accounts"] = [a for a in store["accounts"] if a["slot"] != str(slot)]
+                self.write(STORE, store)
+                self.session()
+                done = self.add("--folder", given, "--wait", "10", has_terminal=False)
+                self.assertEqual((done.returncode, self.seen["slot"], self.seen["id"], self.stub_said()), (0, str(slot), "12", []), done.stderr)
+
+    def test_folder_outside_the_accounts_folder_or_with_no_number_or_missing_exits_2_and_asks_nothing(self) -> None:
+        (self.accounts / "abc").mkdir()
+        (self.accounts / "0").mkdir()
+        (self.accounts / "007").mkdir()
+        (self.home / "9").mkdir()
+        bad = (self.accounts / "abc", self.accounts / "0", self.accounts / "007", self.home / "9", self.accounts / "55", self.accounts)
+        self.assertTrue(bad)
+        for given in bad:
+            with self.subTest(given=given):
+                done = self.add("--folder", str(given), "--wait", "1", has_terminal=False)
+                self.assertEqual((done.returncode, "--help" in done.stderr, "Traceback" in done.stderr), (2, True, False), done.stderr)
+                self.assertFalse(self.requests.exists())
+
+    def test_json_is_orcas_envelope_with_the_sign_ins_own_words_kept_off_stdout(self) -> None:
+        self.session(message="account added")
+        done = self.add("--json", "--wait", "10")
+        data = json.loads(done.stdout)
+        self.assertEqual((data["ok"], data["result"]["account"], data["result"]["folder"], data["result"]["activeAccountId"]), (True, self.next_number, str(self.accounts / self.next_number), "1"))
+        self.assertIn("opening your browser", done.stderr)
+
+    def test_help_names_the_verb_the_browser_the_flag_and_every_exit(self) -> None:
+        self.assertIn("add", run(CLI, "account", "--help").stdout)
+        said = " ".join(run(CLI, "account", "add", "--help").stdout.split())
+        for words in ("browser", "--folder", "signed in", "twin", "5 the sign-in did not finish", "Claude Code's own login"):
+            self.assertIn(words, said)
 
 
 if __name__ == "__main__":
