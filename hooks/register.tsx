@@ -875,8 +875,9 @@ async function checkAll($: Host, isEvery = true): Promise<void> {
       await saveCheckError($, account.id, `the check failed (${kind}); the debug log has the rest`).catch(() => undefined)
     }
   }
-  // The rows carry what this check read, for a session that ends before the next merge.
-  await saveRows($, await $.clock.now())
+  // The rows carry what this check read, for a session that ends before the next merge: a merge writes them from the
+  // store as it stands, where every save went first and another session's reads since this check began are too.
+  await mergeStore($)
   await maybeRotate($)
 }
 
