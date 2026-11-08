@@ -16,7 +16,7 @@ type Answer = { value?: unknown; deny?: string }
 type Handler = (...args: unknown[]) => unknown
 
 const handlers = new Map<string, Handler>()
-register(((event: string, handler: Handler) => void handlers.set(event, handler)) as unknown as Parameters<typeof register>[0])
+register(((event: string, handler: Handler) => void handlers.set(event, handler)) as unknown as Parameters<typeof register>[0], {})
 
 const $ = { clock: { now: async () => NOW, sleep: async () => {} } }
 const nextFrom = (plugin: string) => Object.assign(async () => ({ value: 'passed on' }), { origin: { plugin } })
