@@ -6360,6 +6360,18 @@ test('the watch ends with its call: a later request waits for the minute', async
   expect(resultOf(w, N1)?.ok).toBe(true)
 })
 
+test('a Bash call that throws ends its watch too', async ($, on) => {
+  const { w, store, clock } = await selectWorld($, on)
+  w.bashRuns = Promise.reject(new Error('the tool failed'))
+  await $.tool.call({ tool: 'Bash', command: USE_COMMAND } as unknown as ToolCallArgs).catch(() => undefined)
+  await beat(clock)
+  await beat(clock)
+  w.files[`${REQUESTS}/${N1}.json`] = useRequest(N1, '2', store.get('store-id'), clock.now(), ownMark(w))
+  await beat(clock)
+  await beat(clock)
+  expect(resultOf(w, N1)).toBeUndefined()
+})
+
 test('with no Bash call at all (a `!` command, a wrapper), the minute applies this session\'s use', async ($, on) => {
   const { w, store, clock } = await selectWorld($, on)
   w.files[`${REQUESTS}/${N1}.json`] = useRequest(N1, '2', store.get('store-id'), clock.now(), ownMark(w))

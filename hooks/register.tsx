@@ -556,7 +556,7 @@ const CLI_NAME = 'account-rotator'
 async function watchRequests($: Host, watch: { isRunning: boolean }): Promise<void> {
   while (watch.isRunning) {
     await $.clock.sleep(REQUEST_POLL_MS)
-    if (isBooted && watch.isRunning) await applyRequests($).catch(error => debug($, `requests failed: ${String(error)}`))
+    if (isBooted) await applyRequests($).catch(error => debug($, `requests failed: ${String(error)}`))
   }
 }
 
