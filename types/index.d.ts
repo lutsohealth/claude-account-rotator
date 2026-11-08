@@ -51,11 +51,11 @@ export type Row = { id: string; lines: RowPart[][] }
  * sessions then start on, which is another where `id` has no room. `account use` writes one that moves the session
  * whose mark is `session`, the ACCOUNT_ROTATOR_SESSION it set; its result carries `activeId`, the login that session is
  * on after it, and no other session applies it. `account rm` writes one any session on the store applies, which drops
- * login `id` while it still holds the `slot` and `email` the CLI read; its `pickId` is where new sessions then start.
+ * login `id` while it still holds the `slot`, `email` and `orgId` the CLI read; its `pickId` is where new sessions then start.
  */
 export type RotatorRequest =
   | { kind: 'select'; nonce: string; at: number; id: string; store: string }
-  | { kind: 'rm'; nonce: string; at: number; id: string; store: string; slot: string; email?: string }
+  | { kind: 'rm'; nonce: string; at: number; id: string; store: string; slot: string; email?: string; orgId?: string }
   | { kind: 'use'; nonce: string; at: number; id: string; store: string; session: string }
 
 /**

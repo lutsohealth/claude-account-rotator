@@ -359,7 +359,7 @@ def remove(data: dict, store: str, given: str, wait_s: float, as_json: bool) -> 
         return {"account": account, "activeAccountId": pick, "message": result["message"]}
 
     # What this read saw: the session compares it before it signs anything out, as an id can change holder while a request waits.
-    seen = {"slot": slot, **({"email": row["email"]} if isinstance(row.get("email"), str) else {})}
+    seen = {"slot": slot, **{key: row[key] for key in ("email", "orgId") if isinstance(row.get(key), str)}}
     return request_session(data, store, account, wait_s, as_json, {"kind": "rm", **seen}, f"no session of the mod on {store} took", envelope)
 
 
