@@ -6561,6 +6561,20 @@ test('under the engine\'s own policy hold env.set resolves { deny }, and use mus
   expect(resultOf(w, N1), 'useSlot ignores what $.env.set resolves to, so exit 0 says "now uses account 2" with the slot unmoved: read { deny } in useSlot and treat it as the refusal').toMatchObject({ ok: false, message: blockedText(true), activeId: '1' })
 })
 
+test('a hold in words of the engine\'s own is a refusal too: the reason is not the sign of one', async ($, on) => {
+  let isHolding = false
+  const worded = ((event: string, ...rest: unknown[]) => {
+    if (event !== 'env.set') return (on as (...a: unknown[]) => unknown)(event, ...rest)
+    const below = rest.at(-1) as (...a: unknown[]) => unknown
+    return (on as (...a: unknown[]) => unknown)('env.set', ($: unknown, e: { name: string }, next: unknown) => (isHolding && e.name === 'CLAUDE_SECURESTORAGE_CONFIG_DIR' ? { value: { deny: 'your organization holds this' } } : below($, e, next)))
+  }) as unknown as On
+  const { w, store, clock } = await selectWorld($, worded)
+  isHolding = true
+  w.files[`${REQUESTS}/${N1}.json`] = useRequest(N1, '2', store.get('store-id'), clock.now(), ownMark(w))
+  await untilTick(clock)
+  expect(resultOf(w, N1)).toMatchObject({ ok: false, message: blockedText(true), activeId: '1' })
+})
+
 test('every $.env.set site reads a hold the engine resolves: the boot check, the panel press', async ($, on) => {
   const w = fresh()
   w.keychain['Claude Code-credentials'] = blob('tok-1')

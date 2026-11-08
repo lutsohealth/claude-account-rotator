@@ -619,6 +619,11 @@ class Use(RequestCase):
             self.assertEqual((done.returncode, "use" in done.stdout), (0, True), done.stderr)
         self.assertIn(SESSION_VAR, run(CLI, "account", "use", "--help").stdout)
 
+    def test_help_says_a_background_bash_waits_for_the_minute_and_connect_refuses(self) -> None:
+        said = " ".join(run(CLI, "account", "use", "--help").stdout.split())
+        for words in ("background Bash", "--wait under 60", "Chrome connects"):
+            self.assertIn(words, said)
+
 
 class ListThisSession(StoreCase):
     """C12: `list --json` names the account the session running it is on, read from the slot its Bash children carry."""
@@ -634,6 +639,12 @@ class ListThisSession(StoreCase):
             with self.subTest(account=account):
                 env = {SESSION_VAR: MARK, **({SLOT_VAR: slot} if slot else {})}
                 self.assertEqual(self.session(**env)["thisSessionAccountId"], account)
+
+    def test_help_says_the_field_is_what_this_process_inherited(self) -> None:
+        # Review C12-R1 STALE_MARK (Codex) [MARK-LIFE], RULING 4629: no live proof without a session registry, so the words carry the limit.
+        said = " ".join(run(CLI, "account", "list", "--help").stdout.split())
+        for words in ("thisSessionAccountId", "inherited", "outlives its session"):
+            self.assertIn(words, said)
 
     def test_none_outside_a_session_or_on_a_slot_no_account_holds(self) -> None:
         slot = next(a["slot"] for a in self.fixture["store"]["accounts"] if a["slot"])

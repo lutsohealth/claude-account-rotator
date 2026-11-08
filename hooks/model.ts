@@ -690,8 +690,11 @@ export function slotEnv(slot: string): Record<string, string> {
  * settings, it keeps a plugin you install from changing where sign-ins are read.
  */
 export function isPolicyRefusal(error: unknown): boolean {
-  return String(error).includes('is not for plugins outside policy to change')
+  return error instanceof SwitchHeld || String(error).includes('is not for plugins outside policy to change')
 }
+
+/** The engine's own hold on a variable, which `$.env.set` resolves with rather than rejects, its reason in words of its own. */
+export class SwitchHeld extends Error {}
 
 /** Whether this session reads the normal login, the one `/login` signs in, rather than a slot the mod moved it to. */
 export function isOnNormalLogin(view: View): boolean {

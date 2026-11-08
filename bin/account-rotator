@@ -46,7 +46,7 @@ REQUEST_TTL_S = 300
 SESSION_VAR = "ACCOUNT_ROTATOR_SESSION"
 # The slot a session runs on, which the mod keeps set in its Bash children's environment: unset is Claude Code's login.
 SLOT_VAR = "CLAUDE_SECURESTORAGE_CONFIG_DIR"
-OLDER_NOTE ="an older version of the mod stored some rows as text, their times as of when it wrote them"
+OLDER_NOTE = "an older version of the mod stored some rows as text, their times as of when it wrote them"
 EXITS = (
     "Exit 0 done, 1 no store or a damaged one, 2 a usage error (an unknown flag or verb, --agent not claude, an --account"
     " that names no account or several, a --wait not above 0 and at most 300, use outside a session of the mod), 3 no session"
@@ -177,7 +177,8 @@ def list_text(data: dict, now_ms: float, zone: tzinfo | None) -> str:
 
 
 def this_session_account(data: dict) -> str | None:
-    """The account whose slot the session running this carries: none outside a session of the mod."""
+    """The account whose slot this process inherited from a session of the mod: none with no mark inherited. A child
+    that outlives its session keeps both, and nothing here can tell; a session registry is out of the epic's scope."""
     if not os.environ.get(SESSION_VAR):
         return None
     slot = os.environ.get(SLOT_VAR, "")
@@ -325,7 +326,7 @@ def select(data: dict, store: str, given: str, wait_s: float, as_json: bool) -> 
 
 def use(data: dict, store: str, given: str, wait_s: float, as_json: bool) -> int:
     """Asks the session running this to move to an account. A session answers while its Bash call runs, so a run of
-    this in the Bash tool has its answer at once; any other way of running it, at that session's minute."""
+    this in the Bash tool's foreground has its answer at once; any other way of running it, at that session's minute."""
 
     def envelope(account: str, result: dict) -> dict:
         here = result.get("activeId") if isinstance(result.get("activeId"), str) else None
@@ -348,7 +349,7 @@ def parsers() -> tuple[argparse.ArgumentParser, argparse.ArgumentParser]:
     listing = verbs.add_parser(
         "list",
         help="print each account's row as the switcher pane draws it",
-        description="account list: print each account's row as the switcher pane draws it, then when the rows were written and where new sessions start. Reads the store, never writes it. --json prints Orca's envelope (orca account list --json) with the mod's own fields per account.",
+        description=f"account list: print each account's row as the switcher pane draws it, then when the rows were written and where new sessions start. Reads the store, never writes it. --json prints Orca's envelope (orca account list --json) with the mod's own fields per account, and thisSessionAccountId: the account whose slot this process inherited with {SESSION_VAR}, as of when it started; a child that outlives its session still names it.",
         epilog=EXITS,
     )
     selecting = verbs.add_parser(
@@ -360,7 +361,7 @@ def parsers() -> tuple[argparse.ArgumentParser, argparse.ArgumentParser]:
     using = verbs.add_parser(
         "use",
         help="move the session running this to an account, as the panel's Use now does",
-        description=f"account use: move the session running this to an account, as the panel's Use now does: in the Bash tool, while the command runs; run any other way, within a minute. It never writes the store. It finds its session by {SESSION_VAR}, which the mod sets in its Bash children's environment; with it unset this exits 2. A --plugin-dir or throwaway-config session keeps a store of its own: pass it with --store.",
+        description=f"account use: move the session running this to an account, as the panel's Use now does: in the Bash tool's foreground, while the command runs; run any other way (`!`, under a wrapper's name, a background Bash), within a minute, so a --wait under 60 can exit 3. While Claude in Chrome connects it refuses, exit 4. It never writes the store. It finds its session by {SESSION_VAR}, which the mod sets in its Bash children's environment; with it unset this exits 2. A --plugin-dir or throwaway-config session keeps a store of its own: pass it with --store.",
         epilog=EXITS,
     )
     for verb in (selecting, using):

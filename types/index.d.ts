@@ -215,6 +215,8 @@ export type View = {
   chromeConnecting?: string
   /** This session's id, which `claude --resume` takes. */
   sessionId?: string
+  /** This session only: the mark its Bash children carry in ACCOUNT_ROTATOR_SESSION, which `account use` names it by. */
+  sessionMark?: string
   /** This session only: the footer draws imitated usage, to judge its look. */
   demo?: boolean
   /** This session's terminal draws block characters from its font, short of the line, as Terminal.app does. */

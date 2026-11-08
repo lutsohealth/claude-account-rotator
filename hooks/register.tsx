@@ -83,6 +83,8 @@ import {
   isSameRows,
   rowsOf,
   REQUEST_POLL_MS,
+  REQUEST_TTL_MS,
+  SwitchHeld,
   requestFrom,
   requestsDir,
 } from './model'
@@ -462,17 +464,17 @@ async function saveStoreId($: Host): Promise<void> {
 const takenRequests = new Set<string>()
 
 /**
- * What this session's Bash children carry in ACCOUNT_ROTATOR_SESSION, for `account use` to name it by. Made at each
- * boot, and no session id: /clear moves the id and not the variable, and two processes can resume one id.
+ * Sets what this session's Bash children carry in ACCOUNT_ROTATOR_SESSION, for `account use` to name it by. Kept in the
+ * view, which a reload keeps, so a child started before a later start still names this session. No session id: /clear
+ * moves the id and not the variable, and two processes can resume one id. Refused, the view holds no mark: `use` finds
+ * no session, the rest runs on.
  */
-let sessionMark: string | undefined
-
-/** Sets the mark for every Bash child started after. Refused, it stays unset: `use` finds no session, the rest runs on. */
 async function setSessionMark($: Host): Promise<void> {
-  const mark = `session-${Math.random().toString(36).slice(2, 12)}`
+  const mark = (await getView($)).sessionMark ?? `session-${Math.random().toString(36).slice(2, 12)}`
   try {
-    await $.env.set('ACCOUNT_ROTATOR_SESSION', mark)
-    sessionMark = mark
+    const set = await $.env.set('ACCOUNT_ROTATOR_SESSION', mark)
+    if (set.deny !== undefined) throw new Error(set.deny)
+    await setView($, v => ({ ...v, sessionMark: mark }))
   } catch (error) {
     await debug($, `session mark refused: ${String(error)}`)
   }
@@ -481,11 +483,13 @@ async function setSessionMark($: Host): Promise<void> {
 /**
  * Applies each request in the requests folder that names this store's `store-id` and has no result yet, oldest first
  * so the newest stands, and writes its result beside it. A request another store's CLI read, one aimed at another
- * session, or a stale one, is left for the CLI to withdraw.
+ * session, or a stale one, is left for the CLI to withdraw. `isMerging`: the store is merged first where any request is
+ * there to take, for a caller the minute's merge does not stand before.
  */
-async function applyRequests($: Host): Promise<void> {
+async function applyRequests($: Host, isMerging = false): Promise<void> {
   const storeId = await $.store.get('store-id')
   if (typeof storeId !== 'string') return
+  const { sessionMark } = await getView($)
   const dir = requestsDir(await $.env.get('CLAUDE_CONFIG_DIR'), (await $.env.get('HOME')) ?? '')
   const entries = await $.fs.list(dir).catch(() => [])
   const names = new Set(entries.map(e => e.name))
@@ -500,6 +504,7 @@ async function applyRequests($: Host): Promise<void> {
     if (request === undefined || request.nonce !== nonce || request.store !== storeId) continue
     if (request.kind === 'select' || request.session === sessionMark) requests.push(request)
   }
+  if (isMerging && requests.length > 0) await mergeStore($)
   for (const request of requests.sort((a, b) => a.at - b.at)) {
     // The watch over a Bash call and the minute can read one listing: the first to reach a request takes it.
     if (takenRequests.has(request.nonce)) continue
@@ -534,11 +539,20 @@ async function applyRequest($: Host, request: RotatorRequest): Promise<{ ok: boo
   return { ok: true, message: `new sessions start on account ${pick.id} (${pick.why})`, pickId: pick.id }
 }
 
-/** Moves this session as the panel's Use now does, under the same rule: only a login signed in. The result reads back where it stands. */
+/**
+ * Moves this session as the panel's Use now does, under the same rule: only a login signed in. The result reads back
+ * where it stands. Unlike a press, nobody watches what comes after: Connect's visit would move the session back
+ * unsaid, so a use waits it out; and the account in use needs no switch, only the end of one held for later.
+ */
 async function useAccount($: Host, target: Account): Promise<{ ok: boolean; message: string; activeId: string }> {
   const view = await getView($)
   const name = label(target)
-  if (view.activeId === target.id && held === undefined) return { ok: true, message: `this session already uses account ${name}`, activeId: target.id }
+  if (isConnectingChrome) return { ok: false, message: 'Claude in Chrome is connecting, which moves this session and back: run this again in a minute', activeId: view.activeId }
+  if (view.activeId === target.id) {
+    held?.timer.cancel()
+    held = undefined
+    return { ok: true, message: `this session already uses account ${name}`, activeId: target.id }
+  }
   const health = view.health[target.id]
   if (health?.kind !== 'ok') return { ok: false, message: `account ${name} cannot take over: ${health?.kind === 'login-needed' ? health.why : 'it is not signed in yet'}`, activeId: view.activeId }
   const hasMoved = await switchTo($, target, 'a command asked for it')
@@ -551,11 +565,16 @@ async function useAccount($: Host, target: Account): Promise<{ ok: boolean; mess
 /** What a Bash command spells to be watched: both bins' names hold it. */
 const CLI_NAME = 'account-rotator'
 
-/** Applies requests each beat while `watch.isRunning`. Before boot has read the accounts, it would answer that none is listed. */
+/**
+ * Applies requests each beat while `watch.isRunning`, for at most the time a request lasts: a command that only names
+ * the CLI can run for hours, and the minute takes whatever comes later. Before boot has read the accounts, it would
+ * answer that none is listed.
+ */
 async function watchRequests($: Host, watch: { isRunning: boolean }): Promise<void> {
-  while (watch.isRunning) {
+  const until = (await $.clock.now()) + REQUEST_TTL_MS
+  while (watch.isRunning && (await $.clock.now()) < until) {
     await $.clock.sleep(REQUEST_POLL_MS)
-    if (isBooted) await applyRequests($).catch(error => debug($, `requests failed: ${String(error)}`))
+    if (watch.isRunning && isBooted) await applyRequests($, true).catch(error => debug($, `requests failed: ${String(error)}`))
   }
 }
 
@@ -734,8 +753,9 @@ async function signedInAs($: Host, slot: string): Promise<Identity | undefined> 
 
 /** Points this session's requests, and every child it starts after, at a slot's login. */
 async function useSlot($: Host, slot: string): Promise<void> {
-  if (slot === '') await $.env.set('CLAUDE_SECURESTORAGE_CONFIG_DIR', undefined)
-  else await $.env.set('CLAUDE_SECURESTORAGE_CONFIG_DIR', slot)
+  const set = slot === '' ? await $.env.set('CLAUDE_SECURESTORAGE_CONFIG_DIR', undefined) : await $.env.set('CLAUDE_SECURESTORAGE_CONFIG_DIR', slot)
+  // The engine's hold resolves with its reason; a hook's refusal rejects. Callers meet both as a throw.
+  if (set.deny !== undefined) throw new SwitchHeld(set.deny)
 }
 
 /**
