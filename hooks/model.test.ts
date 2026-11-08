@@ -1311,6 +1311,12 @@ test('a use request names a session or is no request, and a select request carri
   expect(requestFrom({ ...SELECT, session: 'session-abc' }, NOW)).toEqual(SELECT)
 })
 
+test('an rm request is read back as it was written, and it carries no mark', () => {
+  const RM = { kind: 'rm', nonce: 'n0nce-9012', at: NOW, id: '2', store: 'store-abc' }
+  expect(requestFrom(RM, NOW)).toEqual(RM)
+  expect(requestFrom({ ...RM, session: 'session-abc' }, NOW)).toEqual(RM)
+})
+
 test('the requests live in the Claude config folder of the session, CLAUDE_CONFIG_DIR or ~/.claude', () => {
   expect([requestsDir('/cfg', '/home/x'), requestsDir(undefined, '/home/x')]).toEqual(['/cfg/account-rotator-requests', '/home/x/.claude/account-rotator-requests'])
 })

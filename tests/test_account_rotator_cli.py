@@ -622,6 +622,71 @@ class Use(RequestCase):
             self.assertIn(words, said)
 
 
+class Remove(RequestCase):
+    """C12 (puma-eslxj.13, RULING 4640): `account rm` asks any session on the store to drop an account, as Remove does."""
+
+    def rm(self, *args: str) -> subprocess.CompletedProcess[str]:
+        return run(CLI, "account", "rm", *args, env=self.env())
+
+    def test_claude_codes_own_login_by_any_name_exits_2_naming_the_way_out_and_leaves_no_file(self) -> None:
+        own = next(a for a in self.fixture["store"]["accounts"] if a["slot"] == "")
+        names = ("system", own["id"], own["email"])
+        self.assertTrue(names)
+        for given in names:
+            with self.subTest(account=given):
+                done = self.rm("--account", given)
+                self.assertEqual((done.returncode, "claude auth logout" in done.stderr, "--help" in done.stderr, "Traceback" in done.stderr), (2, True, True, False), done.stderr)
+                self.assertFalse(self.requests.exists(), "exit 2 writes no request")
+
+    def test_an_account_no_listed_one_names_exits_2_and_leaves_no_file(self) -> None:
+        self.assertEqual(self.rm("--account", "nobody@example.com").returncode, 2)
+        self.assertFalse(self.requests.exists())
+
+    def test_the_request_names_the_store_and_the_account_and_no_session_and_both_files_go(self) -> None:
+        for given in ("2", "two@example.com"):
+            with self.subTest(account=given):
+                self.answer(True, "account 2 is removed; new sessions start on account 1")
+                done = self.rm("--account", given, "--wait", "10")
+                self.assertEqual((done.returncode, self.seen["kind"], self.seen["store"], self.seen["id"], "session" in self.seen), (0, "rm", "store-abc", "2", False), done.stderr)
+                self.assertIn("account 2 is removed", done.stdout)
+                self.assertEqual(sorted(p.name for p in self.requests.iterdir()), [])
+
+    def test_it_needs_no_session_of_its_own(self) -> None:
+        env = {k: v for k, v in self.env().items() if k != SESSION_VAR}
+        self.answer(True, "account 2 is removed")
+        self.assertEqual(run(CLI, "account", "rm", "--account", "2", "--wait", "10", env=env).returncode, 0)
+
+    def test_a_refusal_gives_exit_4_with_the_sessions_words(self) -> None:
+        self.answer(False, "account 2 could not be signed out: keychain is locked")
+        done = self.rm("--account", "2", "--wait", "10")
+        self.assertEqual((done.returncode, "keychain is locked" in done.stderr), (4, True), done.stderr)
+
+    def test_no_session_within_wait_gives_exit_3_and_withdraws_the_request(self) -> None:
+        self.assertEqual(self.rm("--account", "2", "--wait", "0.3").returncode, 3)
+        self.assertEqual(list(self.requests.iterdir()), [])
+
+    def test_a_signal_withdraws_the_request_in_one_line(self) -> None:
+        child = subprocess.Popen([sys.executable, str(CLI), "account", "rm", "--account", "2", "--wait", "30"], env=self.env(), stderr=subprocess.PIPE, text=True)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not (self.requests.is_dir() and list(self.requests.glob("*.json"))):
+            time.sleep(0.02)
+        self.assertTrue(self.requests.is_dir() and list(self.requests.glob("*.json")), "the CLI wrote no request: the fixture did not reach the wait")
+        child.send_signal(signal.SIGTERM)
+        _, stderr = child.communicate(timeout=5)
+        self.assertEqual((child.returncode, list(self.requests.iterdir()), "Traceback" in stderr), (130, [], False), stderr)
+
+    def test_json_is_orcas_envelope_naming_where_new_sessions_start(self) -> None:
+        self.answer(True, "account 2 is removed; new sessions start on account 1", pick_id="1")
+        data = json.loads(self.rm("--account", "2", "--json", "--wait", "10").stdout)
+        self.assertEqual((data["ok"], data["result"]["account"], data["result"]["activeAccountId"], "removed" in data["result"]["message"]), (True, "2", "1", True))
+
+    def test_help_names_the_verb_and_says_it_signs_out(self) -> None:
+        self.assertIn("rm", run(CLI, "account", "--help").stdout)
+        said = " ".join(run(CLI, "account", "rm", "--help").stdout.split())
+        for words in ("signs", "Other sessions", "not moved"):
+            self.assertIn(words, said)
+
+
 class ListThisSession(StoreCase):
     """C12: `list --json` names the account the session running it is on, read from the slot its Bash children carry."""
 
