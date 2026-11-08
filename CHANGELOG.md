@@ -2,6 +2,12 @@
 
 What each version of the account rotator changed. To get each one as Claude Code starts, turn on auto-update: in `/plugin`, open **Marketplaces**, pick **claude-account-rotator** and choose **Enable auto-update**. To update by hand, run `claude plugin marketplace update claude-account-rotator`, then `claude plugin update account-rotator@claude-account-rotator`, and start a new session.
 
+## 0.5.19-lutso.1 - 2026-11-08
+
+- **A shell command now removes request files a killed command or a dead session left**, once past the five minutes a request lasts. A file of another shape stays.
+- **An oversized or odd file in the requests folder is skipped unread** and logged once, in the debug log.
+- **A requests folder that cannot be read is logged once**, and again only after it has read again.
+
 ## 0.5.18-lutso.1 - 2026-11-08
 
 - **+ Add an account never signs in a folder that exists**, so it never replaces a sign-in. It and `account add` pick a folder by one rule: the first number from 2 with no account on it and no folder. Removing an account leaves its folder, so neither takes that number again.
