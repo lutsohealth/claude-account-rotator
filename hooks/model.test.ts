@@ -7,7 +7,7 @@ import { companyOf, identityFromStatus, planName } from './model'
 import { laterMark, spentMark, withFableMark } from './model'
 import { EMPTY_VIEW, USAGE_IDLE_MS, fitRow, rowOf, rowsOf, rowText, storedLine, storedLineText } from './model'
 import ROWS_FIXTURE from '../tests/fixtures/rows'
-import { REQUEST_TTL_MS, requestFrom, requestsDir } from './model'
+import { REQUEST_TTL_MS, holdsLogin, requestFrom, requestsDir } from './model'
 import { USAGE_BACKOFF_MAX_MS, USAGE_CLAIM_MS, USAGE_CLAIM_WAIT_MS, USAGE_EARLY_MS, WRITER_VERSION, afterUsage, claimDueReads, gatingDue, isUsageDue, mayForceUsage, mayReadSince, renewClaim, retryAfterFrom, usageDueFrom } from './model'
 import { DEFAULT_FOOTER, availableNow, braille, browsersFrom, chromeNote, continueTextFrom, counted, fiveHourLimitFrom, credentialFrom, credentialsFile, fableMark, fableSpentNotice, fableStay, footerStyleFrom, healthOf, identityFromProfile, isFableSpent, isFableStop, isNoBrowser, isPolicyRefusal, keepFable, keychainItem, legacyMark, markFrom, nextReset, pickTarget, pie, readingFromUsage, rotateToFrom, shouldLeave, roomColor, windowPct, withMark, withWeekMark } from './model'
 
@@ -1281,7 +1281,7 @@ test('a select request is read back as it was written, while it is fresh', () =>
 test('a request of another kind, shape or age is no request', () => {
   const cases: [string, unknown][] = [
     ['not an object', 'select'],
-    ['another kind', { ...SELECT, kind: 'rm' }],
+    ['another kind', { ...SELECT, kind: 'add' }],
     ['no nonce', { ...SELECT, nonce: undefined }],
     ['a nonce that names a path', { ...SELECT, nonce: '../launch-slot' }],
     ['no account', { ...SELECT, id: 7 }],
@@ -1305,10 +1305,42 @@ test('a use request names a session or is no request, and a select request carri
     ['no mark', { ...USE, session: undefined }],
     ['an empty mark', { ...USE, session: '' }],
     ['a mark that is no string', { ...USE, session: 7 }],
-    ['another kind with a mark', { ...USE, kind: 'rm' }],
+    ['another kind with a mark', { ...USE, kind: 'add' }],
   ]
   expect(cases.filter(([, value]) => requestFrom(value, NOW) !== undefined).map(([name]) => name)).toEqual([])
   expect(requestFrom({ ...SELECT, session: 'session-abc' }, NOW)).toEqual(SELECT)
+})
+
+test('an rm request is read back with what the CLI saw of the account, and it carries no mark', () => {
+  const RM = { kind: 'rm', nonce: 'n0nce-9012', at: NOW, id: '2', store: 'store-abc', slot: '/slot/2', email: 'two@example.com' }
+  expect(requestFrom(RM, NOW)).toEqual(RM)
+  expect(requestFrom({ ...RM, session: 'session-abc' }, NOW)).toEqual(RM)
+  const { email: _email, ...noEmail } = RM
+  expect(requestFrom(noEmail, NOW), 'an account not signed in yet has no email').toEqual(noEmail)
+  expect(requestFrom({ ...RM, orgId: 'org-a' }, NOW)).toEqual({ ...RM, orgId: 'org-a' })
+  const cases: [string, unknown][] = [
+    ['no slot', { ...RM, slot: undefined }],
+    ['a slot that is no string', { ...RM, slot: 7 }],
+    ['an email that is no string', { ...RM, email: 7 }],
+    ['an organization that is no string', { ...RM, orgId: 7 }],
+  ]
+  expect(cases.filter(([, value]) => requestFrom(value, NOW) !== undefined).map(([name]) => name)).toEqual([])
+})
+
+// Review C12-rm-R2 EMAIL-FILL and ORG-REUSE (Codex) [RM-TARGET-NOT-SEEN]: a login is one email in one organization (sameLogin); what the mod learned since the read is no other login.
+test('an account holds the login a request read: another slot, email or organization is another login, and what was learned since is not', () => {
+  const A = { slot: '/slot/2', email: 'a@example.com', orgId: 'org-a' }
+  const cases: [string, Parameters<typeof holdsLogin>[0], Parameters<typeof holdsLogin>[1], boolean][] = [
+    ['all the same', A, { id: '2', ...A }, true],
+    ['the email learned since', { slot: A.slot }, { id: '2', ...A }, true],
+    ['the organization learned since', { slot: A.slot, email: A.email }, { id: '2', ...A }, true],
+    ['another slot', { ...A, slot: '/slot/9' }, { id: '2', ...A }, false],
+    ['another email', { ...A, email: 'b@example.com' }, { id: '2', ...A }, false],
+    ['another organization under one email', { ...A, orgId: 'org-b' }, { id: '2', ...A }, false],
+    ['an email the store no longer holds', A, { id: '2', slot: A.slot }, false],
+    ['an organization the store no longer holds', A, { id: '2', slot: A.slot, email: A.email }, false],
+  ]
+  expect(cases.filter(([, seen, account, expected]) => holdsLogin(seen, account) !== expected).map(([name]) => name)).toEqual([])
 })
 
 test('the requests live in the Claude config folder of the session, CLAUDE_CONFIG_DIR or ~/.claude', () => {

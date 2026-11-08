@@ -60,6 +60,10 @@ type World = {
   markAtStart?: string
   /** Claude Code's security policy refuses every variable but the slot. */
   refuseMark?: boolean
+  /** The slot of each `claude auth logout` the mod ran. */
+  logouts?: string[]
+  /** What a `claude auth logout` answers, where it fails. */
+  logoutFails?: { exitCode: number | null; stderr: string }
   /** While set, a Bash call runs until it settles. */
   bashRuns?: Promise<void>
   /** While set, a file read waits until it settles, so two readers overlap as the engine's hops can make them. */
@@ -182,7 +186,10 @@ function world(on: On, w: World, store: Record<string, unknown> | Map<string, un
       const status = email ? { loggedIn: true, email, orgId: `org-${email}`, orgName: 'Org', subscriptionType: 'max' } : { loggedIn: false }
       return { value: ran(0, JSON.stringify(status)) }
     }
-    if (cmd === 'claude' && sub === 'auth' && verb === 'logout') return { value: ran(0, '') }
+    if (cmd === 'claude' && sub === 'auth' && verb === 'logout') {
+      w.logouts = [...(w.logouts ?? []), e.init?.env?.CLAUDE_SECURESTORAGE_CONFIG_DIR ?? '']
+      return { value: { ...ran(0, ''), ...w.logoutFails } }
+    }
     throw new Error(`unexpected command: ${e.argv.join(' ')}`)
   })
   on('http.fetch', (_$, e) => {
@@ -6775,4 +6782,245 @@ test('a finished call must not take any later select or use before the minute', 
   await beat(clock)
   const offenders = ['late-use01', 'late-sel01'].filter(n => resultOf(w, n)).map(n => `${n} taken after watcher ended`)
   expect(offenders, `watchRequests must recheck isRunning after sleep before applyRequests: ${offenders.join('; ')}`).toEqual([])
+})
+
+// C12 `rm` (puma-eslxj.13, RULING 4640): `account rm` drops an account through any session on the store, as Remove does.
+
+/** What the CLI read of each login these tests remove. */
+const SEEN: Record<string, { slot: string; email: string }> = {
+  '1': { slot: '', email: 'one@example.com' },
+  '2': { slot: SLOT2, email: 'two@example.com' },
+  '3': { slot: SLOT3, email: 'three@example.com' },
+}
+const rmRequest = (nonce: string, id: string, storeId: unknown, at: number) => JSON.stringify({ kind: 'rm', nonce, at, id, store: storeId, ...SEEN[id] })
+const LOGIN3 = { id: '3', slot: SLOT3, email: 'three@example.com' }
+/** Every store key `rm` deletes for an account. */
+const ACCOUNT_KEYS = ['reading', 'usage', 'mark', 'no-five-hour', 'week-mark', 'fable-mark', 'check-error', 'health', 'holder', 'usage-due']
+
+test('an rm during a Bash call that names the CLI signs the slot out, drops the account and its keys, re-picks launch-slot and says so', async ($, on) => {
+  const { w, store, clock } = await selectWorld($, on)
+  store.set('launch-on', 'account:2')
+  await untilTick(clock)
+  expect((store.get('launch-slot') as { id?: string } | undefined)?.id, 'the fixture does not pick login 2').toBe('2')
+  for (const key of ACCOUNT_KEYS) store.set(`${key}:2`, { seeded: true })
+  const call = bashCall($, w, 'account-rotator account rm --account 2')
+  w.files[`${REQUESTS}/${N1}.json`] = rmRequest(N1, '2', store.get('store-id'), clock.now())
+  await beat(clock)
+  await call.finish()
+  expect(w.logouts).toEqual([SLOT2])
+  expect((store.get('accounts') as { id: string }[]).map(a => a.id)).toEqual(['1'])
+  const left = ACCOUNT_KEYS.filter(key => store.has(`${key}:2`))
+  expect(left, `keys left behind: ${left.join(', ')}`).toEqual([])
+  expect((store.get('launch-slot') as { id?: string } | undefined)?.id).toBe('1')
+  expect(resultOf(w, N1)).toMatchObject({ nonce: N1, ok: true, pickId: '1' })
+  expect(resultOf(w, N1)?.message).toMatch(/account 2 is removed; new sessions start on account 1/)
+})
+
+test('with no Bash call the minute applies an rm', async ($, on) => {
+  const { w, store, clock } = await selectWorld($, on)
+  w.files[`${REQUESTS}/${N1}.json`] = rmRequest(N1, '2', store.get('store-id'), clock.now())
+  await untilTick(clock)
+  expect([w.logouts, resultOf(w, N1)?.ok]).toEqual([[SLOT2], true])
+})
+
+// Two sessions on one store: what each key holds for another account is not this rm's, and neither is an account this session's view has not seen.
+test('two sessions on one store: an rm keeps every key of an account another session added since this session last read the store', async ($, on) => {
+  const { w, store, clock } = await selectWorld($, on)
+  expect(ACCOUNT_KEYS.length, 'the sweep lists no key').toBeGreaterThan(0)
+  store.set('accounts', [...TWO_LOGINS.accounts, LOGIN3])
+  for (const key of ACCOUNT_KEYS) store.set(`${key}:3`, { theirs: true })
+  w.files[`${REQUESTS}/${N1}.json`] = rmRequest(N1, '2', store.get('store-id'), clock.now())
+  const call = bashCall($, w, 'account-rotator account rm --account 2')
+  await beat(clock)
+  await call.finish()
+  expect((store.get('accounts') as { id: string }[]).map(a => a.id)).toEqual(['1', '3'])
+  const lost = ACCOUNT_KEYS.filter(key => !store.has(`${key}:3`))
+  expect(lost, `another account's keys deleted: ${lost.join(', ')}`).toEqual([])
+})
+
+test('two sessions on one store: an rm of an account another session already removed answers ok with no logout', async ($, on) => {
+  const { w, store, clock } = await selectWorld($, on)
+  store.set('accounts', TWO_LOGINS.accounts.filter(a => a.id !== '2'))
+  w.files[`${REQUESTS}/${N1}.json`] = rmRequest(N1, '2', store.get('store-id'), clock.now())
+  await untilTick(clock)
+  expect(w.logouts ?? []).toEqual([])
+  expect(resultOf(w, N1)).toMatchObject({ ok: true })
+  expect(resultOf(w, N1)?.message).toMatch(/account 2 is already gone/)
+})
+
+test('two sessions on one store: a press of Remove from a view that still lists an account another session removed signs nothing out', async ($, on) => {
+  const { w, store, clock } = await selectWorld($, on)
+  const pane = await mountPane($)
+  await pane.press({ key: 'ask-remove-2' })
+  await clock.settle()
+  await pane.redraw()
+  // No minute has passed: this session's view still lists login 2, and the press has no merge before it.
+  store.set('accounts', TWO_LOGINS.accounts.filter(a => a.id !== '2'))
+  await pane.press({ key: 'remove-2' })
+  await clock.settle()
+  await pane.unmount()
+  expect(w.logouts ?? [], 'the press signed out a login the store no longer lists').toEqual([])
+})
+
+// Review C12-rm ID-REUSE (Codex) [RM-TARGET-NOT-SEEN]: a request waits, so its id can change holder before it is applied.
+test('an rm of an id that holds another login than the CLI read signs nothing out and deletes nothing', async ($, on) => {
+  const { w, store, clock } = await selectWorld($, on)
+  const offenders: string[] = []
+  const holders = [{ id: '2', slot: SLOT2, email: 'new@example.com' }, { id: '2', slot: `${HOME}/.claude/accounts/9`, email: 'two@example.com' }, { id: '2', slot: SLOT2 }]
+  let serial = 0
+  for (const holder of holders) {
+    store.set('accounts', [TWO_LOGINS.accounts[0], holder])
+    store.set('reading:2', { theirs: true })
+    const nonce = `reuse-${String(++serial).padStart(4, '0')}`
+    w.files[`${REQUESTS}/${nonce}.json`] = rmRequest(nonce, '2', store.get('store-id'), clock.now())
+    await untilTick(clock)
+    const isKept = (store.get('accounts') as { id: string }[]).some(a => a.id === '2') && store.has('reading:2')
+    if ((w.logouts ?? []).length > 0 || !isKept || resultOf(w, nonce)?.ok !== false) offenders.push(JSON.stringify(holder))
+    w.logouts = []
+    delete w.files[`${REQUESTS}/${nonce}.json`]
+  }
+  expect(offenders, `holders of id 2 an old rm removed; compare what the CLI saw before the logout: ${offenders.join('; ')}`).toEqual([])
+})
+
+// Review C12-rm-R2 ORG-REUSE and EMAIL-FILL (Codex) [RM-TARGET-NOT-SEEN]: the model test holds every case; these two hold the wiring.
+test('an rm that read one organization signs out no other under the same email', async ($, on) => {
+  const { w, store, clock } = await selectWorld($, on)
+  store.set('accounts', [TWO_LOGINS.accounts[0], { id: '2', slot: SLOT2, email: 'two@example.com', orgId: 'org-b' }])
+  w.files[`${REQUESTS}/${N1}.json`] = JSON.stringify({ kind: 'rm', nonce: N1, at: clock.now(), id: '2', store: store.get('store-id'), slot: SLOT2, email: 'two@example.com', orgId: 'org-a' })
+  await untilTick(clock)
+  expect([w.logouts ?? [], resultOf(w, N1)?.ok]).toEqual([[], false])
+})
+
+test('an rm that read an account before its email was learned still applies: the slot is the same and no other login is known', async ($, on) => {
+  const { w, store, clock } = await selectWorld($, on)
+  w.files[`${REQUESTS}/${N1}.json`] = JSON.stringify({ kind: 'rm', nonce: N1, at: clock.now(), id: '2', store: store.get('store-id'), slot: SLOT2 })
+  await untilTick(clock)
+  expect([w.logouts, resultOf(w, N1)?.ok]).toEqual([[SLOT2], true])
+})
+
+// Review C12-rm SHARED-SLOT (Codex) [RM-TARGET-NOT-SEEN].
+test('an rm of an account that shares its slot with one that stays signs nothing out', async ($, on) => {
+  const { w, store, clock } = await selectWorld($, on)
+  store.set('accounts', [...TWO_LOGINS.accounts, { id: '3', slot: SLOT2, email: 'same-slot@example.com' }])
+  w.files[`${REQUESTS}/${N1}.json`] = rmRequest(N1, '2', store.get('store-id'), clock.now())
+  await untilTick(clock)
+  expect(w.logouts ?? [], 'the logout signed out account 3, which stays listed').toEqual([])
+  expect(resultOf(w, N1)?.ok).toBe(false)
+  expect(resultOf(w, N1)?.message).toMatch(/account 2 shares its sign-in with account 3/)
+  expect((store.get('accounts') as unknown[]).length).toBe(3)
+})
+
+test('two sessions on one store: a session still on an account another session removed is not moved by it', async ($, on) => {
+  const w = fresh()
+  w.env.CLAUDE_SECURESTORAGE_CONFIG_DIR = SLOT2
+  const { store, clock } = await selectWorld($, on, undefined, undefined, w)
+  store.set('accounts', TWO_LOGINS.accounts.filter(a => a.id !== '2'))
+  await untilTick(clock)
+  expect(w.envSets).toEqual([])
+})
+
+test('the account the applying session is on: it moves off first, then signs it out', async ($, on) => {
+  const w = fresh()
+  w.env.CLAUDE_SECURESTORAGE_CONFIG_DIR = SLOT2
+  const { store, clock } = await selectWorld($, on, undefined, undefined, w)
+  w.files[`${REQUESTS}/${N1}.json`] = rmRequest(N1, '2', store.get('store-id'), clock.now())
+  await untilTick(clock)
+  expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: undefined }])
+  expect([w.logouts, resultOf(w, N1)?.ok]).toEqual([[SLOT2], true])
+})
+
+test('in use with no other account signed in: not ok, naming it, no logout, the account and its keys stay', async ($, on) => {
+  const w = fresh()
+  w.env.CLAUDE_SECURESTORAGE_CONFIG_DIR = SLOT2
+  const { store, clock } = await selectWorld($, on, undefined, undefined, w)
+  store.set('health:1', { kind: 'login-needed', why: 'its sign-in has run out' })
+  store.set('reading:2', { seeded: true })
+  await untilTick(clock)
+  w.files[`${REQUESTS}/${N1}.json`] = rmRequest(N1, '2', store.get('store-id'), clock.now())
+  await untilTick(clock)
+  expect(resultOf(w, N1)?.ok).toBe(false)
+  expect(resultOf(w, N1)?.message).toMatch(/account 2 is in use and no other account can take over yet; not removed/)
+  expect(w.logouts ?? []).toEqual([])
+  expect((store.get('accounts') as { id: string }[]).map(a => a.id)).toEqual(['1', '2'])
+  expect(store.has('reading:2')).toBe(true)
+})
+
+test('in use under a policy refusal: not ok, no logout', async ($, on) => {
+  const w = fresh()
+  w.env.CLAUDE_SECURESTORAGE_CONFIG_DIR = SLOT2
+  const { store, clock } = await selectWorld($, on, undefined, undefined, w)
+  w.refuseEnv = true
+  w.files[`${REQUESTS}/${N1}.json`] = rmRequest(N1, '2', store.get('store-id'), clock.now())
+  await untilTick(clock)
+  expect([resultOf(w, N1)?.ok, w.logouts ?? []]).toEqual([false, []])
+})
+
+test('Claude Code\'s own login, however a request names it: not ok, no logout', async ($, on) => {
+  const { w, store, clock } = await selectWorld($, on)
+  w.files[`${REQUESTS}/${N1}.json`] = rmRequest(N1, '1', store.get('store-id'), clock.now())
+  await untilTick(clock)
+  expect(resultOf(w, N1)?.ok).toBe(false)
+  expect(resultOf(w, N1)?.message).toMatch(/Claude Code's own login/)
+  expect([w.logouts ?? [], (store.get('accounts') as unknown[]).length]).toEqual([[], 2])
+})
+
+test('while Connect holds the session an rm answers not ok and signs nothing out', async ($, on) => {
+  const { w, clock } = await visitWorld($, on)
+  w.files[`${REQUESTS}/${N1}.json`] = rmRequest(N1, '3', 'store-abc', clock.now())
+  const call = bashCall($, w, 'account-rotator account rm --account 3')
+  await beat(clock)
+  await call.finish()
+  expect(resultOf(w, N1)?.ok).toBe(false)
+  expect(resultOf(w, N1)?.message).toMatch(/Claude in Chrome is connecting/)
+  expect(w.logouts ?? []).toEqual([])
+})
+
+// A non-zero logout is a real failure: `claude auth logout` on an empty slot exits 0, measured twice (RULING 4640).
+for (const [name, failure] of [
+  ['a non-zero exit', { exitCode: 1, stderr: 'keychain is locked\nsecond line' }],
+  ['no exit code, as a timeout gives', { exitCode: null, stderr: '' }],
+] as const) {
+  test(`a logout that fails with ${name} keeps the account and every key, and says so`, async ($, on) => {
+    const { w, store, clock } = await selectWorld($, on)
+    w.logoutFails = failure
+    for (const key of ACCOUNT_KEYS) store.set(`${key}:2`, { seeded: true })
+    w.files[`${REQUESTS}/${N1}.json`] = rmRequest(N1, '2', store.get('store-id'), clock.now())
+    await untilTick(clock)
+    expect(resultOf(w, N1)?.ok).toBe(false)
+    expect(resultOf(w, N1)?.message).toMatch(/account 2 .*could not be signed out/)
+    if (failure.stderr !== '') expect(resultOf(w, N1)?.message).toMatch(/keychain is locked$/)
+    expect((store.get('accounts') as { id: string }[]).map(a => a.id)).toEqual(['1', '2'])
+    // A usage read that works clears check-error, in the same minute.
+    const lost = ACCOUNT_KEYS.filter(key => key !== 'check-error' && !store.has(`${key}:2`))
+    expect(lost, `keys deleted though the login stays signed in: ${lost.join(', ')}`).toEqual([])
+  })
+}
+
+test('a press of Remove whose logout fails keeps the account and tells the person', async ($, on) => {
+  const { w, store, clock } = await selectWorld($, on)
+  w.logoutFails = { exitCode: 1, stderr: 'keychain is locked' }
+  await pressPane($, clock, ['ask-remove-2', 'remove-2'])
+  await clock.settle()
+  expect((store.get('accounts') as { id: string }[]).map(a => a.id)).toEqual(['1', '2'])
+  expect(w.toasts.filter(t => /could not be signed out/.test(t))).toHaveLength(1)
+})
+
+test('a press of Remove with none to take over still tells the person', async ($, on) => {
+  const w = fresh()
+  w.env.CLAUDE_SECURESTORAGE_CONFIG_DIR = SLOT2
+  const { store, clock } = await selectWorld($, on, undefined, undefined, w)
+  store.set('health:1', { kind: 'login-needed', why: 'its sign-in has run out' })
+  await untilTick(clock)
+  await pressPane($, clock, ['ask-remove-2', 'remove-2'])
+  await clock.settle()
+  expect(w.toasts.filter(t => /no other account can take over yet; not removed/.test(t))).toHaveLength(1)
+})
+
+test('an rm that leaves no room anywhere says new sessions start on Claude Code\'s login, and names no pick', async ($, on) => {
+  const { w, store, clock } = await selectWorld($, on, [50, 100], [50, 100])
+  w.files[`${REQUESTS}/${N1}.json`] = rmRequest(N1, '2', store.get('store-id'), clock.now())
+  await untilTick(clock)
+  expect(resultOf(w, N1)?.ok).toBe(true)
+  expect(resultOf(w, N1)?.message).toMatch(/account 2 is removed; no account has room, so new sessions start on Claude Code's login/)
+  expect(resultOf(w, N1)?.pickId).toBeUndefined()
 })

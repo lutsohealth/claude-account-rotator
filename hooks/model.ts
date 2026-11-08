@@ -852,6 +852,16 @@ export function sameLogin(a: Identity, b: Identity): boolean {
   return a.email !== undefined && a.email === b.email && (a.orgId ?? '') === (b.orgId ?? '')
 }
 
+/**
+ * Whether an account still holds the login a request read: its slot, and `sameLogin` as far as the reader knew it. An
+ * email or organization the mod has learned since is no other login; a part it knew and the account now lacks or differs in is.
+ */
+export function holdsLogin(seen: { slot: string; email?: string; orgId?: string }, account: Account): boolean {
+  if (seen.slot !== account.slot) return false
+  if (seen.email === undefined) return true
+  return sameLogin(seen, seen.orgId === undefined ? { email: account.email } : account)
+}
+
 /** A listed login is the account `who` signed in as, as far as it is known: by its email, and its organization once known. */
 export function isLoginOf(a: Identity, who: Identity): boolean {
   return a.email !== undefined && a.email === who.email && (a.orgId === undefined || a.orgId === who.orgId)
@@ -1295,10 +1305,14 @@ const NONCE = /^[A-Za-z0-9-]{6,64}$/
 /** A request read back from its file, while it is fresh; anything else is none. */
 export function requestFrom(value: unknown, now: number): RotatorRequest | undefined {
   if (typeof value !== 'object' || value === null) return undefined
-  const { kind, nonce, at, id, store, session } = value as Record<string, unknown>
+  const { kind, nonce, at, id, store, session, slot, email, orgId } = value as Record<string, unknown>
   if (typeof nonce !== 'string' || !NONCE.test(nonce) || typeof id !== 'string' || typeof store !== 'string') return undefined
   if (typeof at !== 'number' || Math.abs(now - at) > REQUEST_TTL_MS) return undefined
   if (kind === 'select') return { kind, nonce, at, id, store }
+  if (kind === 'rm') {
+    if (typeof slot !== 'string' || (email !== undefined && typeof email !== 'string') || (orgId !== undefined && typeof orgId !== 'string')) return undefined
+    return { kind, nonce, at, id, store, slot, ...(email === undefined ? {} : { email }), ...(orgId === undefined ? {} : { orgId }) }
+  }
   return kind === 'use' && typeof session === 'string' && session !== '' ? { kind, nonce, at, id, store, session } : undefined
 }
 

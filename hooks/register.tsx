@@ -63,6 +63,7 @@ import {
   rotateToFrom,
   readingFromLimits,
   readingFromUsage,
+  holdsLogin,
   sameLogin,
   shouldLeave,
   WRITER_VERSION,
@@ -502,7 +503,7 @@ async function applyRequests($: Host, isMerging = false): Promise<void> {
     const text = await $.fs.read(`${dir}/${name}`).catch(() => undefined)
     const request = requestFrom(parsed(typeof text === 'string' ? text : undefined), now)
     if (request === undefined || request.nonce !== nonce || request.store !== storeId) continue
-    if (request.kind === 'select' || request.session === sessionMark) requests.push(request)
+    if (request.kind !== 'use' || request.session === sessionMark) requests.push(request)
   }
   if (isMerging && requests.length > 0) await mergeStore($)
   for (const request of requests.sort((a, b) => a.at - b.at)) {
@@ -527,17 +528,27 @@ async function takeRequest($: Host, resultPath: string, request: RotatorRequest,
 /**
  * What a request asks, done: `select` sets the login new sessions start on, as the panel's New on does. The result
  * names the pick that setting makes: a login with no room gives way to the next with room, or to Claude Code's login.
- * `use` moves this session.
+ * `use` moves this session. `rm` drops an account, as the panel's Remove does.
  */
 async function applyRequest($: Host, request: RotatorRequest): Promise<{ ok: boolean; message: string; pickId?: string; activeId?: string }> {
+  if (request.kind === 'rm') return removeAccount($, request.id, request)
   const target = (await getView($)).accounts.find(a => a.id === request.id)
   if (target === undefined) return { ok: false, message: `account ${request.id} is not listed in this store` }
   if (request.kind === 'use') return useAccount($, target)
   await setLaunchOn($, `account:${request.id}`)
-  const pick = (await $.store.get('launch-slot')) as LaunchPick | undefined
-  if (pick === undefined) return { ok: true, message: "no account has room, so new sessions start on Claude Code's login" }
-  return { ok: true, message: `new sessions start on account ${pick.id} (${pick.why})`, pickId: pick.id }
+  const { text, pickId } = await pickAnswer($)
+  return { ok: true, message: text, pickId }
 }
+
+/** Where new sessions start now, in a request's words. */
+async function pickAnswer($: Host): Promise<{ text: string; pickId?: string }> {
+  const pick = (await $.store.get('launch-slot')) as LaunchPick | undefined
+  if (pick === undefined) return { text: "no account has room, so new sessions start on Claude Code's login" }
+  return { text: `new sessions start on account ${pick.id} (${pick.why})`, pickId: pick.id }
+}
+
+/** Why a request waits out Connect: its visit moves the session and back, unsaid. */
+const CONNECTING_TEXT = 'Claude in Chrome is connecting, which moves this session and back: run this again in a minute'
 
 /**
  * Moves this session as the panel's Use now does, under the same rule: only a login signed in. The result reads back
@@ -547,7 +558,7 @@ async function applyRequest($: Host, request: RotatorRequest): Promise<{ ok: boo
 async function useAccount($: Host, target: Account): Promise<{ ok: boolean; message: string; activeId: string }> {
   const view = await getView($)
   const name = label(target)
-  if (isConnectingChrome) return { ok: false, message: 'Claude in Chrome is connecting, which moves this session and back: run this again in a minute', activeId: view.activeId }
+  if (isConnectingChrome) return { ok: false, message: CONNECTING_TEXT, activeId: view.activeId }
   if (view.activeId === target.id) {
     held?.timer.cancel()
     held = undefined
@@ -1765,19 +1776,35 @@ async function addAccount($: Host): Promise<void> {
   await signInOne($, id)
 }
 
-/** The second press of Remove: signs the slot out, then drops it from the list. */
-async function removeAccount($: Host, id: string): Promise<void> {
+/**
+ * The second press of Remove, or an `account rm`: signs the slot out, then drops it from the list. It reads the list
+ * from the store, as another session may have removed the account already. A logout that fails keeps the account: one
+ * dropped from the list with its login still signed in is out of everyone's sight. Other sessions on it are not moved.
+ * `seen`: what the CLI read of the account. A request waits, and an id can hold another login by the time it is applied.
+ */
+async function removeAccount($: Host, id: string, seen?: { slot: string; email?: string; orgId?: string }): Promise<{ ok: boolean; message: string; pickId?: string }> {
+  const accounts = await loadAccounts($)
+  const account = accounts.find(a => a.id === id)
+  if (account === undefined) return { ok: true, message: `account ${id} is already gone` }
+  if (account.slot === '') return { ok: false, message: `account ${id} is Claude Code's own login, which the mod does not remove` }
+  if (isConnectingChrome) return { ok: false, message: CONNECTING_TEXT }
+  if (seen !== undefined && !holdsLogin(seen, account)) {
+    return { ok: false, message: `account ${id} holds another login than this command read, so nothing is removed: run account list, then rm again if it is the one you mean` }
+  }
+  const sharing = accounts.find(a => a.id !== id && a.slot === account.slot)
+  if (sharing !== undefined) return { ok: false, message: `account ${id} shares its sign-in with account ${sharing.id}, so signing it out would sign out both: nothing is removed` }
   const view = await getView($)
-  const account = view.accounts.find(a => a.id === id)
-  if (account === undefined || account.slot === '') return
   if (view.activeId === id) {
     const other = view.accounts.find(a => a.id !== id && view.health[a.id]?.kind === 'ok')
     if (other === undefined || !(await switchTo($, other, `account ${id} is being removed`))) {
-      tell($, `Claude account ${id} is in use and no other account can take over yet; not removed.`)
-      return
+      return { ok: false, message: `Claude account ${id} is in use and no other account can take over yet; not removed.` }
     }
   }
-  await $.process.run(['claude', 'auth', 'logout'], { env: slotEnv(account.slot), timeoutMs: 20_000 })
+  const { exitCode, stderr } = await $.process.run(['claude', 'auth', 'logout'], { env: slotEnv(account.slot), timeoutMs: 20_000 })
+  if (exitCode !== 0) {
+    const [why] = stderr.trim().split('\n')
+    return { ok: false, message: `Claude account ${id} could not be signed out, so it stays listed: ${why || `exit ${String(exitCode)}`}` }
+  }
   await saveAccounts($, (await loadAccounts($)).filter(a => a.id !== id))
   if ((await $.store.get('chrome-account')) === id) await setChromeAccount($, undefined)
   await noteChromeAccount($, id, false)
@@ -1806,6 +1833,8 @@ async function removeAccount($: Host, id: string): Promise<void> {
   })
   // A launcher must never start a session on the account just removed.
   await saveLaunchPick($)
+  const { text, pickId } = await pickAnswer($)
+  return { ok: true, message: `account ${id} is removed; ${text}`, pickId }
 }
 
 // ---------------------------------------------------------------- wiring
@@ -1881,7 +1910,12 @@ function actions($: Host): Actions {
         }),
       ),
     askRemove: id => background(setView($, v => ({ ...v, removing: id }))),
-    remove: id => background(removeAccount($, id)),
+    remove: id =>
+      background(
+        removeAccount($, id).then(removed => {
+          if (!removed.ok) tell($, removed.message)
+        }),
+      ),
     setFooter: change => background(setFooter($, change)),
     setRotateTo: rotateTo => background(setRotateTo($, rotateTo)),
     setFiveHourLimit: limit => background(setFiveHourLimit($, limit)),
