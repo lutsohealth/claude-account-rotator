@@ -4301,6 +4301,7 @@ test('a session writes no writer: key at boot, and leaves the writer: records of
   }))
   const clock = world(on, w, store)
   await start($, clock)
+  await clock.advance(61_000)
   expect(Object.fromEntries([...store].filter(([key]) => key.startsWith('writer:')))).toEqual(old)
 })
 
