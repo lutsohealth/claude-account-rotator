@@ -10,7 +10,7 @@ import type {
   Timer,
 } from 'claude-code'
 
-import type { Account, CheckError, FiveHourLimit, FooterStyle, Health, Holder, LaunchOn, LaunchPick, Mark, Reading, ReadingSource, RotateTo, UsageDue, View } from '../types'
+import type { Account, CheckError, FiveHourLimit, FooterStyle, Health, Holder, LaunchOn, LaunchPick, Mark, Reading, ReadingSource, RotateTo, RotatorRequest, UsageDue, View } from '../types'
 import {
   CHROME_SERVER,
   CHROME_TOOL,
@@ -82,6 +82,8 @@ import {
   usageDueFrom,
   isSameRows,
   rowsOf,
+  requestFrom,
+  requestsDir,
 } from './model'
 import type { Credential, Identity, Need, StayReason } from './model'
 import { Band, Footer, PANE_COLUMNS, Pane } from './view'
@@ -443,6 +445,78 @@ async function mergeStore($: Host): Promise<void> {
     return { ...v, accounts, readings: nextReadings, marks: nextMarks, noFiveHour: nextNoFiveHour, weekMarks: nextWeekMarks, fableMarks: nextFableMarks, checkErrors, readAt, health: nextHealth, footer, rotateTo, fiveHourLimit, weekLeave, launchOn, fableContinueText, chromeAccountId, chromeAccountIds, hasOlderWriter }
   })
   await saveRows($, now)
+  await saveStoreId($)
+}
+
+/**
+ * Names this store for bin/account-rotator's requests, once: the first session that finds no `store-id` writes one.
+ * Two sessions writing at once settle on the last write, since each reads the id from the store when it applies.
+ */
+async function saveStoreId($: Host): Promise<void> {
+  if (typeof (await $.store.get('store-id')) === 'string') return
+  await $.store.set('store-id', `store-${Math.random().toString(36).slice(2, 12)}`)
+}
+
+/** The requests this session has taken: one whose result it could not write is not applied again over a later press. */
+const takenRequests = new Set<string>()
+
+/**
+ * Applies each request in the requests folder that names this store's `store-id` and has no result yet, oldest first
+ * so the newest stands, and writes its result beside it. A request another store's CLI read, or a stale one, is left
+ * for the CLI to withdraw.
+ */
+async function applyRequests($: Host): Promise<void> {
+  const storeId = await $.store.get('store-id')
+  if (typeof storeId !== 'string') return
+  const dir = requestsDir(await $.env.get('CLAUDE_CONFIG_DIR'), (await $.env.get('HOME')) ?? '')
+  const entries = await $.fs.list(dir).catch(() => [])
+  const names = new Set(entries.map(e => e.name))
+  const now = await $.clock.now()
+  const requests: RotatorRequest[] = []
+  for (const name of names) {
+    const nonce = name.endsWith('.json') && !name.endsWith('.result.json') ? name.slice(0, -'.json'.length) : undefined
+    if (nonce === undefined || names.has(`${nonce}.result.json`) || takenRequests.has(nonce)) continue
+    // A file the CLI is still writing, or one that is no request, reads as none.
+    const text = await $.fs.read(`${dir}/${name}`).catch(() => undefined)
+    const request = requestFrom(parsed(typeof text === 'string' ? text : undefined), now)
+    if (request !== undefined && request.nonce === nonce && request.store === storeId) requests.push(request)
+  }
+  for (const request of requests.sort((a, b) => a.at - b.at)) {
+    takenRequests.add(request.nonce)
+    await takeRequest($, `${dir}/${request.nonce}.result.json`, request, now)
+  }
+}
+
+/** Applies one request and writes its result. A failure of either is logged, so the minute's other work still runs. */
+async function takeRequest($: Host, resultPath: string, request: RotatorRequest, now: number): Promise<void> {
+  const result = (outcome: object) => $.fs.write(resultPath, JSON.stringify({ nonce: request.nonce, ...outcome, at: now }))
+  try {
+    await result(await applyRequest($, request))
+  } catch (error) {
+    await debug($, `request ${request.nonce} failed: ${String(error)}`)
+    await result({ ok: false, message: `the session failed to apply it: ${String(error)}` }).catch(() => undefined)
+  }
+}
+
+/**
+ * What a request asks, done: `select` sets the login new sessions start on, as the panel's New on does. The result
+ * names the pick that setting makes: a login with no room gives way to the next with room, or to Claude Code's login.
+ */
+async function applyRequest($: Host, request: RotatorRequest): Promise<{ ok: boolean; message: string; pickId?: string }> {
+  if (!(await getView($)).accounts.some(a => a.id === request.id)) return { ok: false, message: `account ${request.id} is not listed in this store` }
+  await setLaunchOn($, `account:${request.id}`)
+  const pick = (await $.store.get('launch-slot')) as LaunchPick | undefined
+  if (pick === undefined) return { ok: true, message: "no account has room, so new sessions start on Claude Code's login" }
+  return { ok: true, message: `new sessions start on account ${pick.id} (${pick.why})`, pickId: pick.id }
+}
+
+/** JSON text as a value, or undefined where it does not parse. */
+function parsed(text: string | undefined): unknown {
+  try {
+    return text === undefined ? undefined : JSON.parse(text)
+  } catch {
+    return undefined
+  }
 }
 
 /**
@@ -1801,6 +1875,7 @@ export const register: Register = on => {
     })
     $.clock.every(60_000, () => {
       void mergeStore($)
+        .then(() => applyRequests($).catch(error => debug($, `requests failed: ${String(error)}`)))
         .then(() => settlePending($, false))
         .then(() => checkAll($, false))
         .catch(error => debug($, `sync failed: ${String(error)}`))

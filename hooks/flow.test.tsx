@@ -5,6 +5,7 @@ import type { StoredRows } from '../types'
 
 import { DEFAULT_FOOTER, USAGE_CLAIM_WAIT_MS, USAGE_FORCE_AFTER_MS, USAGE_IDLE_MS, fingerprint, keychainItem, roomColor } from './model'
 import { laterMark, longBar, markFrom, storedLineText } from './model'
+import { REQUEST_TTL_MS } from './model'
 import { PANE_COLUMNS } from './view'
 
 const NOW = Date.parse('2026-10-12T10:00:00Z')
@@ -20,8 +21,10 @@ type World = {
   system: 'macOS' | 'Linux'
   /** keychain item name -> stored JSON */
   keychain: Record<string, string>
-  /** credentials file -> stored text, or null where it cannot be read */
+  /** credentials file -> stored text, or null where it cannot be read; `$.fs.write` writes here too */
   files: Record<string, string | null>
+  /** every path `$.fs.write` wrote, in order */
+  writes?: string[]
   /**
    * access token -> [5-hour %, or null where the account reports no 5-hour window, week %, or null where the
    * plan reports no weekly limit], and the Fable week's % as a third member where the usage endpoint lists one
@@ -261,7 +264,16 @@ function world(on: On, w: World, store: Record<string, unknown> | Map<string, un
     w.panes = w.panes.filter(id => id !== e.id)
     return { value: undefined }
   })
-  on('fs.write', () => ({ value: undefined }))
+  on('fs.write', (_$, e) => {
+    w.files[e.path] = e.text
+    w.writes = [...(w.writes ?? []), e.path]
+    return { value: undefined }
+  })
+  on('fs.list', (_$, e) => {
+    const names = Object.keys(w.files).filter(p => p.startsWith(`${e.path}/`) && !p.slice(e.path.length + 1).includes('/'))
+    if (names.length === 0) return { deny: `ENOENT: no such file or directory, scandir '${e.path}'` }
+    return { value: names.map(p => ({ name: p.slice(e.path.length + 1), kind: 'file', size: (w.files[p] ?? '').length, mtimeMs: 0, isLink: false })) }
+  })
   on('fs.exists', (_$, e) => ({ value: e.path === '/System/Library/CoreServices/SystemVersion.plist' && w.system === 'macOS' }))
   on('fs.read', (_$, e) => {
     const text = w.files[e.path]
@@ -2889,6 +2901,11 @@ test('a /login on a sign-in another session already named deletes none of the us
   await $.command.run(LOGIN)
   await clock.settle()
   expect(store.log.filter(e => /^delete (usage|no-five-hour|usage-due):1$/.test(e)), store.log.join(', ')).toEqual([])
+  // The check ran (it stored login 1's health), and what the other session stored stands (Review R1 [ABSENCE-ONLY-PIN],
+  // Opus, #34): its schedule says the next read is ten minutes off, so no usage is read now.
+  expect(store.log, `the /login checked nothing: ${store.log.join(', ')}`).toContain('set health:1')
+  expect(store.get('holder:1')).toEqual({ token: await fingerprint('refresh-tok-9'), who: { email: 'nine@example.com' } })
+  expect(store.get('usage:1')).toMatchObject({ sevenDay: { pct: 15 }, by: '1' })
 })
 
 /**
@@ -5986,4 +6003,251 @@ test('no rows write names a good read older than the store holds then, whichever
   }
   expect(store.writes ?? 0).toBeGreaterThan(2)
   expect([...new Set(store.offenders)]).toEqual([])
+})
+
+// C11 (puma-eslxj.12, RULING 4593 and 4595): `account-rotator account select` drops a request file in the config
+// folder's account-rotator-requests; a session's minute tick applies one only when it names this store's store-id.
+const REQUESTS = `${HOME}/.claude/account-rotator-requests`
+/** A nonce as the CLI writes one, a uuid's hex. */
+const N1 = '0f3c2a9e1b7d4c55a6e8f00112233445'
+/** A select request for login `id`, read from the store whose id is `storeId`, as bin/account-rotator writes it. */
+const selectRequest = (nonce: string, id: string, storeId: unknown, at: number) => JSON.stringify({ kind: 'select', nonce, at, id, store: storeId })
+const resultOf = (w: World, nonce: string): Record<string, unknown> | undefined => {
+  const text = w.files[`${REQUESTS}/${nonce}.result.json`]
+  return typeof text === 'string' ? (JSON.parse(text) as Record<string, unknown>) : undefined
+}
+
+/** Two logins, with room unless the test spends a week, a session started on login 1, a minute's merge done. */
+async function selectWorld($: Engine, on: On, login2: [number, number] = [10, 20], login1: [number, number] = [10, 20]): Promise<{ w: World; store: Map<string, unknown>; clock: MockClock }> {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = login1
+  w.usage['tok-2'] = login2
+  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off' }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  await clock.advance(60_000)
+  return { w, store, clock }
+}
+
+test('a store holds a store-id, which the first session that finds none writes', async ($, on) => {
+  const { store } = await selectWorld($, on)
+  expect(typeof store.get('store-id')).toBe('string')
+})
+
+test('two sessions booting at once end with one store-id: this session keeps the one the store holds', async ($, on) => {
+  const { store, clock } = await selectWorld($, on)
+  // The other session's write of its own id lands after this session's.
+  store.set('store-id', 'theirs')
+  await clock.advance(60_000)
+  expect(store.get('store-id')).toBe('theirs')
+})
+
+test('a select request for this store is applied at the minute: launch-on, launch-slot and a result that says so', async ($, on) => {
+  const { w, store, clock } = await selectWorld($, on)
+  w.files[`${REQUESTS}/${N1}.json`] = selectRequest(N1, '2', store.get('store-id'), clock.now())
+  await clock.advance(60_000)
+  expect([store.get('launch-on'), (store.get('launch-slot') as { id?: string } | undefined)?.id]).toEqual(['account:2', '2'])
+  expect(resultOf(w, N1)).toMatchObject({ nonce: N1, ok: true })
+})
+
+// Found live on vox login 2 at 52f30f5: account 1 had no room, the pick went to account 3, and the result said account 1.
+test('a select of a login with no room is applied, and its result names the login new sessions really start on', async ($, on) => {
+  const { w, store, clock } = await selectWorld($, on, [50, 100])
+  w.files[`${REQUESTS}/${N1}.json`] = selectRequest(N1, '2', store.get('store-id'), clock.now())
+  await clock.advance(60_000)
+  expect([store.get('launch-on'), (store.get('launch-slot') as { id?: string } | undefined)?.id]).toEqual(['account:2', '1'])
+  expect(resultOf(w, N1)).toMatchObject({ ok: true, pickId: '1' })
+  expect(resultOf(w, N1)?.message).toMatch(/new sessions start on account 1 \(account 2 has no room/)
+})
+
+test('a request read from another store, a stale one, one whose nonce is not its file\'s and one for a login not listed change nothing', async ($, on) => {
+  const { w, store, clock } = await selectWorld($, on)
+  const [id, now, before] = [store.get('store-id'), clock.now(), store.get('launch-on')]
+  w.files[`${REQUESTS}/named-0001.json`] = selectRequest('other-name', '2', id, now)
+  w.files[`${REQUESTS}/other-0001.json`] = selectRequest('other-0001', '2', 'another-store', now)
+  w.files[`${REQUESTS}/stale-0001.json`] = selectRequest('stale-0001', '2', id, now - REQUEST_TTL_MS - 1)
+  w.files[`${REQUESTS}/gone-00001.json`] = selectRequest('gone-00001', '9', id, now)
+  await clock.advance(60_000)
+  expect(store.get('launch-on')).toBe(before)
+  expect([resultOf(w, 'other-0001'), resultOf(w, 'stale-0001'), resultOf(w, 'gone-00001')?.ok]).toEqual([undefined, undefined, false])
+})
+
+// Review C11-R1 F8 (Opus) [UNPINNED-GUARD] (RULING 4607): the survivors in the session's half.
+test('a request file that does not parse, or one no read can reach, is passed over and the next is applied', async ($, on) => {
+  const { w, store, clock } = await selectWorld($, on)
+  w.files[`${REQUESTS}/torn-00001.json`] = '{"kind": "sel'
+  w.files[`${REQUESTS}/noread-001.json`] = null
+  w.files[`${REQUESTS}/${N1}.json`] = selectRequest(N1, '2', store.get('store-id'), clock.now())
+  await clock.advance(60_000)
+  expect([store.get('launch-on'), resultOf(w, 'torn-00001'), resultOf(w, 'noread-001'), resultOf(w, N1)?.ok]).toEqual(['account:2', undefined, undefined, true])
+})
+
+test('a select while no login has room says new sessions start on Claude Code\'s login, and names no pick', async ($, on) => {
+  const { w, store, clock } = await selectWorld($, on, [50, 100], [50, 100])
+  // The seed: no login has room, so no pick stands.
+  expect(store.get('launch-slot')).toBeUndefined()
+  w.files[`${REQUESTS}/${N1}.json`] = selectRequest(N1, '2', store.get('store-id'), clock.now())
+  await clock.advance(60_000)
+  expect(resultOf(w, N1)).toMatchObject({ ok: true, message: "no account has room, so new sessions start on Claude Code's login" })
+  expect(resultOf(w, N1)?.pickId).toBeUndefined()
+})
+
+test('a request another session already answered is not applied by this one', async ($, on) => {
+  const { w, store, clock } = await selectWorld($, on)
+  w.files[`${REQUESTS}/${N1}.json`] = selectRequest(N1, '2', store.get('store-id'), clock.now())
+  w.files[`${REQUESTS}/${N1}.result.json`] = JSON.stringify({ nonce: N1, ok: true, message: 'theirs', at: clock.now() })
+  await clock.advance(60_000)
+  expect(store.get('launch-on')).toBeUndefined()
+  expect(JSON.parse(w.files[`${REQUESTS}/${N1}.result.json`] ?? '{}').message).toBe('theirs')
+})
+
+// Review C11-R1 [TEST-NAME-OVERCLAIM] (Opus): one session here, twice; two holding one listing apply it twice, the same launch-on.
+test('a request with a result already is not applied again at this session\'s next minute', async ($, on) => {
+  const { w, store, clock } = await selectWorld($, on)
+  w.files[`${REQUESTS}/${N1}.json`] = selectRequest(N1, '2', store.get('store-id'), clock.now())
+  await clock.advance(60_000)
+  // Another session's press sets launch-on since; the next minute must not put the request back.
+  store.set('launch-on', 'room')
+  await clock.advance(60_000)
+  expect(store.get('launch-on')).toBe('room')
+  expect((w.writes ?? []).filter(p => p === `${REQUESTS}/${N1}.result.json`)).toHaveLength(1)
+})
+
+// Review C11-R1 F1 (Opus) [TICK-HELD-BY-REQUEST] -> [REQUEST-LIFE] (RULING 4607).
+
+// REDTEST F1 [TICK-HELD-BY-REQUEST], head fac35db. Appended to a copy of hooks/flow.test.tsx (it uses that file's world).
+// Proven by: sh redtest/run_ts.sh redtest/F1_tick.tsx
+
+/**
+ * selectWorld, with one step that fails while `gate.failing` names it. The kit takes one hook per event and none after
+ * the first `$`, so the world's own hooks fail by what they touch: its files object and its store Map.
+ */
+async function gatedWorld($: Engine, on: On): Promise<{ w: World; store: Map<string, unknown>; clock: MockClock; gate: { failing: string } }> {
+  const gate = { failing: '' }
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [10, 20]
+  w.usage['tok-2'] = [10, 20]
+  w.files = new Proxy<World['files']>({}, {
+    set(target, key, value) {
+      if (gate.failing === 'the result write' && String(key).endsWith('.result.json')) throw new Error(`EACCES: permission denied, open '${String(key)}'`)
+      return Reflect.set(target, key, value)
+    },
+  })
+  class GatedStore extends Map<string, unknown> {
+    get(key: string): unknown {
+      if (gate.failing === 'the launch-slot read' && key === 'launch-slot') throw new Error('store refused')
+      return super.get(key)
+    }
+    set(key: string, value: unknown): this {
+      if (gate.failing === 'the launch-on write' && key === 'launch-on') throw new Error('store refused')
+      return super.set(key, value)
+    }
+  }
+  const store = new GatedStore(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off' }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  await clock.advance(60_000)
+  return { w, store, clock, gate }
+}
+
+/** A login whose usage read falls due before the next minute's tick, so that tick's checkAll(false) reads it. */
+const dueSoon = (store: Map<string, unknown>, clock: MockClock) => store.set('usage-due:1', { next: clock.now() + 30_000, fails: 0, at: clock.now() - 600_000 })
+
+/** The minute's tick, and the wait its usage claim sleeps. */
+const tickAndClaim = async (clock: MockClock) => {
+  await clock.advance(60_000)
+  await clock.settle()
+  await clock.advance(USAGE_CLAIM_WAIT_MS)
+  await clock.settle()
+}
+
+test('with no request, the minute reads a usage that fell due', async ($, on) => {
+  const { w, store, clock } = await gatedWorld($, on)
+  dueSoon(store, clock)
+  const before = w.usageCalls.length
+  await tickAndClaim(clock)
+  expect(w.usageCalls.length, 'the control read no usage: the fixture no longer reaches checkAll').toBeGreaterThan(before)
+})
+
+test('a request the session fails to apply is answered with its failure', async ($, on) => {
+  const { w, store, clock, gate } = await gatedWorld($, on)
+  gate.failing = 'the launch-on write'
+  w.files[`${REQUESTS}/${N1}.json`] = selectRequest(N1, '2', store.get('store-id'), clock.now())
+  await clock.advance(60_000)
+  await clock.settle()
+  expect(resultOf(w, N1)?.ok).toBe(false)
+})
+
+test('a request whose result cannot be written is not applied again over a later press', async ($, on) => {
+  const { w, store, clock, gate } = await gatedWorld($, on)
+  gate.failing = 'the result write'
+  w.files[`${REQUESTS}/${N1}.json`] = selectRequest(N1, '2', store.get('store-id'), clock.now())
+  await clock.advance(60_000)
+  await clock.settle()
+  expect(store.get('launch-on')).toBe('account:2')
+  store.set('launch-on', 'room')
+  await clock.advance(60_000)
+  await clock.settle()
+  expect(store.get('launch-on'), 'the same request set launch-on again, over the press, once a minute until its TTL').toBe('room')
+})
+
+test('no failing step of applyRequests stops the minute', async ($, on) => {
+  const { w, store, clock, gate } = await gatedWorld($, on)
+  const steps = ['the result write', 'the launch-on write', 'the launch-slot read']
+  expect(steps.length, 'the sweep lists no step').toBeGreaterThan(0)
+  const offenders: string[] = []
+  let serial = 0
+  for (const step of steps) {
+    const nonce = `sweep-${String(++serial).padStart(4, '0')}`
+    w.files[`${REQUESTS}/${nonce}.json`] = selectRequest(nonce, '2', store.get('store-id'), clock.now())
+    dueSoon(store, clock)
+    const before = w.usageCalls.length
+    gate.failing = step
+    await tickAndClaim(clock)
+    gate.failing = ''
+    if (w.usageCalls.length === before) offenders.push(`${step}: the minute's checkAll did not run`)
+    delete w.files[`${REQUESTS}/${nonce}.json`]
+    await clock.advance(60_000)
+    await clock.settle()
+    await clock.advance(USAGE_CLAIM_WAIT_MS)
+    await clock.settle()
+  }
+  expect(offenders, `steps of applyRequests that stop settlePending and checkAll; catch each request's failure inside the loop: ${offenders.join('; ')}`).toEqual([])
+})
+
+// Review C11-R1 F2 (Opus) [OLDER-REQUEST-WINS] -> [REQUEST-LIFE] (RULING 4607).
+
+// REDTEST F2 [OLDER-REQUEST-WINS], head fac35db. Appended to a copy of hooks/flow.test.tsx.
+// Proven by: sh redtest/run_ts.sh redtest/F2_order.tsx
+
+test('every listing order of three requests ends on the newest', async ($, on) => {
+  const { w, store, clock } = await selectWorld($, on)
+  const ids = ['1', '2']
+  const requests = [
+    { nonce: 'first-0001', id: ids[1] ?? '', age: 40_000 },
+    { nonce: 'secnd-0001', id: ids[1] ?? '', age: 20_000 },
+    { nonce: 'third-0001', id: ids[0] ?? '', age: 0 },
+  ]
+  const orders = [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]]
+  expect(orders.length, 'the sweep lists no order').toBeGreaterThan(0)
+  const offenders: string[] = []
+  for (const order of orders) {
+    const tag = order.join('')
+    store.set('launch-on', 'room')
+    for (const at of order) {
+      const r = requests[at]
+      if (r === undefined) continue
+      const nonce = `${r.nonce}${tag}`
+      w.files[`${REQUESTS}/${nonce}.json`] = selectRequest(nonce, r.id, store.get('store-id'), clock.now() - r.age)
+    }
+    await clock.advance(60_000)
+    await clock.settle()
+    if (store.get('launch-on') !== 'account:1') offenders.push(`listed ${tag}: launch-on ${String(store.get('launch-on'))}, newest asked account:1`)
+    for (const path of Object.keys(w.files)) if (path.startsWith(`${REQUESTS}/`)) delete w.files[path]
+  }
+  expect(offenders, `orders in which an older request overwrites a newer one; apply by ascending \`at\`, or only the newest: ${offenders.join('; ')}`).toEqual([])
 })

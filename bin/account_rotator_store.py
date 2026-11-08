@@ -31,6 +31,15 @@ def config_folder() -> str:
     return os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(os.path.expanduser("~"), ".claude")
 
 
+def requests_folder(store: str) -> str:
+    """Where `account select` leaves requests for the sessions on `store`: the folder of the config it lies in, by
+    its `<config>/plugins/store/` path, else this shell's config folder (hooks/model.ts requestsDir)."""
+    folder = os.path.dirname(os.path.abspath(store))
+    plugins = os.path.dirname(folder)
+    is_in_config = os.path.basename(folder) == "store" and os.path.basename(plugins) == "plugins"
+    return os.path.join(os.path.dirname(plugins) if is_in_config else config_folder(), "account-rotator-requests")
+
+
 def is_store(data: object) -> bool:
     return isinstance(data, dict) and isinstance(data.get("accounts"), list)
 

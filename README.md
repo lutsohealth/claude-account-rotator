@@ -135,6 +135,8 @@ A window Claude Code stops from switching can connect only as the account it is 
 
 The rows are as the last session left them: with no session running, each row's `updated` says how old its usage is. A reset that has passed since reads `passed`, and the last line names the account; the usage beside it is as before the reset, where the panel, which reads the account again, would show the new week. A row an older version of the mod stored prints as that version wrote it, its times as of then, and the last line says so.
 
+`account-rotator account select --account <id, email or system>` sets the account new sessions start on, as **New on** in **Usage based rotation** does: `account-rotator-launch` then prints its slot, or the next account's with room where that one has none, and the command says which. It never writes the store either. It leaves a request in the `account-rotator-requests` folder of the store's Claude config folder, naming the store it read; a session of the mod on that store takes it within a minute, and the command waits for its answer (`--wait`, 90 seconds by default, at most 300). With no session running, or when stopped, it takes the request back and exits 3, or 130. A `--plugin-dir` session keeps a store of its own, and so does a throwaway config: pass that store with `--store` to reach its sessions.
+
 ## Uninstall
 
 Remove each account in the panel, which signs it out. Then run `claude plugin marketplace remove claude-account-rotator`, which uninstalls the mod and deletes what it stored, and delete `~/.claude/accounts`.

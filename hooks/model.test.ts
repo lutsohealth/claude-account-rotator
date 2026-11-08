@@ -7,6 +7,7 @@ import { companyOf, identityFromStatus, planName } from './model'
 import { laterMark, spentMark, withFableMark } from './model'
 import { EMPTY_VIEW, USAGE_IDLE_MS, fitRow, rowOf, rowsOf, rowText, storedLine, storedLineText } from './model'
 import ROWS_FIXTURE from '../tests/fixtures/rows'
+import { REQUEST_TTL_MS, requestFrom, requestsDir } from './model'
 import { USAGE_BACKOFF_MAX_MS, USAGE_CLAIM_MS, USAGE_CLAIM_WAIT_MS, USAGE_EARLY_MS, WRITER_VERSION, afterUsage, claimDueReads, gatingDue, isUsageDue, mayForceUsage, mayReadSince, renewClaim, retryAfterFrom, usageDueFrom } from './model'
 import { DEFAULT_FOOTER, availableNow, braille, browsersFrom, chromeNote, continueTextFrom, counted, fiveHourLimitFrom, credentialFrom, credentialsFile, fableMark, fableSpentNotice, fableStay, footerStyleFrom, healthOf, identityFromProfile, isFableSpent, isFableStop, isNoBrowser, isPolicyRefusal, keepFable, keychainItem, legacyMark, markFrom, nextReset, pickTarget, pie, readingFromUsage, rotateToFrom, shouldLeave, roomColor, windowPct, withMark, withWeekMark } from './model'
 
@@ -1267,4 +1268,36 @@ test('a stored line read a minute later counts its resets down, and read in UTC 
   const [line1, line2] = rowsOf(FIXTURE_VIEW, ROWS_FIXTURE.now).find(r => r.id === '1')?.lines ?? []
   expect(storedLineText(line2 ?? [], ROWS_FIXTURE.now + MINUTE, TALLINN)).toBe('Used ▰▰▰▱▱▱▱▱▱▱ 31% Fable ▰▰▰▰▱▱▱▱▱▱ 38%  resets 2d 3h 13m · Fable 1d 3h 13m')
   expect(storedLineText(line1 ?? [], ROWS_FIXTURE.now, 'UTC')).toBe('andres@lutsohealth.com · Company · Ultra  updated 16:34')
+})
+
+// C11 (puma-eslxj.12, RULING 4593 and 4595): `account-rotator account select` drops a request file the installed
+// sessions' minute tick applies; a request names the store it was read from by that store's `store-id`.
+const SELECT = { kind: 'select', nonce: 'n0nce-1234', at: NOW, id: '2', store: 'store-abc' }
+
+test('a select request is read back as it was written, while it is fresh', () => {
+  expect(requestFrom(SELECT, NOW + REQUEST_TTL_MS)).toEqual(SELECT)
+})
+
+test('a request of another kind, shape or age is no request', () => {
+  const cases: [string, unknown][] = [
+    ['not an object', 'select'],
+    ['another kind', { ...SELECT, kind: 'rm' }],
+    ['no nonce', { ...SELECT, nonce: undefined }],
+    ['a nonce that names a path', { ...SELECT, nonce: '../launch-slot' }],
+    ['no account', { ...SELECT, id: 7 }],
+    ['no store id', { ...SELECT, store: undefined }],
+    ['no time', { ...SELECT, at: 'now' }],
+    ['older than the time a request waits', { ...SELECT, at: NOW - REQUEST_TTL_MS - 1 }],
+    ['from the future past that time', { ...SELECT, at: NOW + REQUEST_TTL_MS + 1 }],
+  ]
+  expect(cases.filter(([, value]) => requestFrom(value, NOW) !== undefined).map(([name]) => name)).toEqual([])
+})
+
+test('the requests live in the Claude config folder of the session, CLAUDE_CONFIG_DIR or ~/.claude', () => {
+  expect([requestsDir('/cfg', '/home/x'), requestsDir(undefined, '/home/x')]).toEqual(['/cfg/account-rotator-requests', '/home/x/.claude/account-rotator-requests'])
+})
+
+// Review C11-R1 F5 (Opus) [REQUEST-FOLDER] (RULING 4607): Python's `or` in bin/account_rotator_store.py takes an empty value as unset.
+test('an empty CLAUDE_CONFIG_DIR is the folder the CLI takes too, ~/.claude', () => {
+  expect(requestsDir('', '/home/x')).toBe('/home/x/.claude/account-rotator-requests')
 })
