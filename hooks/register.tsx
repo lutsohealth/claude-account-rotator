@@ -460,7 +460,7 @@ async function saveRows($: Host, now: number): Promise<void> {
 
 /** Changes the footer's look for every session. */
 async function setFooter($: Host, change: Partial<FooterStyle>): Promise<void> {
-  const footer = { ...(await getView($)).footer, ...change }
+  const footer = { ...footerStyleFrom(await $.store.get('footer')), ...change }
   await $.store.set('footer', footer)
   await setView($, v => ({ ...v, footer }))
 }
@@ -508,6 +508,8 @@ async function setLaunchOn($: Host, launchOn: LaunchOn): Promise<void> {
  * now, for `bin/account-rotator-launch`; none, while no login has room.
  */
 async function saveLaunchPick($: Host): Promise<void> {
+  // Picked from the store as it stands: a setting or account another session changed since this view last read it counts.
+  await mergeStore($)
   const now = await $.clock.now()
   const pick = pickLaunch(await getView($), now)
   const held = await $.store.get('launch-slot')
@@ -873,9 +875,9 @@ async function checkAll($: Host, isEvery = true): Promise<void> {
       await saveCheckError($, account.id, `the check failed (${kind}); the debug log has the rest`).catch(() => undefined)
     }
   }
-  // The rows carry what this check read, for a session that ends before the next merge: a merge writes them from the
-  // store as it stands, where every save went first and another session's reads since this check began are too.
-  await mergeStore($)
+  // The rows carry what this check read, for a session that ends before the next merge: maybeRotate's launch pick
+  // merges first, which writes them from the store as it stands, where every save went first and another session's
+  // reads since this check began are too.
   await maybeRotate($)
 }
 
@@ -1325,7 +1327,7 @@ async function askChrome($: Host): Promise<ChromeAnswer> {
 
 /** With no account named for the Chrome extension yet, the one a browser answered as is it, for every session. */
 async function learnChrome($: Host, account: Account): Promise<void> {
-  if ((await getView($)).chromeAccountId !== undefined) return
+  if ((await $.store.get('chrome-account')) !== undefined) return
   await setChromeAccount($, account.id)
   tell($, `Claude in Chrome connects as Claude account ${label(account)}: your Chrome extension is signed in to it.`)
 }
@@ -1349,7 +1351,7 @@ async function noteChrome($: Host, as: Account, answer: ChromeAnswer): Promise<v
   }))
   await noteChromeAccount($, as.id, isPaired)
   if (isPaired) await learnChrome($, as)
-  else if ((await getView($)).chromeAccountId === undefined && as.slot === '') await $.store.set('chrome-miss', as.id)
+  else if ((await $.store.get('chrome-account')) === undefined && as.slot === '') await $.store.set('chrome-miss', as.id)
 }
 
 /**
@@ -1631,8 +1633,8 @@ async function removeAccount($: Host, id: string): Promise<void> {
     }
   }
   await $.process.run(['claude', 'auth', 'logout'], { env: slotEnv(account.slot), timeoutMs: 20_000 })
-  await saveAccounts($, view.accounts.filter(a => a.id !== id))
-  if (view.chromeAccountId === id) await setChromeAccount($, undefined)
+  await saveAccounts($, (await loadAccounts($)).filter(a => a.id !== id))
+  if ((await $.store.get('chrome-account')) === id) await setChromeAccount($, undefined)
   await noteChromeAccount($, id, false)
   await $.store.delete(`reading:${id}`)
   await $.store.delete(`usage:${id}`)
@@ -1802,7 +1804,6 @@ export const register: Register = on => {
       void mergeStore($)
         .then(() => settlePending($, false))
         .then(() => checkAll($, false))
-        .then(() => maybeRotate($))
         .catch(error => debug($, `sync failed: ${String(error)}`))
     })
     $.clock.every(10 * 60_000, () => {
