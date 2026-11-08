@@ -1651,9 +1651,11 @@ test('a stored stop mark with no reset time, on an account whose token is not li
   const clock = world(on, w, { ...TWO_LOGINS, 'usage:2': stale })
   await start($, clock)
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
-  // Login 1 reports no 5-hour window, so it has no 5h row; login 2's dropped 5-hour reading leaves its row with none reported.
-  expect(await pane.findAll({ type: 'Text', text: /none reported$/ })).toHaveLength(1)
-  expect(await pane.findAll({ type: 'Text', text: /^5h$/ })).toHaveLength(1)
+  // C7 (puma-eslxj.8), a changed expected value. SOURCE: the bead's decision "Draw a 5h line only when the newest
+  // accepted body or response lists a window, or a stop mark stands" (RULING 4490). Login 1 reports no 5-hour window;
+  // login 2's only window was an older version's stop mark, passed, and no body said it has one: neither draws a 5h row.
+  expect(await pane.findAll({ type: 'Text', text: /none reported$/ })).toHaveLength(0)
+  expect(await pane.findAll({ type: 'Text', text: /^5h$/ })).toHaveLength(0)
   await pane.press({ key: 'rotate' })
   await clock.settle()
   expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
@@ -1724,9 +1726,17 @@ test('a stop\'s week mark on an account that reports no 5-hour window stands thr
   w.usage['tok-1'] = [null, 40]
   w.usage['tok-2'] = [null, 96]
   w.limits = [{ kind: 'seven_day', percentUsed: 40, resetsAt: '2026-10-18T03:00:00Z' }]
-  const clock = world(on, w, TWO_LOGINS)
+  const store = new Map<string, unknown>(Object.entries(TWO_LOGINS))
+  const clock = world(on, w, store)
   await start($, clock)
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  // C7 (puma-eslxj.8), a changed step. SOURCE: the bead's decision that the "5h limit" row shows only while some account
+  // is known to have a window (RULING 4490). Neither account here has one, so the limit is set in the store every
+  // session shares, as another session's press sets it, and this session takes it at its next merge.
+  const setLimit = async (limit: 'on' | 'off') => {
+    store.set('five-hour-limit', limit)
+    await clock.advance(61_000)
+  }
   const markVisible = async () => {
     await pane.redraw()
     return (await pane.find({ text: /^▱{10} 0% left$/ })) !== undefined
@@ -1735,7 +1745,7 @@ test('a stop\'s week mark on an account that reports no 5-hour window stands thr
   for (const rotateTo of ['reset', 'room', 'order', 'off'] as const) {
     await pane.press({ key: `rotate-to-${rotateTo}` })
     for (const limit of ['on', 'off'] as const) {
-      await pane.press({ key: `five-hour-limit-${limit}` })
+      await setLimit(limit)
       await clock.settle()
       await $.classic.StopFailure({ error: 'rate_limit', last_assistant_message: 'Claude usage limit reached.' })
       await clock.settle()
@@ -5074,4 +5084,162 @@ for (const [endName, end] of F3_ENDS) {
       expect([endName, theirName, isKept ? 'kept' : `dropped: ${JSON.stringify(store.get('fable-mark:2'))}`]).toEqual([endName, theirName, 'kept'])
     })
   }
+}
+
+// C7 (puma-eslxj.8, problem e): a 5-hour window is drawn only where an account is known to have one. No reading and no
+// no-five-hour key is unknown, and unknown draws nothing.
+
+/** Two logins, `one` and `two` their usage (undefined: the usage call answers 429), with `store` seeded. */
+async function fiveHourWorld($: Engine, on: On, one: World['usage'][string] | undefined, two: World['usage'][string] | undefined, store: Record<string, unknown> = {}): Promise<{ w: World; clock: MockClock }> {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.failing = {}
+  if (one === undefined) w.failing['tok-1'] = 429
+  else w.usage['tok-1'] = one
+  if (two === undefined) w.failing['tok-2'] = 429
+  else w.usage['tok-2'] = two
+  const clock = world(on, w, { ...TWO_LOGINS, 'rotate-to': 'off', ...store })
+  await start($, clock)
+  return { w, clock }
+}
+
+/** The pane's lines from login 2's email to the end of the accounts box. */
+const loginTwoLines = (text: string) => text.slice(text.indexOf('two@example.com'), text.indexOf(' Accounts ')).split('\n')
+
+test('a login with no reading, no no-five-hour key and a usage call answering 429 draws no 5h row', async ($, on) => {
+  await fiveHourWorld($, on, [20, 30], undefined)
+  expect(loginTwoLines(await paneText($))).not.toContain('5h')
+})
+
+test('with every account unknown, the footer has no Session: label and the pane no 5h limit row', async ($, on) => {
+  await fiveHourWorld($, on, undefined, undefined)
+  const footer = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'SessionMode', props: { modes: [] } })
+  expect((await footer.findAll({ type: 'Text' })).map(t => t.text)).not.toContain('Session:')
+  await footer.unmount()
+  expect((await paneText($)).split('\n')).not.toContain('5h limit')
+})
+
+test('with every account reporting no 5-hour window, the pane has no 5h limit row', async ($, on) => {
+  await fiveHourWorld($, on, [null, 30], [null, 40])
+  expect((await paneText($)).split('\n')).not.toContain('5h limit')
+})
+
+test('with the 5h limit set off, the pane keeps its 5h limit row though no account is known to have a window, so it can be set on again', async ($, on) => {
+  await fiveHourWorld($, on, undefined, undefined, { 'five-hour-limit': 'off' })
+  expect((await paneText($)).split('\n')).toContain('5h limit')
+})
+
+test('with an account known to have a 5-hour window, the pane keeps its 5h limit row', async ($, on) => {
+  await fiveHourWorld($, on, [null, 30], [20, 40])
+  expect((await paneText($)).split('\n')).toContain('5h limit')
+})
+
+// [BLANK-SESSION-ROW]
+test('with the session glyphs off and its percent on, the login in use without a 5-hour window draws no blank footer row though another has one', async ($, on) => {
+  await fiveHourWorld($, on, [null, 30], [20, 40], { footer: { ...DEFAULT_FOOTER, session: 'none', sessionPercent: true } })
+  const footer = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'SessionMode', props: { modes: [] } })
+  const lines = ((await footer.find(GLYPHS))?.text ?? '').split('\n')
+  await footer.unmount()
+  // A row with no glyph and no percent: spaces and the highlight's lines alone.
+  expect(lines.filter(l => l.replace(/[\s│]/g, '') === '')).toEqual([])
+  expect(lines.length).toBeGreaterThan(0)
+})
+
+// Kept green: Claude's own words name the 5-hour window, so its account draws the row, whatever its usage said.
+test('a 5-hour stop on a login whose usage said it has no 5-hour window draws its 5h row', async ($, on) => {
+  const { clock } = await fiveHourWorld($, on, [null, 30], [20, 40])
+  expect((await paneText($)).split('\n').filter(l => l === '5h')).toHaveLength(1)
+  await pastLastRead(clock)
+  await $.classic.StopFailure({ error: 'rate_limit', last_assistant_message: "You've hit your session limit" })
+  await clock.settle()
+  expect((await paneText($)).split('\n').filter(l => l === '5h')).toHaveLength(2)
+})
+
+// C6's lesson, per input of the predicate: a key another session deletes turns the row back to unknown.
+const FIVE_HOUR_INPUTS: [string, unknown][] = [
+  ['no-five-hour:2', false],
+  ['mark:2', { pct: 100, resetsAt: '2026-10-12T12:00:00Z', at: NOW }],
+  ['usage:2', { fiveHour: { pct: 30, resetsAt: '2026-10-12T12:00:00Z' }, sevenDay: { pct: 30, resetsAt: WEEK_RESET }, at: NOW - 60_000, by: '2', v: 1, src: 'body' }],
+]
+for (const [key, value] of FIVE_HOUR_INPUTS) {
+  test(`${key} saying login 2 has a 5-hour window draws its 5h row`, async ($, on) => {
+    await fiveHourWorld($, on, [20, 30], undefined, { [key]: value })
+    expect([key, loginTwoLines(await paneText($)).includes('5h')]).toEqual([key, true])
+  })
+  test(`${key} another session deletes leaves login 2 with no 5h row at the next merge`, async ($, on) => {
+    const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off', [key]: value }))
+    const w = fresh()
+    w.keychain['Claude Code-credentials'] = blob('tok-1')
+    w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+    w.usage['tok-1'] = [20, 30]
+    w.failing = { 'tok-2': 429 }
+    const clock = world(on, w, store)
+    await start($, clock)
+    store.delete(key)
+    await clock.advance(61_000)
+    expect([key, loginTwoLines(await paneText($)).includes('5h')]).toEqual([key, false])
+  })
+}
+
+// Review opus-c7 A3 [UNEXERCISED-WRITER] (RULING 4498): the 5h limit press rewrites every reading in the view; a week
+// mark standing on a login with no 5-hour window stays through it, both ways.
+test('pressing the 5h limit off and on keeps a standing week mark on a login with no 5-hour window', async ($, on) => {
+  const { clock } = await fiveHourWorld($, on, [20, 40], [null, 30], { 'week-mark:2': { pct: 100, resetsAt: WEEK_RESET, at: NOW } })
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  const weekOfTwo = async () => {
+    await pane.redraw()
+    const texts = (await pane.findAll({ type: 'Text' })).map(t => t.text ?? '')
+    const lines = texts.slice(texts.indexOf('two@example.com'))
+    return lines[lines.indexOf('week') + 1]
+  }
+  const seen: string[] = [await weekOfTwo()]
+  for (const limit of ['off', 'on'] as const) {
+    await pane.press({ key: `five-hour-limit-${limit}` })
+    await clock.settle()
+    seen.push(await weekOfTwo())
+  }
+  await pane.unmount()
+  expect(seen).toEqual([`${longBar(0)} 0% left`, `${longBar(0)} 0% left`, `${longBar(0)} 0% left`])
+})
+
+// Review codex-c7 C7-R1-01 and opus-c7 F1 [LIMIT-DEPENDENT-KNOWLEDGE]: whether a login has a 5-hour window does not
+// depend on the 5h limit. Every input that says so, under both settings, on both surfaces hasFiveHour drives.
+/** Whether the pane draws a 5h row in `lines` and the footer its Session: label. */
+async function knownSurfaces($: Engine, lines: string[]): Promise<{ paneRow: boolean; footerSession: boolean }> {
+  const footer = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'SessionMode', props: { modes: [] } })
+  const footerSession = (await footer.findAll({ type: 'Text' })).map(t => t.text).includes('Session:')
+  await footer.unmount()
+  return { paneRow: lines.includes('5h'), footerSession }
+}
+for (const [key, value] of FIVE_HOUR_INPUTS) {
+  for (const limit of ['on', 'off'] as const) {
+    test(`${key} saying login 2 has a 5-hour window, with the 5h limit ${limit}, draws its 5h row and the footer's Session: row`, async ($, on) => {
+      await fiveHourWorld($, on, [null, 30], undefined, { 'five-hour-limit': limit, [key]: value })
+      const label = `${key} / limit ${limit}`
+      expect([label, await knownSurfaces($, loginTwoLines(await paneText($)))]).toEqual([label, { paneRow: true, footerSession: true }])
+    })
+  }
+}
+for (const limit of ['on', 'off'] as const) {
+  test(`a response listing login 1's 5-hour window, with no no-five-hour key and the 5h limit ${limit}, draws its 5h row and the footer's Session: row`, async ($, on) => {
+    const w = fresh()
+    w.keychain['Claude Code-credentials'] = blob('tok-1')
+    w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+    w.failing = { 'tok-1': 429 }
+    w.usage['tok-2'] = [null, 40]
+    w.weekResets = { 'tok-2': '2026-10-19T03:00:00Z' }
+    const week = { sevenDay: { pct: 30, resetsAt: WEEK_RESET }, at: NOW - 60_000, by: '1', v: 1, src: 'body' }
+    const clock = world(on, w, { ...TWO_LOGINS, 'rotate-to': 'off', 'five-hour-limit': limit, 'usage:1': week })
+    await start($, clock)
+    w.limits = [
+      { kind: 'five_hour', percentUsed: 20, resetsAt: '2026-10-12T12:00:00Z' },
+      { kind: 'seven_day', percentUsed: 30, resetsAt: WEEK_RESET },
+    ]
+    await respond($, clock, w)
+    const text = await paneText($)
+    const lines = text.slice(text.indexOf('one@example.com'), text.indexOf('two@example.com')).split('\n')
+    const label = `response / limit ${limit}`
+    expect([label, await knownSurfaces($, lines)]).toEqual([label, { paneRow: true, footerSession: true }])
+  })
 }

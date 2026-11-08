@@ -422,7 +422,8 @@ async function mergeStore($: Host): Promise<void> {
       const kept = readings[a.id]
       const mark = marks[a.id]
       if (mark !== undefined) nextMarks[a.id] = mark
-      const none = noFiveHour[a.id]
+      // With no word stored, a stored reading's own 5-hour window, as read whatever the 5h limit, says it has one.
+      const none = noFiveHour[a.id] ?? (kept !== undefined && counted(kept, 'on', now).fiveHour !== undefined ? false : undefined)
       if (none !== undefined) nextNoFiveHour[a.id] = none
       const weekMark = weekMarks[a.id]
       if (weekMark !== undefined) nextWeekMarks[a.id] = weekMark
@@ -1097,8 +1098,9 @@ async function onMeasure($: Host, limits: readonly SessionRateLimit[]): Promise<
     await maybeRotate($)
     return
   }
-  // A response that reports a 5-hour window shows the account has one, whatever the last usage check said.
-  if (reading.fiveHour !== undefined && view.noFiveHour?.[view.activeId] === true) await saveNoFiveHour($, view.activeId, false)
+  // A response that reports a 5-hour window shows the account has one, whatever the last usage check said: recorded once,
+  // in a form the 5h limit does not filter.
+  if (reading.fiveHour !== undefined && view.noFiveHour?.[view.activeId] !== false) await saveNoFiveHour($, view.activeId, false)
   // A response never lists the Fable week: the one the last check stored stays (the view's carries the marks).
   const fable = (await ownedReading($, view.activeId))?.fable
   await saveReading($, view.activeId, { ...reading, ...(fable ? { fable } : {}), by: view.activeId }, 'response')

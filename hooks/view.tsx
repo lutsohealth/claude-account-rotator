@@ -65,14 +65,22 @@ function rooms(view: View, a: Account, i: number, now: number): readonly [number
 /** A percent's room color, lighter while the pointer is over the footer. */
 const roomRun = (leftPct: number) => ({ color: roomColor(leftPct), lit: roomColor(leftPct, true) })
 
-/** Whether a login's usage said it has no 5-hour window, in its reading or, with none yet, in the store: it has no 5h row. */
+/** Whether a login's usage said it has no 5-hour window, in its reading or, with none yet, in the store: the plan's name infers Ultra from it. */
 function hasNoFiveHour(view: View, id: string): boolean {
   const r = view.readings[id]
   return r === undefined ? view.noFiveHour?.[id] === true : reportsNoFiveHour(r)
 }
 
+/**
+ * Whether a login is known to have a 5-hour window: its reading holds one (a read's, or a stop's mark), or its usage
+ * last said it has one. A login with no reading and no word either way is unknown, and unknown draws nothing.
+ */
+function hasFiveHour(view: View, id: string): boolean {
+  return view.readings[id]?.fiveHour !== undefined || view.noFiveHour?.[id] === false
+}
+
 /** Whether a login has no session row in the footer: a demo shows one for every login. */
-const hasNoSession = (view: View, a: Account) => !view.demo && hasNoFiveHour(view, a.id)
+const hasNoSession = (view: View, a: Account) => !view.demo && !hasFiveHour(view, a.id)
 
 /** The health a footer glyph shows as a mark in place of the login's room. */
 const MARKED: readonly string[] = ['login-needed', 'logging-in']
@@ -81,8 +89,8 @@ const MARKED: readonly string[] = ['login-needed', 'logging-in']
  * A login's glyph in a footer row, green with all of its room left to red with
  * none. The row that carries the marks says when a login needs a sign-in; a
  * login without the room (a plan with no 5-hour window or no weekly limit)
- * leaves its place blank, and one with no reading yet shows a dot in the
- * session row.
+ * leaves its place blank, and one known to have a 5-hour window with no room
+ * read yet shows a dot in the session row.
  */
 function glyphOf(view: View, a: Account, style: Glyphs, row: 0 | 1, room: number | undefined, carriesMark: boolean): FooterRun {
   const health = view.health[a.id]?.kind
@@ -220,7 +228,8 @@ export function Footer(ui: Ui, view: View, modes: readonly string[], now: number
   const hasSession = view.accounts.some(a => !hasNoSession(view, a)) || (needsMark && !weekGlyphs && session !== 'none')
   const sessionGlyphs = session !== 'none' && hasSession
   const hasColumns = sessionGlyphs || weekGlyphs
-  const sessionShown = sessionGlyphs || (sessionPercent && hasSession)
+  // Percents alone are drawn only for a login in use with 5-hour room, as the week's are: else the row is blank.
+  const sessionShown = sessionGlyphs || (sessionPercent && activeRoom(view, now, 0) !== undefined)
   const weekShown = weekGlyphs || (weekPercent && activeRoom(view, now, 1) !== undefined)
   const shownRows = [...(sessionShown ? [0 as const] : []), ...(weekShown ? [1 as const] : [])]
   // The sign-in marks go on the first row drawn with glyphs: a row of percents alone has no place for them.
@@ -405,7 +414,9 @@ function launchChoices(view: View): readonly (readonly [LaunchOn, string])[] {
 function RotationSettings(ui: Ui, view: View, act: Actions) {
   return section(ui, 'rotation', 'Usage based rotation', [
     choice(ui, 'rotate-to', 'Move to', ROTATE_CHOICES, view.rotateTo, act.setRotateTo),
-    choice(ui, 'five-hour-limit', '5h limit', FIVE_HOUR_CHOICES, view.fiveHourLimit, act.setFiveHourLimit),
+    // Only while some account is known to have a 5-hour window, or the limit is off, so it can be set on again.
+    (view.fiveHourLimit === 'off' || view.accounts.some(a => hasFiveHour(view, a.id))) &&
+      choice(ui, 'five-hour-limit', '5h limit', FIVE_HOUR_CHOICES, view.fiveHourLimit, act.setFiveHourLimit),
     weekLeaveRow(ui, view, act),
     choice(ui, 'launch-on', 'New on', launchChoices(view), view.launchOn ?? DEFAULT_LAUNCH_ON, act.setLaunchOn),
   ])
@@ -731,7 +742,7 @@ function accountRows(ui: Ui, view: View, a: Account, now: number, act: Actions) 
           {lineEnd(ui, view, a, act)}
         </Box>
       </Box>
-      {!hasNoFiveHour(view, a.id) && windowRow(ui, view.footer.fill, isActive, '5h', r !== undefined, r?.fiveHour, now)}
+      {hasFiveHour(view, a.id) && windowRow(ui, view.footer.fill, isActive, '5h', r !== undefined, r?.fiveHour, now)}
       {windowRow(ui, view.footer.fill, isActive, 'week', r !== undefined, r?.sevenDay, now)}
       {fableRow(ui, view, a, isActive, now)}
       {expiry !== undefined && expiry - now < SIGN_IN_WARN_MS && (
