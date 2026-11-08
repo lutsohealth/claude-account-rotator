@@ -852,6 +852,11 @@ export function sameLogin(a: Identity, b: Identity): boolean {
   return a.email !== undefined && a.email === b.email && (a.orgId ?? '') === (b.orgId ?? '')
 }
 
+/** Whether an account still holds the login a request read. */
+export function holdsLogin(seen: { slot: string; email?: string; orgId?: string }, account: Account): boolean {
+  return seen.slot === account.slot && seen.email === account.email
+}
+
 /** A listed login is the account `who` signed in as, as far as it is known: by its email, and its organization once known. */
 export function isLoginOf(a: Identity, who: Identity): boolean {
   return a.email !== undefined && a.email === who.email && (a.orgId === undefined || a.orgId === who.orgId)

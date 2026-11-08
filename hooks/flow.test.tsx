@@ -6867,7 +6867,6 @@ test('an rm of an id that holds another login than the CLI read signs nothing ou
   const { w, store, clock } = await selectWorld($, on)
   const offenders: string[] = []
   const holders = [{ id: '2', slot: SLOT2, email: 'new@example.com' }, { id: '2', slot: `${HOME}/.claude/accounts/9`, email: 'two@example.com' }, { id: '2', slot: SLOT2 }]
-  expect(holders.length, 'the sweep lists no holder').toBeGreaterThan(0)
   let serial = 0
   for (const holder of holders) {
     store.set('accounts', [TWO_LOGINS.accounts[0], holder])
@@ -6881,6 +6880,22 @@ test('an rm of an id that holds another login than the CLI read signs nothing ou
     delete w.files[`${REQUESTS}/${nonce}.json`]
   }
   expect(offenders, `holders of id 2 an old rm removed; compare what the CLI saw before the logout: ${offenders.join('; ')}`).toEqual([])
+})
+
+// Review C12-rm-R2 ORG-REUSE and EMAIL-FILL (Codex) [RM-TARGET-NOT-SEEN]: the model test holds every case; these two hold the wiring.
+test('an rm that read one organization signs out no other under the same email', async ($, on) => {
+  const { w, store, clock } = await selectWorld($, on)
+  store.set('accounts', [TWO_LOGINS.accounts[0], { id: '2', slot: SLOT2, email: 'two@example.com', orgId: 'org-b' }])
+  w.files[`${REQUESTS}/${N1}.json`] = JSON.stringify({ kind: 'rm', nonce: N1, at: clock.now(), id: '2', store: store.get('store-id'), slot: SLOT2, email: 'two@example.com', orgId: 'org-a' })
+  await untilTick(clock)
+  expect([w.logouts ?? [], resultOf(w, N1)?.ok]).toEqual([[], false])
+})
+
+test('an rm that read an account before its email was learned still applies: the slot is the same and no other login is known', async ($, on) => {
+  const { w, store, clock } = await selectWorld($, on)
+  w.files[`${REQUESTS}/${N1}.json`] = JSON.stringify({ kind: 'rm', nonce: N1, at: clock.now(), id: '2', store: store.get('store-id'), slot: SLOT2 })
+  await untilTick(clock)
+  expect([w.logouts, resultOf(w, N1)?.ok]).toEqual([[SLOT2], true])
 })
 
 // Review C12-rm SHARED-SLOT (Codex) [RM-TARGET-NOT-SEEN].

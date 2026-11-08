@@ -658,13 +658,20 @@ class Remove(RequestCase):
         self.assertEqual(self.rm("--account", "2", "--wait", "10").returncode, 0)
         self.assertEqual((self.seen["slot"], self.seen["email"]), (account["slot"], account["email"]))
 
-    def test_an_account_with_no_email_sends_none(self) -> None:
+    def test_an_account_with_no_email_or_organization_sends_none_and_one_with_them_sends_both(self) -> None:
         store = json.loads(self.store.read_text(encoding="utf-8"))
-        del next(a for a in store["accounts"] if a["id"] == "2")["email"]
+        row = next(a for a in store["accounts"] if a["id"] == "2")
+        email = row.pop("email")
+        row.pop("orgId", None)
         self.write(STORE, store)
         self.answer(True, "account 2 is removed")
         self.assertEqual(self.rm("--account", "2", "--wait", "10").returncode, 0)
-        self.assertNotIn("email", self.seen)
+        self.assertEqual(("email" in self.seen, "orgId" in self.seen), (False, False))
+        row.update(email=email, orgId="org-a")
+        self.write(STORE, store)
+        self.answer(True, "account 2 is removed")
+        self.assertEqual(self.rm("--account", "2", "--wait", "10").returncode, 0)
+        self.assertEqual((self.seen["email"], self.seen["orgId"]), (email, "org-a"))
 
     def test_a_row_with_no_slot_exits_1_and_leaves_no_file(self) -> None:
         # Review C12-rm MALFORMED-ACCOUNT (Codex) [RM-TARGET-NOT-SEEN]: no writer in the mod makes one, and a session filters it out and would answer "already gone".

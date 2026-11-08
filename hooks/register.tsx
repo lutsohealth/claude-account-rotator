@@ -63,6 +63,7 @@ import {
   rotateToFrom,
   readingFromLimits,
   readingFromUsage,
+  holdsLogin,
   sameLogin,
   shouldLeave,
   WRITER_VERSION,
@@ -1781,14 +1782,14 @@ async function addAccount($: Host): Promise<void> {
  * dropped from the list with its login still signed in is out of everyone's sight. Other sessions on it are not moved.
  * `seen`: what the CLI read of the account. A request waits, and an id can hold another login by the time it is applied.
  */
-async function removeAccount($: Host, id: string, seen?: { slot: string; email?: string }): Promise<{ ok: boolean; message: string; pickId?: string }> {
+async function removeAccount($: Host, id: string, seen?: { slot: string; email?: string; orgId?: string }): Promise<{ ok: boolean; message: string; pickId?: string }> {
   const accounts = await loadAccounts($)
   const account = accounts.find(a => a.id === id)
   if (account === undefined) return { ok: true, message: `account ${id} is already gone` }
   if (account.slot === '') return { ok: false, message: `account ${id} is Claude Code's own login, which the mod does not remove` }
   if (isConnectingChrome) return { ok: false, message: CONNECTING_TEXT }
-  if (seen !== undefined && (seen.slot !== account.slot || seen.email !== account.email)) {
-    return { ok: false, message: `account ${id} holds another login than this command read, so nothing is removed: run account list` }
+  if (seen !== undefined && !holdsLogin(seen, account)) {
+    return { ok: false, message: `account ${id} holds another login than this command read, so nothing is removed: run account list, then rm again if it is the one you mean` }
   }
   const sharing = accounts.find(a => a.id !== id && a.slot === account.slot)
   if (sharing !== undefined) return { ok: false, message: `account ${id} shares its sign-in with account ${sharing.id}, so signing it out would sign out both: nothing is removed` }
