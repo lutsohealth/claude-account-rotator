@@ -426,15 +426,13 @@ async function mergeStore($: Host): Promise<void> {
       if (none !== undefined) nextNoFiveHour[a.id] = none
       const weekMark = weekMarks[a.id] ?? v.weekMarks?.[a.id]
       if (weekMark !== undefined) nextWeekMarks[a.id] = weekMark
-      // A mark past its reset is dropped here, as nothing reads it again.
       const fableMark = fableMarks[a.id] ?? v.fableMarks?.[a.id]
-      const isFableMarkLive = fableMark !== undefined && Date.parse(fableMark.resetsAt) > now
-      if (isFableMarkLive) nextFableMarks[a.id] = fableMark
+      if (fableMark !== undefined) nextFableMarks[a.id] = fableMark
       // On a tie the stored read wins: this session's copy is already counted, and may have lost a window.
       const kept = mine !== undefined && (theirs === undefined || mine.at > theirs.at) ? mine : theirs
       // A stop's mark still in force counts with no reading under it: a reading dropped as no one's takes no mark along.
       const inForce = (m: Mark | undefined) => m !== undefined && Date.parse(m.resetsAt) > now
-      const reading = kept ?? (inForce(mark) || inForce(weekMark) || isFableMarkLive ? { at: now, by: a.id } : undefined)
+      const reading = kept ?? (inForce(mark) || inForce(weekMark) || inForce(fableMark) ? { at: now, by: a.id } : undefined)
       if (reading !== undefined) nextReadings[a.id] = viewed(reading, { mark, weekMark, fableMark, noFiveHour: none }, fiveHourLimit, now)
       const own = v.health[a.id]
       const h = signingIn === a.id ? own : (health[a.id] ?? own)

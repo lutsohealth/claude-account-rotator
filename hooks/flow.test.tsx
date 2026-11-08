@@ -4985,4 +4985,28 @@ test('a Fable stop before any response proves a switch marks fable-mark on the l
   await respond($, clock, w)
   expect(w.toasts.some(t => /did not take/.test(t))).toBe(true)
   expect(store.get('fable-mark:2')).toBeUndefined()
+  // This session's view drops it too: login 2 draws its body's week again.
+  expect(await fableRows($)).toEqual(['–', `${longBar(50)} 50% left`])
+})
+
+test('a check whose usage lists no Fable week after a Fable stop keeps the stored week in usage:<id>, never the mark', async ($, on) => {
+  const { w, store, clock } = await fableStopStays($, on)
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  const calls = w.usageCalls.filter(t => t === 'tok-1').length
+  w.usage['tok-1'] = [20, 30]
+  await pastNextRead(clock)
+  expect(w.usageCalls.filter(t => t === 'tok-1').length).toBeGreaterThan(calls)
+  expect(fableOf(store.get('usage:1'))).toEqual({ pct: 60, resetsAt: FABLE_RESET })
+})
+
+test('a Fable mark another session stored on a login with no reading yet counts: the pane draws that login\'s Fable week spent', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [20, 30, 10]
+  w.failing = { 'tok-2': 429 }
+  const clock = world(on, w, { ...TWO_LOGINS, 'rotate-to': 'off', 'fable-mark:2': { pct: 100, resetsAt: FABLE_RESET, at: NOW } })
+  await start($, clock)
+  expect(await fableRows($)).toEqual([`${longBar(90)} 90% left`, `${longBar(0)} 0% left`])
 })
