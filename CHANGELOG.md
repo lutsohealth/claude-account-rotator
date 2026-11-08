@@ -2,6 +2,11 @@
 
 What each version of the account rotator changed. To get each one as Claude Code starts, turn on auto-update: in `/plugin`, open **Marketplaces**, pick **claude-account-rotator** and choose **Enable auto-update**. To update by hand, run `claude plugin marketplace update claude-account-rotator`, then `claude plugin update account-rotator@claude-account-rotator`, and start a new session.
 
+## 0.5.20-lutso.1 - 2026-11-08
+
+- **The demo harness refuses to store a real usage reading under any key**, by the reset times it hands out. A demo recording shows imitated usage only.
+- **The stored rows' version number is documented as not versioning the line shape**: a reader tells a line's shape by its type, and a new shape takes a new key.
+
 ## 0.5.19-lutso.1 - 2026-11-08
 
 - **A shell command now removes request files a killed command or a dead session left**, once past the five minutes a request lasts. A file of another shape stays.
