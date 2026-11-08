@@ -6549,24 +6549,13 @@ const onUnderHold = (on: On, holds: (name: string) => boolean, why = 'is not for
     )
   }) as unknown as On
 
-test('under the engine\'s own policy hold env.set resolves { deny }, and use must not answer that the session moved', async ($, on) => {
-  let isHolding = false
-  const { w, store, clock } = await selectWorld($, onUnderHold(on, name => isHolding && name === 'CLAUDE_SECURESTORAGE_CONFIG_DIR'))
-  isHolding = true
-  const call = bashCall($, w, USE_COMMAND)
-  w.files[`${REQUESTS}/${N1}.json`] = useRequest(N1, '2', store.get('store-id'), clock.now(), ownMark(w))
-  await beat(clock)
-  await call.finish()
-  expect(w.envSets, 'the fixture wrote the slot under a hold').toEqual([])
-  expect(resultOf(w, N1), 'useSlot ignores what $.env.set resolves to, so exit 0 says "now uses account 2" with the slot unmoved: read { deny } in useSlot and treat it as the refusal').toMatchObject({ ok: false, message: blockedText(true), activeId: '1' })
-})
-
 test('a hold in words of the engine\'s own is a refusal too: the reason is not the sign of one', async ($, on) => {
   let isHolding = false
   const { w, store, clock } = await selectWorld($, onUnderHold(on, name => isHolding && name === 'CLAUDE_SECURESTORAGE_CONFIG_DIR', 'your organization holds this'))
   isHolding = true
   w.files[`${REQUESTS}/${N1}.json`] = useRequest(N1, '2', store.get('store-id'), clock.now(), ownMark(w))
   await untilTick(clock)
+  expect(w.envSets, 'the fixture wrote the slot under a hold').toEqual([])
   expect(resultOf(w, N1)).toMatchObject({ ok: false, message: blockedText(true), activeId: '1' })
 })
 
@@ -6657,6 +6646,15 @@ test('every answer the watch gives within a beat agrees with the store as it sta
   if (resultOf(w, 'used-00001')?.ok !== true) offenders.push(`use of a login just added: "${resultOf(w, 'used-00001')?.message}"`)
   await call.finish()
   expect(offenders, `answers from a stale view; run mergeStore in the watch before applyRequests when a request is there: ${offenders.join('; ')}`).toEqual([])
+})
+
+test('a beat with no request to take merges nothing: a command can run for minutes', async ($, on) => {
+  const { w, store, clock } = await selectWorld($, on)
+  const call = bashCall($, w, USE_COMMAND)
+  store.set('rows', 'another session wrote this')
+  await beat(clock)
+  expect(store.get('rows'), 'the watch merged the store with nothing to take').toBe('another session wrote this')
+  await call.finish()
 })
 
 // Review C12-R1 F4 (Opus) [SELF-SWITCH] -> [ANSWER-NOT-TRUE].
