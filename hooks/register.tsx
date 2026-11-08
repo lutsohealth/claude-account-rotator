@@ -460,15 +460,6 @@ async function saveRows($: Host, now: number): Promise<void> {
   await $.store.set('rows', { v: WRITER_VERSION, at: now, rows })
 }
 
-/** Drops a login's schedule, for every session: its next read is due at once, and no good read is known. */
-async function dropUsageDue($: Host, id: string): Promise<void> {
-  await $.store.delete(`usage-due:${id}`)
-  await setView($, v => {
-    const { [id]: _at, ...readAt } = v.readAt ?? {}
-    return { ...v, readAt }
-  })
-}
-
 /** Changes the footer's look for every session. */
 async function setFooter($: Host, change: Partial<FooterStyle>): Promise<void> {
   const footer = { ...(await getView($)).footer, ...change }
@@ -698,7 +689,7 @@ async function holderOf($: Host, account: Account, credential: Credential, isLiv
   // new token (a refresh, or the same person signing in again) keeps its reading.
   const isOtherAccount = known !== undefined && (known.who.email !== who.email || known.who.orgId !== who.orgId)
   if (isOtherAccount) await dropSignInUsage($, account.id)
-  else if (known !== undefined) await dropUsageDue($, account.id)
+  else if (known !== undefined) await $.store.delete(`usage-due:${account.id}`)
   return holder
 }
 
@@ -713,8 +704,7 @@ function withSignIn(account: Account, who: Identity): Account {
 
 /** Drops what the last sign-in's usage left on a login (its reading, its no-five-hour, its schedule), for every session. */
 async function dropSignInUsage($: Host, id: string): Promise<void> {
-  for (const key of [`usage:${id}`, `no-five-hour:${id}`]) await $.store.delete(key)
-  await dropUsageDue($, id)
+  for (const key of [`usage:${id}`, `no-five-hour:${id}`, `usage-due:${id}`]) await $.store.delete(key)
   await setView($, v => {
     const { [id]: _reading, ...readings } = v.readings
     const { [id]: _noFive, ...noFiveHour } = v.noFiveHour ?? {}
@@ -806,7 +796,6 @@ async function requestUsage($: Host, account: Account, accessToken: string, gate
   const at = await $.clock.now()
   const outcome = usage.kind === 'ok' ? { kind: 'ok' as const, hasResponded } : usage.kind === 'rejected' ? usage : { kind: 'failed' as const, retryAfter: usage.retryAfter }
   await $.store.set(key, afterUsage(due, outcome, at))
-  if (outcome.kind === 'ok') await setView($, v => ({ ...v, readAt: { ...v.readAt, [account.id]: at } }))
   return usage
 }
 
@@ -1651,7 +1640,7 @@ async function removeAccount($: Host, id: string): Promise<void> {
   await $.store.delete(`check-error:${id}`)
   await $.store.delete(`health:${id}`)
   await $.store.delete(`holder:${id}`)
-  await dropUsageDue($, id)
+  await $.store.delete(`usage-due:${id}`)
   await setView($, v => {
     const readings = { ...v.readings }
     const marks = { ...v.marks }
