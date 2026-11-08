@@ -6751,6 +6751,23 @@ test('no command shape holds the watch past the time a request lasts', { timeout
   expect(offenders, `commands the watch polls for without end; bound watchRequests by REQUEST_TTL_MS: ${offenders.join('; ')}`).toEqual([])
 })
 
+// Review C12-R2 C12-BOUNDARY (Codex) [WATCH-BOUNDARY] -> [WATCH-IS-NOT-THE-MINUTE].
+test('a watch takes neither kind of request on its deadline beat', { timeoutMs: 30_000 }, async ($, on) => {
+  const { w, store, clock } = await selectWorld($, on)
+  const offenders: string[] = []
+  for (const [nonce, make] of [['deadline-use01', useRequest], ['deadline-sel01', selectRequest]] as const) {
+    const call = bashCall($, w, USE_COMMAND)
+    await clock.settle()
+    await clock.advance(REQUEST_TTL_MS - REQUEST_POLL_MS)
+    await clock.settle()
+    w.files[`${REQUESTS}/${nonce}.json`] = make(nonce, '2', store.get('store-id'), clock.now(), ownMark(w))
+    await beat(clock)
+    if (resultOf(w, nonce)) offenders.push(nonce)
+    await call.finish()
+  }
+  expect(offenders, `taken at REQUEST_TTL_MS; check the deadline after the sleep too: ${offenders.join(', ')}`).toEqual([])
+})
+
 test('a finished call must not take any later select or use before the minute', async ($, on) => {
   const { w, store, clock } = await selectWorld($, on)
   const call = bashCall($, w, USE_COMMAND)
