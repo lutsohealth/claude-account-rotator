@@ -1296,3 +1296,8 @@ test('a request of another kind, shape or age is no request', () => {
 test('the requests live in the Claude config folder of the session, CLAUDE_CONFIG_DIR or ~/.claude', () => {
   expect([requestsDir('/cfg', '/home/x'), requestsDir(undefined, '/home/x')]).toEqual(['/cfg/account-rotator-requests', '/home/x/.claude/account-rotator-requests'])
 })
+
+// Review C11-R1 F5 (Opus) [REQUEST-FOLDER] (RULING 4607): Python's `or` in bin/account_rotator_store.py takes an empty value as unset.
+test('an empty CLAUDE_CONFIG_DIR is the folder the CLI takes too, ~/.claude', () => {
+  expect(requestsDir('', '/home/x')).toBe('/home/x/.claude/account-rotator-requests')
+})

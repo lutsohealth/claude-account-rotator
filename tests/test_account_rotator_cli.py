@@ -11,6 +11,7 @@ import io
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -21,6 +22,7 @@ import uuid
 from contextlib import redirect_stdout
 from pathlib import Path
 from types import ModuleType
+from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -334,6 +336,110 @@ class Select(StoreCase):
         done = self.select("--account", "2", "--json", "--wait", "10")
         result = json.loads(done.stdout)["result"]
         self.assertEqual((done.returncode, result["activeAccountId"], result["launchOn"]), (0, "1", "account:2"))
+
+    def write_result(self, make_body) -> threading.Thread:
+        """A session that writes whatever `make_body(nonce)` gives, as a result, once a request stands."""
+
+        def respond() -> None:
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                found = [p for p in self.requests.glob("*.json") if not p.name.endswith(".result.json")] if self.requests.is_dir() else []
+                if found:
+                    nonce = json.loads(found[0].read_text(encoding="utf-8"))["nonce"]
+                    (self.requests / f"{nonce}.result.json").write_text(make_body(nonce), encoding="utf-8")
+                    return
+                time.sleep(0.02)
+
+        thread = threading.Thread(target=respond)
+        thread.start()
+        self.addCleanup(thread.join)
+        return thread
+
+    # Review C11-R1 WAIT-01 (Codex), F4 (Opus) [REQUEST-LIFE] (RULING 4607).
+    def test_a_wait_not_finite_or_outside_the_time_a_request_lasts_exits_2_before_any_file(self) -> None:
+        corpus = ["nan", "inf", "-inf", "Infinity", "1e999", "0", "-1", "301", "soon"]
+        self.assertTrue(corpus)
+        offenders = {}
+        for value in corpus:
+            try:
+                code = self.select("--account", "2", f"--wait={value}").returncode
+            except subprocess.TimeoutExpired:
+                code = "no end"
+            if code != 2 or self.requests.exists():
+                offenders[value] = code
+        self.assertEqual(offenders, {}, "fix: --wait is finite, above 0, at most REQUEST_TTL_MS, or exit 2 before any file")
+
+    # Review C11-R1 RESULT-01 (Codex) [REQUEST-LIFE], F8 (Opus) [UNPINNED-GUARD]: the answers that are no answer.
+    def test_only_a_result_with_its_own_nonce_a_bool_ok_and_a_string_message_is_an_answer(self) -> None:
+        bodies = {
+            "another nonce": lambda n: json.dumps({"nonce": "someone-else", "ok": True, "message": "applied"}),
+            "no nonce": lambda n: json.dumps({"ok": True, "message": "applied"}),
+            "no message": lambda n: json.dumps({"nonce": n, "ok": True}),
+            "ok not a bool": lambda n: json.dumps({"nonce": n, "ok": "yes", "message": "applied"}),
+            "not an object": lambda n: "[1]",
+            "torn": lambda n: '{"nonce": "',
+        }
+        self.assertTrue(bodies)
+        codes = {}
+        for name, body in bodies.items():
+            self.write_result(body)
+            codes[name] = self.select("--account", "2", "--wait", "1").returncode
+        self.assertEqual(codes, dict.fromkeys(bodies, 3), "fix: answer() takes only its own nonce, ok a bool, message a string")
+
+    def test_a_result_with_no_pick_says_so_in_json(self) -> None:
+        # Review C11-R1 F8: the --json pick fallback, as when no account has room.
+        self.write_result(lambda n: json.dumps({"nonce": n, "ok": True, "message": "no account has room"}))
+        done = self.select("--account", "2", "--json", "--wait", "10")
+        self.assertEqual((done.returncode, json.loads(done.stdout)["result"]["activeAccountId"]), (0, None), done.stderr)
+
+    def test_the_request_is_whole_at_the_moment_it_takes_its_name(self) -> None:
+        # Review C11-R1 F8: the rename. At os.replace the temp file holds the whole request and the name is free.
+        cli, seen = load_cli(), []
+        real = cli.os.replace
+
+        def watch(source: str, target: str) -> None:
+            seen.append((sorted(json.loads(Path(source).read_text(encoding="utf-8"))), os.path.exists(target)))
+            real(source, target)
+
+        with patch.object(cli.os, "replace", watch), patch.object(cli, "answer", lambda *a: None), patch.object(sys, "stderr", io.StringIO()), patch.dict(os.environ, self.env()):
+            cli.main(["account", "select", "--account", "2", "--wait", "1"])
+        self.assertEqual(seen, [(["at", "id", "kind", "nonce", "store"], False)])
+
+    # Review C11-R1 F3 (Opus) [REQUEST-LIFE]: a live CLI takes its request back, whatever stopped it.
+    def test_no_catchable_signal_leaves_a_request_or_a_traceback(self) -> None:
+        signals = {"SIGINT": signal.SIGINT, "SIGTERM": signal.SIGTERM, "SIGHUP": signal.SIGHUP}
+        self.assertTrue(signals)
+        offenders = {}
+        for name, signum in signals.items():
+            child = subprocess.Popen([sys.executable, str(CLI), "account", "select", "--account", "2", "--wait", "30"], env=self.env(), stderr=subprocess.PIPE, text=True)
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline and not list(self.requests.glob("*.json")):
+                time.sleep(0.02)
+            self.assertTrue(list(self.requests.glob("*.json")), "the CLI wrote no request: the fixture did not reach the wait")
+            child.send_signal(signum)
+            _, stderr = child.communicate(timeout=5)
+            left = sorted(p.name for p in self.requests.iterdir())
+            if left or "Traceback" in stderr or child.returncode != 130:
+                offenders[name] = (left, child.returncode, stderr[-120:])
+        self.assertEqual(offenders, {}, "fix: finally withdraws the request on every exit, one line, exit 130")
+
+    # Review C11-R1 F7 (Opus) [REQUEST-LIFE]: an OSError on the write is one line and exit 1.
+    def test_a_requests_folder_it_cannot_write_exits_1_in_one_line(self) -> None:
+        self.requests.write_text("a file, not a folder", encoding="utf-8")
+        done = self.select("--account", "2", "--wait", "1")
+        self.assertEqual((done.returncode, "Traceback" in done.stderr, len(done.stderr.strip().splitlines())), (1, False, 1), done.stderr)
+
+    # Review C11-R1 F6 (Opus) [REQUEST-FOLDER]: --store names another config's store, so its sessions' folder is that config's.
+    def test_a_store_of_another_config_takes_the_request_to_that_configs_folder(self) -> None:
+        other = self.tmp / "other-config"
+        (other / "plugins" / "store").mkdir(parents=True)
+        store = json.loads(self.store.read_text(encoding="utf-8"))
+        named = other / "plugins" / "store" / "account-rotator_inline-a7581201d848.json"
+        named.write_text(json.dumps(store), encoding="utf-8")
+        self.requests = other / "account-rotator-requests"
+        self.answer(True, "ok")
+        done = self.select("--account", "2", "--store", str(named), "--wait", "10")
+        self.assertEqual(done.returncode, 0, done.stderr)
 
     def answer(self, ok: bool, message: str, pick_id: str | None = None) -> threading.Thread:
         """A session that answers the first request it finds, as the mod's minute tick does."""
