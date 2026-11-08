@@ -2682,8 +2682,8 @@ test('the launch pick follows the New on setting another session stored since th
   await start($, clock)
   expect(store.get('launch-slot')).toMatchObject({ id: '2', why: 'it has the most room' })
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  // The other session stores only the setting; this session's next pick must be made, and written, from it.
   store.set('launch-on', 'account:1')
-  store.set('launch-slot', { id: '1', slot: '', why: 'you picked it', at: NOW })
   // Any press that runs the rotation stores the pick again, before the minute's merge.
   await pane.press({ key: 'week-leave-up' })
   await clock.settle()
