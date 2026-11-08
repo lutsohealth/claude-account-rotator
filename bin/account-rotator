@@ -196,12 +196,14 @@ def this_session_account(data: dict) -> str | None:
 def list_json(data: dict, store: str, now_ms: float, zone: tzinfo | None) -> dict:
     """Orca's envelope (`orca account list --json`), with the mod's own fields per account."""
     accounts = []
+    rows = rows_by_id(data)
     for a, lines, older, passed in listed(data, now_ms, zone):
         health = data.get(f"health:{a['id']}")
+        has_row = bool(rows.get(a["id"]))
         accounts.append({
             "id": a["id"], "email": a.get("email"), "orgId": a.get("orgId"), "orgName": a.get("orgName"), "plan": a.get("plan"),
             "tier": a.get("tier"), "slot": a.get("slot"), "system": a.get("slot") == "",
-            "health": health.get("kind") if isinstance(health, dict) else None, "lines": lines, "olderLines": older,
+            "health": health.get("kind") if isinstance(health, dict) else None, "lines": lines if has_row else [], "hasRow": has_row, "olderLines": older,
             "resetPassed": passed,
         })
     pick = data.get("launch-slot")

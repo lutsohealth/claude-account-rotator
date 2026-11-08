@@ -450,7 +450,8 @@ async function mergeStore($: Host): Promise<void> {
     return { ...v, accounts, readings: nextReadings, marks: nextMarks, noFiveHour: nextNoFiveHour, weekMarks: nextWeekMarks, fableMarks: nextFableMarks, checkErrors, readAt, health: nextHealth, footer, rotateTo, fiveHourLimit, weekLeave, launchOn, fableContinueText, chromeAccountId, chromeAccountIds, hasOlderWriter }
   })
   await saveRows($, now)
-  await saveStoreId($)
+  // A refused store-id fails no caller of the merge: the next merge tries again.
+  await saveStoreId($).catch(error => debug($, `store-id failed: ${String(error)}`))
 }
 
 /**
