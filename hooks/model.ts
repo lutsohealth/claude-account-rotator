@@ -952,18 +952,20 @@ function usedPart(label: string, w: UsageWindow | undefined, now: number): RowPa
 const HTTP_STATUS = /HTTP (\d{3})/
 
 /**
- * Line 1's end: a sign-in needed; else a failed check newer than the last good read, at its time; else the last good
- * read's time. With no good read known and no failure, nothing.
+ * Line 1's end: a sign-in needed; else a failed check no older than the last good read, at its time; else the last
+ * good read's time, while a reading stands. With no good read known and no failure, nothing.
  */
 function statePart(view: View, a: Account, timeZone: string | undefined): RowPart | undefined {
   if (view.health[a.id]?.kind === 'login-needed') return { text: '⚠ sign in needed', tone: 'warning' }
   const readAt = view.readAt?.[a.id]
   const failure = view.checkErrors?.[a.id]
-  if (failure !== undefined && (readAt === undefined || failure.at > readAt)) {
+  // A good read clears the failure, so one standing at the good read's own millisecond came after it.
+  if (failure !== undefined && (readAt === undefined || failure.at >= readAt)) {
     const status = HTTP_STATUS.exec(failure.why)?.[1]
     return { text: `${clockText(failure.at, timeZone)} Failed to update${status === undefined ? '' : ` (HTTP ${status})`}`, tone: 'warning' }
   }
-  return readAt === undefined ? undefined : { text: `updated ${clockText(readAt, timeZone)}` }
+  // A time over no reading would name a read the row cannot show.
+  return readAt === undefined || view.readings[a.id] === undefined ? undefined : { text: `updated ${clockText(readAt, timeZone)}` }
 }
 
 /** Line 2: the week used, the Fable week used (a dash on Max and Ultra where no body listed it), and the resets ahead. */
@@ -1152,11 +1154,15 @@ export function retryAfterFrom(headers: Readonly<Record<string, string>>, now: n
   return Number.isFinite(ms) && ms > 0 ? ms : undefined
 }
 
-/** What a read came to, for the schedule: a body (and whether responses were stored since the last), a failure, a rejected sign-in. */
-export type UsageOutcome = { kind: 'ok'; hasResponded: boolean } | { kind: 'failed'; retryAfter?: number } | { kind: 'rejected' }
+/**
+ * What a read came to, for the schedule: a body (and whether responses were stored since the last), a body that holds
+ * no usage the mod reads (`empty`), a failure, a rejected sign-in.
+ */
+export type UsageOutcome = { kind: 'ok' | 'empty'; hasResponded: boolean } | { kind: 'failed'; retryAfter?: number } | { kind: 'rejected' }
 
 /**
- * The schedule after a read. A body: the next in 10 minutes for a login in use, else 30. A failure: the wait its
+ * The schedule after a read. A body: the next in 10 minutes for a login in use, else 30; a body with no usage in it
+ * the same, but it is no good read, so the last one's time stays. A failure: the wait its
  * Retry-After asks, or 2 minutes doubled for each failure before, whichever is longer, at most 60 minutes. A rejected
  * sign-in is no rate limit: read again in 10 minutes, so a new sign-in is read at once.
  */
@@ -1164,6 +1170,7 @@ export function afterUsage(due: UsageDue | undefined, outcome: UsageOutcome, now
   const last = due?.at === undefined ? {} : { at: due.at }
   const v = WRITER_VERSION
   if (outcome.kind === 'ok') return { next: now + (outcome.hasResponded ? USAGE_IN_USE_MS : USAGE_IDLE_MS), fails: 0, at: now, v }
+  if (outcome.kind === 'empty') return { next: now + (outcome.hasResponded ? USAGE_IN_USE_MS : USAGE_IDLE_MS), fails: 0, ...last, v }
   if (outcome.kind === 'rejected') return { next: now + USAGE_IN_USE_MS, fails: 0, ...last, v }
   const fails = due?.fails ?? 0
   const wait = Math.min(USAGE_BACKOFF_MAX_MS, Math.max(outcome.retryAfter ?? 0, USAGE_BACKOFF_MS * 2 ** fails))

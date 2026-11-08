@@ -794,7 +794,9 @@ async function requestUsage($: Host, account: Account, accessToken: string, gate
     throw error
   }
   const at = await $.clock.now()
-  const outcome = usage.kind === 'ok' ? { kind: 'ok' as const, hasResponded } : usage.kind === 'rejected' ? usage : { kind: 'failed' as const, retryAfter: usage.retryAfter }
+  // A body that holds no usage the mod reads stores no reading: it is no good read.
+  const ok = usage.kind === 'ok' ? { kind: readingFromUsage(usage.body, at) === undefined ? ('empty' as const) : ('ok' as const), hasResponded } : undefined
+  const outcome = ok ?? (usage.kind === 'rejected' ? usage : { kind: 'failed' as const, retryAfter: usage.retryAfter })
   await $.store.set(key, afterUsage(due, outcome, at))
   return usage
 }
