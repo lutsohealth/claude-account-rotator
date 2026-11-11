@@ -5709,30 +5709,13 @@ test('Review R1 F1 instance: a response before the /clear rebind cannot store an
   expect(storedOf(store, '2')?.sevenDay?.pct, 'the clear window stored an unproven target response under login 2').not.toBe(45)
 })
 
-test('Review R1 F1 class: every reset source keeps an unproven response out of the target reading', async ($, on) => {
-  const w = fresh()
-  w.keychain['Claude Code-credentials'] = blob('tok-1')
-  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
-  w.failing = { 'tok-1': 429 }
-  w.usage['tok-2'] = [10, 20]
-  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off' }))
-  const s = clearable(on)
-  on('classic.SessionStart', () => ({}))
-  const clock = world(on, w, store)
-  await start($, clock)
-  await useNow($, clock, '2')
-  const offenders: string[] = []
-  for (const [source, pct] of [['clear', 45], ['resume', 46], ['fork', 47]] as const) {
-    if (source !== 'fork') await endSession($, clock, source)
-    s.clear()
-    await clock.advance(40_000)
-    await respondWeek($, w, clock, pct)
-    if (storedOf(store, '2')?.sevenDay?.pct === pct) offenders.push(source)
-    await $.classic.SessionStart({ source } as never)
-    await clock.settle()
-  }
-  expect(offenders, 'reset windows stored unproven target responses under login 2').toEqual([])
-})
+// The class: each reset source, in a world of its own, since the first response settles the switch.
+for (const source of ['clear', 'resume', 'fork'] as const) {
+  test(`Review R1 F1 class: a response before the ${source} rebind cannot store an unproven target reading`, async ($, on) => {
+    const { store } = await responseInResetWindow($, on, source)
+    expect(storedOf(store, '2')?.sevenDay?.pct, `the ${source} window stored an unproven target response under login 2`).not.toBe(45)
+  })
+}
 
 test('Review RESET-RM-ACTIVE instance: rm during a clear window cannot sign out the account this session uses', async ($, on) => {
   const w = fresh()
