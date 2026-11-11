@@ -955,6 +955,9 @@ async function requestUsage($: Host, account: Account, accessToken: string, gate
   } catch (error) {
     // A call that throws is a failed read: it backs off as one, for every session.
     await $.store.set(key, afterUsage(due, { kind: 'failed' }, await $.clock.now()))
+    // Only the scheduled check (checkAll, the 'claimed' gate) stores a failure for a throw: a forced or since read
+    // that throws stored none, and one stored now would leave a login with no reading unread, out of the pick.
+    if (gate !== 'claimed') throw error
     // The row says so in the usage call's own words: that back-off is the next try of what failed, which the check's
     // generic failure would not say. Only the error's kind is stored, as the check's own failure stores.
     const kind = error instanceof Error ? error.name : 'an error'

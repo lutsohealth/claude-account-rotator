@@ -5974,6 +5974,25 @@ test('a failure another session stores for login 2 shows on this session\'s row,
   expect(lineOne(store, '2')).toMatch(new RegExp(`  updated ${localTime(readAt)}$`))
 })
 
+// The pick treats a login with a failure and no reading as unread (isUnread). A stop's forced read stored no failure
+// for a usage call that threw, so it must not now: the pick stays as it was.
+test('a forced read whose usage call throws stores no failure, so a login with no reading stays in the pick', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.throwing = ['tok-1']
+  // Not due at boot, so the boot check reads nothing and the login has no reading.
+  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off', 'usage-due:1': { next: NOW + HOUR, fails: 0, v: 1 } }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  expect(callsWith(w, 'tok-1')).toBe(0)
+  await clock.advance(10_000)
+  await $.classic.StopFailure({ error: 'rate_limit' })
+  await clock.settle()
+  expect(callsWith(w, 'tok-1')).toBe(1)
+  expect(store.get('usage-due:1')).toMatchObject({ fails: 1 })
+  expect(store.get('check-error:1')).toBeUndefined()
+})
+
 test('a claimed usage read does not show its claim expiry as the failed row’s next try', async ($, on) => {
   const { store, clock } = await rowsWorld($, on, true)
   const due = store.get('usage-due:2') as object
