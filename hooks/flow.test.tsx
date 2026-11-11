@@ -5598,6 +5598,30 @@ test('puma-9arph.9 a Connect that ends between the reset and classic.SessionStar
   await pane.unmount()
 })
 
+// Codex round 1 on #73: noteChrome writes hasChrome in the same window, and that newer answer stands too.
+test('puma-9arph.9 a Connect that finds Claude in Chrome gone between the reset and classic.SessionStart leaves hasChrome false', async ($, on) => {
+  const w = fresh()
+  const store = await chromeWorld(w, ['', SLOT2])
+  const s = clearable(on)
+  const clock = world(on, w, store)
+  on('classic.SessionStart', () => ({}))
+  await start($, clock)
+  expect(s.view()?.hasChrome).toBe(true)
+  const pane = await mountPane($)
+  await pane.press({ key: 'chrome-others' })
+  await clock.settle()
+  await pane.redraw()
+  await pane.press({ key: 'chrome-try-2' })
+  await clock.settle()
+  s.clear()
+  delete w.chrome
+  await clock.advance(36_000)
+  await $.classic.SessionStart({ source: 'clear' })
+  await clock.settle()
+  expect(['hasChrome after /clear, Claude in Chrome gone', s.view()?.hasChrome]).toEqual(['hasChrome after /clear, Claude in Chrome gone', false])
+  await pane.unmount()
+})
+
 test('Review MISSING-RESTORE class: after /resume the font and the switch policy are back, and the refusal is not said again', async ($, on) => {
   const w = fresh()
   w.env = { TERM_PROGRAM: 'Apple_Terminal' }
