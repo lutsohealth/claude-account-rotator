@@ -577,13 +577,14 @@ class ContinueText(RequestCase):
     def test_set_leaves_a_request_of_its_kind_with_the_trimmed_text_and_reports_the_answer(self) -> None:
         self.answer(True, "after a Fable switch a session sends: Please resume.")
         done = self.continue_text("--set", "  Please resume.  ", "--json", "--wait", "10")
-        request = {k: self.seen[k] for k in ("kind", "text", "store")}
+        request = {k: getattr(self, "seen", {}).get(k) for k in ("kind", "text", "store")}
         self.assertEqual((done.returncode, request, json.loads(done.stdout)["result"]), (0, {"kind": "continue-text", "text": "Please resume.", "store": "store-abc"}, {"continueText": "Please resume."}))
 
     def test_clear_leaves_a_request_whose_text_is_null(self) -> None:
         self.answer(True, "cleared")
         done = self.continue_text("--clear", "--wait", "10")
-        self.assertEqual((done.returncode, self.seen["kind"], self.seen["text"]), (0, "continue-text", None))
+        seen = getattr(self, "seen", {})
+        self.assertEqual((done.returncode, seen.get("kind"), "text" in seen, seen.get("text")), (0, "continue-text", True, None))
 
     def test_a_text_empty_or_over_500_characters_once_trimmed_exits_2_before_any_request(self) -> None:
         corpus = ["", "   ", "a" * 501, " " + "a" * 501 + " "]
@@ -596,7 +597,8 @@ class ContinueText(RequestCase):
         self.assertEqual(self.continue_text("--set", "a" * 500, "--wait", "0.2").returncode, 3)
 
     def test_set_and_clear_together_is_a_usage_error(self) -> None:
-        self.assertEqual(self.continue_text("--set", "x", "--clear").returncode, 2)
+        done = self.continue_text("--set", "x", "--clear")
+        self.assertEqual((done.returncode, "not allowed with argument --set" in done.stderr), (2, True))
 
 
 class Use(RequestCase):
