@@ -4498,6 +4498,31 @@ test('a usage call that throws backs off as a failed one, for every session', as
   expect(callsWith(w, 'tok-1')).toBe(1)
 })
 
+test('a claimed read of a login whose token has run out releases its claim, and its row says it failed to update', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  // Login 2 is idle: its access token ran out an hour ago and no session has refreshed it.
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2', NOW - HOUR)
+  w.usage['tok-1'] = [10, 20]
+  const lastRead = NOW - 3 * HOUR
+  const store = new Map<string, unknown>(
+    Object.entries({
+      ...TWO_LOGINS,
+      'holder:2': { token: await fingerprint('refresh-tok-2'), who: { email: 'two@example.com' } },
+      'usage:2': { fiveHour: { pct: 0 }, sevenDay: { pct: 10, resetsAt: WEEK_RESET }, at: lastRead, by: '2', v: 1, src: 'body' },
+      'usage-due:2': { next: NOW - 1, fails: 0, at: lastRead, v: 1 },
+    }),
+  )
+  const clock = world(on, w, store)
+  await start($, clock)
+  await clock.advance(61_000)
+  expect(callsWith(w, 'tok-2')).toBe(0)
+  expect(store.get('usage-due:2')).not.toHaveProperty('claim')
+  expect(store.get('usage-due:2')).toMatchObject({ fails: 0, at: lastRead })
+  expect((store.get('usage-due:2') as { next: number }).next).toBeGreaterThanOrEqual(NOW + USAGE_IDLE_MS)
+  expect(lineOne(store, '2')).toMatch(/ Failed to update$/)
+})
+
 /** A response's rate limits: the 5-hour window and the week, in percent used, and when the week resets. */
 const limitsOf = (five: number, week: number, weekReset = '2026-10-18T03:00:00Z'): SessionRateLimit[] => [
   { kind: 'five_hour', percentUsed: five, resetsAt: '2026-10-12T12:00:00Z' },
