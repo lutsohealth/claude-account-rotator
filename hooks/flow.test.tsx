@@ -5491,6 +5491,109 @@ test('Review SESSION-STATE-SOURCE slot: after Use now moves the session to login
   expect(['activeId after Use now, after /clear', moved, s.view()?.activeId]).toEqual(['activeId after Use now, after /clear', '2', '2'])
 })
 
+/** The shared store, whose first read of the accounts throws: a boot whose bind fails once. */
+const storeFailingFirstAccountsRead = (entries: Record<string, unknown>) => {
+  let isFailing = true
+  return new (class extends Map<string, unknown> {
+    get(key: string): unknown {
+      if (!isFailing || key !== 'accounts') return super.get(key)
+      isFailing = false
+      throw new Error('transient accounts read')
+    }
+  })(Object.entries(entries))
+}
+
+test('Review BOOT-GATE-STARVES instance: a transient bind failure at boot does not stop a later tick rotating', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [100, 100]
+  w.usage['tok-2'] = [10, 20]
+  const clock = world(on, w, storeFailingFirstAccountsRead(TWO_LOGINS))
+  await start($, clock)
+  expect(w.logged?.some(line => line.includes('start failed'))).toBe(true)
+  await clock.advance(10 * 60_000)
+  await clock.settle()
+  await clock.advance(USAGE_CLAIM_WAIT_MS)
+  expect(w.envSets, 'rotation stayed gated after the store recovered').toContainEqual({ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 })
+})
+
+test('Review BOOT-GATE-STARVES class: the minute and the ten-minute checks both recover a failed first bind', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [100, 100]
+  w.usage['tok-2'] = [10, 20]
+  const clock = world(on, w, storeFailingFirstAccountsRead(TWO_LOGINS))
+  await start($, clock)
+  expect(w.logged?.some(line => line.includes('start failed'))).toBe(true)
+  const stalled: string[] = []
+  for (const [name, delay] of [['minute', 60_000], ['ten-minute', 9 * 60_000]] as const) {
+    await clock.advance(delay)
+    await clock.settle()
+    await clock.advance(USAGE_CLAIM_WAIT_MS)
+    if (!w.envSets.some(set => set.name === 'CLAUDE_SECURESTORAGE_CONFIG_DIR' && set.value === SLOT2)) stalled.push(name)
+  }
+  expect(stalled, 'rotation entry points still gated after a failed first bind').toEqual([])
+})
+
+// The other side of the heal: a session whose boot never read the slot has nothing to bind, so it binds and moves nothing.
+test('Review BOOT-GATE-STARVES other side: a stop before boot has read the slot binds no view and switches no login', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [100, 100]
+  w.usage['tok-2'] = [10, 20]
+  const view = watchedView(on)
+  const clock = world(on, w, TWO_LOGINS)
+  await $.classic.StopFailure({ error: 'rate_limit', last_assistant_message: 'Claude usage limit reached.' })
+  await clock.settle()
+  expect(['bound, switches', view()?.isBound, w.envSets]).toEqual(['bound, switches', undefined, []])
+})
+
+test('Review RESET-RM-ACTIVE instance: rm during a clear window cannot sign out the account this session uses', async ($, on) => {
+  const w = fresh()
+  w.env.CLAUDE_SECURESTORAGE_CONFIG_DIR = SLOT2
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-2'] = [10, 20]
+  const s = clearable(on)
+  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off' }))
+  const clock = world(on, w, store)
+  on('classic.SessionStart', () => ({}))
+  await start($, clock)
+  expect(s.view()?.activeId).toBe('2')
+  s.clear()
+  w.files[`${REQUESTS}/${N1}.json`] = rmRequest(N1, '2', store.get('store-id'), clock.now())
+  await untilTick(clock)
+  expect([w.logouts ?? [], resultOf(w, N1)?.ok], 'rm signed out the slot still used by this session').toEqual([[], false])
+})
+
+test('Review RESET-RM-ACTIVE class: rm of the slot in use stays refused across every reset source', async ($, on) => {
+  const w = fresh()
+  w.env.CLAUDE_SECURESTORAGE_CONFIG_DIR = SLOT2
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-2'] = [10, 20]
+  const s = clearable(on)
+  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off' }))
+  const clock = world(on, w, store)
+  on('classic.SessionStart', () => ({}))
+  await start($, clock)
+  const offenders: string[] = []
+  for (const [index, source] of (['clear', 'resume', 'fork'] as const).entries()) {
+    const nonce = `${N1.slice(0, -1)}${index}`
+    s.clear()
+    w.files[`${REQUESTS}/${nonce}.json`] = rmRequest(nonce, '2', store.get('store-id'), clock.now())
+    const before = (w.logouts ?? []).length
+    await untilTick(clock)
+    if ((w.logouts ?? []).length !== before || resultOf(w, nonce)?.ok !== false) offenders.push(source)
+    delete w.files[`${REQUESTS}/${nonce}.json`]
+    delete w.files[`${REQUESTS}/${nonce}.result.json`]
+    store.set('accounts', TWO_LOGINS.accounts)
+    await $.classic.SessionStart({ source })
+  }
+  expect(offenders, 'reset sources that let rm sign out the account still in use').toEqual([])
+})
+
 test('Review F3 instance: a session whose mark was refused does not take its parent session\'s mark after /clear', async ($, on) => {
   const w = fresh()
   w.env = { CLAUDE_SECURESTORAGE_CONFIG_DIR: SLOT2, ACCOUNT_ROTATOR_SESSION: 'parent-session-mark' }
