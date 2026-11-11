@@ -785,9 +785,10 @@ async function useSlot($: Host, slot: string): Promise<void> {
  * False when it was said already.
  */
 async function blocked($: Host): Promise<boolean> {
+  // Kept first: after a reload the view says it already, and /clear would lose it.
+  kept = { ...kept, isSwitchBlocked: true }
   const view = await getView($)
   if (view.isSwitchBlocked) return false
-  kept = { ...kept, isSwitchBlocked: true }
   await setView($, v => ({ ...v, isSwitchBlocked: true }))
   const text = blockedText(isOnNormalLogin(view))
   $.ui.toast(text, { timeoutMs: 15_000 })
