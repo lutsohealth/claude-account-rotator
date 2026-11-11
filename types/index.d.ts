@@ -240,6 +240,8 @@ export type View = {
   sessionId?: string
   /** This session only: the mark its Bash children carry in ACCOUNT_ROTATOR_SESSION, which `account use` names it by. */
   sessionMark?: string
+  /** This session only: `activeId` is the login this session runs on; the reset of /clear, /resume and /branch clears it. */
+  isBound?: boolean
   /** This session only: the switch the refresh guard holds back, tried each minute, kept by a reload; `carry`, a Fable stop's carry-on. */
   held?:{ target: Account; why: string; carry?: { need?: 'fable' }; isRotation: boolean }
   /** This session only: a stop marked on the login moved to before any response proved the switch; a reload keeps it. */
