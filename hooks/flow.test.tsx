@@ -5220,12 +5220,15 @@ for (const [name, end] of F3_ENDS) {
   })
 }
 
-// Review opus-e17 F2 [END-IS-NOT-EXIT]: an end the process outlives (a /clear, a resume) leaves the switch, and its stop, unsettled.
-for (const reason of ['clear', 'resume']) {
+// Review opus-e17 F2 [END-IS-NOT-EXIT]: an end the process outlives (a /clear, a resume) leaves the switch, and its stop,
+// unsettled, through the reset of $.state that follows the end.
+for (const reason of ['clear', 'resume'] as const) {
   for (const [kind, said, key] of UNPROVEN_STOPS) {
     test(`a session end for ${reason}, which the process outlives, keeps a ${kind} stop's ${key} for the proof that follows`, async ($, on) => {
+      const s = clearable(on)
+      on('classic.SessionStart', () => ({}))
       const { w, store, clock } = await stopDuringSwitch($, on, 40_000, said)
-      await endSession($, clock, reason)
+      await clearSession($, clock, s.clear, reason)
       w.limits = [{ kind: 'seven_day', percentUsed: 41, resetsAt: OTHER_WEEK }]
       await respond($, clock, w)
       expect([reason, kind, store.get(key) !== undefined]).toEqual([reason, kind, true])
@@ -5236,10 +5239,11 @@ for (const reason of ['clear', 'resume']) {
 // puma-9arph.3: /clear, /resume and /branch reset every $.state value to its default, and session.start does not fire
 // again; classic.SessionStart fires after each, with source clear, resume or fork. The kit never resets $.state, so
 // `clearable` does: after `clear()` a read of the view finds the default until the mod writes the view again, and
-// `view()` is what such a read finds.
-function clearable(on: On): { clear: () => void; view: () => View | undefined } {
+// `view()` is what such a read finds, and `writes()` every view written.
+function clearable(on: On): { clear: () => void; view: () => View | undefined; writes: () => View[] } {
   let isCleared = false
   let last: View | undefined
+  const written: View[] = []
   on('state.get', async (_$, e, next) => {
     const read = await next(e)
     if (!isCleared || e.plugin !== 'account-rotator' || e.key !== 'view') return read
@@ -5250,10 +5254,11 @@ function clearable(on: On): { clear: () => void; view: () => View | undefined } 
     if (key === 'view') {
       isCleared = false
       last = value
+      written.push(value)
     }
     return next(e)
   })
-  return { clear: () => { isCleared = true }, view: () => (isCleared ? EMPTY_VIEW : last) }
+  return { clear: () => { isCleared = true }, view: () => (isCleared ? EMPTY_VIEW : last), writes: () => [...written] }
 }
 
 /** A reset as Claude Code runs it: the session ends for /clear or /resume (no end is fired for fork), $.state resets, classic.SessionStart fires. */
@@ -5742,6 +5747,145 @@ for (const reason of ['prompt_input_exit', 'logout', 'other']) {
     expect([reason, store.get('mark:2')]).toEqual([reason, undefined])
   })
 }
+
+// puma-9arph.8, Review F2 [MISSING-RESTORE]: the records of a switch in flight (pending, provisionalStop, held) live in
+// the view, which /clear, /resume and /branch reset. A switch still in flight keeps them; a finished one stays finished.
+const IN_FLIGHT = ['pending', 'provisionalStop', 'held'] as const
+
+/** One /clear, with each in-flight record the reset did not give back as it stood before, named by `step`. */
+async function lostAtClear($: Engine, clock: MockClock, s: ReturnType<typeof clearable>, step: string): Promise<string[]> {
+  const before = s.view() ?? EMPTY_VIEW
+  await clearSession($, clock, s.clear)
+  const after = s.view() ?? EMPTY_VIEW
+  return IN_FLIGHT.filter(k => JSON.stringify(after[k]) !== JSON.stringify(before[k])).map(k => `${step}: ${k} ${JSON.stringify(before[k])} -> ${JSON.stringify(after[k])}`)
+}
+
+/** Login 1 in use and login 2 signed in, each with its own week, rotation off: a switch is the person's alone. */
+async function twoWeeks(on: On): Promise<{ w: World; store: Map<string, unknown>; clock: MockClock }> {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [10, 40]
+  w.usage['tok-2'] = [10, 41]
+  w.weekResets = { 'tok-2': OTHER_WEEK }
+  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off' }))
+  return { w, store, clock: world(on, w, store) }
+}
+
+test('Review F2 instance: a /clear between a provisional stop and the did-not-take settle still leaves login 2 unmarked', async ($, on) => {
+  const s = clearable(on)
+  on('classic.SessionStart', () => ({}))
+  const { w, store, clock } = await stopDuringSwitch($, on, 40_000, 'Claude usage limit reached.')
+  await clearSession($, clock, s.clear)
+  w.limits = [{ kind: 'seven_day', percentUsed: 42, resetsAt: WEEK_RESET }]
+  await clock.advance(4 * 60_000 + 10_000)
+  await respond($, clock, w)
+  expect(['mark:2 after /clear and the did-not-take settle', store.get('mark:2')]).toEqual(['mark:2 after /clear and the did-not-take settle', undefined])
+})
+
+for (const source of ['clear', 'resume', 'fork'] as const) {
+  for (const [kind, said] of UNPROVEN_STOPS) {
+    test(`Review F2 class: a ${kind} stop on an unproven switch, then ${source}: every in-flight record in the view outlives the reset`, async ($, on) => {
+      const s = clearable(on)
+      on('classic.SessionStart', () => ({}))
+      const { clock } = await stopDuringSwitch($, on, 40_000, said)
+      const before = s.view() ?? EMPTY_VIEW
+      const recorded = IN_FLIGHT.filter(k => before[k] !== undefined)
+      expect(recorded.length).toBeGreaterThan(0)
+      await clearSession($, clock, s.clear, source)
+      const after = s.view() ?? EMPTY_VIEW
+      const lost = recorded.filter(k => JSON.stringify(after[k]) !== JSON.stringify(before[k]))
+      expect([kind, source, 'in-flight records lost', lost]).toEqual([kind, source, 'in-flight records lost', []])
+    })
+  }
+}
+
+// Every write of a switch's records, set and cleared, reaches what the reset gives back: a /clear after each step.
+test('Review F2 sweep, a switch that does not take: a /clear after each step finds the records as that step left them', async ($, on) => {
+  const s = clearable(on)
+  on('classic.SessionStart', () => ({}))
+  const { w, store, clock } = await twoWeeks(on)
+  await start($, clock)
+  await useNow($, clock, '2')
+  const lost = await lostAtClear($, clock, s, 'after Use now')
+  await clock.advance(40_000)
+  await $.classic.StopFailure({ error: 'rate_limit', last_assistant_message: 'Claude usage limit reached.' })
+  await clock.settle()
+  lost.push(...(await lostAtClear($, clock, s, 'after the stop')))
+  w.limits = [{ kind: 'seven_day', percentUsed: 42, resetsAt: WEEK_RESET }]
+  await clock.advance(4 * 60_000 + 10_000)
+  await respond($, clock, w)
+  lost.push(...(await lostAtClear($, clock, s, 'after the did-not-take settle')))
+  await clock.advance(5 * 60_000)
+  await respond($, clock, w)
+  const outcome = [store.get('mark:2'), s.view()?.activeId, w.toasts.filter(t => /did not take/.test(t)).length]
+  expect([lost, outcome]).toEqual([[], [undefined, '1', 1]])
+})
+
+test('Review F2 sweep, a switch a response proves: a /clear after each step finds the records as that step left them', async ($, on) => {
+  const s = clearable(on)
+  on('classic.SessionStart', () => ({}))
+  const { w, store, clock } = await twoWeeks(on)
+  await start($, clock)
+  await useNow($, clock, '2')
+  const lost = await lostAtClear($, clock, s, 'after Use now')
+  await clock.advance(40_000)
+  await $.classic.StopFailure({ error: 'rate_limit', last_assistant_message: 'Claude usage limit reached.' })
+  await clock.settle()
+  lost.push(...(await lostAtClear($, clock, s, 'after the stop')))
+  w.limits = [{ kind: 'seven_day', percentUsed: 41, resetsAt: OTHER_WEEK }]
+  await respond($, clock, w)
+  lost.push(...(await lostAtClear($, clock, s, 'after the proof')))
+  // The proof kept the stop's mark: no later end reverts it.
+  await endSession($, clock)
+  expect([lost, store.get('mark:2') !== undefined]).toEqual([[], true])
+})
+
+test('Review F2 held: a switch held back for a token refresh is made after /clear once the refresh lands, and only once', async ($, on) => {
+  const w = fresh()
+  const s = clearable(on)
+  on('classic.SessionStart', () => ({}))
+  const clock = await guarded(on, w, {}, [20, 30])
+  await start($, clock)
+  // Between two ticks, so a wait of the switch's own would come due after the next one.
+  await clock.set(NOW + 70_000)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  await pane.press({ key: 'rotate' })
+  await clock.settle()
+  await pane.unmount()
+  const isHeld = s.view()?.held?.target.id === '2'
+  const lost = await lostAtClear($, clock, s, 'held')
+  refresh(w)
+  await clock.set(NOW + 121_000)
+  const landed = [s.view()?.held, w.envSets]
+  lost.push(...(await lostAtClear($, clock, s, 'landed')))
+  await clock.advance(3 * 60_000)
+  const switches = w.envSets.filter(set => set.name === 'CLAUDE_SECURESTORAGE_CONFIG_DIR').length
+  expect([isHeld, lost, landed, switches]).toEqual([true, [], [undefined, [{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }]], 1])
+})
+
+// The copy is made from a bound view only: the reset's default, written before the hook rebinds, is no switch's end.
+test('Review F2 gap: a write onto the reset view before the hook runs leaves the switch in flight for the hook to give back', async ($, on) => {
+  const s = clearable(on)
+  on('classic.SessionStart', () => ({}))
+  const { w, store, clock } = await stopDuringSwitch($, on, 40_000, 'Claude usage limit reached.')
+  const before = s.view() ?? EMPTY_VIEW
+  await endSession($, clock, 'clear')
+  s.clear()
+  const at = s.writes().length
+  // A minute's tick lands in the gap: its first write builds on the reset view.
+  await clock.advance(60_000)
+  await clock.settle()
+  const unbound = s.writes().slice(at).filter(v => v.isBound !== true).length
+  await $.classic.SessionStart({ source: 'clear' } as never)
+  await clock.settle()
+  const after = s.view() ?? EMPTY_VIEW
+  const lost = IN_FLIGHT.filter(k => JSON.stringify(after[k]) !== JSON.stringify(before[k]))
+  w.limits = [{ kind: 'seven_day', percentUsed: 42, resetsAt: WEEK_RESET }]
+  await clock.advance(3 * 60_000 + 10_000)
+  await respond($, clock, w)
+  expect([unbound > 0, lost, store.get('mark:2')]).toEqual([true, [], undefined])
+})
 
 // puma-eslxj.6 (C5): the plan by its name, and the Company only where it is not the account's own.
 

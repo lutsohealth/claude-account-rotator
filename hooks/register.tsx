@@ -134,9 +134,10 @@ let isPaneShown = false
 let isBooted = false
 /**
  * What this session set that only its view shows, kept where /clear, /resume and /branch do not reach: they reset the
- * view, and rebindSession copies these back. Each is set where its value is born; undefined until then.
+ * view, and rebindSession copies these back. Each is set where its value is born; undefined until then. The records
+ * of a switch in flight are copied by setView instead, from every write of a bound view.
  */
-let kept: { slot?: string; mark?: string; hasFontBlocks?: boolean; isSwitchBlocked?: boolean; isFableStopped?: boolean } = {}
+let kept: { slot?: string; mark?: string; hasFontBlocks?: boolean; isSwitchBlocked?: boolean; isFableStopped?: boolean } & InFlight = {}
 /** When this session's boot read the store: an older version's reading written after it says that version still runs. */
 let bootedAt: number | undefined
 /** An older version writes its reading at every check, every 10 minutes at most: one this old has stopped. */
@@ -215,7 +216,16 @@ let isConnectingChrome = false
 /** The view survives a hot reload as the code before wrote it: what this code added starts as in a new session. */
 const current = (v: View): View => ({ ...EMPTY_VIEW, ...v })
 const getView = async ($: Host): Promise<View> => current(await read($, viewAtom))
-const setView = ($: Host, fn: (v: View) => View): Promise<View> => update($, viewAtom, v => fn(current(v)))
+/** The records of a switch in flight: what settles it, undoes its stop and retries it, held by the view alone. */
+type InFlight = Pick<View, 'pending' | 'provisionalStop' | 'held'>
+const inFlight = (v: View): InFlight => ({ pending: v.pending, provisionalStop: v.provisionalStop, held: v.held })
+const setView = async ($: Host, fn: (v: View) => View): Promise<View> => {
+  const written = await update($, viewAtom, v => fn(current(v)))
+  // A cleared record is copied too, so a finished switch comes back as finished. A view not bound is the reset's
+  // default, before rebindSession: copied, it would wipe the switch the reset took.
+  if (written.isBound === true) kept = { ...kept, ...inFlight(written) }
+  return written
+}
 /** Something the person should know that nothing on screen says: a toast, on screen for a while. */
 const tell = ($: Host, text: string) => $.ui.toast(text, { timeoutMs: 8000 })
 const debug = ($: Host, text: string) => $.ui.log(`account-rotator: ${text}`, { to: 'debug' })
@@ -2089,9 +2099,12 @@ async function bindSession($: Host, slot: string): Promise<void> {
  * Before boot has read the slot there is nothing to bind: boot binds it.
  */
 async function rebindSession($: Host): Promise<void> {
-  const { slot, mark, hasFontBlocks, isSwitchBlocked, isFableStopped } = kept
+  const { slot, mark, hasFontBlocks, isSwitchBlocked, isFableStopped, pending, provisionalStop, held } = kept
   await setView($, v => ({
     ...v,
+    ...(pending === undefined ? {} : { pending }),
+    ...(provisionalStop === undefined ? {} : { provisionalStop }),
+    ...(held === undefined ? {} : { held }),
     ...(hasFontBlocks === undefined ? {} : { hasFontBlocks }),
     ...(isSwitchBlocked === undefined ? {} : { isSwitchBlocked }),
     ...(isFableStopped === undefined ? {} : { isFableStopped }),
@@ -2179,7 +2192,8 @@ export const register: Register = on => {
   })
 
   // A stop marked on a switch no response has proven is a guess: it goes when the process does, within the end's
-  // budget. A /clear or a resume ends the conversation, not the process: the switch, and its proof, go on.
+  // budget. A /clear or a resume ends the conversation, not the process: the switch, and its proof, go on, as `kept`
+  // carries the switch's records across the reset.
   on('session.end', async ($, e, next) => {
     if (PROCESS_ENDS.has(e.reason)) await undoProvisionalStop($).catch(error => debug($, `undo at session end failed: ${String(error)}`))
     return next(e)
