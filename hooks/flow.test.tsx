@@ -7011,6 +7011,48 @@ for (const [name, fields] of REFUSED_TEXTS) {
   })
 }
 
+// Review R2 (Codex, #70 round 1) [REQUEST-UNANSWERED]: the CLI writes a request whole, by a rename, so a request
+// file that does not parse is a broken request, refused with an answer, and the line stays.
+test('Review R2: a continue-text request file that does not parse is refused with an answer and keeps the line', async ($, on) => {
+  const { w, store, clock } = await fableReady($, on, { 'fable-continue-text': 'Keep this.' })
+  w.files[`${REQUESTS}/${N1}.json`] = '{"kind":"continue-text","text":"bad",'
+  await clock.advance(60_000)
+  expect([resultOf(w, N1)?.ok, store.get('fable-continue-text')]).toEqual([false, 'Keep this.'])
+})
+
+test('Review R2 class: every request file that does not parse gets a refusal, and the line stays', async ($, on) => {
+  const { w, store, clock } = await fableReady($, on, { 'fable-continue-text': 'Keep this.' })
+  const corpus = ['{"kind":"continue-text","text":"bad",', '{"kind":"continue-text","text":', '{"kind":"continue-text","text":"bad"} trailing', '']
+  corpus.forEach((text, i) => { w.files[`${REQUESTS}/review-r2-${i + 1}.json`] = text })
+  await clock.advance(60_000)
+  const offenders = corpus.flatMap((_, i) => resultOf(w, `review-r2-${i + 1}`)?.ok === false ? [] : [`review-r2-${i + 1}`])
+  expect(corpus.length).toBeGreaterThan(0)
+  expect([offenders, store.get('fable-continue-text')]).toEqual([[], 'Keep this.'])
+})
+
+// Review R3 (Codex, #70 round 1) [CHARACTER-COUNT-MISMATCH]: the CLI counts code points (Python len), so the session
+// counts the same, never UTF-16 units: a line of 251 to 500 astral characters is taken on both sides.
+test('Review R3: a line of 251 emoji, which the CLI takes, is taken by the session', async ($, on) => {
+  const { w, store, clock } = await fableReady($, on, {})
+  const line = '😀'.repeat(251)
+  w.files[`${REQUESTS}/${N1}.json`] = continueRequest(N1, store.get('store-id'), await clock.now(), { text: line })
+  await clock.advance(60_000)
+  expect([resultOf(w, N1)?.ok, store.get('fable-continue-text')]).toEqual([true, line])
+})
+
+test('Review R3 class: the session takes every line of 500 code points and refuses every line of 501', async ($, on) => {
+  const { w, store, clock } = await fableReady($, on, {})
+  const cases: [string, string, boolean][] = [
+    ['emoji-500', '😀'.repeat(500), true], ['cjk-emoji-500', '中😀'.repeat(250), true], ['music-500', '𝄞'.repeat(500), true],
+    ['emoji-501', '😀'.repeat(501), false], ['ascii-501', 'a'.repeat(501), false],
+  ]
+  for (const [label, line] of cases) w.files[`${REQUESTS}/review-r3-${label}.json`] = continueRequest(`review-r3-${label}`, store.get('store-id'), await clock.now(), { text: line })
+  await clock.advance(60_000)
+  const offenders = cases.flatMap(([label, , taken]) => resultOf(w, `review-r3-${label}`)?.ok === taken ? [] : [label])
+  expect(cases.length).toBeGreaterThan(0)
+  expect(offenders).toEqual([])
+})
+
 test('two sessions booting at once end with one store-id: this session keeps the one the store holds', async ($, on) => {
   const { store, clock } = await selectWorld($, on)
   // The other session's write of its own id lands after this session's.

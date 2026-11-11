@@ -11,6 +11,7 @@ import io
 import json
 import os
 import pty
+import re
 import shutil
 import signal
 import subprocess
@@ -20,7 +21,7 @@ import threading
 import time
 import unittest
 import uuid
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime
 from pathlib import Path
 from types import ModuleType
@@ -603,6 +604,52 @@ class ContinueText(RequestCase):
     def test_set_and_clear_together_is_a_usage_error(self) -> None:
         done = self.continue_text("--set", "x", "--clear")
         self.assertEqual((done.returncode, "not allowed with argument --set" in done.stderr), (2, True))
+
+    def written(self, text: str) -> tuple[int, int | None]:
+        """`--set text` run in this process with a session that takes it: the exit and the request file's size in
+        bytes, None where no request was written."""
+        cli = load_cli()
+        sizes: list[int] = []
+
+        def inspect(folder: str, nonce: str, _wait: float) -> dict:
+            sizes.append((Path(folder) / f"{nonce}.json").stat().st_size)
+            return {"nonce": nonce, "ok": True, "message": "accepted"}
+
+        with patch.dict(os.environ, self.env()), patch.object(cli, "answer", side_effect=inspect), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            code = cli.main(["continue-text", "--set", text, "--store", str(self.store)])
+        return code, (sizes[0] if sizes else None)
+
+    def session_cap(self) -> int:
+        """REQUEST_MAX_BYTES of hooks/model.ts: a session skips a larger request file."""
+        found = re.search(r"REQUEST_MAX_BYTES = (\d+)", (ROOT / "hooks" / "model.ts").read_text(encoding="utf-8"))
+        assert found is not None, "hooks/model.ts no longer names REQUEST_MAX_BYTES"
+        return int(found.group(1))
+
+    # Review R1 (Codex, #70 round 1) [REQUEST-SIZE-MISMATCH]: a line the CLI takes is written small enough for a
+    # session to read it.
+    def test_review_r1_a_line_of_500_emoji_is_written_under_the_session_request_cap(self) -> None:
+        code, size = self.written("😀" * 500)
+        self.assertTrue(code == 0 and size is not None and size <= self.session_cap(), f"exit {code}, 500 emoji written as {size} bytes, cap {self.session_cap()}")
+
+    def test_review_r1_class_every_line_the_cli_takes_is_written_under_the_session_request_cap(self) -> None:
+        corpus = {"ascii": "a" * 500, "latin": "é" * 500, "cjk": "中" * 500, "astral": "😀" * 500, "control": "a" + "\u0000" * 499, "quotes": '"\\' * 250}
+        offenders = {}
+        for label, line in corpus.items():
+            code, size = self.written(line)
+            if code != 0 or size is None or size > self.session_cap():
+                offenders[label] = (code, size)
+        self.assertTrue(corpus)
+        self.assertEqual(offenders, {})
+
+    def test_review_r1_a_line_that_is_not_utf_8_exits_2_before_any_request(self) -> None:
+        # A lone surrogate: what Python makes of argv bytes that are not UTF-8.
+        self.assertEqual(self.written("ok \udcff"), (2, None))
+
+    # Review R3 (Codex, #70 round 1) [CHARACTER-COUNT-MISMATCH], the CLI's half: it trims what JavaScript's trim()
+    # trims, so the line it counts is the line the session counts.
+    def test_review_r3_a_line_of_only_byte_order_marks_exits_2_before_any_request(self) -> None:
+        self.assertEqual(self.written("﻿ ﻿"), (2, None))
+        self.assertEqual(self.written("﻿" + "a" * 500 + "﻿")[0], 0)
 
 
 class Use(RequestCase):
