@@ -5247,8 +5247,9 @@ for (const source of ['clear', 'resume', 'fork'] as const) {
     await clock.settle()
     expect([source, view()?.activeId, view()?.sessionMark]).toEqual([source, '2', 'session-mark-7'])
     const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+    // Login 1 is Claude Code's own (no Remove) and unread here (no Use now); login 2's row ends Remove, then in use.
     const ends = (await pane.findAll({ text: /^(Remove|Use now|● in use)$/ })).filter(e => e.type !== 'Box')
-    expect([source, ends.map(e => e.text)]).toEqual([source, ['Use now', 'Remove', '● in use']])
+    expect([source, ends.map(e => e.text)]).toEqual([source, ['Remove', '● in use']])
     await pane.unmount()
   })
 }

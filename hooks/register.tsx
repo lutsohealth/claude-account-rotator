@@ -2022,10 +2022,12 @@ function actions($: Host): Actions {
 }
 
 /** First run makes the normal login number 1; then: which login this session uses, and Claude in Chrome connected as the extension's account. */
-async function boot($: Host, isInteractive: boolean): Promise<void> {
-  // Terminal.app is the terminal that names itself so and draws block characters from its font.
-  const hasFontBlocks = (await $.env.get('TERM_PROGRAM')) === 'Apple_Terminal'
-  await setView($, v => ({ ...v, hasFontBlocks }))
+/**
+ * The view's account in use, from the slot this session runs on, and its session id, after the store's merge; returns
+ * the slot. `boot` runs it at the start, and the classic.SessionStart hook again after /clear, /resume and /branch, which
+ * reset $.state while session.start does not fire again.
+ */
+async function bindSession($: Host): Promise<string> {
   let accounts = await loadAccounts($)
   if (accounts.length === 0) {
     accounts = [{ id: '1', slot: '' }]
@@ -2042,9 +2044,27 @@ async function boot($: Host, isInteractive: boolean): Promise<void> {
   }
   const activeId = active.id
   const sessionId = await $.session.id().catch(() => undefined)
-  bootedAt = await $.clock.now()
   await mergeStore($)
   await setView($, v => ({ ...v, activeId, ...(sessionId === undefined ? {} : { sessionId }) }))
+  return slot
+}
+
+/**
+ * After /clear, /resume or /branch: the account and id again, and the mark this session set at its start, which its
+ * Bash children still carry. Only here: at the start the variable may be a parent session's, which setSessionMark replaces.
+ */
+async function rebindSession($: Host): Promise<void> {
+  await bindSession($)
+  const mark = await $.env.get('ACCOUNT_ROTATOR_SESSION')
+  if (mark !== undefined && mark !== '') await setView($, v => ({ ...v, sessionMark: mark }))
+}
+
+async function boot($: Host, isInteractive: boolean): Promise<void> {
+  // Terminal.app is the terminal that names itself so and draws block characters from its font.
+  const hasFontBlocks = (await $.env.get('TERM_PROGRAM')) === 'Apple_Terminal'
+  await setView($, v => ({ ...v, hasFontBlocks }))
+  bootedAt = await $.clock.now()
+  const slot = await bindSession($)
   isBooted = true
   await checkSwitching($, slot)
   // First, while the session can still move: the rotation waits for it.
@@ -2110,6 +2130,12 @@ export const register: Register = on => {
 
   on('classic.StopFailure', async ($, e, next) => {
     void onStopFailure($, e).catch(error => debug($, `stop failure handling failed: ${String(error)}`))
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
+  // The start and a compaction keep $.state; these three reset it, and session.start does not fire after them.
+  on('classic.SessionStart', { source: ['clear', 'resume', 'fork'] }, async ($, e, next) => {
+    void rebindSession($).catch(error => debug($, `rebind after ${e.source} failed: ${String(error)}`))
     return next(e)
   }).catch(($, e, next) => next(e))
 
