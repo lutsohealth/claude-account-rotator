@@ -4,7 +4,7 @@ What each version of the account rotator changed. To get each one as Claude Code
 
 ## Unreleased
 
-- **After `/clear`, `/resume` or `/branch` the panel marks the account the session runs on**, where it marked account 1. The session's mark for `account use` comes back too.
+- **After `/clear`, `/resume` or `/branch` the panel marks the account the session runs on**, where it marked account 1. The session's mark for `account use` comes back too, and so do Terminal.app's block drawing, the notice that Claude Code's policy refuses switching, and the band after a Fable stop. A check in the moment after the command no longer switches away from the account the session runs on.
 
 ## 0.5.25-lutso.1 - 2026-11-11
 
