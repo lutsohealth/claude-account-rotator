@@ -63,8 +63,10 @@ SLOT_VAR = "CLAUDE_SECURESTORAGE_CONFIG_DIR"
 OLDER_NOTE = "an older version of the mod stored some rows as text, their times as of when it wrote them"
 # hooks/model.ts CONTINUE_TEXT_MAX: the longest line, once trimmed, a session sends after a Fable switch.
 CONTINUE_TEXT_MAX = 500
-# What JavaScript's String.prototype.trim() takes off each end: Python's whitespace and U+FEFF.
-JS_TRIM = re.compile(r"^[\s﻿]+|[\s﻿]+$")
+# What JavaScript's String.prototype.trim() takes off each end, no more: ECMAScript's WhiteSpace (tab, vertical tab, form
+# feed, U+FEFF and the Zs spaces) and LineTerminator. Python's `\s` takes U+001C to U+001F and U+0085 too.
+JS_SPACE = "\t\n\u000b\u000c\r    -     　﻿"
+JS_TRIM = re.compile(f"^[{JS_SPACE}]+|[{JS_SPACE}]+$")
 EXITS = (
     "Exit 0 done, 1 no store or a damaged one or a folder or request it cannot write, 2 a usage error (an unknown flag or verb, --agent not claude, an --account"
     " that names no account or several, a --wait not above 0 and at most 300, use outside a session of the mod, rm of Claude Code's own login, add with no terminal,"
@@ -390,7 +392,7 @@ def select(data: dict, store: str, given: str, wait_s: float, as_json: bool) -> 
 
 def continue_text_given(given: str) -> str:
     """The line `--set` gives, trimmed, as the mod keeps it: refused here, before any request, when the mod would refuse it.
-    It trims what JavaScript's trim() trims (Python's whitespace and U+FEFF) and counts code points, as the mod does."""
+    It trims what JavaScript's trim() trims and counts code points, as the mod does."""
     text = JS_TRIM.sub("", given)
     try:
         text.encode("utf-8")
