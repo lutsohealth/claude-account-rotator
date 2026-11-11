@@ -30,10 +30,11 @@ export type CheckError = { why: string; at: number }
 
 /**
  * A run of a row's text, and how it is drawn: dim, or as a warning; plain where no tone is named. `used` is a bar's
- * percent used, which colors it by the room left; `shrink` marks the email and the Company, which a narrow pane cuts.
- * `runs` is how `rows` stores a part that holds a time: its text with each time as epoch milliseconds.
+ * percent used, which colors it by the room left; `shrink` marks the email, the Company and a failed read's cause, which a
+ * narrow pane cuts, the cause to its `short` form. `runs` is how `rows` stores a part that holds a time: its text with
+ * each time as epoch milliseconds.
  */
-export type RowPart = { text: string; tone?: 'dim' | 'warning'; used?: number; shrink?: 'email' | 'company'; runs?: StoredRun[] }
+export type RowPart = { text: string; tone?: 'dim' | 'warning'; used?: number; shrink?: 'email' | 'company' | 'cause'; short?: string; runs?: StoredRun[] }
 
 /**
  * A run of a stored row line: text, or a time its reader renders at its own clock and zone: `clock` as HH:MM, `until`
@@ -194,6 +195,8 @@ export type View = {
   checkErrors?: Record<string, CheckError>
   /** When each login's last good usage read came, as its schedule `usage-due:<id>` holds it (`UsageDue.at`). */
   readAt?: Record<string, number>
+  /** When each login's usage is next read, as its schedule `usage-due:<id>` holds it (`UsageDue.next`). */
+  nextAt?: Record<string, number>
   health: Record<string, Health>
   /** The login this session sends its requests with. */
   activeId: string

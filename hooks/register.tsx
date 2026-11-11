@@ -362,6 +362,7 @@ async function mergeStore($: Host): Promise<void> {
   const fableMarks: Record<string, Mark> = {}
   const checkErrors: Record<string, CheckError> = {}
   const readAt: Record<string, number> = {}
+  const nextAt: Record<string, number> = {}
   const health: Record<string, Health> = {}
   let hasOlderWriter = false
   for (const a of accounts) {
@@ -385,8 +386,9 @@ async function mergeStore($: Host): Promise<void> {
     const e = await $.store.get(`check-error:${a.id}`)
     if (typeof e === 'object' && e !== null && typeof (e as CheckError).why === 'string' && typeof (e as CheckError).at === 'number') checkErrors[a.id] = e as CheckError
     // The last good usage read, any session's: a response rewrites `usage:<id>` and its `at`, so the schedule says it.
-    const goodAt = usageDueFrom(await $.store.get(`usage-due:${a.id}`))?.at
-    if (goodAt !== undefined) readAt[a.id] = goodAt
+    const due = usageDueFrom(await $.store.get(`usage-due:${a.id}`))
+    if (due?.at !== undefined) readAt[a.id] = due.at
+    if (due !== undefined) nextAt[a.id] = due.next
     const h = await $.store.get(`health:${a.id}`)
     if (typeof h === 'object' && h !== null && typeof (h as Health).kind === 'string') health[a.id] = h as Health
   }
@@ -429,7 +431,7 @@ async function mergeStore($: Host): Promise<void> {
       const h = signingIn === a.id ? own : (health[a.id] ?? own)
       if (h !== undefined) nextHealth[a.id] = h
     }
-    return { ...v, accounts, readings: nextReadings, marks: nextMarks, noFiveHour: nextNoFiveHour, weekMarks: nextWeekMarks, fableMarks: nextFableMarks, checkErrors, readAt, health: nextHealth, footer, rotateTo, fiveHourLimit, weekLeave, launchOn, fableContinueText, chromeAccountId, chromeAccountIds, hasOlderWriter }
+    return { ...v, accounts, readings: nextReadings, marks: nextMarks, noFiveHour: nextNoFiveHour, weekMarks: nextWeekMarks, fableMarks: nextFableMarks, checkErrors, readAt, nextAt, health: nextHealth, footer, rotateTo, fiveHourLimit, weekLeave, launchOn, fableContinueText, chromeAccountId, chromeAccountIds, hasOlderWriter }
   })
   await saveRows($, now)
   // A refused store-id fails no caller of the merge: the next merge tries again.

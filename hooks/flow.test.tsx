@@ -2223,7 +2223,8 @@ test('a usage check that fails shows its HTTP status on the login\'s line and in
   const clock = world(on, w, store)
   await start($, clock)
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
-  expect((await pane.findAll({ type: 'Text', text: /^\d\d:\d\d Failed to update \(HTTP 429\)$/ })).length).toBe(1)
+  const failedTexts = (await pane.findAll({ type: 'Text', text: /^(\d\d:\d\d Failed to update| \(HTTP 429\)|, next try \d\d:\d\d)$/ })).map(t => t.text?.replace(/\d\d:\d\d/g, 'HH:MM'))
+  expect(failedTexts).toEqual(['HH:MM Failed to update', ' (HTTP 429)', ', next try HH:MM'])
   expect(store.get('check-error:2')).toEqual({ why: 'the usage call answered HTTP 429', at: NOW + USAGE_CLAIM_WAIT_MS })
   w.failing = {}
   await clock.advance(10 * 60_000)
@@ -4520,7 +4521,7 @@ test('a claimed read of a login whose token has run out releases its claim, and 
   expect(store.get('usage-due:2')).not.toHaveProperty('claim')
   expect(store.get('usage-due:2')).toMatchObject({ fails: 0, at: lastRead })
   expect((store.get('usage-due:2') as { next: number }).next).toBeGreaterThanOrEqual(NOW + USAGE_IDLE_MS)
-  expect(lineOne(store, '2')).toMatch(/ Failed to update$/)
+  expect(lineOne(store, '2')).toMatch(/ Failed to update \(token run out\), until a session refreshes its token$/)
 })
 
 test('a login whose token has run out and that has no reading saves no failure for its skipped read, so it stays in the pick', async ($, on) => {
@@ -4970,8 +4971,8 @@ for (const status of [429, 500, 401]) {
     await clock.advance(10 * 60_000)
     expect(callsWith(w, 'tok-2')).toBe(0)
     expect((store.get('check-error:2') as { why?: string } | undefined)?.why).toMatch(new RegExp(`profile call answered HTTP ${status}`))
-    // The row says the update failed; the profile call's status is not the usage call's, so it names none.
-    expect(await paneText($)).toMatch(/^\d\d:\d\d Failed to update$/m)
+    // The row says the update failed and names the profile call's status, which is not the usage call's.
+    expect(lineOne(store, '2')).toMatch(new RegExp(`  \\d\\d:\\d\\d Failed to update \\(profile HTTP ${status}\\)(, next try \\d\\d:\\d\\d)?$`))
   })
 }
 
@@ -5890,6 +5891,8 @@ const rowsText = (store: Map<string, unknown>, now = rowsOf(store)?.at ?? NaN) =
 const lineOne = (store: Map<string, unknown>, id: string) => rowsText(store)?.find(r => r.id === id)?.lines[0] ?? '(no row)'
 /** When a login's last good usage read came, as its schedule holds it. */
 const goodReadAt = (store: Map<string, unknown>, id: string) => (store.get(`usage-due:${id}`) as { at?: number } | undefined)?.at ?? NaN
+/** When a login's schedule says its next read is due. */
+const nextTryAt = (store: Map<string, unknown>, id: string) => (store.get(`usage-due:${id}`) as { next?: number } | undefined)?.next ?? NaN
 /** HH:MM of `at` in this machine's zone, as a session writes the rows. */
 const localTime = (at: number) => new Intl.DateTimeFormat('en-GB', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(at)
 
@@ -5963,7 +5966,7 @@ test('a failure another session stores for login 2 shows on this session\'s row,
   const failedAt = clock.now()
   store.set('check-error:2', { why: 'the usage call answered HTTP 429', at: failedAt })
   await clock.advance(60_000)
-  expect(lineOne(store, '2')).toMatch(new RegExp(`  ${localTime(failedAt)} Failed to update \\(HTTP 429\\)$`))
+  expect(lineOne(store, '2')).toMatch(new RegExp(`  ${localTime(failedAt)} Failed to update \\(HTTP 429\\), next try ${localTime(nextTryAt(store, '2'))}$`))
   store.delete('check-error:2')
   await clock.advance(60_000)
   expect(lineOne(store, '2')).toMatch(new RegExp(`  updated ${localTime(readAt)}$`))
@@ -5973,7 +5976,7 @@ test('rows another session stored with this session\'s own lines are not written
   const { store, clock } = await rowsWorld($, on, true)
   const ours = rowsOf(store)
   // The seed: the failures, which hold the lines still until the next read, are on the rows.
-  expect(lineOne(store, '1')).toMatch(/Failed to update \(HTTP 429\)$/)
+  expect(lineOne(store, '1')).toMatch(/Failed to update \(HTTP 429\), next try \d\d:\d\d$/)
   store.set('rows', { ...ours, at: 1 })
   await clock.advance(60_000)
   expect(rowsOf(store)).toEqual({ ...ours, at: 1 })
@@ -6074,7 +6077,7 @@ test('boot failure refreshes the exported row before the first minute tick', asy
   const clock = world(on, w, store)
   await start($, clock)
   expect(store.get('check-error:1')).toMatchObject({ why: expect.stringMatching(/HTTP 429/) })
-  expect(lineOne(store, '1')).toMatch(/Failed to update \(HTTP 429\)$/)
+  expect(lineOne(store, '1')).toMatch(new RegExp(`Failed to update \\(HTTP 429\\), next try ${localTime(nextTryAt(store, '1'))}$`))
 })
 
 // C9 (puma-eslxj.10, problem g part 2): the pane draws each account's row fitted to its body's width, the buttons at
@@ -6222,7 +6225,7 @@ test('the pane draws no id column and no separate failure line: a failed read en
   const lines = await drawnLines($, 82)
   const text = await paneText($)
   expect([text.includes('its last usage check failed'), text.split('\n').includes('1'), text.split('\n').includes('2')]).toEqual([false, false, false])
-  expect(lines['line-1-0']?.text).toMatch(/  \d\d:\d\d Failed to update \(HTTP 429\)$/)
+  expect(lines['line-1-0']?.text).toMatch(/  \d\d:\d\d Failed to update \(HTTP 429\), next try \d\d:\d\d$/)
   expect(lines['line-1-0']?.text).toBe(lineOne(store, '1'))
 })
 

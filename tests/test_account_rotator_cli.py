@@ -21,6 +21,7 @@ import time
 import unittest
 import uuid
 from contextlib import redirect_stdout
+from datetime import datetime
 from pathlib import Path
 from types import ModuleType
 from unittest.mock import patch
@@ -204,6 +205,15 @@ class StorePick(StoreCase):
 
     def test_a_newer_inline_store_never_wins(self) -> None:
         self.assertEqual(self.picks(), {"account-rotator-launch": "/the/installed/store", "account-rotator": str(self.store)})
+
+    def test_both_start_lines_say_the_same_pick_since_its_local_time(self) -> None:
+        env = {**self.env(), "TZ": self.fixture["zone"]}
+        since = datetime.fromtimestamp(self.fixture["now"] / 1000, ZoneInfo(self.fixture["zone"])).strftime("%H:%M")
+        launch = run(LAUNCH, env=env)
+        listed = run(CLI, "account", "list", env=env)
+        self.assertEqual(launch.stderr.strip(), f"account-rotator: new session starts on account 1 (the most room, the same pick since {since})")
+        self.assertIn(f"new sessions start on account 1 (the most room, the same pick since {since})", listed.stdout)
+        self.assertNotIn("picked ", launch.stderr + listed.stdout)
 
     def test_a_newer_file_of_the_mods_name_with_no_accounts_never_wins(self) -> None:
         self.write("account-rotator_claude-account-rotator-gone.json", {"generation": 1}, mtime=2_000_000)

@@ -33,12 +33,12 @@ import subprocess
 import sys
 import time
 import uuid
-from datetime import datetime, tzinfo
+from datetime import tzinfo
 
 # The store module stands beside this file. Run as a script, Python puts the file's own folder first on sys.path,
 # links resolved; this line is for a loader that does not, such as the tests' in-process import.
 sys.path.insert(0, os.path.dirname(__file__))
-from account_rotator_store import STORE_GLOB, StoreError, is_instant, read, requests_folder  # noqa: E402
+from account_rotator_store import STORE_GLOB, StoreError, clock_text, is_instant, read, requests_folder, same_pick_since  # noqa: E402
 
 EXIT_NO_STORE = 1
 EXIT_USAGE = 2
@@ -101,11 +101,6 @@ def check(data: dict, path: str) -> None:
         raise damaged("launch-slot is no pick")
 
 
-def clock_text(at_ms: float, zone: tzinfo | None) -> str:
-    """HH:MM on a 24-hour clock in `zone`, else in this machine's own: hooks/model.ts clockText."""
-    return datetime.fromtimestamp(at_ms / 1000, zone).strftime("%H:%M")
-
-
 def reset_text(at_ms: float, now_ms: float) -> str:
     """The time until `at_ms`, as hooks/model.ts resetText says it, a half minute rounded up as JavaScript rounds."""
     minutes = max(0, math.floor((at_ms - now_ms) / MINUTE_MS + 0.5))
@@ -160,7 +155,8 @@ def footer(data: dict, now_ms: float, zone: tzinfo | None, older: bool, passed: 
     written = f"rows written {clock_text(at, zone)} ({minutes_ago(at, now_ms)})" if is_instant(at) else "no session has stored rows yet"
     pick = data.get("launch-slot")
     if isinstance(pick, dict) and isinstance(pick.get("id"), str):
-        starts = f"new sessions start on account {pick['id']} ({pick.get('why', 'the setting picked it')}, picked {minutes_ago(pick.get('at'), now_ms)})"
+        since = same_pick_since(pick.get("at"), zone)
+        starts = f"new sessions start on account {pick['id']} ({pick.get('why', 'the setting picked it')}{', ' + since if since else ''})"
     else:
         starts = "no account picked for new sessions"
     notes = [OLDER_NOTE] if older else []

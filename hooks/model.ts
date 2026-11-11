@@ -1,4 +1,4 @@
-import type { Account, Fill, FiveHourLimit, FooterStyle, Glyphs, Health, Highlight, LaunchOn, LaunchPick, Mark, PlanTier, Reading, RotateTo, RotatorRequest, Row, RowPart, StoredRows, StoredRun, UsageDue, UsageWindow, View } from '../types'
+import type { Account, CheckError, Fill, FiveHourLimit, FooterStyle, Glyphs, Health, Highlight, LaunchOn, LaunchPick, Mark, PlanTier, Reading, RotateTo, RotatorRequest, Row, RowPart, StoredRows, StoredRun, UsageDue, UsageWindow, View } from '../types'
 
 /** Leave a login once its 5-hour window is this full (percent). */
 export const LEAVE_FIVE_HOUR = 90
@@ -985,26 +985,53 @@ function usedParts(label: string, w: UsageWindow | undefined, now: number): RowP
   return [{ text: `${label} ` }, { text: `${longBar(used)} ${used}%`, used }]
 }
 
-/** The HTTP status in a failure's why, where the usage call answered it: another call's status is not the update's. */
-const HTTP_STATUS = /usage call answered HTTP (\d{3})/
+/** Why a read failed, as a row says it: `text` in full, `short` for a narrow pane; `hasNext` where the schedule's next read is tried. */
+type Cause = { text: string; short: string; hasNext: boolean }
+
+const RUN_OUT = ' (token run out), until a session refreshes its token'
 
 /**
- * Line 1's end: a sign-in needed; else a failed check no older than the last good read, at its time; else the last
- * good read's time, while a reading stands. With no good read known and no failure, nothing.
+ * The cause in a failure's why, which the writers of `check-error:<id>` word (hooks/register.tsx): each call's status
+ * is that call's own. A why no writer words has none. A run-out token is read again only once a session refreshes it,
+ * so the schedule's time on that row would move forward with nothing tried.
  */
-function statePart(view: View, a: Account, timeZone: string | undefined): RowPart | undefined {
-  if (view.health[a.id]?.kind === 'login-needed') return { text: '⚠ sign in needed', tone: 'warning' }
+function causeOf(why: string): Cause | undefined {
+  const status = (call: RegExp) => call.exec(why)?.[1]
+  const [usage, profile] = [status(/usage call answered HTTP (\d{3})/), status(/profile call answered HTTP (\d{3})/)]
+  if (usage !== undefined) return { text: ` (HTTP ${usage})`, short: ` (${usage})`, hasNext: true }
+  if (profile !== undefined) return { text: ` (profile HTTP ${profile})`, short: ` (profile ${profile})`, hasNext: true }
+  if (why.startsWith('the profile answer named no email')) return { text: ' (profile named no email)', short: ' (no email)', hasNext: true }
+  if (why.startsWith('its token has run out')) return { text: RUN_OUT, short: ' (token run out)', hasNext: false }
+  if (why.startsWith('the check failed')) return { text: ' (check failed)', short: ' (error)', hasNext: true }
+  return undefined
+}
+
+/** A failed read's line 1 end: its time, its cause, and the next try where the schedule gives one. */
+function failedParts(failure: CheckError, nextAt: number | undefined, timeZone: string | undefined): RowPart[] {
+  const tone = 'warning' as const
+  const cause = causeOf(failure.why)
+  const failed = ' Failed to update'
+  return [
+    { text: `${clockText(failure.at, timeZone)}${failed}`, tone, runs: [{ clock: failure.at }, failed] },
+    ...(cause === undefined ? [] : [{ text: cause.text, tone, shrink: 'cause' as const, short: cause.short }]),
+    ...(nextAt === undefined || cause?.hasNext === false ? [] : [{ text: `, next try ${clockText(nextAt, timeZone)}`, tone, runs: [', next try ', { clock: nextAt }] }]),
+  ]
+}
+
+/**
+ * Line 1's end: a sign-in needed; else a failed check no older than the last good read, at its time, with its cause
+ * and next try; else the last good read's time, while a reading stands. With no good read known and no failure,
+ * nothing.
+ */
+function statePart(view: View, a: Account, timeZone: string | undefined): RowPart[] {
+  if (view.health[a.id]?.kind === 'login-needed') return [{ text: '⚠ sign in needed', tone: 'warning' }]
   const readAt = view.readAt?.[a.id]
   const failure = view.checkErrors?.[a.id]
   // A good read clears the failure, so one standing at the good read's own millisecond came after it.
-  if (failure !== undefined && (readAt === undefined || failure.at >= readAt)) {
-    const status = HTTP_STATUS.exec(failure.why)?.[1]
-    const failed = ` Failed to update${status === undefined ? '' : ` (HTTP ${status})`}`
-    return { text: `${clockText(failure.at, timeZone)}${failed}`, tone: 'warning', runs: [{ clock: failure.at }, failed] }
-  }
+  if (failure !== undefined && (readAt === undefined || failure.at >= readAt)) return failedParts(failure, view.nextAt?.[a.id], timeZone)
   // A time over no reading would name a read the row cannot show.
-  if (readAt === undefined || view.readings[a.id] === undefined) return undefined
-  return { text: `updated ${clockText(readAt, timeZone)}`, runs: ['updated ', { clock: readAt }] }
+  if (readAt === undefined || view.readings[a.id] === undefined) return []
+  return [{ text: `updated ${clockText(readAt, timeZone)}`, runs: ['updated ', { clock: readAt }] }]
 }
 
 /** Line 2: the week used, the Fable week used (a dash on Max and Ultra where no body listed it), and the resets ahead. */
@@ -1048,9 +1075,9 @@ export function rowOf(view: View, a: Account, now: number, timeZone?: string): R
     ...(company === undefined ? [] : [{ text: ` · ${company}`, shrink: 'company' as const }]),
     ...(plan === undefined ? [] : [{ text: ` · ${plan}` }]),
     ...(view.chromeAccountId === a.id ? [{ text: ' · Chrome' }] : []),
-    ...(state === undefined ? [] : [{ text: '  ' }, state]),
+    ...(state.length === 0 ? [] : [{ text: '  ' }, ...state]),
   ]
-  const isFailed = state?.tone === 'warning' && view.health[a.id]?.kind !== 'login-needed'
+  const isFailed = state[0]?.tone === 'warning' && view.health[a.id]?.kind !== 'login-needed'
   const dim = (line: RowPart[]): RowPart[] => (isFailed ? line.map(p => ({ ...p, tone: 'dim' })) : line)
   const five = fiveHourLine(view, a, now)
   return { id: a.id, lines: [line1, dim(usageLine(view, a, now)), ...(five === undefined ? [] : [dim(five)])] }
@@ -1103,20 +1130,21 @@ export const END_GAP = 2
 /** The cells a line takes, one per character. */
 export const cellsOf = (line: readonly RowPart[]): number => line.reduce((n, p) => n + [...p.text].length, 0)
 
-/** A Company part cut to `cells` (at least ` · X…`), or an email cut in its middle (at least `x…y`), with an ellipsis. */
+/** A cause part cut to its short form, a Company part to `cells` (at least ` · X…`), or an email in its middle (at least `x…y`), with an ellipsis. */
 function cutTo(p: RowPart, cells: number): RowPart {
   const chars = [...p.text]
   if (cells >= chars.length) return p
+  if (p.shrink === 'cause') return { ...p, text: p.short ?? p.text }
   if (p.shrink === 'company') return { ...p, text: `${chars.slice(0, Math.max(5, cells) - 1).join('')}…` }
   const keep = Math.max(2, cells - 1)
   const head = Math.ceil(keep / 2)
   return { ...p, text: `${chars.slice(0, head).join('')}…${chars.slice(chars.length - (keep - head)).join('')}` }
 }
 
-/** Line 1 cut to `columns`: the Company first, then the email's middle; the plan and the state never. */
+/** Line 1 cut to `columns`: a failed read's cause to its short form, then the Company, then the email's middle; the plan, the time and the next try never. */
 function fitLine1(line: RowPart[], columns: number): RowPart[] {
   let fitted = line
-  for (const kind of ['company', 'email'] as const) {
+  for (const kind of ['cause', 'company', 'email'] as const) {
     const over = cellsOf(fitted) - columns
     if (over <= 0) return fitted
     fitted = fitted.map(p => (p.shrink === kind ? cutTo(p, [...p.text].length - over) : p))

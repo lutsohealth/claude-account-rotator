@@ -2,6 +2,11 @@
 
 What each version of the account rotator changed. To get each one as Claude Code starts, turn on auto-update: in `/plugin`, open **Marketplaces**, pick **claude-account-rotator** and choose **Enable auto-update**. To update by hand, run `claude plugin marketplace update claude-account-rotator`, then `claude plugin update account-rotator@claude-account-rotator`, and start a new session.
 
+## Unreleased
+
+- **A row that failed to update says why and when it is tried next**, as `18:39 Failed to update (HTTP 429), next try 18:45`, where it used to say only `Failed to update`. The cause names the status the usage or the profile call answered, a sign-in whose token has run out (which says `until a session refreshes its token` and gives no time), or a check that threw. A narrow panel shortens the cause before the company and the email, so each account stays two lines.
+- **The start lines of `account-rotator-launch` and `account-rotator account list` say `the same pick since 14:02`**, the time the pick last changed in your zone, where they said `picked 20 min ago` about a pick the mod checks again each minute.
+
 ## 0.5.24-lutso.1 - 2026-11-11
 
 - **An idle account whose sign-in has run out says Failed to update**, where its row used to show its last update's time as if it were current. The usage it shows is from that last update.
