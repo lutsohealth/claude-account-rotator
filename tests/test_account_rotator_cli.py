@@ -656,6 +656,27 @@ class ContinueText(RequestCase):
         self.assertEqual(self.written("﻿ ﻿"), (2, None))
         self.assertEqual(self.written("﻿" + "a" * 500 + "﻿")[0], 0)
 
+    # Review R4 (Codex, #70 round 2) [CHARACTER-COUNT-MISMATCH]: the CLI trims exactly what JavaScript's trim() trims,
+    # no more, so it neither refuses nor changes a line the session keeps.
+    def test_review_r4_a_line_of_only_next_line_is_taken(self) -> None:
+        code, size = self.written("\u0085")
+        self.assertTrue(code == 0 and size is not None, f"U+0085 is a line the session keeps, but the CLI exits {code} without a request")
+
+    def test_review_r4_class_no_character_javascript_keeps_is_trimmed(self) -> None:
+        cli = load_cli()
+        controls = ["\u001c", "\u001d", "\u001e", "\u001f", "\u0085", "᠎", "​"]
+        corpus = [(f"U+{ord(char):04X}/{place}", given) for char in controls for place, given in (("only", char), ("leading", char + "x"), ("trailing", "x" + char))]
+        offenders = []
+        for label, given in corpus:
+            try:
+                actual = cli.continue_text_given(given)
+            except cli.UsageError as error:
+                actual = f"refused: {error}"
+            if actual != given:
+                offenders.append(f"{label}: {actual!r}")
+        self.assertTrue(corpus)
+        self.assertEqual(offenders, [])
+
 
 class Use(RequestCase):
     """C12 (puma-eslxj.13, RULING 4624): `account use` moves the one session that runs it. The mod sets a mark in the
