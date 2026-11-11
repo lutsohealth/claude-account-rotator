@@ -462,7 +462,7 @@ export function spentMark(read: UsageWindow | undefined, now: number, lengthMs: 
 }
 
 /** The most characters of the line that asks Claude to carry on. */
-const CONTINUE_TEXT_MAX = 500
+export const CONTINUE_TEXT_MAX = 500
 
 /** The line that asks Claude to carry on after a Fable switch, as stored: text of at most 500 characters, trimmed; anything else is ignored. */
 export function continueTextFrom(value: unknown): string | undefined {
@@ -1374,6 +1374,7 @@ export function requestFrom(value: unknown, now: number): RotatorRequest | undef
     return { kind, nonce, at, id, store, slot, ...(email === undefined ? {} : { email }), ...(orgId === undefined ? {} : { orgId }) }
   }
   if (kind === 'add') return typeof slot === 'string' && slot !== '' ? { kind, nonce, at, id, store, slot } : undefined
+  if (kind === 'continue-text') return { kind, nonce, at, id, store, text: (value as Record<string, unknown>).text }
   return kind === 'use' && typeof session === 'string' && session !== '' ? { kind, nonce, at, id, store, session } : undefined
 }
 

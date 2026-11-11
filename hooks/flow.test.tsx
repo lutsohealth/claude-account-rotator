@@ -6810,6 +6810,63 @@ test('a store holds a store-id, which the first session that finds none writes',
   expect(typeof store.get('store-id')).toBe('string')
 })
 
+// puma-9arph.5: `account-rotator continue-text` sets or clears fable-continue-text through a session's request.
+/** A continue-text request as bin/account-rotator writes one; `fields` stands in for its text, or what a hand put there. */
+const continueRequest = (nonce: string, storeId: unknown, at: number, fields: Record<string, unknown>) => JSON.stringify({ kind: 'continue-text', nonce, at, id: '', store: storeId, ...fields })
+
+/** Login 1 at its Fable limit, login 2 with Fable room, the store as given; a minute's merge done, so it has a store-id. */
+async function fableReady($: Engine, on: On, kept: Record<string, unknown>): Promise<{ w: World; store: Map<string, unknown>; clock: MockClock }> {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [20, 30, 100]
+  w.usage['tok-2'] = [10, 30, 10]
+  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, ...kept }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  await clock.advance(60_000)
+  return { w, store, clock }
+}
+
+/** The request applied at the next minute, then a Fable stop and its switch landed: what the carry-on sent. */
+async function requestThenFableStop($: Engine, w: World, store: Map<string, unknown>, clock: MockClock, fields: Record<string, unknown>): Promise<void> {
+  w.files[`${REQUESTS}/${N1}.json`] = continueRequest(N1, store.get('store-id'), await clock.now(), fields)
+  await clock.advance(60_000)
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  await clock.advance(36_000)
+}
+
+test('a continue-text request sets the line, trimmed, and the next Fable switch carries on with it as the person\'s words', async ($, on) => {
+  const { w, store, clock } = await fableReady($, on, {})
+  await requestThenFableStop($, w, store, clock, { text: '  Please resume.  ' })
+  expect([store.get('fable-continue-text'), resultOf(w, N1)?.ok, w.submitted, w.asUser]).toEqual(['Please resume.', true, ['Please resume.'], [true]])
+})
+
+test('a continue-text request with text null clears the line, and the next Fable switch sends the mod\'s own', async ($, on) => {
+  const { w, store, clock } = await fableReady($, on, { 'fable-continue-text': 'Go on on Fable-free ground.' })
+  await requestThenFableStop($, w, store, clock, { text: null })
+  expect([store.has('fable-continue-text'), resultOf(w, N1)?.ok, w.asUser]).toEqual([false, true, [false]])
+})
+
+// RULING 5287: a request a hand wrote, malformed or with a text the CLI refuses, is refused by the session too.
+const REFUSED_TEXTS: [string, Record<string, unknown>][] = [
+  ['501 characters', { text: 'a'.repeat(501) }],
+  ['spaces only', { text: '   ' }],
+  ['empty', { text: '' }],
+  ['a number', { text: 42 }],
+  ['no text field', {}],
+]
+for (const [name, fields] of REFUSED_TEXTS) {
+  test(`a continue-text request with ${name}, which the CLI would refuse or never writes, is refused with an answer and keeps the line`, async ($, on) => {
+    const { w, store, clock } = await fableReady($, on, { 'fable-continue-text': 'Go on on Fable-free ground.' })
+    w.files[`${REQUESTS}/${N1}.json`] = continueRequest(N1, store.get('store-id'), await clock.now(), fields)
+    await clock.advance(60_000)
+    const answer = resultOf(w, N1)
+    expect([name, answer?.ok, /1 to 500 characters/.test(String(answer?.message)), store.get('fable-continue-text')]).toEqual([name, false, true, 'Go on on Fable-free ground.'])
+  })
+}
+
 test('two sessions booting at once end with one store-id: this session keeps the one the store holds', async ($, on) => {
   const { store, clock } = await selectWorld($, on)
   // The other session's write of its own id lands after this session's.

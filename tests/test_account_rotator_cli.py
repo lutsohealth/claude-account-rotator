@@ -567,6 +567,38 @@ SESSION_VAR = "ACCOUNT_ROTATOR_SESSION"
 SLOT_VAR = "CLAUDE_SECURESTORAGE_CONFIG_DIR"
 
 
+class ContinueText(RequestCase):
+    """puma-9arph.5: `continue-text` sets or clears the line a Fable switch sends, through a session's request,
+    as `account select` does: the CLI never writes the store."""
+
+    def continue_text(self, *args: str) -> subprocess.CompletedProcess[str]:
+        return run(CLI, "continue-text", *args, env=self.env())
+
+    def test_set_leaves_a_request_of_its_kind_with_the_trimmed_text_and_reports_the_answer(self) -> None:
+        self.answer(True, "after a Fable switch a session sends: Please resume.")
+        done = self.continue_text("--set", "  Please resume.  ", "--json", "--wait", "10")
+        request = {k: self.seen[k] for k in ("kind", "text", "store")}
+        self.assertEqual((done.returncode, request, json.loads(done.stdout)["result"]), (0, {"kind": "continue-text", "text": "Please resume.", "store": "store-abc"}, {"continueText": "Please resume."}))
+
+    def test_clear_leaves_a_request_whose_text_is_null(self) -> None:
+        self.answer(True, "cleared")
+        done = self.continue_text("--clear", "--wait", "10")
+        self.assertEqual((done.returncode, self.seen["kind"], self.seen["text"]), (0, "continue-text", None))
+
+    def test_a_text_empty_or_over_500_characters_once_trimmed_exits_2_before_any_request(self) -> None:
+        corpus = ["", "   ", "a" * 501, " " + "a" * 501 + " "]
+        offenders = {}
+        for text in corpus:
+            done = self.continue_text("--set", text, "--wait", "10")
+            if done.returncode != 2 or self.requests.exists():
+                offenders[len(text)] = (done.returncode, self.requests.exists())
+        self.assertEqual(offenders, {})
+        self.assertEqual(self.continue_text("--set", "a" * 500, "--wait", "0.2").returncode, 3)
+
+    def test_set_and_clear_together_is_a_usage_error(self) -> None:
+        self.assertEqual(self.continue_text("--set", "x", "--clear").returncode, 2)
+
+
 class Use(RequestCase):
     """C12 (puma-eslxj.13, RULING 4624): `account use` moves the one session that runs it. The mod sets a mark in the
     environment of its Bash children; the request names it and only that session applies it, during the Bash call."""

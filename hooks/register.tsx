@@ -33,6 +33,7 @@ import {
   accountsRoot,
   canConnectChrome,
   chromeNote,
+  CONTINUE_TEXT_MAX,
   continueTextFrom,
   credentialFrom,
   credentialsFile,
@@ -539,16 +540,35 @@ async function takeRequest($: Host, resultPath: string, request: RotatorRequest,
  * What a request asks, done: `select` sets the login new sessions start on, as the panel's New on does. The result
  * names the pick that setting makes: a login with no room gives way to the next with room, or to Claude Code's login.
  * `use` moves this session. `rm` drops an account, as the panel's Remove does. `add` lists a folder signed in.
+ * `continue-text` sets or clears the line a Fable switch sends.
  */
 async function applyRequest($: Host, request: RotatorRequest): Promise<{ ok: boolean; message: string; pickId?: string; activeId?: string; accountId?: string }> {
   if (request.kind === 'rm') return removeAccount($, request.id, request)
   if (request.kind === 'add') return adoptSlot($, request.slot)
+  if (request.kind === 'continue-text') return setContinueText($, request.text)
   const target = (await getView($)).accounts.find(a => a.id === request.id)
   if (target === undefined) return { ok: false, message: `account ${request.id} is not listed in this store` }
   if (request.kind === 'use') return useAccount($, target)
   await setLaunchOn($, `account:${request.id}`)
   const { text, pickId } = await pickAnswer($)
   return { ok: true, message: text, pickId }
+}
+
+/**
+ * The line a session sends after a Fable switch, as the person's own words: `text`, as `continueTextFrom` takes it, or
+ * null to clear it, so the mod's own line goes instead. Every session reads the key at its next merge.
+ */
+async function setContinueText($: Host, text: unknown): Promise<{ ok: boolean; message: string }> {
+  if (text === null) {
+    await $.store.delete('fable-continue-text')
+    await setView($, v => ({ ...v, fableContinueText: undefined }))
+    return { ok: true, message: "cleared: after a Fable switch a session sends the mod's own line" }
+  }
+  const line = continueTextFrom(text)
+  if (line === undefined) return { ok: false, message: `the line after a Fable switch is text of 1 to ${CONTINUE_TEXT_MAX} characters once trimmed` }
+  await $.store.set('fable-continue-text', line)
+  await setView($, v => ({ ...v, fableContinueText: line }))
+  return { ok: true, message: `after a Fable switch a session sends: ${line}` }
 }
 
 /** Where new sessions start now, in a request's words. */
