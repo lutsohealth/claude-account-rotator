@@ -163,10 +163,13 @@ export function shouldLeave(view: View, now: number, need?: Need): boolean {
   return view.health[view.activeId]?.kind === 'login-needed' || isSpent(r, now, view.weekLeave) || (need === 'fable' && isFableSpent(r, now))
 }
 
-/** When a login's 5-hour window resets, or its week where it reports no 5-hour window, epoch ms; Infinity while none is running. */
+/**
+ * When a login's 5-hour window resets, or its week where it reports no 5-hour window, epoch ms; Infinity while the
+ * reading holds no reset to come. A window at 0% used still resets at its time: a week runs whether it is used or not.
+ */
 function resetOf(r: Reading | undefined, now: number): number {
   const w = r?.fiveHour ?? r?.sevenDay
-  if (w?.resetsAt === undefined || (windowPct(w, now) ?? 0) === 0) return Infinity
+  if (w?.resetsAt === undefined || Date.parse(w.resetsAt) <= now) return Infinity
   return Date.parse(w.resetsAt)
 }
 

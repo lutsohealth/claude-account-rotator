@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import type { RotateTo, View } from '../types'
+import type { Reading, RotateTo, View } from '../types'
 import { weekLeaveFrom, launchOnFrom, pickLaunch, isSessionStop } from './model'
 import { isSameWeek, whoseWeek } from './model'
 import { companyOf, identityFromStatus, planName } from './model'
@@ -198,6 +198,30 @@ test('soonest reset moves to the login whose 5-hour window resets first, never a
   // Two resets at once: the more room wins.
   resetsAt(v, '2', '2026-10-12T11:00:00Z')
   expect(pickTarget(v, NOW)?.id).toBe('2')
+})
+
+// puma-9arph.4 (reading R11): a week runs while nobody uses it, so a login at 0% ranks by its own reset.
+test('soonest reset takes a login at 0% used whose week resets first, for a new session and for the rotation', () => {
+  // Login 1, the one in use, has no room left, so a new session cannot start on it.
+  const v = view({ '1': [100, 50], '2': [0, 0], '3': [0, 0] }, {}, 'reset')
+  v.readings['2'] = weekOnly(0, '2026-10-12T20:00:00Z')
+  v.readings['3'] = weekOnly(30, '2026-10-14T03:00:00Z')
+  expect(pickLaunch({ ...v, launchOn: 'reset' }, NOW)).toMatchObject({ id: '2', why: 'its window resets soonest' })
+  expect(pickTarget(v, NOW)?.id).toBe('2')
+})
+
+test('soonest reset puts last a login at 0% whose reading holds no reset to come: none, or one already past', () => {
+  const v = view({ '1': [100, 50], '2': [0, 0], '3': [0, 0] }, {}, 'reset')
+  v.readings['3'] = weekOnly(30, '2026-10-14T03:00:00Z')
+  const rows: [string, Reading][] = [
+    ['no reset time', { sevenDay: { pct: 0 }, at: NOW }],
+    ['a reset already past', weekOnly(0, new Date(NOW - HOUR).toISOString())],
+  ]
+  const picks = rows.map(([name, read]) => {
+    const w = { ...v, readings: { ...v.readings, '2': read } }
+    return [name, pickLaunch({ ...w, launchOn: 'reset' }, NOW)?.id, pickTarget(w, NOW)?.id]
+  })
+  expect(picks).toEqual(rows.map(([name]) => [name, '3', '3']))
 })
 
 test('next in list moves to the login after the one in use, wrapping, past spent and locked ones', () => {

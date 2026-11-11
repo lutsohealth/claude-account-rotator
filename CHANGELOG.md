@@ -2,6 +2,10 @@
 
 What each version of the account rotator changed. To get each one as Claude Code starts, turn on auto-update: in `/plugin`, open **Marketplaces**, pick **claude-account-rotator** and choose **Enable auto-update**. To update by hand, run `claude plugin marketplace update claude-account-rotator`, then `claude plugin update account-rotator@claude-account-rotator`, and start a new session.
 
+## Unreleased
+
+- **Soonest reset counts an account nobody has used yet by its own reset time**, for the account new sessions start on and for the rotation, where an account at 0% used came after every account whose window was running: its week runs, and resets, whether it is used or not.
+
 ## 0.5.26-lutso.1 - 2026-11-11
 
 - **After `/clear`, `/resume` or `/branch` the panel marks the account the session runs on**, where it marked account 1. The session's mark for `account use` comes back too, and so do Terminal.app's block drawing, the notice that Claude Code's policy refuses switching, and the band after a Fable stop. A check in the moment after the command no longer switches away from the account the session runs on, and an `account rm` then no longer signs out that account. A session whose start could not read the accounts list rotates again at its next check.
