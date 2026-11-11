@@ -131,8 +131,6 @@ const viewAtom = atom({ plugin: 'account-rotator', key: 'view' } as const, EMPTY
  */
 let isPaneShown = false
 
-/** Whether boot has set the view's login to the one this session uses. */
-let isBooted = false
 /**
  * What this session set that only its view shows, kept where /clear, /resume and /branch do not reach: they reset the
  * view, and rebindSession copies these back. Each is set where its value is born; undefined until then. The records
@@ -641,7 +639,8 @@ async function watchRequests($: Host, watch: { isRunning: boolean }): Promise<vo
   const isWatching = async () => watch.isRunning && (await $.clock.now()) < until
   while (await isWatching()) {
     await $.clock.sleep(REQUEST_POLL_MS)
-    if (isBooted && (await isWatching())) await applyRequests($, true).catch(error => debug($, `requests failed: ${String(error)}`))
+    // applyRequests binds a view not bound, once boot has read the slot, before it takes a request.
+    if (await isWatching()) await applyRequests($, true).catch(error => debug($, `requests failed: ${String(error)}`))
   }
 }
 
@@ -1349,14 +1348,15 @@ async function settlePending($: Host, isResponse: boolean): Promise<void> {
 async function onMeasure($: Host, limits: readonly SessionRateLimit[]): Promise<void> {
   const measuredAt = await $.clock.now()
   lastMeasured = { at: measuredAt, reading: readingFromLimits(limits, measuredAt) }
+  // A view not bound holds a default login, not this session's: a response measured then is no login's to store (it
+  // once put account 3's week under account 1). Once boot has read the slot, isBound binds it first, and gives back
+  // a switch in flight, which this response then settles before any reading is stored.
+  if (!(await isBound($))) return
   const view = await getView($)
   if (view.pending !== undefined) {
     await settlePending($, true)
     return
   }
-  // Until boot has read which login this session uses, the view's login is a default, not this session's: a
-  // response measured then is no login's to store (it once put account 3's week under account 1).
-  if (!isBooted) return
   const reading = readingFromLimits(limits, await $.clock.now())
   if (reading === undefined) return
   // Stored only as the login in use's own week: a response whose week is another login's went out on that login's
@@ -2142,6 +2142,10 @@ async function isBound($: Host): Promise<boolean> {
 
 /** First run makes the normal login number 1; then: which login this session uses, and Claude in Chrome connected as the extension's account. */
 async function boot($: Host, isInteractive: boolean): Promise<void> {
+  // A view still bound outlived a reload of this code, which emptied `kept`: its Fable stop mark goes back into `kept`,
+  // so a later /clear, /resume or /branch restores it.
+  const survived = await getView($)
+  if (survived.isBound === true && survived.isFableStopped !== undefined) kept = { ...kept, isFableStopped: survived.isFableStopped }
   // Terminal.app is the terminal that names itself so and draws block characters from its font.
   const hasFontBlocks = (await $.env.get('TERM_PROGRAM')) === 'Apple_Terminal'
   kept = { ...kept, hasFontBlocks }
@@ -2150,7 +2154,6 @@ async function boot($: Host, isInteractive: boolean): Promise<void> {
   const slot = (await $.env.get('CLAUDE_SECURESTORAGE_CONFIG_DIR')) ?? ''
   kept = { ...kept, slot }
   await bindSession($, slot)
-  isBooted = true
   await checkSwitching($, slot)
   // First, while the session can still move: the rotation waits for it.
   if (isInteractive && shouldConnectAtOpen(await getView($))) {

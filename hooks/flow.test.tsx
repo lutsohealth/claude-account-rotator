@@ -3166,6 +3166,53 @@ test('a view kept from the code before a hot reload, which lacks what this code 
   await pane.unmount()
 })
 
+// puma-9arph.10: a hot reload empties the module's `kept` while the view survives it; boot copies the surviving view's
+// Fable stop mark into `kept`, so a /clear after the reload gives it back.
+/** A session whose view survived a reload as `surviving` (none: a fresh start), then a /clear: the view the rebind wrote. */
+async function reloadThenClear($: Engine, on: On, surviving: Partial<View> | undefined): Promise<View | undefined> {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.usage['tok-1'] = [20, 30, 100]
+  let phase: 'reloaded' | 'live' | 'cleared' = surviving === undefined ? 'live' : 'reloaded'
+  let last: View | undefined
+  on('state.get', async (_$, e, next) => {
+    const read = await next(e)
+    if (e.plugin !== 'account-rotator' || e.key !== 'view' || phase === 'live') return read
+    // Until the mod writes the view again: the view the reload kept, or the default a /clear leaves.
+    const value = phase === 'reloaded' ? { ...EMPTY_VIEW, ...TWO_LOGINS, activeId: '1', isBound: true, ...surviving } : EMPTY_VIEW
+    return { value: { value, version: read.value?.version ?? 0 } }
+  })
+  on('state.set', async (_$, e, next) => {
+    const { key, value } = e as unknown as { key: string; value: View }
+    if (key === 'view') {
+      phase = 'live'
+      last = value
+    }
+    return next(e)
+  })
+  const clock = world(on, w, TWO_LOGINS)
+  on('classic.SessionStart', () => ({}))
+  await start($, clock)
+  await endSession($, clock, 'clear')
+  phase = 'cleared'
+  await $.classic.SessionStart({ source: 'clear' } as never)
+  await clock.settle()
+  return last
+}
+
+test('Review RELOAD-FABLE-LOSS: after a hot reload, then /clear, the Fable stop mark the surviving view held comes back', async ($, on) => {
+  expect((await reloadThenClear($, on, { isFableStopped: true }))?.isFableStopped).toBe(true)
+})
+
+test('Review RELOAD-FABLE-LOSS other side: a surviving view whose Fable stop mark is false gives back false', async ($, on) => {
+  expect((await reloadThenClear($, on, { isFableStopped: false }))?.isFableStopped).toBe(false)
+})
+
+test('Review RELOAD-FABLE-LOSS other side: a fresh start, with no view surviving, leaves the Fable stop mark unset after /clear', async ($, on) => {
+  const after = await reloadThenClear($, on, undefined)
+  expect([after?.isBound, after?.isFableStopped]).toEqual([true, undefined])
+})
+
 const BAND_PROPS = { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 160, scroll: { offset: 0, bodyRows: 9 }, view: {} } as const
 
 /**
@@ -5566,6 +5613,109 @@ test('Review BOOT-GATE-STARVES other side: a boot that failed before it read the
   await clock.settle()
   expect(['bound, switches', isBoundSeen, w.envSets]).toEqual(['bound, switches', false, []])
 })
+
+// puma-9arph.11: after a boot whose first bind failed, a response and the Bash watch go by whether the view is bound,
+// as the ticks do, not by a boot that will not finish. A minute passes first: its checks read each login, as a session's
+// first minute does (login 1's week at 40%, which lets a response's week be told as login 1's), and at origin/main the
+// boot gate stays shut through it.
+const LOGIN1_WEEK = { ...TWO_LOGINS, 'rotate-to': 'off', 'store-id': 'store-test' }
+const weekPct = (store: Map<string, unknown>) => (store.get('usage:1') as { sevenDay?: { pct?: number } } | undefined)?.sevenDay?.pct
+const respondWeek = async ($: Engine, w: World, clock: MockClock, pct: number) => {
+  w.limits = [{ kind: 'five_hour', percentUsed: 10, resetsAt: '2026-10-12T12:00:00Z' }, { kind: 'seven_day', percentUsed: pct, resetsAt: WEEK_RESET }]
+  await $.session.measure({ context: { window: 200_000 }, rateLimits: w.limits, changed: ['rateLimits'] })
+  await clock.settle()
+}
+
+test('Review BOOT-GATE-STARVES response: after a boot whose first bind failed once, the next response\'s reading is stored', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.usage['tok-1'] = [10, 40]
+  const store = storeFailingFirstAccountsRead(LOGIN1_WEEK)
+  const clock = world(on, w, store)
+  await start($, clock)
+  expect(w.logged?.some(line => line.includes('start failed'))).toBe(true)
+  await untilTick(clock)
+  await respondWeek($, w, clock, 45)
+  expect(weekPct(store), 'the response after a failed first bind was not stored').toBe(45)
+})
+
+test('Review BOOT-GATE-STARVES Bash watch: after a boot whose first bind failed once, a use request is applied within a beat', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [10, 40]
+  w.usage['tok-2'] = [10, 20]
+  const clock = world(on, w, storeFailingFirstAccountsRead(LOGIN1_WEEK))
+  await start($, clock)
+  expect(w.logged?.some(line => line.includes('start failed'))).toBe(true)
+  await untilTick(clock)
+  const call = bashCall($, w, USE_COMMAND)
+  w.files[`${REQUESTS}/${N1}.json`] = useRequest(N1, '2', 'store-test', clock.now(), ownMark(w))
+  await beat(clock)
+  expect([resultOf(w, N1)?.ok, w.envSets]).toEqual([true, [{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }]])
+  await call.finish()
+})
+
+test('Review BOOT-GATE-STARVES other side, response and Bash watch: a boot that failed before it read the slot stores and applies nothing', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [10, 40]
+  w.usage['tok-2'] = [10, 20]
+  let isFailing = true
+  on('state.set', async (_$, e, next) => {
+    const { key } = e as unknown as { key: string }
+    if (key === 'view' && isFailing) return { deny: 'the view cannot be written' }
+    return next(e)
+  })
+  const store = new Map<string, unknown>(Object.entries(LOGIN1_WEEK))
+  const clock = world(on, w, store)
+  await start($, clock)
+  expect(w.logged?.some(line => line.includes('start failed'))).toBe(true)
+  isFailing = false
+  await untilTick(clock)
+  await respondWeek($, w, clock, 45)
+  const call = bashCall($, w, USE_COMMAND)
+  w.files[`${REQUESTS}/${N1}.json`] = useRequest(N1, '2', 'store-test', clock.now(), ownMark(w))
+  await beat(clock)
+  expect([weekPct(store) === 45, resultOf(w, N1), w.envSets]).toEqual([false, undefined, []])
+  await call.finish()
+})
+
+// Review R1 F1 (Codex, #72 round 1) [READING-WRONG-LOGIN]: a response in the window between a reset and
+// classic.SessionStart binds the view first, which gives back a switch in flight; the switch settles on that response,
+// so its reading is never stored under the target while the switch is unproven.
+async function responseInResetWindow($: Engine, on: On, source: 'clear' | 'resume' | 'fork') {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.failing = { 'tok-1': 429 }
+  w.usage['tok-2'] = [10, 20]
+  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off' }))
+  const s = clearable(on)
+  on('classic.SessionStart', () => ({}))
+  const clock = world(on, w, store)
+  await start($, clock)
+  await useNow($, clock, '2')
+  if (source !== 'fork') await endSession($, clock, source)
+  s.clear()
+  await clock.advance(40_000)
+  await respondWeek($, w, clock, 45)
+  return { store, view: s.view() }
+}
+
+test('Review R1 F1 instance: a response before the /clear rebind cannot store an unproven target reading', async ($, on) => {
+  const { store } = await responseInResetWindow($, on, 'clear')
+  expect(storedOf(store, '2')?.sevenDay?.pct, 'the clear window stored an unproven target response under login 2').not.toBe(45)
+})
+
+// The class: each reset source, in a world of its own, since the first response settles the switch.
+for (const source of ['clear', 'resume', 'fork'] as const) {
+  test(`Review R1 F1 class: a response before the ${source} rebind cannot store an unproven target reading`, async ($, on) => {
+    const { store } = await responseInResetWindow($, on, source)
+    expect(storedOf(store, '2')?.sevenDay?.pct, `the ${source} window stored an unproven target response under login 2`).not.toBe(45)
+  })
+}
 
 test('Review RESET-RM-ACTIVE instance: rm during a clear window cannot sign out the account this session uses', async ($, on) => {
   const w = fresh()
