@@ -2021,7 +2021,6 @@ function actions($: Host): Actions {
   }
 }
 
-/** First run makes the normal login number 1; then: which login this session uses, and Claude in Chrome connected as the extension's account. */
 /**
  * The view's account in use, from the slot this session runs on, and its session id, after the store's merge; returns
  * the slot. `boot` runs it at the start, and the classic.SessionStart hook again after /clear, /resume and /branch, which
@@ -2059,6 +2058,7 @@ async function rebindSession($: Host): Promise<void> {
   if (mark !== undefined && mark !== '') await setView($, v => ({ ...v, sessionMark: mark }))
 }
 
+/** First run makes the normal login number 1; then: which login this session uses, and Claude in Chrome connected as the extension's account. */
 async function boot($: Host, isInteractive: boolean): Promise<void> {
   // Terminal.app is the terminal that names itself so and draws block characters from its font.
   const hasFontBlocks = (await $.env.get('TERM_PROGRAM')) === 'Apple_Terminal'
