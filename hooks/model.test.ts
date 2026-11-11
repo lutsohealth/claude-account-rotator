@@ -1035,7 +1035,7 @@ test('a failure older than the last good read is past: line 1 says when the good
 })
 
 test('a check that threw says (check failed), and the error\'s kind stays in the debug log', () => {
-  const v = rowView({ checkErrors: { '1': { why: 'the check failed (TypeError); the debug log has the rest', at: FAILED_AT } } })
+  const v = rowView({ checkErrors: { '1': { why: 'the check failed (TypeError); the debug log has the rest', at: FAILED_AT } }, nextAt: { '1': NEXT_AT } })
   expect(rowLines(v)[0]).toBe('andres@lutsohealth.com · Company · Ultra  18:39 Failed to update (check failed)')
 })
 
@@ -1233,12 +1233,38 @@ test('a failed row too wide for the pane cuts its cause to the short form before
 // Review C8-R1 Opus advisory [STATUS-OF-ANOTHER-CALL] (RULING 4525, 4538): the row's HTTP status is the usage call's.
 test('a failure of the profile call says (profile HTTP 403): the status is the profile call\'s, never the usage call\'s', () => {
   const profile = { why: 'the profile call answered HTTP 403, so its usage is not read until it names the sign-in', at: FAILED_AT }
-  expect(rowLines(rowView({ checkErrors: { '1': profile } }))[0]).toBe('andres@lutsohealth.com · Company · Ultra  18:39 Failed to update (profile HTTP 403)')
+  // The schedule holds the usage read's next try; the 10-minute check retries the profile call, at a time no stored value holds.
+  expect(rowLines(rowView({ checkErrors: { '1': profile }, nextAt: { '1': NEXT_AT } }))[0]).toBe('andres@lutsohealth.com · Company · Ultra  18:39 Failed to update (profile HTTP 403)')
 })
 
-test('a profile answer that names no email says so', () => {
+test('a profile answer that names no email says so, and names no next try though the usage schedule has one', () => {
   const why = 'the profile answer named no email, so its usage is not read until it names the sign-in'
-  expect(rowLines(rowView({ checkErrors: { '1': { why, at: FAILED_AT } } }))[0]).toBe('andres@lutsohealth.com · Company · Ultra  18:39 Failed to update (profile named no email)')
+  expect(rowLines(rowView({ checkErrors: { '1': { why, at: FAILED_AT } }, nextAt: { '1': NEXT_AT } }))[0]).toBe('andres@lutsohealth.com · Company · Ultra  18:39 Failed to update (profile named no email)')
+})
+
+test('a failure no writer words stays a bare Failed to update, with no next try though the schedule has one', () => {
+  const v = rowView({ checkErrors: { '1': { why: 'the usage call failed to connect', at: FAILED_AT } }, nextAt: { '1': NEXT_AT } })
+  expect(rowLines(v)[0]).toBe('andres@lutsohealth.com · Company · Ultra  18:39 Failed to update')
+})
+
+test('a run-out row keeps its wait when the pane is narrow: only the cause\'s label shortens', () => {
+  const why = 'its token has run out and no session has refreshed it, so its usage is not read until one does'
+  const v = rowView({ checkErrors: { '1': { why, at: FAILED_AT } }, nextAt: { '1': NEXT_AT } })
+  const line = fitted(v, 64).lines[0] ?? ''
+  expect(line).toBe('an…om · C… · Ultra  18:39 Failed to update (waits for a session)')
+  expect([...line].length).toBeLessThanOrEqual(64)
+})
+
+test('every cause\'s short form keeps what the row needs: the status, the call, or the wait for a session', () => {
+  const whys: [string, string, string][] = [
+    ['the usage call answered HTTP 429 (retry after 60 s)', '(429), next try 18:45', 'usage'],
+    ['the profile call answered HTTP 403, so its usage is not read until it names the sign-in', '(profile 403)', 'profile status'],
+    ['the profile answer named no email, so its usage is not read until it names the sign-in', '(profile no email)', 'profile email'],
+    ['the check failed (TypeError); the debug log has the rest', '(check error)', 'thrown check'],
+    ['its token has run out and no session has refreshed it, so its usage is not read until one does', '(waits for a session)', 'run-out token'],
+  ]
+  const shown = whys.map(([why, , name]) => [name, fitted(rowView({ checkErrors: { '1': { why, at: FAILED_AT } }, nextAt: { '1': NEXT_AT } }), 64).lines[0]?.split('18:39 ')[1]])
+  expect(shown).toEqual(whys.map(([, end, name]) => [name, `Failed to update ${end}`]))
 })
 
 test('the account the Chrome extension is signed in to says Chrome after its plan', () => {

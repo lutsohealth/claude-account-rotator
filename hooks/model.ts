@@ -985,28 +985,30 @@ function usedParts(label: string, w: UsageWindow | undefined, now: number): RowP
   return [{ text: `${label} ` }, { text: `${longBar(used)} ${used}%`, used }]
 }
 
-/** Why a read failed, as a row says it: `text` in full, `short` for a narrow pane; `hasNext` where the schedule's next read is tried. */
+/**
+ * Why a read failed, as a row says it: `text` in full, `short` for a narrow pane, which keeps what the row needs (the
+ * status, the call, the wait for a session). `hasNext` where `usage-due:<id>.next` is the next try of what failed.
+ */
 type Cause = { text: string; short: string; hasNext: boolean }
 
-const RUN_OUT = ' (token run out), until a session refreshes its token'
-
 /**
- * The cause in a failure's why, which the writers of `check-error:<id>` word (hooks/register.tsx): each call's status
- * is that call's own. A why no writer words has none. A run-out token is read again only once a session refreshes it,
- * so the schedule's time on that row would move forward with nothing tried.
+ * The cause in a failure's why, which the writers of `check-error:<id>` word (hooks/register.tsx). The schedule
+ * `usage-due:<id>.next` retries the usage read alone, so only that cause names it. The profile call and a thrown check
+ * are tried again by the 10-minute check (checkAll), a run-out token once a session refreshes it: no stored time says
+ * when, so those rows name none. A why no writer words has no cause and no time.
  */
 function causeOf(why: string): Cause | undefined {
   const status = (call: RegExp) => call.exec(why)?.[1]
   const [usage, profile] = [status(/usage call answered HTTP (\d{3})/), status(/profile call answered HTTP (\d{3})/)]
   if (usage !== undefined) return { text: ` (HTTP ${usage})`, short: ` (${usage})`, hasNext: true }
-  if (profile !== undefined) return { text: ` (profile HTTP ${profile})`, short: ` (profile ${profile})`, hasNext: true }
-  if (why.startsWith('the profile answer named no email')) return { text: ' (profile named no email)', short: ' (no email)', hasNext: true }
-  if (why.startsWith('its token has run out')) return { text: RUN_OUT, short: ' (token run out)', hasNext: false }
-  if (why.startsWith('the check failed')) return { text: ' (check failed)', short: ' (error)', hasNext: true }
+  if (profile !== undefined) return { text: ` (profile HTTP ${profile})`, short: ` (profile ${profile})`, hasNext: false }
+  if (why.startsWith('the profile answer named no email')) return { text: ' (profile named no email)', short: ' (profile no email)', hasNext: false }
+  if (why.startsWith('its token has run out')) return { text: ' (token run out), until a session refreshes its token', short: ' (waits for a session)', hasNext: false }
+  if (why.startsWith('the check failed')) return { text: ' (check failed)', short: ' (check error)', hasNext: false }
   return undefined
 }
 
-/** A failed read's line 1 end: its time, its cause, and the next try where the schedule gives one. */
+/** A failed read's line 1 end: its time, its cause, and the next try where the schedule is the failed read's own. */
 function failedParts(failure: CheckError, nextAt: number | undefined, timeZone: string | undefined): RowPart[] {
   const tone = 'warning' as const
   const cause = causeOf(failure.why)
@@ -1014,7 +1016,7 @@ function failedParts(failure: CheckError, nextAt: number | undefined, timeZone: 
   return [
     { text: `${clockText(failure.at, timeZone)}${failed}`, tone, runs: [{ clock: failure.at }, failed] },
     ...(cause === undefined ? [] : [{ text: cause.text, tone, shrink: 'cause' as const, short: cause.short }]),
-    ...(nextAt === undefined || cause?.hasNext === false ? [] : [{ text: `, next try ${clockText(nextAt, timeZone)}`, tone, runs: [', next try ', { clock: nextAt }] }]),
+    ...(nextAt === undefined || cause?.hasNext !== true ? [] : [{ text: `, next try ${clockText(nextAt, timeZone)}`, tone, runs: [', next try ', { clock: nextAt }] }]),
   ]
 }
 

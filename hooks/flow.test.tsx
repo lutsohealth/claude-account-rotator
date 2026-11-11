@@ -4972,7 +4972,9 @@ for (const status of [429, 500, 401]) {
     expect(callsWith(w, 'tok-2')).toBe(0)
     expect((store.get('check-error:2') as { why?: string } | undefined)?.why).toMatch(new RegExp(`profile call answered HTTP ${status}`))
     // The row says the update failed and names the profile call's status, which is not the usage call's.
-    expect(lineOne(store, '2')).toMatch(new RegExp(`  \\d\\d:\\d\\d Failed to update \\(profile HTTP ${status}\\)(, next try \\d\\d:\\d\\d)?$`))
+    expect(lineOne(store, '2')).toMatch(new RegExp(`  \\d\\d:\\d\\d Failed to update \\(profile HTTP ${status}\\)$`))
+    // The released claim holds the usage read's next try; the profile call is tried again by the 10-minute check, so the row names none.
+    expect(store.get('usage-due:2')).toHaveProperty('next')
   })
 }
 
