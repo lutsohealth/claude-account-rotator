@@ -956,6 +956,17 @@ async function requestUsage($: Host, account: Account, accessToken: string, gate
   return usage
 }
 
+/**
+ * A claimed read the check did not make (a token not live, a sign-in not named, a throw) gives its claim back, so no
+ * claim stands unanswered: the login is next due as an idle one, with no back-off and its last good read's time kept.
+ */
+async function releaseClaim($: Host, id: string): Promise<void> {
+  const key = `usage-due:${id}`
+  const due = usageDueFrom(await $.store.get(key))
+  if (due?.claim !== ((await getView($)).sessionId ?? SELF)) return
+  await $.store.set(key, afterUsage(due, { kind: 'empty', hasResponded: false }, await $.clock.now()))
+}
+
 /** Why a failed usage call failed, as the pane says it: its status, and the wait its Retry-After asked for. */
 const failedWhy = (usage: { status: number; retryAfter?: number }): string =>
   `the usage call answered HTTP ${usage.status}${usage.retryAfter === undefined ? '' : ` (retry after ${Math.round(usage.retryAfter / 1000)} s)`}`
@@ -998,6 +1009,9 @@ async function checkAccount($: Host, account: Account, gate: UsageGate): Promise
           await saveReading($, account.id, { ...keepFable(reading, await ownedReading($, account.id), now), by: account.id }, 'body')
         }
       }
+    } else if (!isLive && gate === 'claimed' && (await storedReading($, account.id)) !== undefined) {
+      // The reading stands unrefreshed, so the row says so; with a reading the login stays in the pick, as before.
+      await saveCheckError($, account.id, 'its token has run out and no session has refreshed it, so its usage is not read until one does')
     }
   }
   const before = await saveHealth($, account.id, health)
@@ -1029,6 +1043,7 @@ async function checkAll($: Host, isEvery = true): Promise<void> {
       const kind = error instanceof Error ? error.name : 'an error'
       await saveCheckError($, account.id, `the check failed (${kind}); the debug log has the rest`).catch(() => undefined)
     }
+    if (ours.has(account.id)) await releaseClaim($, account.id).catch(error => debug($, `releasing account ${account.id}'s usage claim failed: ${String(error)}`))
   }
   // The rows carry what this check read, for a session that ends before the next merge: maybeRotate's launch pick
   // merges first, which writes them from the store as it stands, where every save went first and another session's
