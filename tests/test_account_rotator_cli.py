@@ -641,6 +641,11 @@ class ContinueText(RequestCase):
         self.assertTrue(corpus)
         self.assertEqual(offenders, {})
 
+    def test_review_r1_a_request_utf_8_cannot_hold_is_written_escaped_as_before(self) -> None:
+        cli = load_cli()
+        request = {"kind": "add", "slot": "/accounts/\udcff", "text": "😀"}
+        self.assertEqual((cli.request_text(request), cli.request_text({"text": "😀"})), (json.dumps(request), '{"text": "😀"}'))
+
     def test_review_r1_a_line_that_is_not_utf_8_exits_2_before_any_request(self) -> None:
         # A lone surrogate: what Python makes of argv bytes that are not UTF-8.
         self.assertEqual(self.written("ok \udcff"), (2, None))

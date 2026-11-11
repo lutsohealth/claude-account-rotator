@@ -63,6 +63,8 @@ SLOT_VAR = "CLAUDE_SECURESTORAGE_CONFIG_DIR"
 OLDER_NOTE = "an older version of the mod stored some rows as text, their times as of when it wrote them"
 # hooks/model.ts CONTINUE_TEXT_MAX: the longest line, once trimmed, a session sends after a Fable switch.
 CONTINUE_TEXT_MAX = 500
+# What JavaScript's String.prototype.trim() takes off each end: Python's whitespace and U+FEFF.
+JS_TRIM = re.compile(r"^[\s﻿]+|[\s﻿]+$")
 EXITS = (
     "Exit 0 done, 1 no store or a damaged one or a folder or request it cannot write, 2 a usage error (an unknown flag or verb, --agent not claude, an --account"
     " that names no account or several, a --wait not above 0 and at most 300, use outside a session of the mod, rm of Claude Code's own login, add with no terminal,"
@@ -293,6 +295,17 @@ def sweep(folder: str) -> None:
             pass
 
 
+def request_text(request: dict) -> str:
+    """A request as JSON in UTF-8, not \\u escapes, so a line of 500 emoji stays under the session's REQUEST_MAX_BYTES.
+    A value UTF-8 cannot hold (a lone surrogate from argv bytes that are not UTF-8) keeps the escaped form."""
+    text = json.dumps(request, ensure_ascii=False)
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return json.dumps(request)
+    return text
+
+
 def ask(folder: str, request: dict, wait_s: float) -> dict | None:
     """Writes a request whole, by a rename, and waits for its answer; the request is withdrawn on every way out."""
     path = os.path.join(folder, f"{request['nonce']}.json")
@@ -300,7 +313,7 @@ def ask(folder: str, request: dict, wait_s: float) -> dict | None:
         os.makedirs(folder, exist_ok=True)
         sweep(folder)
         with open(f"{path}.tmp", "w", encoding="utf-8") as f:
-            json.dump(request, f)
+            f.write(request_text(request))
         os.replace(f"{path}.tmp", path)
         return answer(folder, request["nonce"], wait_s)
     finally:
@@ -376,8 +389,13 @@ def select(data: dict, store: str, given: str, wait_s: float, as_json: bool) -> 
 
 
 def continue_text_given(given: str) -> str:
-    """The line `--set` gives, trimmed, as the mod keeps it: refused here, before any request, when the mod would refuse it."""
-    text = given.strip()
+    """The line `--set` gives, trimmed, as the mod keeps it: refused here, before any request, when the mod would refuse it.
+    It trims what JavaScript's trim() trims (Python's whitespace and U+FEFF) and counts code points, as the mod does."""
+    text = JS_TRIM.sub("", given)
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        raise UsageError("--set: the line after a Fable switch is UTF-8 text, and this holds bytes that are not; or pass --clear, or see --help") from None
     if not 0 < len(text) <= CONTINUE_TEXT_MAX:
         raise UsageError(f"--set: the line after a Fable switch is text of 1 to {CONTINUE_TEXT_MAX} characters once trimmed, and this is {len(text)}; or pass --clear, or see --help")
     return text

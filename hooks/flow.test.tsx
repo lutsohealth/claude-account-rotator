@@ -7030,6 +7030,14 @@ test('Review R2 class: every request file that does not parse gets a refusal, an
   expect([offenders, store.get('fable-continue-text')]).toEqual([[], 'Keep this.'])
 })
 
+test('Review R2, the other side: a file that does not parse and whose name is no nonce the CLI writes gets no result', async ($, on) => {
+  const { w, clock } = await fableReady($, on, {})
+  w.files[`${REQUESTS}/short.json`] = '{"kind":'
+  w.files[`${REQUESTS}/${N1}.json`] = '{"kind":'
+  await clock.advance(60_000)
+  expect([w.files[`${REQUESTS}/short.result.json`], resultOf(w, N1)?.ok]).toEqual([undefined, false])
+})
+
 // Review R3 (Codex, #70 round 1) [CHARACTER-COUNT-MISMATCH]: the CLI counts code points (Python len), so the session
 // counts the same, never UTF-16 units: a line of 251 to 500 astral characters is taken on both sides.
 test('Review R3: a line of 251 emoji, which the CLI takes, is taken by the session', async ($, on) => {
@@ -7092,13 +7100,14 @@ test('a request read from another store, a stale one, one whose nonce is not its
 })
 
 // Review C11-R1 F8 (Opus) [UNPINNED-GUARD] (RULING 4607): the survivors in the session's half.
-test('a request file that does not parse, or one no read can reach, is passed over and the next is applied', async ($, on) => {
+// Review R2 (Codex, #70 round 1): a file that does not parse is answered with a refusal, no longer passed over unanswered.
+test('a request file that does not parse is refused, one no read can reach is passed over, and the next is applied', async ($, on) => {
   const { w, store, clock } = await selectWorld($, on)
   w.files[`${REQUESTS}/torn-00001.json`] = '{"kind": "sel'
   w.files[`${REQUESTS}/noread-001.json`] = null
   w.files[`${REQUESTS}/${N1}.json`] = selectRequest(N1, '2', store.get('store-id'), clock.now())
   await clock.advance(60_000)
-  expect([store.get('launch-on'), resultOf(w, 'torn-00001'), resultOf(w, 'noread-001'), resultOf(w, N1)?.ok]).toEqual(['account:2', undefined, undefined, true])
+  expect([store.get('launch-on'), resultOf(w, 'torn-00001')?.ok, resultOf(w, 'noread-001'), resultOf(w, N1)?.ok]).toEqual(['account:2', false, undefined, true])
 })
 
 test('a select while no login has room says new sessions start on Claude Code\'s login, and names no pick', async ($, on) => {
