@@ -5462,6 +5462,35 @@ test('Review SESSION-STATE-SOURCE isFableStopped: after /clear a session whose t
   expect(['isFableStopped before, after /clear', before, s.view()?.isFableStopped]).toEqual(['isFableStopped before, after /clear', true, true])
 })
 
+// The undo of a provisional Fable stop clears the band: /clear brings back the cleared band, not the stop's.
+test('Review SESSION-STATE-SOURCE isFableStopped: a Fable stop undone by Use now stays undone after /clear', async ($, on) => {
+  const s = clearable(on)
+  on('classic.SessionStart', () => ({}))
+  const { clock } = await stopDuringSwitch($, on, 40_000, FABLE_STOP.last_assistant_message)
+  const stopped = s.view()?.isFableStopped
+  await useNow($, clock, '1')
+  const undone = s.view()?.isFableStopped
+  await clearSession($, clock, s.clear)
+  expect(['isFableStopped at the stop, after the undo, after /clear', stopped, undone, s.view()?.isFableStopped]).toEqual(['isFableStopped at the stop, after the undo, after /clear', true, false, false])
+})
+
+// The slot a switch set, not the variable read again: the kit's $.env.get answers the start's value after a set.
+test('Review SESSION-STATE-SOURCE slot: after Use now moves the session to login 2, /clear keeps login 2 in use', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [10, 40]
+  w.usage['tok-2'] = [10, 41]
+  const s = clearable(on)
+  const clock = world(on, w, new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off' })))
+  on('classic.SessionStart', () => ({}))
+  await start($, clock)
+  await useNow($, clock, '2')
+  const moved = s.view()?.activeId
+  await clearSession($, clock, s.clear)
+  expect(['activeId after Use now, after /clear', moved, s.view()?.activeId]).toEqual(['activeId after Use now, after /clear', '2', '2'])
+})
+
 test('Review F3 instance: a session whose mark was refused does not take its parent session\'s mark after /clear', async ($, on) => {
   const w = fresh()
   w.env = { CLAUDE_SECURESTORAGE_CONFIG_DIR: SLOT2, ACCOUNT_ROTATOR_SESSION: 'parent-session-mark' }
