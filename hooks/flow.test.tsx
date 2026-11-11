@@ -4523,6 +4523,22 @@ test('a claimed read of a login whose token has run out releases its claim, and 
   expect(lineOne(store, '2')).toMatch(/ Failed to update$/)
 })
 
+test('a login whose token has run out and that has no reading saves no failure for its skipped read, so it stays in the pick', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2', NOW - HOUR)
+  w.usage['tok-1'] = [10, 20]
+  const store = new Map<string, unknown>(Object.entries(TWO_LOGINS))
+  const clock = world(on, w, store)
+  await start($, clock)
+  expect(store.get('check-error:2')).toBeUndefined()
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  await pane.press({ key: 'rotate' })
+  await clock.settle()
+  expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
+  await pane.unmount()
+})
+
 /** A response's rate limits: the 5-hour window and the week, in percent used, and when the week resets. */
 const limitsOf = (five: number, week: number, weekReset = '2026-10-18T03:00:00Z'): SessionRateLimit[] => [
   { kind: 'five_hour', percentUsed: five, resetsAt: '2026-10-12T12:00:00Z' },
