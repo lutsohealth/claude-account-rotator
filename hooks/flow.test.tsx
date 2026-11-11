@@ -5233,6 +5233,40 @@ for (const reason of ['clear', 'resume']) {
   }
 }
 
+// puma-9arph.3: /clear, /resume and /branch reset $.state to its defaults and session.start does not fire again, so the
+// view's account in use fell back to login 1. classic.SessionStart fires after each, with source clear, resume or fork.
+// Each test starts with $.state at its defaults, as those commands leave it.
+for (const source of ['clear', 'resume', 'fork'] as const) {
+  test(`after ${source}, the session's own login is in use again and its mark is back`, async ($, on) => {
+    const w = fresh()
+    w.env = { CLAUDE_SECURESTORAGE_CONFIG_DIR: SLOT2, ACCOUNT_ROTATOR_SESSION: 'session-mark-7' }
+    const view = watchedView(on)
+    const clock = world(on, w, TWO_LOGINS)
+    on('classic.SessionStart', () => ({}))
+    await $.classic.SessionStart({ source })
+    await clock.settle()
+    expect([source, view()?.activeId, view()?.sessionMark]).toEqual([source, '2', 'session-mark-7'])
+    const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+    const ends = (await pane.findAll({ text: /^(Remove|Use now|● in use)$/ })).filter(e => e.type !== 'Box')
+    expect([source, ends.map(e => e.text)]).toEqual([source, ['Use now', 'Remove', '● in use']])
+    await pane.unmount()
+  })
+}
+
+// The start and a compaction keep $.state: the hook leaves the view alone for them.
+for (const source of ['startup', 'compact'] as const) {
+  test(`classic.SessionStart for ${source} writes nothing to the view`, async ($, on) => {
+    const w = fresh()
+    w.env = { CLAUDE_SECURESTORAGE_CONFIG_DIR: SLOT2, ACCOUNT_ROTATOR_SESSION: 'session-mark-7' }
+    const view = watchedView(on)
+    const clock = world(on, w, TWO_LOGINS)
+    on('classic.SessionStart', () => ({}))
+    await $.classic.SessionStart({ source })
+    await clock.settle()
+    expect([source, view()]).toEqual([source, undefined])
+  })
+}
+
 // [UNDO-OWNERSHIP]: what the stop's own usage read stored is the login's, not the stop's: it stands after the revert.
 test('the usage read a stop makes 90 s into an unproven switch stands once the stop is reverted', async ($, on) => {
   const { store, clock } = await stopDuringSwitch($, on, 90_000, "You've hit your session limit", undefined, { 'tok-2': [null, 41] })
