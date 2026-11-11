@@ -16,12 +16,11 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-import time
 
 # The store module stands beside this file. Run as a script, Python puts the file's own folder first on sys.path,
 # links resolved; this line is for a loader that does not.
 sys.path.insert(0, os.path.dirname(__file__))
-from account_rotator_store import STORE_GLOB, StoreError, is_instant, read  # noqa: E402
+from account_rotator_store import STORE_GLOB, StoreError, read, same_pick_since  # noqa: E402
 
 
 def main() -> int:
@@ -41,10 +40,8 @@ def main() -> int:
     if not isinstance(pick, dict) or not isinstance(pick.get("slot"), str) or not isinstance(pick.get("id"), str):
         print("account-rotator-launch: no pick stored (no account has room on every limit, or no session of this version has run); a new session starts on Claude Code's login", file=sys.stderr)
         return 1
-    age = ""
-    if is_instant(pick.get("at")):
-        age = f", picked {round((time.time() * 1000 - pick['at']) / 60000)} min ago"
-    print(f"account-rotator: new session starts on account {pick['id']} ({pick.get('why', 'the setting picked it')}{age})", file=sys.stderr)
+    since = same_pick_since(pick.get("at"))
+    print(f"account-rotator: new session starts on account {pick['id']} ({pick.get('why', 'the setting picked it')}{', ' + since if since else ''})", file=sys.stderr)
     print(pick["slot"])
     return 0
 

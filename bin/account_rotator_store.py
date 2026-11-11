@@ -11,6 +11,7 @@ from __future__ import annotations
 import glob
 import json
 import os
+from datetime import datetime, tzinfo
 
 STORE_GLOB = "account-rotator_claude-account-rotator-*.json"
 
@@ -25,6 +26,16 @@ class StoreError(Exception):
 def is_instant(value: object) -> bool:
     """Whether a stored value is a time the mod writes: epoch milliseconds a Python datetime can render."""
     return isinstance(value, (int, float)) and not isinstance(value, bool) and 0 <= value <= MAX_INSTANT_MS
+
+
+def clock_text(at_ms: float, zone: tzinfo | None) -> str:
+    """HH:MM on a 24-hour clock in `zone`, else in this machine's own: hooks/model.ts clockText."""
+    return datetime.fromtimestamp(at_ms / 1000, zone).strftime("%H:%M")
+
+
+def same_pick_since(at_ms: object, zone: tzinfo | None = None) -> str:
+    """How both bins say since when new sessions have started on the same account, in `zone` or this machine's own; empty where no time is stored."""
+    return f"the same pick since {clock_text(at_ms, zone)}" if is_instant(at_ms) else ""
 
 
 def config_folder() -> str:

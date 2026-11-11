@@ -1,4 +1,4 @@
-import type { Account, Fill, FiveHourLimit, FooterStyle, Glyphs, Health, Highlight, LaunchOn, LaunchPick, Mark, PlanTier, Reading, RotateTo, RotatorRequest, Row, RowPart, StoredRows, StoredRun, UsageDue, UsageWindow, View } from '../types'
+import type { Account, CheckError, Fill, FiveHourLimit, FooterStyle, Glyphs, Health, Highlight, LaunchOn, LaunchPick, Mark, PlanTier, Reading, RotateTo, RotatorRequest, Row, RowPart, StoredRows, StoredRun, UsageDue, UsageWindow, View } from '../types'
 
 /** Leave a login once its 5-hour window is this full (percent). */
 export const LEAVE_FIVE_HOUR = 90
@@ -985,26 +985,61 @@ function usedParts(label: string, w: UsageWindow | undefined, now: number): RowP
   return [{ text: `${label} ` }, { text: `${longBar(used)} ${used}%`, used }]
 }
 
-/** The HTTP status in a failure's why, where the usage call answered it: another call's status is not the update's. */
-const HTTP_STATUS = /usage call answered HTTP (\d{3})/
+/**
+ * Why a read failed, as a row says it: `forms` the cause in full, then in the shorter forms a narrow pane takes, each
+ * keeping what the row needs (the status, the call, the wait for a session). `hasNext` where `usage-due:<id>.next` is
+ * the next try of what failed.
+ */
+type Cause = { forms: string[]; hasNext: boolean }
 
 /**
- * Line 1's end: a sign-in needed; else a failed check no older than the last good read, at its time; else the last
- * good read's time, while a reading stands. With no good read known and no failure, nothing.
+ * The cause in a failure's why, which the writers of `check-error:<id>` word (hooks/register.tsx). The schedule
+ * `usage-due:<id>.next` retries the usage read alone, and requestUsage stores its back-off for a usage call that
+ * answered a failure or threw, so only those causes name it. The profile call and a check that threw elsewhere are
+ * tried again by the 10-minute check (checkAll), a run-out token once a session refreshes it: no stored time says
+ * when, so those rows name none. A why no writer words has no cause and no time.
  */
-function statePart(view: View, a: Account, timeZone: string | undefined): RowPart | undefined {
-  if (view.health[a.id]?.kind === 'login-needed') return { text: '⚠ sign in needed', tone: 'warning' }
+function causeOf(why: string): Cause | undefined {
+  const status = (call: RegExp) => call.exec(why)?.[1]
+  const [usage, profile] = [status(/usage call answered HTTP (\d{3})/), status(/profile call answered HTTP (\d{3})/)]
+  if (usage !== undefined) return { forms: [` (HTTP ${usage})`, ` (${usage})`], hasNext: true }
+  if (why.startsWith('the usage call threw')) return { forms: [' (usage call threw)', ' (usage error)', ' (error)'], hasNext: true }
+  if (profile !== undefined) return { forms: [` (profile HTTP ${profile})`, ` (profile ${profile})`], hasNext: false }
+  if (why.startsWith('the profile answer named no email')) return { forms: [' (profile named no email)', ' (profile no email)', ' (no email)'], hasNext: false }
+  if (why.startsWith('its token has run out')) return { forms: [' (token run out), until a session refreshes its token', ' (waits for a session)', ' (needs a session)'], hasNext: false }
+  if (why.startsWith('the check failed')) return { forms: [' (check failed)', ' (check error)', ' (error)'], hasNext: false }
+  return undefined
+}
+
+/** A failed read's line 1 end: its time, its cause, and the next try where the schedule is the failed read's own. */
+function failedParts(failure: CheckError, nextAt: number | undefined, timeZone: string | undefined): RowPart[] {
+  const tone = 'warning' as const
+  const cause = causeOf(failure.why)
+  const failed = ' Failed to update'
+  const next = nextAt === undefined ? undefined : clockText(nextAt, timeZone)
+  return [
+    { text: `${clockText(failure.at, timeZone)}${failed}`, tone, runs: [{ clock: failure.at }, failed] },
+    ...(cause === undefined ? [] : [{ text: cause.forms[0] ?? '', tone, shrink: 'cause' as const, forms: cause.forms }]),
+    ...(next === undefined || nextAt === undefined || cause?.hasNext !== true
+      ? []
+      : [{ text: `, next try ${next}`, tone, shrink: 'next' as const, forms: [`, next try ${next}`, `, next ${next}`], runs: [', next try ', { clock: nextAt }] }]),
+  ]
+}
+
+/**
+ * Line 1's end: a sign-in needed; else a failed check no older than the last good read, at its time, with its cause
+ * and next try; else the last good read's time, while a reading stands. With no good read known and no failure,
+ * nothing.
+ */
+function statePart(view: View, a: Account, timeZone: string | undefined): RowPart[] {
+  if (view.health[a.id]?.kind === 'login-needed') return [{ text: '⚠ sign in needed', tone: 'warning' }]
   const readAt = view.readAt?.[a.id]
   const failure = view.checkErrors?.[a.id]
   // A good read clears the failure, so one standing at the good read's own millisecond came after it.
-  if (failure !== undefined && (readAt === undefined || failure.at >= readAt)) {
-    const status = HTTP_STATUS.exec(failure.why)?.[1]
-    const failed = ` Failed to update${status === undefined ? '' : ` (HTTP ${status})`}`
-    return { text: `${clockText(failure.at, timeZone)}${failed}`, tone: 'warning', runs: [{ clock: failure.at }, failed] }
-  }
+  if (failure !== undefined && (readAt === undefined || failure.at >= readAt)) return failedParts(failure, view.nextAt?.[a.id], timeZone)
   // A time over no reading would name a read the row cannot show.
-  if (readAt === undefined || view.readings[a.id] === undefined) return undefined
-  return { text: `updated ${clockText(readAt, timeZone)}`, runs: ['updated ', { clock: readAt }] }
+  if (readAt === undefined || view.readings[a.id] === undefined) return []
+  return [{ text: `updated ${clockText(readAt, timeZone)}`, runs: ['updated ', { clock: readAt }] }]
 }
 
 /** Line 2: the week used, the Fable week used (a dash on Max and Ultra where no body listed it), and the resets ahead. */
@@ -1046,11 +1081,11 @@ export function rowOf(view: View, a: Account, now: number, timeZone?: string): R
   const line1: RowPart[] = [
     { text: who, shrink: 'email' },
     ...(company === undefined ? [] : [{ text: ` · ${company}`, shrink: 'company' as const }]),
-    ...(plan === undefined ? [] : [{ text: ` · ${plan}` }]),
+    ...(plan === undefined ? [] : [{ text: ` · ${plan}`, shrink: 'plan' as const }]),
     ...(view.chromeAccountId === a.id ? [{ text: ' · Chrome' }] : []),
-    ...(state === undefined ? [] : [{ text: '  ' }, state]),
+    ...(state.length === 0 ? [] : [{ text: '  ' }, ...state]),
   ]
-  const isFailed = state?.tone === 'warning' && view.health[a.id]?.kind !== 'login-needed'
+  const isFailed = state[0]?.tone === 'warning' && view.health[a.id]?.kind !== 'login-needed'
   const dim = (line: RowPart[]): RowPart[] => (isFailed ? line.map(p => ({ ...p, tone: 'dim' })) : line)
   const five = fiveHourLine(view, a, now)
   return { id: a.id, lines: [line1, dim(usageLine(view, a, now)), ...(five === undefined ? [] : [dim(five)])] }
@@ -1103,7 +1138,7 @@ export const END_GAP = 2
 /** The cells a line takes, one per character. */
 export const cellsOf = (line: readonly RowPart[]): number => line.reduce((n, p) => n + [...p.text].length, 0)
 
-/** A Company part cut to `cells` (at least ` · X…`), or an email cut in its middle (at least `x…y`), with an ellipsis. */
+/** A Company part cut to `cells` (at least ` · X…`), or an email in its middle (at least `x…y`), with an ellipsis. */
 function cutTo(p: RowPart, cells: number): RowPart {
   const chars = [...p.text]
   if (cells >= chars.length) return p
@@ -1113,15 +1148,34 @@ function cutTo(p: RowPart, cells: number): RowPart {
   return { ...p, text: `${chars.slice(0, head).join('')}…${chars.slice(chars.length - (keep - head)).join('')}` }
 }
 
-/** Line 1 cut to `columns`: the Company first, then the email's middle; the plan and the state never. */
+/** The parts of one kind taking their `n`th form (the last one where they have fewer), or none of their text. */
+const inForm = (line: RowPart[], kind: RowPart['shrink'], n: number | 'gone'): RowPart[] =>
+  line.map(p => {
+    if (p.shrink !== kind) return p
+    const { runs: _runs, ...rest } = p
+    return { ...rest, text: n === 'gone' ? '' : (p.forms?.[Math.min(n, p.forms.length - 1)] ?? p.text) }
+  })
+
+/** The parts of one kind cut by the `over` cells the line is over (cutTo). */
+const cutKind = (line: RowPart[], kind: RowPart['shrink'], over: number): RowPart[] =>
+  line.map(p => (p.shrink === kind ? cutTo(p, [...p.text].length - over) : p))
+
+/**
+ * Line 1 cut to `columns`, one step at a time while it is over: a failed read's cause to its short form and its next
+ * try to a shorter one, the Company, the email's middle, then the cause to its shortest form, the Company and the plan
+ * gone. The time, `Failed to update`, and Chrome's name stay, and so does each cause's word for what the row needs.
+ */
 function fitLine1(line: RowPart[], columns: number): RowPart[] {
-  let fitted = line
-  for (const kind of ['company', 'email'] as const) {
-    const over = cellsOf(fitted) - columns
-    if (over <= 0) return fitted
-    fitted = fitted.map(p => (p.shrink === kind ? cutTo(p, [...p.text].length - over) : p))
-  }
-  return fitted
+  const steps: ((fitted: RowPart[], over: number) => RowPart[])[] = [
+    fitted => inForm(fitted, 'cause', 1),
+    (fitted, over) => cutKind(fitted, 'company', over),
+    (fitted, over) => cutKind(fitted, 'email', over),
+    fitted => inForm(fitted, 'next', 1),
+    fitted => inForm(fitted, 'cause', 2),
+    fitted => inForm(fitted, 'company', 'gone'),
+    fitted => inForm(fitted, 'plan', 'gone'),
+  ]
+  return steps.reduce((fitted, step) => (cellsOf(fitted) > columns ? step(fitted, cellsOf(fitted) - columns) : fitted), line)
 }
 
 /**
