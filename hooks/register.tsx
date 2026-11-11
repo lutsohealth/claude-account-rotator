@@ -908,13 +908,14 @@ const SELF = `module-${Math.random().toString(36).slice(2, 10)}`
  */
 type UsageGate = 'claimed' | 'force' | 'none' | { since: number }
 
-/** Claims, for this session, the read of each login whose schedule says it is due; answers those whose claim stands. */
-async function claimDue($: Host, ids: readonly string[]): Promise<Set<string>> {
+/** Claims, for this session, the read of each login whose schedule says it is due; answers those whose claim stands, and when it claimed them. */
+async function claimDue($: Host, ids: readonly string[]): Promise<{ ours: Set<string>; at: number }> {
   const sessionId = (await getView($)).sessionId ?? SELF
   // The engine reads `$` only as `$.noun.event(...)` at the call site: the store goes over as two calls.
   const store = { get: (key: string) => $.store.get(key), set: (key: string, value: unknown) => $.store.set(key, value) }
   const hasOwnReading = async (id: string) => (await storedReading($, id)) !== undefined
-  return claimDueReads(store, ids, sessionId, await $.clock.now(), () => $.clock.sleep(USAGE_CLAIM_WAIT_MS), hasOwnReading)
+  const at = await $.clock.now()
+  return { ours: await claimDueReads(store, ids, sessionId, at, () => $.clock.sleep(USAGE_CLAIM_WAIT_MS), hasOwnReading), at }
 }
 
 /** The schedule a read leaves when its gate lets it start: this session's claim, from now; undefined when it may not. */
@@ -959,12 +960,17 @@ async function requestUsage($: Host, account: Account, accessToken: string, gate
 /**
  * A claimed read the check did not make (a token not live, a sign-in not named, a throw) gives its claim back, so no
  * claim stands unanswered: the login is next due as an idle one, with no back-off and its last good read's time kept.
+ * Only the claim made at `claimedAt`: a read this session started since (a stop, a /login) renewed it, moving its next.
  */
-async function releaseClaim($: Host, id: string): Promise<void> {
+async function releaseClaim($: Host, id: string, claimedAt: number): Promise<void> {
   const key = `usage-due:${id}`
+  const sessionId = (await getView($)).sessionId ?? SELF
+  // The clock is read first, so nothing but the write itself comes between the store's read and its write.
+  const now = await $.clock.now()
   const due = usageDueFrom(await $.store.get(key))
-  if (due?.claim !== ((await getView($)).sessionId ?? SELF)) return
-  await $.store.set(key, afterUsage(due, { kind: 'empty', hasResponded: false }, await $.clock.now()))
+  const made = claimUsage(due, sessionId, claimedAt)
+  if (due?.claim !== made.claim || due.next !== made.next) return
+  await $.store.set(key, afterUsage(due, { kind: 'empty', hasResponded: false }, now))
 }
 
 /** Why a failed usage call failed, as the pane says it: its status, and the wait its Retry-After asked for. */
@@ -1028,8 +1034,9 @@ async function checkAccount($: Host, account: Account, gate: UsageGate): Promise
 async function checkAll($: Host, isEvery = true): Promise<void> {
   const { accounts } = await getView($)
   let ours = new Set<string>()
+  let claimedAt = NaN
   try {
-    ours = await claimDue($, accounts.map(a => a.id))
+    ;({ ours, at: claimedAt } = await claimDue($, accounts.map(a => a.id)))
   } catch (error) {
     // The sign-in checks still run, login by login: a store that fails a claim reads no usage this time.
     await debug($, `claiming usage reads failed: ${String(error)}`)
@@ -1043,7 +1050,7 @@ async function checkAll($: Host, isEvery = true): Promise<void> {
       const kind = error instanceof Error ? error.name : 'an error'
       await saveCheckError($, account.id, `the check failed (${kind}); the debug log has the rest`).catch(() => undefined)
     }
-    if (ours.has(account.id)) await releaseClaim($, account.id).catch(error => debug($, `releasing account ${account.id}'s usage claim failed: ${String(error)}`))
+    if (ours.has(account.id)) await releaseClaim($, account.id, claimedAt).catch(error => debug($, `releasing account ${account.id}'s usage claim failed: ${String(error)}`))
   }
   // The rows carry what this check read, for a session that ends before the next merge: maybeRotate's launch pick
   // merges first, which writes them from the store as it stands, where every save went first and another session's
