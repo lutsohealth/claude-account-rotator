@@ -30,11 +30,11 @@ export type CheckError = { why: string; at: number }
 
 /**
  * A run of a row's text, and how it is drawn: dim, or as a warning; plain where no tone is named. `used` is a bar's
- * percent used, which colors it by the room left; `shrink` marks the email, the Company and a failed read's cause, which a
- * narrow pane cuts, the cause to its `short` form. `runs` is how `rows` stores a part that holds a time: its text with
- * each time as epoch milliseconds.
+ * percent used, which colors it by the room left; `shrink` marks what a narrow pane cuts: the email, the Company and the
+ * plan, and a failed read's cause and next try, which take the shorter of their `forms`. `runs` is how `rows` stores a
+ * part that holds a time: its text with each time as epoch milliseconds.
  */
-export type RowPart = { text: string; tone?: 'dim' | 'warning'; used?: number; shrink?: 'email' | 'company' | 'cause'; short?: string; runs?: StoredRun[] }
+export type RowPart = { text: string; tone?: 'dim' | 'warning'; used?: number; shrink?: 'email' | 'company' | 'plan' | 'cause' | 'next'; forms?: string[]; runs?: StoredRun[] }
 
 /**
  * A run of a stored row line: text, or a time its reader renders at its own clock and zone: `clock` as HH:MM, `until`

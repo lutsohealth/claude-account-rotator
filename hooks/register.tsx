@@ -927,6 +927,11 @@ function startRead(gate: Exclude<UsageGate, 'none'>, due: UsageDue | undefined, 
   return isAllowed ? claimUsage(due, sessionId, now) : undefined
 }
 
+/** A usage call that threw: requestUsage has stored its back-off and its failure, so the check stores no other. */
+class UsageCallThrew extends Error {
+  name = 'UsageCallThrew'
+}
+
 /**
  * The one way to the usage endpoint: reads a login's usage when its gate lets it, and stores, for every session,
  * when it is next read. The claim is written as the read starts, so it lasts from the read. Undefined when the gate
@@ -949,7 +954,11 @@ async function requestUsage($: Host, account: Account, accessToken: string, gate
   } catch (error) {
     // A call that throws is a failed read: it backs off as one, for every session.
     await $.store.set(key, afterUsage(due, { kind: 'failed' }, await $.clock.now()))
-    throw error
+    // The row says so in the usage call's own words: that back-off is the next try of what failed, which the check's
+    // generic failure would not say. Only the error's kind is stored, as the check's own failure stores.
+    const kind = error instanceof Error ? error.name : 'an error'
+    await saveCheckError($, account.id, `the usage call threw (${kind})`).catch(() => undefined)
+    throw new UsageCallThrew(String(error))
   }
   const at = await $.clock.now()
   // A body that holds no usage the mod reads stores no reading: it is no good read.
@@ -1017,8 +1026,9 @@ async function checkAccount($: Host, account: Account, gate: UsageGate): Promise
           await saveReading($, account.id, { ...keepFable(reading, await ownedReading($, account.id), now), by: account.id }, 'body')
         }
       }
-    } else if (!isLive && gate === 'claimed' && (await storedReading($, account.id)) !== undefined) {
-      // The reading stands unrefreshed, so the row says so; with a reading the login stays in the pick, as before.
+    } else if (!isLive && gate === 'claimed' && ((await storedReading($, account.id)) !== undefined || (await $.store.get(`check-error:${account.id}`)) !== undefined)) {
+      // The reading stands unrefreshed, so the row says so; with a reading the login stays in the pick, as before. A
+      // failure already standing is replaced: its next try would move 30 minutes on each pass with nothing tried.
       await saveCheckError($, account.id, 'its token has run out and no session has refreshed it, so its usage is not read until one does')
     }
   }
@@ -1048,9 +1058,10 @@ async function checkAll($: Host, isEvery = true): Promise<void> {
       await checkAccount($, account, ours.has(account.id) ? 'claimed' : 'none')
     } catch (error) {
       await debug($, `checking account ${account.id} failed: ${String(error)}`)
-      // The error's own text can carry anything a call returned: only its kind leaves the debug log.
+      // The error's own text can carry anything a call returned: only its kind leaves the debug log. A usage call that
+      // threw has stored its own failure, which names its back-off.
       const kind = error instanceof Error ? error.name : 'an error'
-      await saveCheckError($, account.id, `the check failed (${kind}); the debug log has the rest`).catch(() => undefined)
+      if (!(error instanceof UsageCallThrew)) await saveCheckError($, account.id, `the check failed (${kind}); the debug log has the rest`).catch(() => undefined)
     }
     if (ours.has(account.id)) await releaseClaim($, account.id, claimedAt).catch(error => debug($, `releasing account ${account.id}'s usage claim failed: ${String(error)}`))
   }

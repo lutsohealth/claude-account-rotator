@@ -6082,6 +6082,53 @@ test('boot failure refreshes the exported row before the first minute tick', asy
   expect(lineOne(store, '1')).toMatch(new RegExp(`Failed to update \\(HTTP 429\\), next try ${localTime(nextTryAt(store, '1'))}$`))
 })
 
+test('a usage call that throws names its back-off as the next try', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.throwing = ['tok-1']
+  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off' }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  expect(store.get('check-error:1')).toMatchObject({ why: expect.stringMatching(/^the usage call threw \(\w+\)$/) })
+  expect(lineOne(store, '1')).toMatch(new RegExp(`Failed to update \\(usage call threw\\), next try ${localTime(nextTryAt(store, '1'))}$`))
+})
+
+const FAILED_USAGE_CALLS: [string, (w: World) => void][] = [
+  ['a throwing token', w => { w.throwing = ['tok-1'] }],
+  ['a token the usage call answers 429', w => { w.failing = { 'tok-1': 429 } }],
+]
+for (const [name, fail] of FAILED_USAGE_CALLS) {
+  test(`a row names a next try exactly when its schedule holds a failed read's back-off: ${name}`, async ($, on) => {
+    const w = fresh()
+    w.keychain['Claude Code-credentials'] = blob('tok-1')
+    fail(w)
+    const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off' }))
+    const clock = world(on, w, store)
+    await start($, clock)
+    expect((store.get('usage-due:1') as { fails?: number } | undefined)?.fails).toBeGreaterThan(0)
+    expect(lineOne(store, '1')).toMatch(/ next try \d\d:\d\d$/)
+  })
+}
+
+test('a login with a failed read and no reading, whose token has since run out, says it waits for a session, not a next try nothing will take', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2', NOW - HOUR)
+  w.usage['tok-1'] = [10, 20]
+  const store = new Map<string, unknown>(
+    Object.entries({
+      ...TWO_LOGINS,
+      'check-error:2': { why: 'the usage call answered HTTP 429', at: NOW - 2 * HOUR },
+      'usage-due:2': { next: NOW - 1, fails: 2, v: 1 },
+    }),
+  )
+  const clock = world(on, w, store)
+  await start($, clock)
+  await clock.advance(61_000)
+  expect(callsWith(w, 'tok-2')).toBe(0)
+  expect(lineOne(store, '2')).toMatch(/ Failed to update \(token run out\), until a session refreshes its token$/)
+})
+
 // C9 (puma-eslxj.10, problem g part 2): the pane draws each account's row fitted to its body's width, the buttons at
 // the end of the line that holds them, with no id column and no separate failure line.
 

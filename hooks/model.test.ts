@@ -1024,7 +1024,7 @@ test('a failed read newer than the last good one ends line 1 with its time and s
   const [line1, line2] = rowOf(v, ANDRES, ROW_NOW, TALLINN).lines
   expect(line1?.slice(-2)).toEqual([
     { text: '18:39 Failed to update', tone: 'warning', runs: [{ clock: FAILED_AT }, ' Failed to update'] },
-    { text: ' (HTTP 429)', tone: 'warning', shrink: 'cause', short: ' (429)' },
+    { text: ' (HTTP 429)', tone: 'warning', shrink: 'cause', forms: [' (HTTP 429)', ' (429)'] },
   ])
   expect(line2?.map(p => p.tone)).toEqual(line2?.map(() => 'dim'))
   expect(rowOf(rowView(), ANDRES, ROW_NOW, TALLINN).lines[1]?.some(p => p.tone === 'dim')).toBe(false)
@@ -1050,7 +1050,7 @@ test('a failed row names the next try, the time its schedule gives, in the zone\
   expect(rowLines(v)[0]).toBe(FAILED_NEXT_L1)
   expect(rowLines(v, 'UTC')[0]).toBe('andres@lutsohealth.com · Company · Ultra  16:39 Failed to update (HTTP 429), next try 16:45')
   const [line1] = rowOf(v, ANDRES, ROW_NOW, TALLINN).lines
-  expect(line1?.at(-1)).toEqual({ text: ', next try 18:45', tone: 'warning', runs: [', next try ', { clock: NEXT_AT }] })
+  expect(line1?.at(-1)).toEqual({ text: ', next try 18:45', tone: 'warning', shrink: 'next', forms: [', next try 18:45', ', next 18:45'], runs: [', next try ', { clock: NEXT_AT }] })
   // A row that did not fail names no next try, whatever its schedule says.
   expect(rowLines(rowView({ nextAt: { '1': NEXT_AT } }))[0]).toBe('andres@lutsohealth.com · Company · Ultra  updated 18:34')
 })
@@ -1253,6 +1253,42 @@ test('a run-out row keeps its wait when the pane is narrow: only the cause\'s la
   const line = fitted(v, 64).lines[0] ?? ''
   expect(line).toBe('an…om · C… · Ultra  18:39 Failed to update (waits for a session)')
   expect([...line].length).toBeLessThanOrEqual(64)
+})
+
+test('a usage call that threw says (usage call threw) and names the next try: its back-off is the schedule', () => {
+  const why = 'the usage call threw (Error)'
+  const v = rowView({ checkErrors: { '1': { why, at: FAILED_AT } }, nextAt: { '1': NEXT_AT } })
+  expect(rowLines(v)[0]).toBe('andres@lutsohealth.com · Company · Ultra  18:39 Failed to update (usage call threw), next try 18:45')
+})
+
+const EVERY_WHY = [
+  'the usage call answered HTTP 429 (retry after 60 s)',
+  'the usage call threw (Error)',
+  'the profile call answered HTTP 403, so its usage is not read until it names the sign-in',
+  'the profile answer named no email, so its usage is not read until it names the sign-in',
+  'the check failed (TypeError); the debug log has the rest',
+  'its token has run out and no session has refreshed it, so its usage is not read until one does',
+]
+
+test('a failed usage row with its next try fits 56 columns', () => {
+  const v = rowView({ checkErrors: { '1': HTTP_429 }, nextAt: { '1': NEXT_AT } })
+  const line = fitted(v, 56).lines[0] ?? ''
+  expect(line).toBe('a…m · Ultra  18:39 Failed to update (429), next 18:45')
+  expect([...line].length).toBeLessThanOrEqual(56)
+})
+
+test('every cause, with and without Chrome, fits every width the fit tests use, and keeps its time and the run-out\'s wait', () => {
+  const offenders: string[] = []
+  for (const why of EVERY_WHY)
+    for (const chromeAccountId of [undefined, '1'])
+      for (const columns of [56, 64, 82]) {
+        const v = rowView({ checkErrors: { '1': { why, at: FAILED_AT } }, nextAt: { '1': NEXT_AT }, chromeAccountId })
+        const line = fitted(v, columns).lines[0] ?? ''
+        const keepsWait = !why.startsWith('its token') || line.includes('session')
+        if ([...line].length > columns || !line.includes('18:39 Failed to update') || !keepsWait) offenders.push(`${why.slice(0, 20)} chrome=${chromeAccountId} ${columns}: ${[...line].length} ${line}`)
+      }
+  expect(EVERY_WHY.length).toBeGreaterThan(0)
+  expect(offenders).toEqual([])
 })
 
 test('every cause\'s short form keeps what the row needs: the status, the call, or the wait for a session', () => {

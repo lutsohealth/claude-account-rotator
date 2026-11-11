@@ -986,25 +986,28 @@ function usedParts(label: string, w: UsageWindow | undefined, now: number): RowP
 }
 
 /**
- * Why a read failed, as a row says it: `text` in full, `short` for a narrow pane, which keeps what the row needs (the
- * status, the call, the wait for a session). `hasNext` where `usage-due:<id>.next` is the next try of what failed.
+ * Why a read failed, as a row says it: `forms` the cause in full, then in the shorter forms a narrow pane takes, each
+ * keeping what the row needs (the status, the call, the wait for a session). `hasNext` where `usage-due:<id>.next` is
+ * the next try of what failed.
  */
-type Cause = { text: string; short: string; hasNext: boolean }
+type Cause = { forms: string[]; hasNext: boolean }
 
 /**
  * The cause in a failure's why, which the writers of `check-error:<id>` word (hooks/register.tsx). The schedule
- * `usage-due:<id>.next` retries the usage read alone, so only that cause names it. The profile call and a thrown check
- * are tried again by the 10-minute check (checkAll), a run-out token once a session refreshes it: no stored time says
+ * `usage-due:<id>.next` retries the usage read alone, and requestUsage stores its back-off for a usage call that
+ * answered a failure or threw, so only those causes name it. The profile call and a check that threw elsewhere are
+ * tried again by the 10-minute check (checkAll), a run-out token once a session refreshes it: no stored time says
  * when, so those rows name none. A why no writer words has no cause and no time.
  */
 function causeOf(why: string): Cause | undefined {
   const status = (call: RegExp) => call.exec(why)?.[1]
   const [usage, profile] = [status(/usage call answered HTTP (\d{3})/), status(/profile call answered HTTP (\d{3})/)]
-  if (usage !== undefined) return { text: ` (HTTP ${usage})`, short: ` (${usage})`, hasNext: true }
-  if (profile !== undefined) return { text: ` (profile HTTP ${profile})`, short: ` (profile ${profile})`, hasNext: false }
-  if (why.startsWith('the profile answer named no email')) return { text: ' (profile named no email)', short: ' (profile no email)', hasNext: false }
-  if (why.startsWith('its token has run out')) return { text: ' (token run out), until a session refreshes its token', short: ' (waits for a session)', hasNext: false }
-  if (why.startsWith('the check failed')) return { text: ' (check failed)', short: ' (check error)', hasNext: false }
+  if (usage !== undefined) return { forms: [` (HTTP ${usage})`, ` (${usage})`], hasNext: true }
+  if (why.startsWith('the usage call threw')) return { forms: [' (usage call threw)', ' (usage error)', ' (error)'], hasNext: true }
+  if (profile !== undefined) return { forms: [` (profile HTTP ${profile})`, ` (profile ${profile})`], hasNext: false }
+  if (why.startsWith('the profile answer named no email')) return { forms: [' (profile named no email)', ' (profile no email)', ' (no email)'], hasNext: false }
+  if (why.startsWith('its token has run out')) return { forms: [' (token run out), until a session refreshes its token', ' (waits for a session)', ' (needs a session)'], hasNext: false }
+  if (why.startsWith('the check failed')) return { forms: [' (check failed)', ' (check error)', ' (error)'], hasNext: false }
   return undefined
 }
 
@@ -1013,10 +1016,13 @@ function failedParts(failure: CheckError, nextAt: number | undefined, timeZone: 
   const tone = 'warning' as const
   const cause = causeOf(failure.why)
   const failed = ' Failed to update'
+  const next = nextAt === undefined ? undefined : clockText(nextAt, timeZone)
   return [
     { text: `${clockText(failure.at, timeZone)}${failed}`, tone, runs: [{ clock: failure.at }, failed] },
-    ...(cause === undefined ? [] : [{ text: cause.text, tone, shrink: 'cause' as const, short: cause.short }]),
-    ...(nextAt === undefined || cause?.hasNext !== true ? [] : [{ text: `, next try ${clockText(nextAt, timeZone)}`, tone, runs: [', next try ', { clock: nextAt }] }]),
+    ...(cause === undefined ? [] : [{ text: cause.forms[0] ?? '', tone, shrink: 'cause' as const, forms: cause.forms }]),
+    ...(next === undefined || nextAt === undefined || cause?.hasNext !== true
+      ? []
+      : [{ text: `, next try ${next}`, tone, shrink: 'next' as const, forms: [`, next try ${next}`, `, next ${next}`], runs: [', next try ', { clock: nextAt }] }]),
   ]
 }
 
@@ -1075,7 +1081,7 @@ export function rowOf(view: View, a: Account, now: number, timeZone?: string): R
   const line1: RowPart[] = [
     { text: who, shrink: 'email' },
     ...(company === undefined ? [] : [{ text: ` · ${company}`, shrink: 'company' as const }]),
-    ...(plan === undefined ? [] : [{ text: ` · ${plan}` }]),
+    ...(plan === undefined ? [] : [{ text: ` · ${plan}`, shrink: 'plan' as const }]),
     ...(view.chromeAccountId === a.id ? [{ text: ' · Chrome' }] : []),
     ...(state.length === 0 ? [] : [{ text: '  ' }, ...state]),
   ]
@@ -1132,26 +1138,44 @@ export const END_GAP = 2
 /** The cells a line takes, one per character. */
 export const cellsOf = (line: readonly RowPart[]): number => line.reduce((n, p) => n + [...p.text].length, 0)
 
-/** A cause part cut to its short form, a Company part to `cells` (at least ` · X…`), or an email in its middle (at least `x…y`), with an ellipsis. */
+/** A Company part cut to `cells` (at least ` · X…`), or an email in its middle (at least `x…y`), with an ellipsis. */
 function cutTo(p: RowPart, cells: number): RowPart {
   const chars = [...p.text]
   if (cells >= chars.length) return p
-  if (p.shrink === 'cause') return { ...p, text: p.short ?? p.text }
   if (p.shrink === 'company') return { ...p, text: `${chars.slice(0, Math.max(5, cells) - 1).join('')}…` }
   const keep = Math.max(2, cells - 1)
   const head = Math.ceil(keep / 2)
   return { ...p, text: `${chars.slice(0, head).join('')}…${chars.slice(chars.length - (keep - head)).join('')}` }
 }
 
-/** Line 1 cut to `columns`: a failed read's cause to its short form, then the Company, then the email's middle; the plan, the time and the next try never. */
+/** The parts of one kind taking their `n`th form (the last one where they have fewer), or none of their text. */
+const inForm = (line: RowPart[], kind: RowPart['shrink'], n: number | 'gone'): RowPart[] =>
+  line.map(p => {
+    if (p.shrink !== kind) return p
+    const { runs: _runs, ...rest } = p
+    return { ...rest, text: n === 'gone' ? '' : (p.forms?.[Math.min(n, p.forms.length - 1)] ?? p.text) }
+  })
+
+/** The parts of one kind cut by the `over` cells the line is over (cutTo). */
+const cutKind = (line: RowPart[], kind: RowPart['shrink'], over: number): RowPart[] =>
+  line.map(p => (p.shrink === kind ? cutTo(p, [...p.text].length - over) : p))
+
+/**
+ * Line 1 cut to `columns`, one step at a time while it is over: a failed read's cause to its short form and its next
+ * try to a shorter one, the Company, the email's middle, then the cause to its shortest form, the Company and the plan
+ * gone. The time, `Failed to update`, and Chrome's name stay, and so does each cause's word for what the row needs.
+ */
 function fitLine1(line: RowPart[], columns: number): RowPart[] {
-  let fitted = line
-  for (const kind of ['cause', 'company', 'email'] as const) {
-    const over = cellsOf(fitted) - columns
-    if (over <= 0) return fitted
-    fitted = fitted.map(p => (p.shrink === kind ? cutTo(p, [...p.text].length - over) : p))
-  }
-  return fitted
+  const steps: ((fitted: RowPart[], over: number) => RowPart[])[] = [
+    fitted => inForm(fitted, 'cause', 1),
+    (fitted, over) => cutKind(fitted, 'company', over),
+    (fitted, over) => cutKind(fitted, 'email', over),
+    fitted => inForm(fitted, 'next', 1),
+    fitted => inForm(fitted, 'cause', 2),
+    fitted => inForm(fitted, 'company', 'gone'),
+    fitted => inForm(fitted, 'plan', 'gone'),
+  ]
+  return steps.reduce((fitted, step) => (cellsOf(fitted) > columns ? step(fitted, cellsOf(fitted) - columns) : fitted), line)
 }
 
 /**
