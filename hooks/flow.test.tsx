@@ -5571,6 +5571,33 @@ test('puma-9arph.9 chromeConnecting: a /clear during Connect keeps the connectin
   await pane.unmount()
 })
 
+// The other side: what a Connect writes between the reset and the rebind is newer than `kept`, and a Connect that has
+// ended leaves no connecting line behind.
+test('puma-9arph.9 a Connect that ends between the reset and classic.SessionStart keeps its own link and leaves no connecting line', async ($, on) => {
+  const w = fresh()
+  const store = await chromeWorld(w, ['', SLOT2])
+  const s = clearable(on)
+  const clock = world(on, w, store)
+  on('classic.SessionStart', () => ({}))
+  await start($, clock)
+  const pane = await mountPane($)
+  await pane.press({ key: 'chrome-others' })
+  await clock.settle()
+  await pane.redraw()
+  await pane.press({ key: 'chrome-try-2' })
+  await clock.settle()
+  s.clear()
+  await clock.advance(36_000)
+  await $.classic.SessionStart({ source: 'clear' })
+  await clock.settle()
+  expect(['chrome, chromeConnecting after /clear', s.view()?.chrome, s.view()?.chromeConnecting]).toEqual([
+    'chrome, chromeConnecting after /clear',
+    { as: '2', isPaired: true },
+    undefined,
+  ])
+  await pane.unmount()
+})
+
 test('Review MISSING-RESTORE class: after /resume the font and the switch policy are back, and the refusal is not said again', async ($, on) => {
   const w = fresh()
   w.env = { TERM_PROGRAM: 'Apple_Terminal' }
