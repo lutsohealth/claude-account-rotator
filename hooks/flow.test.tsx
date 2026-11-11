@@ -5682,6 +5682,58 @@ test('Review BOOT-GATE-STARVES other side, response and Bash watch: a boot that 
   await call.finish()
 })
 
+// Review R1 F1 (Codex, #72 round 1) [READING-WRONG-LOGIN]: a response in the window between a reset and
+// classic.SessionStart binds the view first, which gives back a switch in flight; the switch settles on that response,
+// so its reading is never stored under the target while the switch is unproven.
+async function responseInResetWindow($: Engine, on: On, source: 'clear' | 'resume' | 'fork') {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.failing = { 'tok-1': 429 }
+  w.usage['tok-2'] = [10, 20]
+  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off' }))
+  const s = clearable(on)
+  on('classic.SessionStart', () => ({}))
+  const clock = world(on, w, store)
+  await start($, clock)
+  await useNow($, clock, '2')
+  if (source !== 'fork') await endSession($, clock, source)
+  s.clear()
+  await clock.advance(40_000)
+  await respondWeek($, w, clock, 45)
+  return { store, view: s.view() }
+}
+
+test('Review R1 F1 instance: a response before the /clear rebind cannot store an unproven target reading', async ($, on) => {
+  const { store } = await responseInResetWindow($, on, 'clear')
+  expect(storedOf(store, '2')?.sevenDay?.pct, 'the clear window stored an unproven target response under login 2').not.toBe(45)
+})
+
+test('Review R1 F1 class: every reset source keeps an unproven response out of the target reading', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.failing = { 'tok-1': 429 }
+  w.usage['tok-2'] = [10, 20]
+  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off' }))
+  const s = clearable(on)
+  on('classic.SessionStart', () => ({}))
+  const clock = world(on, w, store)
+  await start($, clock)
+  await useNow($, clock, '2')
+  const offenders: string[] = []
+  for (const [source, pct] of [['clear', 45], ['resume', 46], ['fork', 47]] as const) {
+    if (source !== 'fork') await endSession($, clock, source)
+    s.clear()
+    await clock.advance(40_000)
+    await respondWeek($, w, clock, pct)
+    if (storedOf(store, '2')?.sevenDay?.pct === pct) offenders.push(source)
+    await $.classic.SessionStart({ source } as never)
+    await clock.settle()
+  }
+  expect(offenders, 'reset windows stored unproven target responses under login 2').toEqual([])
+})
+
 test('Review RESET-RM-ACTIVE instance: rm during a clear window cannot sign out the account this session uses', async ($, on) => {
   const w = fresh()
   w.env.CLAUDE_SECURESTORAGE_CONFIG_DIR = SLOT2
