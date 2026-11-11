@@ -578,7 +578,11 @@ class ContinueText(RequestCase):
         self.answer(True, "after a Fable switch a session sends: Please resume.")
         done = self.continue_text("--set", "  Please resume.  ", "--json", "--wait", "10")
         request = {k: getattr(self, "seen", {}).get(k) for k in ("kind", "text", "store")}
-        self.assertEqual((done.returncode, request, json.loads(done.stdout)["result"]), (0, {"kind": "continue-text", "text": "Please resume.", "store": "store-abc"}, {"continueText": "Please resume."}))
+        self.assertEqual((done.returncode, request, self.result_of(done)), (0, {"kind": "continue-text", "text": "Please resume.", "store": "store-abc"}, {"continueText": "Please resume."}))
+
+    def result_of(self, done: subprocess.CompletedProcess[str]) -> object:
+        """The --json result, or None where the command printed none."""
+        return json.loads(done.stdout).get("result") if done.stdout.strip() else None
 
     def test_clear_leaves_a_request_whose_text_is_null(self) -> None:
         self.answer(True, "cleared")
