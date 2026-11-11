@@ -71,6 +71,7 @@ import {
   slotEnv,
   windowPct,
   USAGE_CLAIM_WAIT_MS,
+  USAGE_FETCH_MAX_MS,
   USAGE_IDLE_MS,
   afterUsage,
   claimDueReads,
@@ -727,7 +728,10 @@ const oauthHeaders = (accessToken: string) => ({
 
 /** The usage of the login a token belongs to, as `/usage` reads it. */
 async function fetchUsage($: Host, accessToken: string): Promise<UsageAnswer> {
-  const res = await $.http.fetch(USAGE_URL, { headers: oauthHeaders(accessToken) })
+  // A call that never answers would hold its claim and leave fails at 0: past the bound it throws, a failed read.
+  const call = $.http.fetch(USAGE_URL, { headers: oauthHeaders(accessToken) })
+  const res = await Promise.race([call, $.clock.sleep(USAGE_FETCH_MAX_MS).then(() => undefined)])
+  if (res === undefined) throw new Error(`the usage call did not answer within ${USAGE_FETCH_MAX_MS / 1000} s`)
   if (res.status === 401 || res.status === 403) return { kind: 'rejected' }
   if (!res.ok) {
     const retryAfter = retryAfterFrom(res.headers ?? {}, await $.clock.now())
