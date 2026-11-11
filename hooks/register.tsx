@@ -131,6 +131,11 @@ let isPaneShown = false
 
 /** Whether boot has set the view's login to the one this session uses. */
 let isBooted = false
+/**
+ * What this session set that only its view shows, kept where /clear, /resume and /branch do not reach: they reset the
+ * view, and rebindSession copies these back. Each is set where its value is born; undefined until then.
+ */
+let kept: { slot?: string; mark?: string; hasFontBlocks?: boolean; isSwitchBlocked?: boolean; isFableStopped?: boolean } = {}
 /** When this session's boot read the store: an older version's reading written after it says that version still runs. */
 let bootedAt: number | undefined
 /** An older version writes its reading at every check, every 10 minutes at most: one this old has stopped. */
@@ -465,6 +470,7 @@ async function setSessionMark($: Host): Promise<void> {
   try {
     const set = await $.env.set('ACCOUNT_ROTATOR_SESSION', mark)
     if (set.deny !== undefined) throw new Error(set.deny)
+    kept = { ...kept, mark }
     await setView($, v => ({ ...v, sessionMark: mark }))
   } catch (error) {
     await debug($, `session mark refused: ${String(error)}`)
@@ -480,6 +486,8 @@ async function setSessionMark($: Host): Promise<void> {
 async function applyRequests($: Host, isMerging = false): Promise<void> {
   const storeId = await $.store.get('store-id')
   if (typeof storeId !== 'string') return
+  // A view the reset left names login 1 in use and no mark: bound first, so a request acts on this session's login.
+  if (!(await isBound($))) return
   const { sessionMark } = await getView($)
   const dir = requestsDir(await $.env.get('CLAUDE_CONFIG_DIR'), (await $.env.get('HOME')) ?? '')
   const entries = await $.fs.list(dir).then(found => {
@@ -770,6 +778,7 @@ async function useSlot($: Host, slot: string): Promise<void> {
   const set = slot === '' ? await $.env.set('CLAUDE_SECURESTORAGE_CONFIG_DIR', undefined) : await $.env.set('CLAUDE_SECURESTORAGE_CONFIG_DIR', slot)
   // The engine's hold resolves with its reason; a hook's refusal rejects. Callers meet both as a throw.
   if (set.deny !== undefined) throw new SwitchHeld(set.deny)
+  kept = { ...kept, slot }
 }
 
 /**
@@ -778,6 +787,8 @@ async function useSlot($: Host, slot: string): Promise<void> {
  * False when it was said already.
  */
 async function blocked($: Host): Promise<boolean> {
+  // Kept first: after a reload the view says it already, and /clear would lose it.
+  kept = { ...kept, isSwitchBlocked: true }
   const view = await getView($)
   if (view.isSwitchBlocked) return false
   await setView($, v => ({ ...v, isSwitchBlocked: true }))
@@ -1121,6 +1132,8 @@ function whyLeave(view: View, now: number, need?: Need): string {
  * Fable week stays on a login whose Fable week is spent.
  */
 async function maybeRotate($: Host, need?: Need, carry?: CarryOn): Promise<boolean> {
+  // A view at its defaults names login 1 in use, whichever login this session runs on.
+  if (!(await isBound($))) return false
   // Every check, response and tick comes through here: the login new sessions start on follows the same readings.
   await saveLaunchPick($).catch(error => debug($, `launch pick failed: ${String(error)}`))
   const now = await $.clock.now()
@@ -1410,7 +1423,10 @@ async function undoProvisionalStop($: Host): Promise<void> {
       gone.push(key)
     } else await $.store.set(key, before)
   }
-  if (p.setFableStop) await setView($, v => ({ ...v, isFableStopped: false }))
+  if (p.setFableStop) {
+    kept = { ...kept, isFableStopped: false }
+    await setView($, v => ({ ...v, isFableStopped: false }))
+  }
   // The merge reads each key back; one now gone leaves nothing to read, so the view drops it here.
   const drop = <T,>(entries: Record<string, T> | undefined, key: string): Record<string, T> | undefined => {
     if (entries === undefined || !gone.includes(key)) return entries
@@ -1450,6 +1466,7 @@ async function markStop($: Host, active: Account, said: string | undefined, afte
     const isFable = said === undefined || said === '' ? isFableSpent(r, now) : isFableStop(said)
     if (isFable) {
       need = 'fable'
+      kept = { ...kept, isFableStopped: true }
       await setView($, v => ({ ...v, isFableStopped: true }))
       // The limit was hit before the usage call shows it: count the Fable week as full, under the mark's own key.
       if (!isFableSpent(r, now)) {
@@ -2021,17 +2038,17 @@ function actions($: Host): Actions {
   }
 }
 
-/** First run makes the normal login number 1; then: which login this session uses, and Claude in Chrome connected as the extension's account. */
-async function boot($: Host, isInteractive: boolean): Promise<void> {
-  // Terminal.app is the terminal that names itself so and draws block characters from its font.
-  const hasFontBlocks = (await $.env.get('TERM_PROGRAM')) === 'Apple_Terminal'
-  await setView($, v => ({ ...v, hasFontBlocks }))
+/**
+ * The view's account in use, from the slot this session runs on, and its session id, after the store's merge, with
+ * `isBound`. `boot` runs it at the start, and rebindSession again after /clear, /resume and /branch, which reset $.state
+ * while session.start does not fire again.
+ */
+async function bindSession($: Host, slot: string): Promise<void> {
   let accounts = await loadAccounts($)
   if (accounts.length === 0) {
     accounts = [{ id: '1', slot: '' }]
     await saveAccounts($, accounts)
   }
-  const slot = (await $.env.get('CLAUDE_SECURESTORAGE_CONFIG_DIR')) ?? ''
   let active = accounts.find(a => a.slot === slot)
   if (active === undefined) {
     // Started on a slot nobody registered (set by hand, or by another tool): adopt it.
@@ -2042,9 +2059,49 @@ async function boot($: Host, isInteractive: boolean): Promise<void> {
   }
   const activeId = active.id
   const sessionId = await $.session.id().catch(() => undefined)
-  bootedAt = await $.clock.now()
   await mergeStore($)
-  await setView($, v => ({ ...v, activeId, ...(sessionId === undefined ? {} : { sessionId }) }))
+  await setView($, v => ({ ...v, activeId, isBound: true, ...(sessionId === undefined ? {} : { sessionId }) }))
+}
+
+/**
+ * After /clear, /resume or /branch: what `kept` holds, then the account and id again, from the slot this session last
+ * set. No variable is read: one this session set may not read back as set, and one it was refused is a parent's.
+ * Before boot has read the slot there is nothing to bind: boot binds it.
+ */
+async function rebindSession($: Host): Promise<void> {
+  const { slot, mark, hasFontBlocks, isSwitchBlocked, isFableStopped } = kept
+  await setView($, v => ({
+    ...v,
+    ...(hasFontBlocks === undefined ? {} : { hasFontBlocks }),
+    ...(isSwitchBlocked === undefined ? {} : { isSwitchBlocked }),
+    ...(isFableStopped === undefined ? {} : { isFableStopped }),
+    ...(mark === undefined ? {} : { sessionMark: mark }),
+  }))
+  if (slot !== undefined) await bindSession($, slot)
+}
+
+/**
+ * Whether the view holds this session's account. The reset of /clear, /resume and /branch clears `isBound` before the
+ * classic.SessionStart hook runs; once boot has read the slot, a view not bound is bound here, so the next check makes
+ * good a bind that failed, at boot or after a reset.
+ */
+async function isBound($: Host): Promise<boolean> {
+  if ((await getView($)).isBound === true) return true
+  if (kept.slot === undefined) return false
+  await rebindSession($).catch(error => debug($, `rebind failed: ${String(error)}`))
+  return (await getView($)).isBound === true
+}
+
+/** First run makes the normal login number 1; then: which login this session uses, and Claude in Chrome connected as the extension's account. */
+async function boot($: Host, isInteractive: boolean): Promise<void> {
+  // Terminal.app is the terminal that names itself so and draws block characters from its font.
+  const hasFontBlocks = (await $.env.get('TERM_PROGRAM')) === 'Apple_Terminal'
+  kept = { ...kept, hasFontBlocks }
+  await setView($, v => ({ ...v, hasFontBlocks }))
+  bootedAt = await $.clock.now()
+  const slot = (await $.env.get('CLAUDE_SECURESTORAGE_CONFIG_DIR')) ?? ''
+  kept = { ...kept, slot }
+  await bindSession($, slot)
   isBooted = true
   await checkSwitching($, slot)
   // First, while the session can still move: the rotation waits for it.
@@ -2110,6 +2167,13 @@ export const register: Register = on => {
 
   on('classic.StopFailure', async ($, e, next) => {
     void onStopFailure($, e).catch(error => debug($, `stop failure handling failed: ${String(error)}`))
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
+  // The start and a compaction keep $.state; these three reset it, and session.start does not fire after them.
+  on('classic.SessionStart', { source: ['clear', 'resume', 'fork'] }, async ($, e, next) => {
+    // Awaited: the event completes with the view bound again.
+    await rebindSession($).catch(error => debug($, `rebind after ${e.source} failed: ${String(error)}`))
     return next(e)
   }).catch(($, e, next) => next(e))
 

@@ -2,6 +2,10 @@
 
 What each version of the account rotator changed. To get each one as Claude Code starts, turn on auto-update: in `/plugin`, open **Marketplaces**, pick **claude-account-rotator** and choose **Enable auto-update**. To update by hand, run `claude plugin marketplace update claude-account-rotator`, then `claude plugin update account-rotator@claude-account-rotator`, and start a new session.
 
+## Unreleased
+
+- **After `/clear`, `/resume` or `/branch` the panel marks the account the session runs on**, where it marked account 1. The session's mark for `account use` comes back too, and so do Terminal.app's block drawing, the notice that Claude Code's policy refuses switching, and the band after a Fable stop. A check in the moment after the command no longer switches away from the account the session runs on, and an `account rm` then no longer signs out that account. A session whose start could not read the accounts list rotates again at its next check.
+
 ## 0.5.25-lutso.1 - 2026-11-11
 
 - **A row that failed to update says why**, as `18:39 Failed to update (HTTP 429), next try 18:45`, where it used to say only `Failed to update`. The cause names the status the usage or the profile call answered, a usage call that threw, a sign-in whose token has run out (which says `until a session refreshes its token`), or another check that threw. Only a usage read that failed, by an answer or a throw, names its next try, the time its schedule gives; the other causes name no time, as nothing stored says when they are tried again. A login whose usage read failed and that has no reading says it waits for a session once its token runs out, where it kept a next try nothing would take. A narrow panel shortens the cause, then the next try, then the company, the email and the plan, so each account stays two lines.
