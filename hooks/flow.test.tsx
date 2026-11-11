@@ -8383,14 +8383,15 @@ test('two sessions on one store, store-id: an add read from another store is lef
 const paddedSelect = (nonce: string, storeId: unknown, at: number, pad = 0) => JSON.stringify({ kind: 'select', nonce, at, id: '2', store: storeId, pad: 'x'.repeat(pad) })
 const debugLines = (w: World, text: string) => (w.logged ?? []).filter(line => line.includes(text))
 
-test('a request over 4 KB is skipped unread, in one debug line, and one of exactly 4 KB is taken', async ($, on) => {
+// Review R2 (Codex, #70 round 1), its class: a request too large to read is refused unread, never left unanswered.
+test('a request over 4 KB is refused unread, in one debug line, and one of exactly 4 KB is taken', async ($, on) => {
   const { w, store, clock } = await selectWorld($, on)
   const size = paddedSelect(N1, store.get('store-id'), clock.now()).length
   w.files[`${REQUESTS}/${N1}.json`] = paddedSelect(N1, store.get('store-id'), clock.now(), 4097 - size)
   await untilTick(clock)
   w.files[`${REQUESTS}/${N1}.json`] = paddedSelect(N1, store.get('store-id'), clock.now(), 4097 - size)
   await untilTick(clock)
-  expect(resultOf(w, N1)).toBeUndefined()
+  expect([resultOf(w, N1)?.ok, /over 4096 bytes/.test(String(resultOf(w, N1)?.message)), store.get('launch-on')]).toEqual([false, true, undefined])
   expect(debugLines(w, N1).length).toBe(1)
   w.files[`${REQUESTS}/${N2}.json`] = paddedSelect(N2, store.get('store-id'), clock.now(), 4096 - size)
   await untilTick(clock)

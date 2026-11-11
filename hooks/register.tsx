@@ -513,28 +513,30 @@ async function applyRequests($: Host, isMerging = false): Promise<void> {
   const names = new Set(entries.map(e => e.name))
   const now = await $.clock.now()
   const requests: RotatorRequest[] = []
-  const broken: string[] = []
+  // The CLI writes a request whole, by a rename from `.json.tmp`, which this listing skips: a request file of a nonce
+  // it writes that is too large to read, or whose text does not parse, is a broken request, answered so its CLI does
+  // not wait out --wait.
+  const broken: [nonce: string, message: string][] = []
   for (const { name, kind, size } of entries) {
     const nonce = name.endsWith('.json') && !name.endsWith('.result.json') ? name.slice(0, -'.json'.length) : undefined
     if (nonce === undefined || names.has(`${nonce}.result.json`) || takenRequests.has(nonce)) continue
     if (kind !== 'file' || size > REQUEST_MAX_BYTES) {
       if (!skippedRequests.has(name)) await debug($, `skipped ${name} in the requests folder: ${kind}, ${size} bytes`)
       skippedRequests.add(name)
+      if (kind === 'file' && isRequestNonce(nonce)) broken.push([nonce, `the request file is over ${REQUEST_MAX_BYTES} bytes, more than a session reads: run the command again`])
       continue
     }
     // A file no read can reach, or one that is no request of this store, reads as none.
     const text = await $.fs.read(`${dir}/${name}`).catch(() => undefined)
     const value = parsed(typeof text === 'string' ? text : undefined)
-    // The CLI writes a request whole, by a rename from `.json.tmp`, which this listing skips: text that does not parse
-    // is a broken request, answered so its CLI does not wait out --wait.
-    if (typeof text === 'string' && value === undefined && isRequestNonce(nonce)) broken.push(nonce)
+    if (typeof text === 'string' && value === undefined && isRequestNonce(nonce)) broken.push([nonce, 'the request file is not JSON a session can read: run the command again'])
     const request = requestFrom(value, now)
     if (request === undefined || request.nonce !== nonce || request.store !== storeId) continue
     if (request.kind !== 'use' || request.session === sessionMark) requests.push(request)
   }
-  for (const nonce of broken) {
+  for (const [nonce, message] of broken) {
     takenRequests.add(nonce)
-    await $.fs.write(`${dir}/${nonce}.result.json`, JSON.stringify({ nonce, ok: false, message: 'the request file is not JSON a session can read: run the command again', at: now }))
+    await $.fs.write(`${dir}/${nonce}.result.json`, JSON.stringify({ nonce, ok: false, message, at: now }))
       .catch(error => debug($, `request ${nonce} failed: ${String(error)}`))
   }
   if (isMerging && requests.length > 0) await mergeStore($)
