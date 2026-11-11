@@ -2119,7 +2119,7 @@ async function bindSession($: Host, slot: string): Promise<void> {
  * reset left it unset, a write since being newer; the Connect line only while a Connect is under way.
  */
 async function rebindSession($: Host): Promise<void> {
-  const { slot, mark, hasFontBlocks, isSwitchBlocked, isFableStopped, pending, provisionalStop, held, hasChrome, chrome, chromeConnecting } = kept
+  const { slot, mark, hasFontBlocks, isSwitchBlocked, isFableStopped, pending, provisionalStop, held, hasChrome, chrome: link, chromeConnecting } = kept
   await setView($, v => ({
     ...v,
     ...(pending === undefined ? {} : { pending }),
@@ -2130,7 +2130,7 @@ async function rebindSession($: Host): Promise<void> {
     ...(isFableStopped === undefined ? {} : { isFableStopped }),
     ...(mark === undefined ? {} : { sessionMark: mark }),
     ...(hasChrome === undefined || v.hasChrome !== undefined ? {} : { hasChrome }),
-    ...(chrome === undefined || v.chrome !== undefined ? {} : { chrome }),
+    ...(link === undefined || v.chrome !== undefined ? {} : { chrome: link }),
     ...(chromeConnecting === undefined || v.chromeConnecting !== undefined || !isConnectingChrome ? {} : { chromeConnecting }),
   }))
   if (slot !== undefined) await bindSession($, slot)
