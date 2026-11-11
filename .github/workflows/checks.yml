@@ -1,0 +1,40 @@
+name: checks
+
+# The three checks of README.md's "Develop" section, on every pull request and every push to main.
+# No secret: the three checks pass with none.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    # A stated bash runs every step with -o pipefail, so a failed download fails the install step.
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      # Official native installer (https://code.claude.com/docs/en/setup).
+      - name: Install Claude Code
+        run: |
+          curl -fsSL https://claude.ai/install.sh | bash
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: claude plugin validate
+        run: claude plugin validate .
+
+      # Each check runs even when an earlier check failed, so one run shows every broken check.
+      - name: claude plugin test
+        if: ${{ !cancelled() }}
+        run: claude plugin test .
+
+      # The tests import only the standard library.
+      - name: python3 -m unittest
+        if: ${{ !cancelled() }}
+        run: python3 -m unittest discover -s tests

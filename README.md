@@ -169,6 +169,8 @@ claude plugin test .
 python3 -m unittest discover -s tests   # bin/account-rotator and the store pick both bins share
 ```
 
+`.github/workflows/checks.yml` runs the last three on every pull request and every push to main.
+
 `--plugin-dir` loads this folder over the installed release for that session only, with a list of accounts of its own, so a broken working tree breaks only that window. Keep the marketplace installed from GitHub: added from this folder instead, every window loads the folder as it stands. `/release` publishes a version, by the steps in `.claude/skills/release`.
 
 `demo/record.mjs` records the GIF and `demo/looks.mjs` draws the footer's looks, both from a real session fed imitated accounts; their headers say what they need.
