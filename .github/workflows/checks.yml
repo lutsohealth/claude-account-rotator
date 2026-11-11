@@ -1,0 +1,33 @@
+name: checks
+
+# The three checks of README.md's "Develop" section, on every pull request and every push to main.
+# No secret: `claude plugin test` runs without a session, a sign-in or a network.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Official native installer (https://code.claude.com/docs/en/setup).
+      - name: Install Claude Code
+        run: |
+          curl -fsSL https://claude.ai/install.sh | bash
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: claude plugin validate
+        run: claude plugin validate .
+
+      - name: claude plugin test
+        run: claude plugin test .
+
+      # The tests import only the standard library.
+      - name: python3 -m unittest
+        run: python3 -m unittest discover -s tests
