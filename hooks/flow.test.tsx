@@ -5268,6 +5268,9 @@ for (const source of ['clear', 'resume', 'fork'] as const) {
   test(`after ${source}, the session's own login is in use again and its mark is back when the event completes`, async ($, on) => {
     const w = fresh()
     w.env = { CLAUDE_SECURESTORAGE_CONFIG_DIR: SLOT2 }
+    // Login 2 signed in, so its row ends in use rather than with a sign-in.
+    w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+    w.usage['tok-2'] = [10, 30]
     const s = clearable(on)
     const clock = world(on, w, TWO_LOGINS)
     on('classic.SessionStart', () => ({}))
