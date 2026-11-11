@@ -6,6 +6,7 @@ What each version of the account rotator changed. To get each one as Claude Code
 
 - **A Fable stop stays known through `/clear`, `/resume` and `/branch` after the mod's code reloads**, where the session forgot it.
 - **A session whose start failed once still stores the usage each response reports, and takes `account use` while its Bash call runs**, where it did neither until the session ended.
+- **The Chrome box keeps how Claude in Chrome stands through `/clear`, `/resume` and `/branch`**: a window without it still says so and offers no Connect, one connected still shows the account in use, and Try to connect after it reconnects Claude in Chrome, where another account's browser answered and the extension was named as the wrong account.
 
 ## 0.5.27-lutso.1 - 2026-11-11
 
