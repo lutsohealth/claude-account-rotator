@@ -1158,6 +1158,8 @@ export const USAGE_BACKOFF_MAX_MS = 60 * 60_000
 export const USAGE_EARLY_MS = 30_000
 /** How long a claim holds a read for the session that made it, early window included: one that died mid-read frees it after this. */
 export const USAGE_CLAIM_MS = 90_000
+/** A usage call unanswered this long is a failed read; shorter than the claim, so the session holding it writes the failure. */
+export const USAGE_FETCH_MAX_MS = 30_000
 /** How long a session waits before reading its claim back: a claim another session made meanwhile wins. */
 export const USAGE_CLAIM_WAIT_MS = 300
 /** A stop, a /login or a sign-in reads a login again only once its last good read is this old. */

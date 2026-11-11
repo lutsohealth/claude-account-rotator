@@ -3,7 +3,7 @@ import type { Engine, MockClock } from 'claude-code/testing'
 import type { On, ProcessRunResult, SessionRateLimit, ToolCallArgs } from 'claude-code'
 import type { StoredRows, View } from '../types'
 
-import { DEFAULT_FOOTER, USAGE_CLAIM_WAIT_MS, USAGE_FORCE_AFTER_MS, USAGE_IDLE_MS, fingerprint, keychainItem, roomColor } from './model'
+import { DEFAULT_FOOTER, USAGE_CLAIM_WAIT_MS, USAGE_FETCH_MAX_MS, USAGE_FORCE_AFTER_MS, USAGE_IDLE_MS, fingerprint, keychainItem, roomColor } from './model'
 import { laterMark, longBar, markFrom, storedLineText } from './model'
 import { REQUEST_POLL_MS, REQUEST_TTL_MS, blockedText } from './model'
 import { PANE_COLUMNS } from './view'
@@ -38,6 +38,8 @@ type World = {
   usageCalls: string[]
   /** Access tokens whose usage call throws, as a dropped connection does. */
   throwing?: string[]
+  /** Access tokens whose usage call never answers, as a stalled connection does. */
+  hanging?: string[]
   /** access token -> when its week resets, as its usage body says; `WEEK_RESET` where unset */
   weekResets?: Record<string, string>
   /** access token -> the HTTP status the profile endpoint fails with, where it fails */
@@ -261,6 +263,7 @@ function world(on: On, w: World, store: Record<string, unknown> | Map<string, un
     }
     w.usageCalls.push(token)
     if (w.throwing?.includes(token)) throw new Error('socket hang up')
+    if (w.hanging?.includes(token)) return new Promise(() => {})
     const failing = w.failing?.[token]
     const retryAfter = w.retryAfter?.[token]
     if (failing !== undefined) return { value: { status: failing, ok: false, headers: retryAfter === undefined ? {} : { 'retry-after': retryAfter }, text: '' } }
@@ -4491,6 +4494,27 @@ test('a usage call that throws backs off as a failed one, for every session', as
   await start($, clock)
   expect(callsWith(w, 'tok-1')).toBe(1)
   expect(store.get('usage-due:1')).toMatchObject({ fails: 1 })
+  // Past the claim, inside the two-minute back-off: a stop reads nothing.
+  await clock.advance(100_000)
+  await $.classic.StopFailure({ error: 'rate_limit' })
+  await clock.settle()
+  expect(callsWith(w, 'tok-1')).toBe(1)
+})
+
+// puma-eslxj.33: a read claimed and never answered left fails at 0 and the old reading standing, claim after claim.
+test('a usage call that never answers is a failed read once USAGE_FETCH_MAX_MS passes: it backs off and the row says so', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.hanging = ['tok-1']
+  const store = new Map<string, unknown>(Object.entries({ accounts: [{ id: '1', slot: '', email: 'one@example.com' }] }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  await clock.advance(USAGE_FETCH_MAX_MS)
+  await clock.settle()
+  expect(callsWith(w, 'tok-1')).toBe(1)
+  expect(store.get('usage-due:1')).toMatchObject({ fails: 1 })
+  expect(store.get('usage-due:1')).not.toHaveProperty('claim')
+  expect(store.has('check-error:1')).toBe(true)
   // Past the claim, inside the two-minute back-off: a stop reads nothing.
   await clock.advance(100_000)
   await $.classic.StopFailure({ error: 'rate_limit' })
