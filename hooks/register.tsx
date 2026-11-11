@@ -529,7 +529,9 @@ async function applyRequests($: Host, isMerging = false): Promise<void> {
     // A file no read can reach, or one that is no request of this store, reads as none.
     const text = await $.fs.read(`${dir}/${name}`).catch(() => undefined)
     const value = parsed(typeof text === 'string' ? text : undefined)
-    if (typeof text === 'string' && value === undefined && isRequestNonce(nonce)) broken.push([nonce, 'the request file is not JSON a session can read: run the command again'])
+    // No version of the CLI writes a request that is not a JSON object.
+    const isObject = typeof value === 'object' && value !== null && !Array.isArray(value)
+    if (typeof text === 'string' && !isObject && isRequestNonce(nonce)) broken.push([nonce, 'the request file is not a JSON object a session can read: run the command again'])
     const request = requestFrom(value, now)
     if (request === undefined || request.nonce !== nonce || request.store !== storeId) continue
     if (request.kind !== 'use' || request.session === sessionMark) requests.push(request)

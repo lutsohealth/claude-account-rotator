@@ -7020,9 +7020,9 @@ test('Review R2: a continue-text request file that does not parse is refused wit
   expect([resultOf(w, N1)?.ok, store.get('fable-continue-text')]).toEqual([false, 'Keep this.'])
 })
 
-test('Review R2 class: every request file that does not parse gets a refusal, and the line stays', async ($, on) => {
+test('Review R2 class: every request file that is not a JSON object gets a refusal, and the line stays', async ($, on) => {
   const { w, store, clock } = await fableReady($, on, { 'fable-continue-text': 'Keep this.' })
-  const corpus = ['{"kind":"continue-text","text":"bad",', '{"kind":"continue-text","text":', '{"kind":"continue-text","text":"bad"} trailing', '']
+  const corpus = ['{"kind":"continue-text","text":"bad",', '{"kind":"continue-text","text":', '{"kind":"continue-text","text":"bad"} trailing', '', 'null', '42', '"continue-text"', '[{"kind":"continue-text"}]']
   corpus.forEach((text, i) => { w.files[`${REQUESTS}/review-r2-${i + 1}.json`] = text })
   await clock.advance(60_000)
   const offenders = corpus.flatMap((_, i) => resultOf(w, `review-r2-${i + 1}`)?.ok === false ? [] : [`review-r2-${i + 1}`])
@@ -7048,11 +7048,13 @@ test('Review R3: a line of 251 emoji, which the CLI takes, is taken by the sessi
   expect([resultOf(w, N1)?.ok, store.get('fable-continue-text')]).toEqual([true, line])
 })
 
-test('Review R3 class: the session takes every line of 500 code points and refuses every line of 501', async ($, on) => {
+test('Review R3 class: the session takes every line of 500 code points and refuses a line of 501, or one that is not UTF-8', async ($, on) => {
   const { w, store, clock } = await fableReady($, on, {})
   const cases: [string, string, boolean][] = [
     ['emoji-500', '😀'.repeat(500), true], ['cjk-emoji-500', '中😀'.repeat(250), true], ['music-500', '𝄞'.repeat(500), true],
     ['emoji-501', '😀'.repeat(501), false], ['ascii-501', 'a'.repeat(501), false],
+    // A lone surrogate, which the CLI refuses as text that is not UTF-8.
+    ['lone-surrogate', 'ok \udcff', false], ['lone-high-surrogate', '\ud83d ok', false],
   ]
   for (const [label, line] of cases) w.files[`${REQUESTS}/review-r3-${label}.json`] = continueRequest(`review-r3-${label}`, store.get('store-id'), await clock.now(), { text: line })
   await clock.advance(60_000)

@@ -475,13 +475,14 @@ export const CONTINUE_TEXT_MAX = 500
 
 /**
  * The line that asks Claude to carry on after a Fable switch, as stored: text of at most 500 characters, trimmed;
- * anything else is ignored. A character is a code point, as bin/account-rotator counts it, so an emoji is one.
+ * anything else is ignored. A character is a code point, as bin/account-rotator counts it, so an emoji is one; a lone
+ * surrogate, which UTF-8 cannot hold and the CLI refuses, is refused here too.
  */
 export function continueTextFrom(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined
   const text = value.trim()
   const count = Array.from(text).length
-  return count > 0 && count <= CONTINUE_TEXT_MAX ? text : undefined
+  return count > 0 && count <= CONTINUE_TEXT_MAX && !/\p{Cs}/u.test(text) ? text : undefined
 }
 
 /** A reading from the rate-limit windows the last response reported. */
