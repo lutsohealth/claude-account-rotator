@@ -5537,18 +5537,29 @@ test('Review BOOT-GATE-STARVES class: the minute and the ten-minute checks both 
   expect(stalled, 'rotation entry points still gated after a failed first bind').toEqual([])
 })
 
-// The other side of the heal: a session whose boot never read the slot has nothing to bind, so it binds and moves nothing.
-test('Review BOOT-GATE-STARVES other side: a stop before boot has read the slot binds no view and switches no login', async ($, on) => {
+// The other side of the heal: a boot that failed before it read the slot has nothing to bind, so the ticks bind and
+// move nothing.
+test('Review BOOT-GATE-STARVES other side: a boot that failed before it read the slot binds no view and switches no login', async ($, on) => {
   const w = fresh()
   w.keychain['Claude Code-credentials'] = blob('tok-1')
   w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
   w.usage['tok-1'] = [100, 100]
   w.usage['tok-2'] = [10, 20]
-  const view = watchedView(on)
+  let isFailing = true
+  let isBoundSeen = false
+  on('state.set', async (_$, e, next) => {
+    const { key, value } = e as unknown as { key: string; value: View }
+    if (key === 'view' && isFailing) return { deny: 'the view cannot be written' }
+    if (key === 'view' && value.isBound === true) isBoundSeen = true
+    return next(e)
+  })
   const clock = world(on, w, TWO_LOGINS)
-  await $.classic.StopFailure({ error: 'rate_limit', last_assistant_message: 'Claude usage limit reached.' })
+  await start($, clock)
+  expect(w.logged?.some(line => line.includes('start failed'))).toBe(true)
+  isFailing = false
+  await clock.advance(10 * 60_000)
   await clock.settle()
-  expect(['bound, switches', view()?.isBound, w.envSets]).toEqual(['bound, switches', undefined, []])
+  expect(['bound, switches', isBoundSeen, w.envSets]).toEqual(['bound, switches', false, []])
 })
 
 test('Review RESET-RM-ACTIVE instance: rm during a clear window cannot sign out the account this session uses', async ($, on) => {
