@@ -3,7 +3,7 @@ import type { Engine, MockClock } from 'claude-code/testing'
 import type { On, ProcessRunResult, SessionRateLimit, ToolCallArgs } from 'claude-code'
 import type { StoredRows, View } from '../types'
 
-import { DEFAULT_FOOTER, USAGE_CLAIM_WAIT_MS, USAGE_FORCE_AFTER_MS, USAGE_IDLE_MS, fingerprint, keychainItem, roomColor } from './model'
+import { DEFAULT_FOOTER, EMPTY_VIEW, USAGE_CLAIM_WAIT_MS, USAGE_FORCE_AFTER_MS, USAGE_IDLE_MS, fingerprint, keychainItem, roomColor } from './model'
 import { laterMark, longBar, markFrom, storedLineText } from './model'
 import { REQUEST_POLL_MS, REQUEST_TTL_MS, blockedText } from './model'
 import { PANE_COLUMNS } from './view'
@@ -5233,19 +5233,52 @@ for (const reason of ['clear', 'resume']) {
   }
 }
 
-// puma-9arph.3: /clear, /resume and /branch reset $.state to its defaults and session.start does not fire again, so the
-// view's account in use fell back to login 1. classic.SessionStart fires after each, with source clear, resume or fork.
-// Each test starts with $.state at its defaults, as those commands leave it.
+// puma-9arph.3: /clear, /resume and /branch reset every $.state value to its default, and session.start does not fire
+// again; classic.SessionStart fires after each, with source clear, resume or fork. The kit never resets $.state, so
+// `clearable` does: after `clear()` a read of the view finds the default until the mod writes the view again, and
+// `view()` is what such a read finds.
+function clearable(on: On): { clear: () => void; view: () => View | undefined } {
+  let isCleared = false
+  let last: View | undefined
+  on('state.get', async (_$, e, next) => {
+    const read = await next(e)
+    if (!isCleared || e.plugin !== 'account-rotator' || e.key !== 'view') return read
+    return { value: { value: EMPTY_VIEW, version: read.value?.version ?? 0 } }
+  })
+  on('state.set', async (_$, e, next) => {
+    const { key, value } = e as unknown as { key: string; value: View }
+    if (key === 'view') {
+      isCleared = false
+      last = value
+    }
+    return next(e)
+  })
+  return { clear: () => { isCleared = true }, view: () => (isCleared ? EMPTY_VIEW : last) }
+}
+
+/** A reset as Claude Code runs it: the session ends for /clear or /resume (no end is fired for fork), $.state resets, classic.SessionStart fires. */
+async function clearSession($: Engine, clock: MockClock, clear: () => void, source: 'clear' | 'resume' | 'fork' = 'clear'): Promise<void> {
+  if (source !== 'fork') await endSession($, clock, source)
+  clear()
+  await $.classic.SessionStart({ source } as never)
+  await clock.settle()
+}
+
 for (const source of ['clear', 'resume', 'fork'] as const) {
-  test(`after ${source}, the session's own login is in use again and its mark is back`, async ($, on) => {
+  test(`after ${source}, the session's own login is in use again and its mark is back when the event completes`, async ($, on) => {
     const w = fresh()
-    w.env = { CLAUDE_SECURESTORAGE_CONFIG_DIR: SLOT2, ACCOUNT_ROTATOR_SESSION: 'session-mark-7' }
-    const view = watchedView(on)
+    w.env = { CLAUDE_SECURESTORAGE_CONFIG_DIR: SLOT2 }
+    const s = clearable(on)
     const clock = world(on, w, TWO_LOGINS)
     on('classic.SessionStart', () => ({}))
+    await start($, clock)
+    const mark = s.view()?.sessionMark
+    expect(mark).toMatch(/^session-/)
+    if (source !== 'fork') await endSession($, clock, source)
+    s.clear()
     await $.classic.SessionStart({ source })
+    expect([source, s.view()?.activeId, s.view()?.sessionMark]).toEqual([source, '2', mark])
     await clock.settle()
-    expect([source, view()?.activeId, view()?.sessionMark]).toEqual([source, '2', 'session-mark-7'])
     const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
     // Login 1 is Claude Code's own (no Remove) and unread here (no Use now); login 2's row ends Remove, then in use.
     const ends = (await pane.findAll({ text: /^(Remove|Use now|● in use)$/ })).filter(e => e.type !== 'Box')
@@ -5258,13 +5291,206 @@ for (const source of ['clear', 'resume', 'fork'] as const) {
 for (const source of ['startup', 'compact'] as const) {
   test(`classic.SessionStart for ${source} writes nothing to the view`, async ($, on) => {
     const w = fresh()
-    w.env = { CLAUDE_SECURESTORAGE_CONFIG_DIR: SLOT2, ACCOUNT_ROTATOR_SESSION: 'session-mark-7' }
-    const view = watchedView(on)
+    w.env = { CLAUDE_SECURESTORAGE_CONFIG_DIR: SLOT2 }
+    const s = clearable(on)
     const clock = world(on, w, TWO_LOGINS)
     on('classic.SessionStart', () => ({}))
+    await start($, clock)
+    const before = s.view()
     await $.classic.SessionStart({ source })
     await clock.settle()
-    expect([source, view()]).toEqual([source, undefined])
+    expect([source, s.view() === before]).toEqual([source, true])
+  })
+}
+
+test('Review REBIND-ORDER instance: after /clear the account is rebound when classic.SessionStart completes', async ($, on) => {
+  const w = fresh()
+  w.env = { CLAUDE_SECURESTORAGE_CONFIG_DIR: SLOT2 }
+  const s = clearable(on)
+  const clock = world(on, w, TWO_LOGINS)
+  on('classic.SessionStart', () => ({}))
+  await start($, clock)
+  await endSession($, clock, 'clear')
+  s.clear()
+  await $.classic.SessionStart({ source: 'clear' })
+  expect(s.view()?.activeId, 'the event has completed').toBe('2')
+})
+
+test('Review REBIND-ORDER class: every reset source, one after another, completes with the account rebound', async ($, on) => {
+  const w = fresh()
+  w.env = { CLAUDE_SECURESTORAGE_CONFIG_DIR: SLOT2 }
+  const s = clearable(on)
+  const clock = world(on, w, TWO_LOGINS)
+  on('classic.SessionStart', () => ({}))
+  await start($, clock)
+  const observed: Array<string | undefined> = []
+  for (const source of ['clear', 'resume', 'fork'] as const) {
+    s.clear()
+    await $.classic.SessionStart({ source })
+    observed.push(s.view()?.activeId)
+  }
+  expect(observed).toEqual(['2', '2', '2'])
+})
+
+// The reset comes before classic.SessionStart: a tick in between finds the view at its defaults, login 1 in use.
+test('Review REBIND-ORDER window: a minute tick between the reset and classic.SessionStart switches no login', async ($, on) => {
+  const w = fresh()
+  w.env = { CLAUDE_SECURESTORAGE_CONFIG_DIR: SLOT2 }
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [100, 100]
+  w.usage['tok-2'] = [10, 30]
+  const s = clearable(on)
+  const clock = world(on, w, TWO_LOGINS)
+  on('classic.SessionStart', () => ({}))
+  await start($, clock)
+  const setsBefore = w.envSets.length
+  await endSession($, clock, 'clear')
+  s.clear()
+  await clock.advance(60_000)
+  expect(['switches in the window', w.envSets.slice(setsBefore), w.toasts.filter(t => /^Switched/.test(t))]).toEqual(['switches in the window', [], []])
+  await $.classic.SessionStart({ source: 'clear' })
+  expect(s.view()?.activeId).toBe('2')
+})
+
+// The other side of the window's gate: once a rebind has ended, by its end or by a throw, a check rotates as before.
+for (const isThrowing of [false, true]) {
+  test(`Review REBIND-ORDER window: after a rebind that ${isThrowing ? 'threw' : 'ended'}, a check still leaves a spent login`, async ($, on) => {
+    const w = fresh()
+    w.env = { CLAUDE_SECURESTORAGE_CONFIG_DIR: SLOT2 }
+    w.keychain['Claude Code-credentials'] = blob('tok-1')
+    w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+    w.usage['tok-1'] = [10, 30]
+    w.usage['tok-2'] = [20, 30]
+    let isFailing = false
+    // The shared store, whose next read of the accounts throws while `isFailing`.
+    const store = new (class extends Map<string, unknown> {
+      get(key: string): unknown {
+        if (!isFailing || key !== 'accounts') return super.get(key)
+        isFailing = false
+        throw new Error('the store is down')
+      }
+    })(Object.entries(TWO_LOGINS))
+    const s = clearable(on)
+    const clock = world(on, w, store)
+    on('classic.SessionStart', () => ({}))
+    await start($, clock)
+    await endSession($, clock, 'clear')
+    s.clear()
+    isFailing = isThrowing
+    w.logged = []
+    await $.classic.SessionStart({ source: 'clear' })
+    await clock.settle()
+    expect(['the rebind threw', w.logged.some(line => line.includes('rebind after clear failed'))]).toEqual(['the rebind threw', isThrowing])
+    w.usage['tok-2'] = [100, 100]
+    await pastNextRead(clock)
+    expect(w.toasts.filter(t => /^Switched to Claude account 1\b/.test(t))).toHaveLength(1)
+  })
+}
+
+test('Review F1 instance: after /clear in Terminal.app the view still says the font draws block characters', async ($, on) => {
+  const w = fresh()
+  w.env = { TERM_PROGRAM: 'Apple_Terminal', CLAUDE_SECURESTORAGE_CONFIG_DIR: SLOT2 }
+  const s = clearable(on)
+  const clock = world(on, w, TWO_LOGINS)
+  on('classic.SessionStart', () => ({}))
+  await start($, clock)
+  const before = s.view()?.hasFontBlocks
+  await clearSession($, clock, s.clear)
+  expect(['hasFontBlocks before, after /clear', before, s.view()?.hasFontBlocks]).toEqual(['hasFontBlocks before, after /clear', true, true])
+})
+
+// Every view field the start set, in every start the scenarios cover, is the same once /clear's hook has run.
+const REVIEW_F1_STARTS: [string, (w: World) => void][] = [
+  ['plain start on login 2', w => { w.env = { CLAUDE_SECURESTORAGE_CONFIG_DIR: SLOT2 } }],
+  ['Terminal.app on login 2', w => { w.env = { TERM_PROGRAM: 'Apple_Terminal', CLAUDE_SECURESTORAGE_CONFIG_DIR: SLOT2 } }],
+  ['switching refused by policy, on login 2', w => { w.env = { CLAUDE_SECURESTORAGE_CONFIG_DIR: SLOT2 }; w.refuseEnv = true }],
+]
+for (const [name, arrange] of REVIEW_F1_STARTS) {
+  test(`Review F1 class: ${name}: every view field the start set is back after /clear`, async ($, on) => {
+    const w = fresh()
+    arrange(w)
+    const s = clearable(on)
+    const clock = world(on, w, TWO_LOGINS)
+    on('classic.SessionStart', () => ({}))
+    await start($, clock)
+    const before = { ...(s.view() ?? EMPTY_VIEW) } as Record<string, unknown>
+    // sessionMark is Review F3's, swept there.
+    const set = Object.keys(before).filter(k => k !== 'sessionMark' && JSON.stringify(before[k]) !== JSON.stringify((EMPTY_VIEW as Record<string, unknown>)[k]))
+    expect(set.length).toBeGreaterThan(0)
+    await clearSession($, clock, s.clear)
+    const after = { ...(s.view() ?? EMPTY_VIEW) } as Record<string, unknown>
+    const lost = set.filter(k => JSON.stringify(after[k]) !== JSON.stringify(before[k])).map(k => `${k}: ${JSON.stringify(before[k])} -> ${JSON.stringify(after[k])}`)
+    expect([name, 'lost at /clear', lost]).toEqual([name, 'lost at /clear', []])
+  })
+}
+
+test('Review MISSING-RESTORE class: after /resume the font and the switch policy are back, and the refusal is not said again', async ($, on) => {
+  const w = fresh()
+  w.env = { TERM_PROGRAM: 'Apple_Terminal' }
+  w.refuseEnv = true
+  const s = clearable(on)
+  const clock = world(on, w, TWO_LOGINS)
+  on('classic.SessionStart', () => ({}))
+  await start($, clock)
+  const refusal = (t: string) => /^Can't switch accounts in this session/.test(t)
+  expect([w.toasts.filter(refusal).length, w.notices.filter(refusal).length]).toEqual([1, 1])
+  await clearSession($, clock, s.clear, 'resume')
+  expect(
+    [s.view()?.hasFontBlocks, s.view()?.isSwitchBlocked, w.toasts.filter(refusal).length, w.notices.filter(refusal).length],
+    'terminal font, switch policy, and the refusal said once',
+  ).toEqual([true, true, 1, 1])
+})
+
+test('Review SESSION-STATE-SOURCE isFableStopped: after /clear a session whose turn died on the Fable week still says so', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [20, 30, 100]
+  w.usage['tok-2'] = [10, 30, 100]
+  const s = clearable(on)
+  const clock = world(on, w, TWO_LOGINS)
+  on('classic.SessionStart', () => ({}))
+  await start($, clock)
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  const before = s.view()?.isFableStopped
+  await clearSession($, clock, s.clear)
+  expect(['isFableStopped before, after /clear', before, s.view()?.isFableStopped]).toEqual(['isFableStopped before, after /clear', true, true])
+})
+
+test('Review F3 instance: a session whose mark was refused does not take its parent session\'s mark after /clear', async ($, on) => {
+  const w = fresh()
+  w.env = { CLAUDE_SECURESTORAGE_CONFIG_DIR: SLOT2, ACCOUNT_ROTATOR_SESSION: 'parent-session-mark' }
+  w.refuseMark = true
+  const s = clearable(on)
+  const clock = world(on, w, TWO_LOGINS)
+  on('classic.SessionStart', () => ({}))
+  await start($, clock)
+  const before = s.view()?.sessionMark
+  await clearSession($, clock, s.clear)
+  expect(['sessionMark before, after /clear', before, s.view()?.sessionMark]).toEqual(['sessionMark before, after /clear', undefined, undefined])
+})
+
+// Whatever the start's mark came to (set, refused) and whatever the inherited variable held, /clear keeps it.
+const REVIEW_F3_ROWS: [string, boolean, string | undefined][] = [
+  ['refused, a parent mark inherited', true, 'parent-session-mark'],
+  ['refused, nothing inherited', true, undefined],
+  ['set, a parent mark inherited', false, 'parent-session-mark'],
+  ['set, nothing inherited', false, undefined],
+]
+for (const [name, isRefused, inherited] of REVIEW_F3_ROWS) {
+  test(`Review F3 class: mark ${name}: the session's mark after /clear is the one its start left`, async ($, on) => {
+    const w = fresh()
+    w.env = { CLAUDE_SECURESTORAGE_CONFIG_DIR: SLOT2, ...(inherited === undefined ? {} : { ACCOUNT_ROTATOR_SESSION: inherited }) }
+    w.refuseMark = isRefused
+    const s = clearable(on)
+    const clock = world(on, w, TWO_LOGINS)
+    on('classic.SessionStart', () => ({}))
+    await start($, clock)
+    const before = s.view()?.sessionMark
+    await clearSession($, clock, s.clear)
+    expect([name, s.view()?.sessionMark]).toEqual([name, before])
   })
 }
 
