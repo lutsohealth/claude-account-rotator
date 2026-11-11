@@ -4498,6 +4498,74 @@ test('a usage call that throws backs off as a failed one, for every session', as
   expect(callsWith(w, 'tok-1')).toBe(1)
 })
 
+test('a claimed read of a login whose token has run out releases its claim, and its row says it failed to update', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  // Login 2 is idle: its access token ran out an hour ago and no session has refreshed it.
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2', NOW - HOUR)
+  w.usage['tok-1'] = [10, 20]
+  const lastRead = NOW - 3 * HOUR
+  const store = new Map<string, unknown>(
+    Object.entries({
+      ...TWO_LOGINS,
+      'holder:2': { token: await fingerprint('refresh-tok-2'), who: { email: 'two@example.com' } },
+      'usage:2': { fiveHour: { pct: 0 }, sevenDay: { pct: 10, resetsAt: WEEK_RESET }, at: lastRead, by: '2', v: 1, src: 'body' },
+      'usage-due:2': { next: NOW - 1, fails: 0, at: lastRead, v: 1 },
+    }),
+  )
+  const clock = world(on, w, store)
+  await start($, clock)
+  await clock.advance(61_000)
+  expect(callsWith(w, 'tok-2')).toBe(0)
+  expect(store.get('usage-due:2')).not.toHaveProperty('claim')
+  expect(store.get('usage-due:2')).toMatchObject({ fails: 0, at: lastRead })
+  expect((store.get('usage-due:2') as { next: number }).next).toBeGreaterThanOrEqual(NOW + USAGE_IDLE_MS)
+  expect(lineOne(store, '2')).toMatch(/ Failed to update$/)
+})
+
+test('a login whose token has run out and that has no reading saves no failure for its skipped read, so it stays in the pick', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2', NOW - HOUR)
+  w.usage['tok-1'] = [10, 20]
+  const store = new Map<string, unknown>(Object.entries(TWO_LOGINS))
+  const clock = world(on, w, store)
+  await start($, clock)
+  expect(store.get('check-error:2')).toBeUndefined()
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  await pane.press({ key: 'rotate' })
+  await clock.settle()
+  expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
+  await pane.unmount()
+})
+
+// Review codex-r1 F1 [CLAIM-OWNERSHIP]: the release took any claim under this session's id.
+test('a skipped read gives back only the claim its check made: a read this session started since keeps its own', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2', NOW - HOUR)
+  w.usage['tok-1'] = [10, 20]
+  const lastRead = NOW - 3 * HOUR
+  const store = new Map<string, unknown>(
+    Object.entries({
+      ...TWO_LOGINS,
+      'usage:2': { fiveHour: { pct: 0 }, sevenDay: { pct: 10, resetsAt: WEEK_RESET }, at: lastRead, by: '2', v: 1, src: 'body' },
+      'usage-due:2': { next: NOW - 1, fails: 0, at: lastRead, v: 1 },
+    }),
+  )
+  // Between the skip and the release, a stop or a /login in this session renews login 2's claim for a read of its own.
+  const renewed = { next: NOW + 10 * 60_000, fails: 0, claim: 'session-1', at: lastRead, v: 1 }
+  w.afterStoreSet = key => {
+    if (key === 'check-error:2' && w.afterStoreSet !== undefined) {
+      w.afterStoreSet = undefined
+      store.set('usage-due:2', renewed)
+    }
+  }
+  const clock = world(on, w, store)
+  await start($, clock)
+  expect(store.get('usage-due:2')).toEqual(renewed)
+})
+
 /** A response's rate limits: the 5-hour window and the week, in percent used, and when the week resets. */
 const limitsOf = (five: number, week: number, weekReset = '2026-10-18T03:00:00Z'): SessionRateLimit[] => [
   { kind: 'five_hour', percentUsed: five, resetsAt: '2026-10-12T12:00:00Z' },
