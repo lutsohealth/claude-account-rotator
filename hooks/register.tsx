@@ -388,7 +388,8 @@ async function mergeStore($: Host): Promise<void> {
     // The last good usage read, any session's: a response rewrites `usage:<id>` and its `at`, so the schedule says it.
     const due = usageDueFrom(await $.store.get(`usage-due:${a.id}`))
     if (due?.at !== undefined) readAt[a.id] = due.at
-    if (due !== undefined) nextAt[a.id] = due.next
+    // While a read is claimed `next` is the claim's expiry (claimUsage), not when the failed read is tried again.
+    if (due !== undefined && due.claim === undefined) nextAt[a.id] = due.next
     const h = await $.store.get(`health:${a.id}`)
     if (typeof h === 'object' && h !== null && typeof (h as Health).kind === 'string') health[a.id] = h as Health
   }

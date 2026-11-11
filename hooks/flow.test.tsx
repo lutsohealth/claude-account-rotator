@@ -5974,6 +5974,23 @@ test('a failure another session stores for login 2 shows on this session\'s row,
   expect(lineOne(store, '2')).toMatch(new RegExp(`  updated ${localTime(readAt)}$`))
 })
 
+test('a claimed usage read does not show its claim expiry as the failed row’s next try', async ($, on) => {
+  const { store, clock } = await rowsWorld($, on, true)
+  const due = store.get('usage-due:2') as object
+  store.set('usage-due:2', { ...due, next: clock.now() + 90_000, claim: 'other-session' })
+  await clock.advance(60_000)
+  expect(lineOne(store, '2')).toMatch(/Failed to update \(HTTP 429\)$/)
+})
+
+test('a claimed usage read leaves the updated time at the last good read', async ($, on) => {
+  const { store, clock } = await rowsWorld($, on)
+  const readAt = goodReadAt(store, '2')
+  const due = store.get('usage-due:2') as object
+  store.set('usage-due:2', { ...due, next: clock.now() + 90_000, claim: 'other-session' })
+  await clock.advance(60_000)
+  expect(lineOne(store, '2')).toMatch(new RegExp(`  updated ${localTime(readAt)}$`))
+})
+
 test('rows another session stored with this session\'s own lines are not written again', async ($, on) => {
   const { store, clock } = await rowsWorld($, on, true)
   const ours = rowsOf(store)

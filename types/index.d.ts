@@ -195,7 +195,7 @@ export type View = {
   checkErrors?: Record<string, CheckError>
   /** When each login's last good usage read came, as its schedule `usage-due:<id>` holds it (`UsageDue.at`). */
   readAt?: Record<string, number>
-  /** When each login's usage is next read, as its schedule `usage-due:<id>` holds it (`UsageDue.next`). */
+  /** When each login's usage is next read, as its schedule `usage-due:<id>` holds it (`UsageDue.next`); absent while a read is claimed, when `next` is the claim's expiry. */
   nextAt?: Record<string, number>
   health: Record<string, Health>
   /** The login this session sends its requests with. */
