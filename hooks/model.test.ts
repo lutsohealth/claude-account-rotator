@@ -224,6 +224,85 @@ test('soonest reset puts last a login at 0% whose reading holds no reset to come
   expect(picks).toEqual(rows.map(([name]) => [name, '3', '3']))
 })
 
+// Review F2 [INVALID-RESET], PR #69 round 1: a reset that does not parse is no reset to come.
+test('Review F2 instance: an invalid reset at 0% cannot outrank a known upcoming reset', () => {
+  const v = view({ '1': [100, 50], '2': [0, 0], '3': [0, 0] }, {}, 'reset')
+  v.readings['2'] = weekOnly(0, 'invalid-reset')
+  v.readings['3'] = weekOnly(30, '2026-10-14T03:00:00Z')
+  expect(pickTarget(v, NOW)?.id).toBe('3')
+})
+
+test('Review F2 class: every reset picker puts a malformed reset after a known one, in either window, at any percent', () => {
+  const offenders: string[] = []
+  for (const site of ['launch', 'target'] as const) {
+    for (const window of ['fiveHour', 'sevenDay'] as const) {
+      for (const pct of [0, 30]) {
+        for (const invalid of ['invalid-reset', '2026-99-99T00:00:00Z']) {
+          const v = view({ '1': [100, 50], '2': [0, 0], '3': [0, 0] }, {}, 'reset')
+          v.readings['2'] = window === 'sevenDay'
+            ? weekOnly(pct, invalid)
+            : { fiveHour: { pct, resetsAt: invalid }, sevenDay: { pct: 0, resetsAt: WEEK_END }, at: NOW }
+          v.readings['3'] = weekOnly(30, '2026-10-14T03:00:00Z')
+          const picked = site === 'launch' ? pickLaunch({ ...v, launchOn: 'reset' }, NOW)?.id : pickTarget(v, NOW)?.id
+          if (picked !== '3') offenders.push(`${site}/${window}/${pct}%/${invalid}: ${picked}`)
+        }
+      }
+    }
+  }
+  expect(offenders).toEqual([])
+})
+
+// Review F1 [LAUNCH-ADMITS-A-LEAVE], PR #69 round 1: a launch rule passes over a login the rotation would leave at once.
+test('Review F1 instance: soonest reset starts no session on a login whose week has reached the leave line', () => {
+  const v = view({ '1': [100, 50], '2': [0, 95], '3': [20, 0] }, {}, 'reset')
+  v.weekLeave = 5
+  v.readings['2'].fiveHour = { pct: 0, resetsAt: new Date(NOW + HOUR).toISOString() }
+  v.readings['3'].fiveHour = { pct: 20, resetsAt: LATER }
+  expect(pickLaunch({ ...v, launchOn: 'reset' }, NOW)?.id).toBe('3')
+})
+
+test('Review F1 class: no launch rule starts on a login the rotation would leave, at any week-leave', () => {
+  const offenders: string[] = []
+  for (const launchOn of ['reset', 'room', 'nonzero'] as const) {
+    for (const weekLeave of [1, 5, 50, 99]) {
+      // Login 2 is first in the list, holds the most room and resets soonest: each rule would take it but for the line.
+      const v = view({ '1': [100, 50], '2': [0, 100 - weekLeave], '3': [20, 0] }, {}, 'reset')
+      v.weekLeave = weekLeave
+      v.readings['2'].fiveHour = { pct: 0, resetsAt: new Date(NOW + HOUR).toISOString() }
+      v.readings['3'].fiveHour = { pct: 20, resetsAt: LATER }
+      const picked = pickLaunch({ ...v, launchOn }, NOW)?.id
+      if (picked !== '3') offenders.push(`${launchOn}, week-leave ${weekLeave}: picked ${picked}; the rotation takes ${pickTarget(v, NOW)?.id}`)
+    }
+  }
+  expect(offenders).toEqual([])
+})
+
+// RULING 5280, condition 1: with every login past the rotation's line, a rule still picks among those with room.
+test('a launch rule with every login past the leave line still picks, as it did before the line counted', () => {
+  const v = view({ '1': [10, 96], '2': [20, 97], '3': [30, 98] }, {}, 'reset')
+  v.weekLeave = 5
+  v.readings['3'].fiveHour = { pct: 30, resetsAt: '2026-10-12T11:00:00Z' }
+  const picks = (['room', 'nonzero', 'reset'] as const).map(launchOn => [launchOn, pickLaunch({ ...v, launchOn }, NOW)?.id])
+  expect(picks).toEqual([['room', '1'], ['nonzero', '1'], ['reset', '3']])
+})
+
+// RULING 5280, condition 2: where no login is past the line, every rule picks as at origin/main cb92eb7.
+test('a launch with no login past the leave line picks as before, by every rule and a named account', () => {
+  const v = view({ '1': [10, 50], '2': [5, 20], '3': [60, 50] })
+  v.weekLeave = 5
+  v.readings['3'].fiveHour = { pct: 60, resetsAt: '2026-10-12T10:30:00Z' }
+  const rules: View['launchOn'][] = ['room', 'nonzero', 'reset', 'account:3']
+  const picks = rules.map(launchOn => [launchOn, pickLaunch({ ...v, launchOn }, NOW)?.id])
+  expect(picks).toEqual([['room', '2'], ['nonzero', '1'], ['reset', '3'], ['account:3', '3']])
+})
+
+// RULING 5280, condition 3: README's New on skips a named account only at a limit with 0% left, so the line does not.
+test('a named account past the leave line but with room is still where new sessions start', () => {
+  const v = view({ '1': [10, 50], '2': [10, 97] })
+  v.weekLeave = 5
+  expect(pickLaunch({ ...v, launchOn: 'account:2' }, NOW)).toMatchObject({ id: '2', why: 'you picked it' })
+})
+
 test('next in list moves to the login after the one in use, wrapping, past spent and locked ones', () => {
   const at = (activeId: string, v: View) => pickTarget({ ...v, activeId }, NOW)?.id
   const v = view({ '1': [10, 10], '2': [95, 10], '3': [20, 10], '4': [80, 10] }, {}, 'order')
