@@ -13,6 +13,10 @@ permissions:
 jobs:
   checks:
     runs-on: ubuntu-latest
+    # A stated bash runs every step with -o pipefail, so a failed download fails the install step.
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
 
