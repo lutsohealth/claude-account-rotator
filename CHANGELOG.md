@@ -2,6 +2,11 @@
 
 What each version of the account rotator changed. To get each one as Claude Code starts, turn on auto-update: in `/plugin`, open **Marketplaces**, pick **claude-account-rotator** and choose **Enable auto-update**. To update by hand, run `claude plugin marketplace update claude-account-rotator`, then `claude plugin update account-rotator@claude-account-rotator`, and start a new session.
 
+## Unreleased
+
+- **A Fable stop stays known through `/clear`, `/resume` and `/branch` after the mod's code reloads**, where the session forgot it.
+- **A session whose start failed once still stores the usage each response reports, and takes `account use` while its Bash call runs**, where it did neither until the session ended.
+
 ## 0.5.27-lutso.1 - 2026-11-11
 
 - **`account-rotator continue-text --set "<text>"` sets the line a session sends after a Fable switch, and `--clear` clears it**, through a session of the mod as `account select` does, where nothing but a hand edit of the store could. A text empty or over 500 characters once trimmed is refused, by the command and by the session, which count an emoji as one character.
