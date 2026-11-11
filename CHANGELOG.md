@@ -2,6 +2,10 @@
 
 What each version of the account rotator changed. To get each one as Claude Code starts, turn on auto-update: in `/plugin`, open **Marketplaces**, pick **claude-account-rotator** and choose **Enable auto-update**. To update by hand, run `claude plugin marketplace update claude-account-rotator`, then `claude plugin update account-rotator@claude-account-rotator`, and start a new session.
 
+## 0.5.24-lutso.1 - 2026-11-11
+
+- **An idle account whose sign-in has run out says Failed to update**, where its row used to show its last update's time as if it were current. The usage it shows is from that last update.
+
 ## 0.5.23-lutso.1 - 2026-11-08
 
 - **A usage-limit stop during an unproven switch can still be given back after the mod's code reloads**, where its mark used to stay on the account until its reset.
