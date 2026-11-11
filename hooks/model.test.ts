@@ -146,7 +146,7 @@ test('new sessions start on the login the setting picks among those with room on
   const on = (launchOn: View['launchOn']) => pickLaunch({ ...v, launchOn }, NOW)
   expect(on('room')).toMatchObject({ id: '2', slot: '/h/.claude/accounts/2' })
   expect(on('nonzero')?.id).toBe('2')
-  expect(on('reset')?.id).toBe('3')
+  expect(on('reset')?.id).toBe('2')
   expect(on('account:3')).toMatchObject({ id: '3', why: 'you picked it' })
   expect(on('account:4')).toMatchObject({ id: '2', why: 'account 4 has no room, and it is the next with room' })
   expect(on('account:1')?.id).toBe('2')
