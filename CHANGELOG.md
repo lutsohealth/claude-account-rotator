@@ -4,6 +4,8 @@ What each version of the account rotator changed. To get each one as Claude Code
 
 ## Unreleased
 
+- **`account-rotator continue-text --set "<text>"` sets the line a session sends after a Fable switch, and `--clear` clears it**, through a session of the mod as `account select` does, where nothing but a hand edit of the store could. A text empty or over 500 characters once trimmed is refused, by the command and by the session, which count an emoji as one character.
+- **A request file a session cannot read is answered no**, as one that does not parse or is over 4096 bytes, so its command exits 4 at once, where it waited out `--wait` and exited 3.
 - **A switch still unproven goes on through `/clear`, `/resume` and `/branch`**: a usage-limit stop marked during it is given back if the switch does not take, where the mark used to stay on the account until its reset, and a switch held back for a token refresh is still made when the refresh lands.
 - **Soonest reset counts a window at 0% used by its reset time**, where its usage gives one, for the account new sessions start on and for the rotation, where an account at 0% used came after every account whose window was running: a week runs, and resets, whether it is used or not. A reset time that does not parse counts as none.
 - **New on starts no session on an account the rotation would leave at once**, by the most room, the first with room or the soonest reset, while another account stays below the line: a week down to the **Week** row's line, or a 5-hour window at 90%. With every account past it, the pick is as before. A named account is not passed over.

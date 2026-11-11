@@ -33,6 +33,7 @@ import {
   accountsRoot,
   canConnectChrome,
   chromeNote,
+  CONTINUE_TEXT_MAX,
   continueTextFrom,
   credentialFrom,
   credentialsFile,
@@ -84,6 +85,7 @@ import {
   isSameRows,
   rowsOf,
   REQUEST_MAX_BYTES,
+  isRequestNonce,
   REQUEST_POLL_MS,
   REQUEST_TTL_MS,
   SwitchHeld,
@@ -511,19 +513,33 @@ async function applyRequests($: Host, isMerging = false): Promise<void> {
   const names = new Set(entries.map(e => e.name))
   const now = await $.clock.now()
   const requests: RotatorRequest[] = []
+  // The CLI writes a request whole, by a rename from `.json.tmp`, which this listing skips: a request file of a nonce
+  // it writes that is too large to read, or whose text does not parse, is a broken request, answered so its CLI does
+  // not wait out --wait.
+  const broken: [nonce: string, message: string][] = []
   for (const { name, kind, size } of entries) {
     const nonce = name.endsWith('.json') && !name.endsWith('.result.json') ? name.slice(0, -'.json'.length) : undefined
     if (nonce === undefined || names.has(`${nonce}.result.json`) || takenRequests.has(nonce)) continue
     if (kind !== 'file' || size > REQUEST_MAX_BYTES) {
       if (!skippedRequests.has(name)) await debug($, `skipped ${name} in the requests folder: ${kind}, ${size} bytes`)
       skippedRequests.add(name)
+      if (kind === 'file' && isRequestNonce(nonce)) broken.push([nonce, `the request file is over ${REQUEST_MAX_BYTES} bytes, more than a session reads: run the command again`])
       continue
     }
-    // A file the CLI is still writing, or one that is no request, reads as none.
+    // A file no read can reach, or one that is no request of this store, reads as none.
     const text = await $.fs.read(`${dir}/${name}`).catch(() => undefined)
-    const request = requestFrom(parsed(typeof text === 'string' ? text : undefined), now)
+    const value = parsed(typeof text === 'string' ? text : undefined)
+    // No version of the CLI writes a request that is not a JSON object.
+    const isObject = typeof value === 'object' && value !== null && !Array.isArray(value)
+    if (typeof text === 'string' && !isObject && isRequestNonce(nonce)) broken.push([nonce, 'the request file is not a JSON object a session can read: run the command again'])
+    const request = requestFrom(value, now)
     if (request === undefined || request.nonce !== nonce || request.store !== storeId) continue
     if (request.kind !== 'use' || request.session === sessionMark) requests.push(request)
+  }
+  for (const [nonce, message] of broken) {
+    takenRequests.add(nonce)
+    await $.fs.write(`${dir}/${nonce}.result.json`, JSON.stringify({ nonce, ok: false, message, at: now }))
+      .catch(error => debug($, `request ${nonce} failed: ${String(error)}`))
   }
   if (isMerging && requests.length > 0) await mergeStore($)
   for (const request of requests.sort((a, b) => a.at - b.at)) {
@@ -549,16 +565,35 @@ async function takeRequest($: Host, resultPath: string, request: RotatorRequest,
  * What a request asks, done: `select` sets the login new sessions start on, as the panel's New on does. The result
  * names the pick that setting makes: a login with no room gives way to the next with room, or to Claude Code's login.
  * `use` moves this session. `rm` drops an account, as the panel's Remove does. `add` lists a folder signed in.
+ * `continue-text` sets or clears the line a Fable switch sends.
  */
 async function applyRequest($: Host, request: RotatorRequest): Promise<{ ok: boolean; message: string; pickId?: string; activeId?: string; accountId?: string }> {
   if (request.kind === 'rm') return removeAccount($, request.id, request)
   if (request.kind === 'add') return adoptSlot($, request.slot)
+  if (request.kind === 'continue-text') return setContinueText($, request.text)
   const target = (await getView($)).accounts.find(a => a.id === request.id)
   if (target === undefined) return { ok: false, message: `account ${request.id} is not listed in this store` }
   if (request.kind === 'use') return useAccount($, target)
   await setLaunchOn($, `account:${request.id}`)
   const { text, pickId } = await pickAnswer($)
   return { ok: true, message: text, pickId }
+}
+
+/**
+ * The line a session sends after a Fable switch, as the person's own words: `text`, as `continueTextFrom` takes it, or
+ * null to clear it, so the mod's own line goes instead. Every session reads the key at its next merge.
+ */
+async function setContinueText($: Host, text: unknown): Promise<{ ok: boolean; message: string }> {
+  if (text === null) {
+    await $.store.delete('fable-continue-text')
+    await setView($, v => ({ ...v, fableContinueText: undefined }))
+    return { ok: true, message: "cleared: after a Fable switch a session sends the mod's own line" }
+  }
+  const line = continueTextFrom(text)
+  if (line === undefined) return { ok: false, message: `the line after a Fable switch is text of 1 to ${CONTINUE_TEXT_MAX} characters once trimmed` }
+  await $.store.set('fable-continue-text', line)
+  await setView($, v => ({ ...v, fableContinueText: line }))
+  return { ok: true, message: `after a Fable switch a session sends: ${line}` }
 }
 
 /** Where new sessions start now, in a request's words. */

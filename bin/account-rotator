@@ -6,6 +6,7 @@
     account-rotator account use --account <id|email|system> [--agent claude] [--wait S] [--json] [--store PATH]
     account-rotator account rm --account <id|email> [--agent claude] [--wait S] [--json] [--store PATH]
     account-rotator account add [--folder PATH] [--agent claude] [--wait S] [--json] [--store PATH]
+    account-rotator continue-text --set TEXT | --clear [--agent claude] [--wait S] [--json] [--store PATH]
 
 `list` prints each account's row as the switcher pane draws it, from the store's `rows` key, which every session of
 the mod rewrites when a row changes: its times are stored as instants, rendered here at this clock and in this zone.
@@ -18,6 +19,9 @@ mod on that store applies it and answers with a result file. `use` also names th
 its Bash children's environment.
 
 `add` signs a new folder in, in this terminal, then asks in the same way for a session to list it.
+
+`continue-text` sets the line a session sends after a Fable switch, as the person's own words, or clears it so the
+mod's own line goes: a request in the same way, which the session judges again.
 """
 
 # Read as text, so `str | None` is no error on a macOS python3 older than 3.10.
@@ -57,10 +61,16 @@ SESSION_VAR = "ACCOUNT_ROTATOR_SESSION"
 # The slot a session runs on, which the mod keeps set in its Bash children's environment: unset is Claude Code's login.
 SLOT_VAR = "CLAUDE_SECURESTORAGE_CONFIG_DIR"
 OLDER_NOTE = "an older version of the mod stored some rows as text, their times as of when it wrote them"
+# hooks/model.ts CONTINUE_TEXT_MAX: the longest line, once trimmed, a session sends after a Fable switch.
+CONTINUE_TEXT_MAX = 500
+# What JavaScript's String.prototype.trim() takes off each end, no more: ECMAScript's WhiteSpace (tab, vertical tab, form
+# feed, U+FEFF and the Zs spaces) and LineTerminator. Python's `\s` takes U+001C to U+001F and U+0085 too.
+JS_SPACE = "\t\n\u000b\u000c\r    -     　﻿"
+JS_TRIM = re.compile(f"^[{JS_SPACE}]+|[{JS_SPACE}]+$")
 EXITS = (
     "Exit 0 done, 1 no store or a damaged one or a folder or request it cannot write, 2 a usage error (an unknown flag or verb, --agent not claude, an --account"
     " that names no account or several, a --wait not above 0 and at most 300, use outside a session of the mod, rm of Claude Code's own login, add with no terminal,"
-    " a --folder that names no numbered folder under the accounts folder), 3 no session took the request within --wait, or none"
+    " a --folder that names no numbered folder under the accounts folder, a continue-text --set text empty or over 500 characters once trimmed), 3 no session took the request within --wait, or none"
     " has given the store a store-id yet, 4 a session refused it, 5 the sign-in did not finish, 130 stopped, the request withdrawn."
 )
 
@@ -287,6 +297,17 @@ def sweep(folder: str) -> None:
             pass
 
 
+def request_text(request: dict) -> str:
+    """A request as JSON in UTF-8, not \\u escapes, so a line of 500 emoji stays under the session's REQUEST_MAX_BYTES.
+    A value UTF-8 cannot hold (a lone surrogate from argv bytes that are not UTF-8) keeps the escaped form."""
+    text = json.dumps(request, ensure_ascii=False)
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return json.dumps(request)
+    return text
+
+
 def ask(folder: str, request: dict, wait_s: float) -> dict | None:
     """Writes a request whole, by a rename, and waits for its answer; the request is withdrawn on every way out."""
     path = os.path.join(folder, f"{request['nonce']}.json")
@@ -294,7 +315,7 @@ def ask(folder: str, request: dict, wait_s: float) -> dict | None:
         os.makedirs(folder, exist_ok=True)
         sweep(folder)
         with open(f"{path}.tmp", "w", encoding="utf-8") as f:
-            json.dump(request, f)
+            f.write(request_text(request))
         os.replace(f"{path}.tmp", path)
         return answer(folder, request["nonce"], wait_s)
     finally:
@@ -367,6 +388,30 @@ def select(data: dict, store: str, given: str, wait_s: float, as_json: bool) -> 
         return {"account": account, "activeAccountId": pick, "launchOn": f"account:{account}"}
 
     return request_session(data, store, given, wait_s, as_json, {"kind": "select"}, f"no session of the mod on {store} took", envelope)
+
+
+def continue_text_given(given: str) -> str:
+    """The line `--set` gives, trimmed, as the mod keeps it: refused here, before any request, when the mod would refuse it.
+    It trims what JavaScript's trim() trims and counts code points, as the mod does."""
+    text = JS_TRIM.sub("", given)
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        raise UsageError("--set: the line after a Fable switch is UTF-8 text, and this holds bytes that are not; or pass --clear, or see --help") from None
+    if not 0 < len(text) <= CONTINUE_TEXT_MAX:
+        raise UsageError(f"--set: the line after a Fable switch is text of 1 to {CONTINUE_TEXT_MAX} characters once trimmed, and this is {len(text)}; or pass --clear, or see --help")
+    return text
+
+
+def continue_text(data: dict, store: str, text: str | None, wait_s: float, as_json: bool) -> int:
+    """Asks the sessions on this store to set the line sent after a Fable switch, or with `text` None to clear it."""
+    store_id = data.get("store-id")
+    if not isinstance(store_id, str):
+        return no_store_id(store)
+    code, result = session_answer(store, store_id, "", wait_s, {"kind": "continue-text", "text": text}, f"no session of the mod on {store} took")
+    if result is not None:
+        report(store, result, {"continueText": text}, as_json)
+    return code
 
 
 def use(data: dict, store: str, given: str, wait_s: float, as_json: bool) -> int:
@@ -494,10 +539,20 @@ def parsers() -> tuple[argparse.ArgumentParser, argparse.ArgumentParser]:
     """The root parser, and the account group's, whose help a bare `account` prints."""
     root = argparse.ArgumentParser(
         prog="account-rotator",
-        description="The account-rotator mod's Claude accounts, from a shell. Verbs: account list, account select, account use, account rm, account add.",
+        description="The account-rotator mod's Claude accounts, from a shell. Verbs: account list, account select, account use, account rm, account add, continue-text.",
         epilog=EXITS,
     )
-    groups = root.add_subparsers(dest="group", metavar="account")
+    groups = root.add_subparsers(dest="group", metavar="account|continue-text")
+    continuing = groups.add_parser(
+        "continue-text",
+        help="set or clear the line a session sends after a Fable switch",
+        description=f"continue-text: set the line a session sends after a Fable switch, as your own words, or clear it so the mod's own line goes, through a session of the mod on the store, which applies the request within a minute. It never writes the store. --set takes text of 1 to {CONTINUE_TEXT_MAX} characters once trimmed; the session judges the request again.",
+        epilog=EXITS,
+    )
+    continuing.set_defaults(verb="continue-text")
+    line = continuing.add_mutually_exclusive_group(required=True)
+    line.add_argument("--set", metavar="TEXT", help=f"the line, 1 to {CONTINUE_TEXT_MAX} characters once trimmed")
+    line.add_argument("--clear", action="store_true", help="clear the line: a session sends the mod's own")
     account = groups.add_parser("account", help="the Claude accounts the mod keeps", description="Verbs: account list, account select, account use, account rm, account add.", epilog=EXITS)
     verbs = account.add_subparsers(dest="verb", metavar="list|select|use|rm|add")
     listing = verbs.add_parser(
@@ -534,9 +589,9 @@ def parsers() -> tuple[argparse.ArgumentParser, argparse.ArgumentParser]:
     wait_help = "seconds to wait for a session to take the request, above 0 and at most 300 (default 90; a session looks once a minute)"
     for verb in (selecting, using, removing):
         verb.add_argument("--account", required=True, help="the account: its id, its email (when one account has it), or system, the account on Claude Code's own login")
-    for verb in (selecting, using, removing, adding):
+    for verb in (selecting, using, removing, adding, continuing):
         verb.add_argument("--wait", type=wait_seconds, default=90.0, help=wait_help)
-    for verb in (listing, selecting, using, removing, adding):
+    for verb in (listing, selecting, using, removing, adding, continuing):
         verb.add_argument("--agent", default="claude", help="the agent whose accounts these are: claude, the only one the mod keeps")
         verb.add_argument("--json", action="store_true", help="print Orca's JSON envelope instead of text")
         verb.add_argument("--store", help="the mod's store file (default: the newest " + STORE_GLOB + " holding accounts, under the Claude config folder)")
@@ -556,6 +611,11 @@ def main(argv: list[str] | None = None, *, now: float | None = None, zone: tzinf
     if args.verb == "use" and not os.environ.get(SESSION_VAR):
         print(f"account-rotator: account use moves the session running it, and {SESSION_VAR} is unset: run it from the Bash tool of a session on this version of the mod, or see --help", file=sys.stderr)
         return EXIT_USAGE
+    try:
+        text = continue_text_given(args.set) if args.verb == "continue-text" and not args.clear else None
+    except UsageError as error:
+        print(f"account-rotator: {error}", file=sys.stderr)
+        return EXIT_USAGE
     folder = None
     if args.verb == "add":
         if args.folder is None and (sys.stdin is None or not sys.stdin.isatty()):
@@ -573,10 +633,12 @@ def main(argv: list[str] | None = None, *, now: float | None = None, zone: tzinf
         print(f"account-rotator: {error}", file=sys.stderr)
         return EXIT_NO_STORE
     requesting = {"select": select, "use": use, "rm": remove}
-    if args.verb in ("add", *requesting):
+    if args.verb in ("add", "continue-text", *requesting):
         try:
             if args.verb == "add":
                 return add(data, store, folder, args.wait, args.json)
+            if args.verb == "continue-text":
+                return continue_text(data, store, text, args.wait, args.json)
             return requesting[args.verb](data, store, args.account, args.wait, args.json)
         except KeyboardInterrupt:
             print("account-rotator: stopped, so any request is withdrawn; a session may have taken it in that same moment: run account list", file=sys.stderr)

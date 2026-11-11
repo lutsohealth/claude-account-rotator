@@ -6954,6 +6954,115 @@ test('a store holds a store-id, which the first session that finds none writes',
   expect(typeof store.get('store-id')).toBe('string')
 })
 
+// puma-9arph.5: `account-rotator continue-text` sets or clears fable-continue-text through a session's request.
+/** A continue-text request as bin/account-rotator writes one; `fields` stands in for its text, or what a hand put there. */
+const continueRequest = (nonce: string, storeId: unknown, at: number, fields: Record<string, unknown>) => JSON.stringify({ kind: 'continue-text', nonce, at, id: '', store: storeId, ...fields })
+
+/** Login 1 at its Fable limit, login 2 with Fable room, the store as given; a minute's merge done, so it has a store-id. */
+async function fableReady($: Engine, on: On, kept: Record<string, unknown>): Promise<{ w: World; store: Map<string, unknown>; clock: MockClock }> {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [20, 30, 100]
+  w.usage['tok-2'] = [10, 30, 10]
+  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, ...kept }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  await clock.advance(60_000)
+  return { w, store, clock }
+}
+
+/** The request applied at the next minute, then a Fable stop and its switch landed: what the carry-on sent. */
+async function requestThenFableStop($: Engine, w: World, store: Map<string, unknown>, clock: MockClock, fields: Record<string, unknown>): Promise<void> {
+  w.files[`${REQUESTS}/${N1}.json`] = continueRequest(N1, store.get('store-id'), await clock.now(), fields)
+  await clock.advance(60_000)
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  await clock.advance(36_000)
+}
+
+test('a continue-text request sets the line, trimmed, and the next Fable switch carries on with it as the person\'s words', async ($, on) => {
+  const { w, store, clock } = await fableReady($, on, {})
+  await requestThenFableStop($, w, store, clock, { text: '  Please resume.  ' })
+  expect([store.get('fable-continue-text'), resultOf(w, N1)?.ok, w.submitted, w.asUser]).toEqual(['Please resume.', true, ['Please resume.'], [true]])
+})
+
+test('a continue-text request with text null clears the line, and the next Fable switch sends the mod\'s own', async ($, on) => {
+  const { w, store, clock } = await fableReady($, on, { 'fable-continue-text': 'Go on on Fable-free ground.' })
+  await requestThenFableStop($, w, store, clock, { text: null })
+  expect([store.has('fable-continue-text'), resultOf(w, N1)?.ok, w.asUser]).toEqual([false, true, [false]])
+})
+
+// RULING 5287: a request a hand wrote, malformed or with a text the CLI refuses, is refused by the session too.
+const REFUSED_TEXTS: [string, Record<string, unknown>][] = [
+  ['501 characters', { text: 'a'.repeat(501) }],
+  ['spaces only', { text: '   ' }],
+  ['empty', { text: '' }],
+  ['a number', { text: 42 }],
+  ['no text field', {}],
+]
+for (const [name, fields] of REFUSED_TEXTS) {
+  test(`a continue-text request with ${name}, which the CLI would refuse or never writes, is refused with an answer and keeps the line`, async ($, on) => {
+    const { w, store, clock } = await fableReady($, on, { 'fable-continue-text': 'Go on on Fable-free ground.' })
+    w.files[`${REQUESTS}/${N1}.json`] = continueRequest(N1, store.get('store-id'), await clock.now(), fields)
+    await clock.advance(60_000)
+    const answer = resultOf(w, N1)
+    expect([name, answer?.ok, /1 to 500 characters/.test(String(answer?.message)), store.get('fable-continue-text')]).toEqual([name, false, true, 'Go on on Fable-free ground.'])
+  })
+}
+
+// Review R2 (Codex, #70 round 1) [REQUEST-UNANSWERED]: the CLI writes a request whole, by a rename, so a request
+// file that does not parse is a broken request, refused with an answer, and the line stays.
+test('Review R2: a continue-text request file that does not parse is refused with an answer and keeps the line', async ($, on) => {
+  const { w, store, clock } = await fableReady($, on, { 'fable-continue-text': 'Keep this.' })
+  w.files[`${REQUESTS}/${N1}.json`] = '{"kind":"continue-text","text":"bad",'
+  await clock.advance(60_000)
+  expect([resultOf(w, N1)?.ok, store.get('fable-continue-text')]).toEqual([false, 'Keep this.'])
+})
+
+test('Review R2 class: every request file that is not a JSON object gets a refusal, and the line stays', async ($, on) => {
+  const { w, store, clock } = await fableReady($, on, { 'fable-continue-text': 'Keep this.' })
+  const corpus = ['{"kind":"continue-text","text":"bad",', '{"kind":"continue-text","text":', '{"kind":"continue-text","text":"bad"} trailing', '', 'null', '42', '"continue-text"', '[{"kind":"continue-text"}]']
+  corpus.forEach((text, i) => { w.files[`${REQUESTS}/review-r2-${i + 1}.json`] = text })
+  await clock.advance(60_000)
+  const offenders = corpus.flatMap((_, i) => resultOf(w, `review-r2-${i + 1}`)?.ok === false ? [] : [`review-r2-${i + 1}`])
+  expect(corpus.length).toBeGreaterThan(0)
+  expect([offenders, store.get('fable-continue-text')]).toEqual([[], 'Keep this.'])
+})
+
+test('Review R2, the other side: a file that does not parse and whose name is no nonce the CLI writes gets no result', async ($, on) => {
+  const { w, clock } = await fableReady($, on, {})
+  w.files[`${REQUESTS}/short.json`] = '{"kind":'
+  w.files[`${REQUESTS}/${N1}.json`] = '{"kind":'
+  await clock.advance(60_000)
+  expect([w.files[`${REQUESTS}/short.result.json`], resultOf(w, N1)?.ok]).toEqual([undefined, false])
+})
+
+// Review R3 (Codex, #70 round 1) [CHARACTER-COUNT-MISMATCH]: the CLI counts code points (Python len), so the session
+// counts the same, never UTF-16 units: a line of 251 to 500 astral characters is taken on both sides.
+test('Review R3: a line of 251 emoji, which the CLI takes, is taken by the session', async ($, on) => {
+  const { w, store, clock } = await fableReady($, on, {})
+  const line = '😀'.repeat(251)
+  w.files[`${REQUESTS}/${N1}.json`] = continueRequest(N1, store.get('store-id'), await clock.now(), { text: line })
+  await clock.advance(60_000)
+  expect([resultOf(w, N1)?.ok, store.get('fable-continue-text')]).toEqual([true, line])
+})
+
+test('Review R3 class: the session takes every line of 500 code points and refuses a line of 501, or one that is not UTF-8', async ($, on) => {
+  const { w, store, clock } = await fableReady($, on, {})
+  const cases: [string, string, boolean][] = [
+    ['emoji-500', '😀'.repeat(500), true], ['cjk-emoji-500', '中😀'.repeat(250), true], ['music-500', '𝄞'.repeat(500), true],
+    ['emoji-501', '😀'.repeat(501), false], ['ascii-501', 'a'.repeat(501), false],
+    // A lone surrogate, which the CLI refuses as text that is not UTF-8.
+    ['lone-surrogate', 'ok \udcff', false], ['lone-high-surrogate', '\ud83d ok', false],
+  ]
+  for (const [label, line] of cases) w.files[`${REQUESTS}/review-r3-${label}.json`] = continueRequest(`review-r3-${label}`, store.get('store-id'), await clock.now(), { text: line })
+  await clock.advance(60_000)
+  const offenders = cases.flatMap(([label, , taken]) => resultOf(w, `review-r3-${label}`)?.ok === taken ? [] : [label])
+  expect(cases.length).toBeGreaterThan(0)
+  expect(offenders).toEqual([])
+})
+
 test('two sessions booting at once end with one store-id: this session keeps the one the store holds', async ($, on) => {
   const { store, clock } = await selectWorld($, on)
   // The other session's write of its own id lands after this session's.
@@ -6993,13 +7102,14 @@ test('a request read from another store, a stale one, one whose nonce is not its
 })
 
 // Review C11-R1 F8 (Opus) [UNPINNED-GUARD] (RULING 4607): the survivors in the session's half.
-test('a request file that does not parse, or one no read can reach, is passed over and the next is applied', async ($, on) => {
+// Review R2 (Codex, #70 round 1): a file that does not parse is answered with a refusal, no longer passed over unanswered.
+test('a request file that does not parse is refused, one no read can reach is passed over, and the next is applied', async ($, on) => {
   const { w, store, clock } = await selectWorld($, on)
   w.files[`${REQUESTS}/torn-00001.json`] = '{"kind": "sel'
   w.files[`${REQUESTS}/noread-001.json`] = null
   w.files[`${REQUESTS}/${N1}.json`] = selectRequest(N1, '2', store.get('store-id'), clock.now())
   await clock.advance(60_000)
-  expect([store.get('launch-on'), resultOf(w, 'torn-00001'), resultOf(w, 'noread-001'), resultOf(w, N1)?.ok]).toEqual(['account:2', undefined, undefined, true])
+  expect([store.get('launch-on'), resultOf(w, 'torn-00001')?.ok, resultOf(w, 'noread-001'), resultOf(w, N1)?.ok]).toEqual(['account:2', false, undefined, true])
 })
 
 test('a select while no login has room says new sessions start on Claude Code\'s login, and names no pick', async ($, on) => {
@@ -8275,14 +8385,15 @@ test('two sessions on one store, store-id: an add read from another store is lef
 const paddedSelect = (nonce: string, storeId: unknown, at: number, pad = 0) => JSON.stringify({ kind: 'select', nonce, at, id: '2', store: storeId, pad: 'x'.repeat(pad) })
 const debugLines = (w: World, text: string) => (w.logged ?? []).filter(line => line.includes(text))
 
-test('a request over 4 KB is skipped unread, in one debug line, and one of exactly 4 KB is taken', async ($, on) => {
+// Review R2 (Codex, #70 round 1), its class: a request too large to read is refused unread, never left unanswered.
+test('a request over 4 KB is refused unread, in one debug line, and one of exactly 4 KB is taken', async ($, on) => {
   const { w, store, clock } = await selectWorld($, on)
   const size = paddedSelect(N1, store.get('store-id'), clock.now()).length
   w.files[`${REQUESTS}/${N1}.json`] = paddedSelect(N1, store.get('store-id'), clock.now(), 4097 - size)
   await untilTick(clock)
   w.files[`${REQUESTS}/${N1}.json`] = paddedSelect(N1, store.get('store-id'), clock.now(), 4097 - size)
   await untilTick(clock)
-  expect(resultOf(w, N1)).toBeUndefined()
+  expect([resultOf(w, N1)?.ok, /over 4096 bytes/.test(String(resultOf(w, N1)?.message)), store.get('launch-on')]).toEqual([false, true, undefined])
   expect(debugLines(w, N1).length).toBe(1)
   w.files[`${REQUESTS}/${N2}.json`] = paddedSelect(N2, store.get('store-id'), clock.now(), 4096 - size)
   await untilTick(clock)

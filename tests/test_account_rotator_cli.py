@@ -11,6 +11,7 @@ import io
 import json
 import os
 import pty
+import re
 import shutil
 import signal
 import subprocess
@@ -20,7 +21,7 @@ import threading
 import time
 import unittest
 import uuid
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime
 from pathlib import Path
 from types import ModuleType
@@ -565,6 +566,116 @@ class Select(RequestCase):
 MARK = "session-abc"
 SESSION_VAR = "ACCOUNT_ROTATOR_SESSION"
 SLOT_VAR = "CLAUDE_SECURESTORAGE_CONFIG_DIR"
+
+
+class ContinueText(RequestCase):
+    """puma-9arph.5: `continue-text` sets or clears the line a Fable switch sends, through a session's request,
+    as `account select` does: the CLI never writes the store."""
+
+    def continue_text(self, *args: str) -> subprocess.CompletedProcess[str]:
+        return run(CLI, "continue-text", *args, env=self.env())
+
+    def test_set_leaves_a_request_of_its_kind_with_the_trimmed_text_and_reports_the_answer(self) -> None:
+        self.answer(True, "after a Fable switch a session sends: Please resume.")
+        done = self.continue_text("--set", "  Please resume.  ", "--json", "--wait", "10")
+        request = {k: getattr(self, "seen", {}).get(k) for k in ("kind", "text", "store")}
+        self.assertEqual((done.returncode, request, self.result_of(done)), (0, {"kind": "continue-text", "text": "Please resume.", "store": "store-abc"}, {"continueText": "Please resume."}))
+
+    def result_of(self, done: subprocess.CompletedProcess[str]) -> object:
+        """The --json result, or None where the command printed none."""
+        return json.loads(done.stdout).get("result") if done.stdout.strip() else None
+
+    def test_clear_leaves_a_request_whose_text_is_null(self) -> None:
+        self.answer(True, "cleared")
+        done = self.continue_text("--clear", "--wait", "10")
+        seen = getattr(self, "seen", {})
+        self.assertEqual((done.returncode, seen.get("kind"), "text" in seen, seen.get("text")), (0, "continue-text", True, None))
+
+    def test_a_text_empty_or_over_500_characters_once_trimmed_exits_2_before_any_request(self) -> None:
+        corpus = ["", "   ", "a" * 501, " " + "a" * 501 + " "]
+        offenders = {}
+        for text in corpus:
+            done = self.continue_text("--set", text, "--wait", "10")
+            if done.returncode != 2 or self.requests.exists():
+                offenders[len(text)] = (done.returncode, self.requests.exists())
+        self.assertEqual(offenders, {})
+        self.assertEqual(self.continue_text("--set", "a" * 500, "--wait", "0.2").returncode, 3)
+
+    def test_set_and_clear_together_is_a_usage_error(self) -> None:
+        done = self.continue_text("--set", "x", "--clear")
+        self.assertEqual((done.returncode, "not allowed with argument --set" in done.stderr), (2, True))
+
+    def written(self, text: str) -> tuple[int, int | None]:
+        """`--set text` run in this process with a session that takes it: the exit and the request file's size in
+        bytes, None where no request was written."""
+        cli = load_cli()
+        sizes: list[int] = []
+
+        def inspect(folder: str, nonce: str, _wait: float) -> dict:
+            sizes.append((Path(folder) / f"{nonce}.json").stat().st_size)
+            return {"nonce": nonce, "ok": True, "message": "accepted"}
+
+        with patch.dict(os.environ, self.env()), patch.object(cli, "answer", side_effect=inspect), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            code = cli.main(["continue-text", "--set", text, "--store", str(self.store)])
+        return code, (sizes[0] if sizes else None)
+
+    def session_cap(self) -> int:
+        """REQUEST_MAX_BYTES of hooks/model.ts: a session skips a larger request file."""
+        found = re.search(r"REQUEST_MAX_BYTES = (\d+)", (ROOT / "hooks" / "model.ts").read_text(encoding="utf-8"))
+        assert found is not None, "hooks/model.ts no longer names REQUEST_MAX_BYTES"
+        return int(found.group(1))
+
+    # Review R1 (Codex, #70 round 1) [REQUEST-SIZE-MISMATCH]: a line the CLI takes is written small enough for a
+    # session to read it.
+    def test_review_r1_a_line_of_500_emoji_is_written_under_the_session_request_cap(self) -> None:
+        code, size = self.written("😀" * 500)
+        self.assertTrue(code == 0 and size is not None and size <= self.session_cap(), f"exit {code}, 500 emoji written as {size} bytes, cap {self.session_cap()}")
+
+    def test_review_r1_class_every_line_the_cli_takes_is_written_under_the_session_request_cap(self) -> None:
+        corpus = {"ascii": "a" * 500, "latin": "é" * 500, "cjk": "中" * 500, "astral": "😀" * 500, "control": "a" + "\u0000" * 499, "quotes": '"\\' * 250}
+        offenders = {}
+        for label, line in corpus.items():
+            code, size = self.written(line)
+            if code != 0 or size is None or size > self.session_cap():
+                offenders[label] = (code, size)
+        self.assertTrue(corpus)
+        self.assertEqual(offenders, {})
+
+    def test_review_r1_a_request_utf_8_cannot_hold_is_written_escaped_as_before(self) -> None:
+        cli = load_cli()
+        request = {"kind": "add", "slot": "/accounts/\udcff", "text": "😀"}
+        self.assertEqual((cli.request_text(request), cli.request_text({"text": "😀"})), (json.dumps(request), '{"text": "😀"}'))
+
+    def test_review_r1_a_line_that_is_not_utf_8_exits_2_before_any_request(self) -> None:
+        # A lone surrogate: what Python makes of argv bytes that are not UTF-8.
+        self.assertEqual(self.written("ok \udcff"), (2, None))
+
+    # Review R3 (Codex, #70 round 1) [CHARACTER-COUNT-MISMATCH], the CLI's half: it trims what JavaScript's trim()
+    # trims, so the line it counts is the line the session counts.
+    def test_review_r3_a_line_of_only_byte_order_marks_exits_2_before_any_request(self) -> None:
+        self.assertEqual(self.written("﻿ ﻿"), (2, None))
+        self.assertEqual(self.written("﻿" + "a" * 500 + "﻿")[0], 0)
+
+    # Review R4 (Codex, #70 round 2) [CHARACTER-COUNT-MISMATCH]: the CLI trims exactly what JavaScript's trim() trims,
+    # no more, so it neither refuses nor changes a line the session keeps.
+    def test_review_r4_a_line_of_only_next_line_is_taken(self) -> None:
+        code, size = self.written("\u0085")
+        self.assertTrue(code == 0 and size is not None, f"U+0085 is a line the session keeps, but the CLI exits {code} without a request")
+
+    def test_review_r4_class_no_character_javascript_keeps_is_trimmed(self) -> None:
+        cli = load_cli()
+        controls = ["\u001c", "\u001d", "\u001e", "\u001f", "\u0085", "᠎", "​"]
+        corpus = [(f"U+{ord(char):04X}/{place}", given) for char in controls for place, given in (("only", char), ("leading", char + "x"), ("trailing", "x" + char))]
+        offenders = []
+        for label, given in corpus:
+            try:
+                actual = cli.continue_text_given(given)
+            except cli.UsageError as error:
+                actual = f"refused: {error}"
+            if actual != given:
+                offenders.append(f"{label}: {actual!r}")
+        self.assertTrue(corpus)
+        self.assertEqual(offenders, [])
 
 
 class Use(RequestCase):

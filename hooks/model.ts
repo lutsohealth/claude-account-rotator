@@ -471,13 +471,18 @@ export function spentMark(read: UsageWindow | undefined, now: number, lengthMs: 
 }
 
 /** The most characters of the line that asks Claude to carry on. */
-const CONTINUE_TEXT_MAX = 500
+export const CONTINUE_TEXT_MAX = 500
 
-/** The line that asks Claude to carry on after a Fable switch, as stored: text of at most 500 characters, trimmed; anything else is ignored. */
+/**
+ * The line that asks Claude to carry on after a Fable switch, as stored: text of at most 500 characters, trimmed;
+ * anything else is ignored. A character is a code point, as bin/account-rotator counts it, so an emoji is one; a lone
+ * surrogate, which UTF-8 cannot hold and the CLI refuses, is refused here too.
+ */
 export function continueTextFrom(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined
   const text = value.trim()
-  return text.length > 0 && text.length <= CONTINUE_TEXT_MAX ? text : undefined
+  const count = Array.from(text).length
+  return count > 0 && count <= CONTINUE_TEXT_MAX && !/\p{Cs}/u.test(text) ? text : undefined
 }
 
 /** A reading from the rate-limit windows the last response reported. */
@@ -1371,6 +1376,11 @@ export const REQUEST_POLL_MS = 250
 /** A nonce the CLI writes: letters, digits and dashes, so it names a file in the requests folder and nothing else. */
 const NONCE = /^[A-Za-z0-9-]{6,64}$/
 
+/** Whether `nonce` is one the CLI writes, so a result for it lands beside its request and nowhere else. */
+export function isRequestNonce(nonce: string): boolean {
+  return NONCE.test(nonce)
+}
+
 /** A request read back from its file, while it is fresh; anything else is none. */
 export function requestFrom(value: unknown, now: number): RotatorRequest | undefined {
   if (typeof value !== 'object' || value === null) return undefined
@@ -1383,6 +1393,7 @@ export function requestFrom(value: unknown, now: number): RotatorRequest | undef
     return { kind, nonce, at, id, store, slot, ...(email === undefined ? {} : { email }), ...(orgId === undefined ? {} : { orgId }) }
   }
   if (kind === 'add') return typeof slot === 'string' && slot !== '' ? { kind, nonce, at, id, store, slot } : undefined
+  if (kind === 'continue-text') return { kind, nonce, at, id, store, text: (value as Record<string, unknown>).text }
   return kind === 'use' && typeof session === 'string' && session !== '' ? { kind, nonce, at, id, store, session } : undefined
 }
 
