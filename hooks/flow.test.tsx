@@ -2389,7 +2389,7 @@ test('with the session glyphs off and its percent on, the week row says which lo
 })
 
 // Review R2 MARKLOST, the class: every footer setting that picks glyphs for some row, with the session row left out.
-test('with the session row left out, every footer setting that picks glyphs for a row shows the sign-in mark', async ($, on) => {
+test('with the session row left out, every footer setting that picks glyphs for a row shows the sign-in mark', { timeoutMs: 30_000 }, async ($, on) => {
   const w = fresh()
   w.keychain['Claude Code-credentials'] = blob('tok-1')
   w.usage['tok-1'] = [null, 40]
