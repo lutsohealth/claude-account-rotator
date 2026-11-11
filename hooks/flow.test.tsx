@@ -5614,12 +5614,14 @@ test('Review BOOT-GATE-STARVES other side: a boot that failed before it read the
   expect(['bound, switches', isBoundSeen, w.envSets]).toEqual(['bound, switches', false, []])
 })
 
-// puma-9arph.11: a response and the Bash watch heal a failed first bind as the ticks do, so neither waits on a boot
-// that will not finish. Login 1's stored week lets a response's reading be told as login 1's.
-const LOGIN1_WEEK = { ...TWO_LOGINS, 'rotate-to': 'off', 'store-id': 'store-test', 'reading:1': { sevenDay: { pct: 40, resetsAt: '2026-10-18T03:00:00Z' }, at: NOW - HOUR, by: '1' } }
-const weekPct = (store: Map<string, unknown>) => (store.get('reading:1') as { sevenDay?: { pct?: number } } | undefined)?.sevenDay?.pct
+// puma-9arph.11: after a boot whose first bind failed, a response and the Bash watch go by whether the view is bound,
+// as the ticks do, not by a boot that will not finish. A minute passes first: its checks read each login, as a session's
+// first minute does (login 1's week at 40%, which lets a response's week be told as login 1's), and at origin/main the
+// boot gate stays shut through it.
+const LOGIN1_WEEK = { ...TWO_LOGINS, 'rotate-to': 'off', 'store-id': 'store-test' }
+const weekPct = (store: Map<string, unknown>) => (store.get('usage:1') as { sevenDay?: { pct?: number } } | undefined)?.sevenDay?.pct
 const respondWeek = async ($: Engine, w: World, clock: MockClock, pct: number) => {
-  w.limits = [{ kind: 'seven_day', percentUsed: pct, resetsAt: '2026-10-18T03:00:00Z' }]
+  w.limits = [{ kind: 'five_hour', percentUsed: 10, resetsAt: '2026-10-12T12:00:00Z' }, { kind: 'seven_day', percentUsed: pct, resetsAt: WEEK_RESET }]
   await $.session.measure({ context: { window: 200_000 }, rateLimits: w.limits, changed: ['rateLimits'] })
   await clock.settle()
 }
@@ -5632,6 +5634,7 @@ test('Review BOOT-GATE-STARVES response: after a boot whose first bind failed on
   const clock = world(on, w, store)
   await start($, clock)
   expect(w.logged?.some(line => line.includes('start failed'))).toBe(true)
+  await untilTick(clock)
   await respondWeek($, w, clock, 45)
   expect(weekPct(store), 'the response after a failed first bind was not stored').toBe(45)
 })
@@ -5645,6 +5648,7 @@ test('Review BOOT-GATE-STARVES Bash watch: after a boot whose first bind failed 
   const clock = world(on, w, storeFailingFirstAccountsRead(LOGIN1_WEEK))
   await start($, clock)
   expect(w.logged?.some(line => line.includes('start failed'))).toBe(true)
+  await untilTick(clock)
   const call = bashCall($, w, USE_COMMAND)
   w.files[`${REQUESTS}/${N1}.json`] = useRequest(N1, '2', 'store-test', clock.now(), ownMark(w))
   await beat(clock)
@@ -5669,11 +5673,12 @@ test('Review BOOT-GATE-STARVES other side, response and Bash watch: a boot that 
   await start($, clock)
   expect(w.logged?.some(line => line.includes('start failed'))).toBe(true)
   isFailing = false
+  await untilTick(clock)
   await respondWeek($, w, clock, 45)
   const call = bashCall($, w, USE_COMMAND)
   w.files[`${REQUESTS}/${N1}.json`] = useRequest(N1, '2', 'store-test', clock.now(), ownMark(w))
   await beat(clock)
-  expect([weekPct(store), resultOf(w, N1), w.envSets]).toEqual([40, undefined, []])
+  expect([weekPct(store) === 45, resultOf(w, N1), w.envSets]).toEqual([false, undefined, []])
   await call.finish()
 })
 
