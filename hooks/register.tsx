@@ -486,6 +486,8 @@ async function setSessionMark($: Host): Promise<void> {
 async function applyRequests($: Host, isMerging = false): Promise<void> {
   const storeId = await $.store.get('store-id')
   if (typeof storeId !== 'string') return
+  // A view the reset left names login 1 in use and no mark: bound first, so a request acts on this session's login.
+  if (!(await isBound($))) return
   const { sessionMark } = await getView($)
   const dir = requestsDir(await $.env.get('CLAUDE_CONFIG_DIR'), (await $.env.get('HOME')) ?? '')
   const entries = await $.fs.list(dir).then(found => {
@@ -2080,12 +2082,12 @@ async function rebindSession($: Host): Promise<void> {
 
 /**
  * Whether the view holds this session's account. The reset of /clear, /resume and /branch clears `isBound` before the
- * classic.SessionStart hook runs; once boot has run, a view the reset left is bound again here, so the next check
- * makes good a rebind that failed.
+ * classic.SessionStart hook runs; once boot has read the slot, a view not bound is bound here, so the next check makes
+ * good a bind that failed, at boot or after a reset.
  */
 async function isBound($: Host): Promise<boolean> {
   if ((await getView($)).isBound === true) return true
-  if (!isBooted) return false
+  if (kept.slot === undefined) return false
   await rebindSession($).catch(error => debug($, `rebind failed: ${String(error)}`))
   return (await getView($)).isBound === true
 }
