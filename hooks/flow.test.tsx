@@ -5564,6 +5564,8 @@ test('puma-9arph.9 chromeConnecting: a /clear during Connect keeps the connectin
   s.clear()
   await $.classic.SessionStart({ source: 'clear' })
   const during = s.view()?.chromeConnecting
+  // No browser answers as login 2: Connect goes back to login 1, a second move and settle.
+  await clock.advance(36_000)
   await clock.advance(36_000)
   expect(['chromeConnecting during Connect, after it', during, s.view()?.chromeConnecting]).toEqual(['chromeConnecting during Connect, after it', '2', undefined])
   await pane.unmount()

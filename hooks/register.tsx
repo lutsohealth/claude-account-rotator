@@ -134,9 +134,9 @@ let isPaneShown = false
 /**
  * What this session set that only its view shows, kept where /clear, /resume and /branch do not reach: they reset the
  * view, and rebindSession copies these back. Each is set where its value is born; undefined until then. The records
- * of a switch in flight are copied by setView instead, from every write of a bound view.
+ * of a switch in flight and the Chrome link are copied by setView instead, from every write of a bound view.
  */
-let kept: { slot?: string; mark?: string; hasFontBlocks?: boolean; isSwitchBlocked?: boolean; isFableStopped?: boolean } & InFlight = {}
+let kept: { slot?: string; mark?: string; hasFontBlocks?: boolean; isSwitchBlocked?: boolean; isFableStopped?: boolean } & InFlight & ChromeLink = {}
 /** When this session's boot read the store: an older version's reading written after it says that version still runs. */
 let bootedAt: number | undefined
 /** An older version writes its reading at every check, every 10 minutes at most: one this old has stopped. */
@@ -218,11 +218,14 @@ const getView = async ($: Host): Promise<View> => current(await read($, viewAtom
 /** The records of a switch in flight: what settles it, undoes its stop and retries it, held by the view alone. */
 type InFlight = Pick<View, 'pending' | 'provisionalStop' | 'held'>
 const inFlight = (v: View): InFlight => ({ pending: v.pending, provisionalStop: v.provisionalStop, held: v.held })
+/** How Claude in Chrome stands in this session: whether it has it, as which login it connected, and a Connect under way. */
+type ChromeLink = Pick<View, 'hasChrome' | 'chrome' | 'chromeConnecting'>
+const chromeLink = (v: View): ChromeLink => ({ hasChrome: v.hasChrome, chrome: v.chrome, chromeConnecting: v.chromeConnecting })
 const setView = async ($: Host, fn: (v: View) => View): Promise<View> => {
   const written = await update($, viewAtom, v => fn(current(v)))
   // A cleared record is copied too, so a finished switch comes back as finished. A view not bound is the reset's
   // default, before rebindSession: copied, it would wipe the switch the reset took.
-  if (written.isBound === true) kept = { ...kept, ...inFlight(written) }
+  if (written.isBound === true) kept = { ...kept, ...inFlight(written), ...chromeLink(written) }
   return written
 }
 /** Something the person should know that nothing on screen says: a toast, on screen for a while. */
@@ -1555,6 +1558,7 @@ let hasChromeMissed = false
 let isAskingChrome = false
 /** A turn hit a usage limit while Connect held the session on the extension's account: it carries on once the session is back. */
 let isCutByVisit = false
+// These flags and isConnectingChrome are module variables: /clear, /resume and /branch reset the view, not them.
 
 /**
  * Asks Claude in Chrome which browsers answer, connecting it if this session
@@ -2111,10 +2115,11 @@ async function bindSession($: Host, slot: string): Promise<void> {
 /**
  * After /clear, /resume or /branch: what `kept` holds, then the account and id again, from the slot this session last
  * set. No variable is read: one this session set may not read back as set, and one it was refused is a parent's.
- * Before boot has read the slot there is nothing to bind: boot binds it.
+ * Before boot has read the slot there is nothing to bind: boot binds it. The Chrome link goes back only where the
+ * reset left it unset, a write since being newer; the Connect line only while a Connect is under way.
  */
 async function rebindSession($: Host): Promise<void> {
-  const { slot, mark, hasFontBlocks, isSwitchBlocked, isFableStopped, pending, provisionalStop, held } = kept
+  const { slot, mark, hasFontBlocks, isSwitchBlocked, isFableStopped, pending, provisionalStop, held, hasChrome, chrome, chromeConnecting } = kept
   await setView($, v => ({
     ...v,
     ...(pending === undefined ? {} : { pending }),
@@ -2124,6 +2129,9 @@ async function rebindSession($: Host): Promise<void> {
     ...(isSwitchBlocked === undefined ? {} : { isSwitchBlocked }),
     ...(isFableStopped === undefined ? {} : { isFableStopped }),
     ...(mark === undefined ? {} : { sessionMark: mark }),
+    ...(hasChrome === undefined || v.hasChrome !== undefined ? {} : { hasChrome }),
+    ...(chrome === undefined || v.chrome !== undefined ? {} : { chrome }),
+    ...(chromeConnecting === undefined || v.chromeConnecting !== undefined || !isConnectingChrome ? {} : { chromeConnecting }),
   }))
   if (slot !== undefined) await bindSession($, slot)
 }
