@@ -163,11 +163,15 @@ export function shouldLeave(view: View, now: number, need?: Need): boolean {
   return view.health[view.activeId]?.kind === 'login-needed' || isSpent(r, now, view.weekLeave) || (need === 'fable' && isFableSpent(r, now))
 }
 
-/** When a login's 5-hour window resets, or its week where it reports no 5-hour window, epoch ms; Infinity while none is running. */
+/**
+ * When a login's 5-hour window resets, or its week where it reports no 5-hour window, epoch ms; Infinity while the
+ * reading holds no reset to come: none, one already past, or one that does not parse. A window at 0% used still resets
+ * at its time: a week runs whether it is used or not.
+ */
 function resetOf(r: Reading | undefined, now: number): number {
   const w = r?.fiveHour ?? r?.sevenDay
-  if (w?.resetsAt === undefined || (windowPct(w, now) ?? 0) === 0) return Infinity
-  return Date.parse(w.resetsAt)
+  const at = w?.resetsAt === undefined ? NaN : Date.parse(w.resetsAt)
+  return Number.isFinite(at) && at > now ? at : Infinity
 }
 
 /**
@@ -231,7 +235,8 @@ const LAUNCH_WHY: Record<'room' | 'nonzero' | 'reset', string> = {
  * The login new sessions start on, as `launchOn` picks among the signed-in
  * logins with room on every limit: the most room, the first in the list, the
  * soonest reset, or the one account named, else the next in the list after it
- * with room. Undefined while no login has room.
+ * with room. A rule passes over a login the rotation would leave at once while
+ * another stays. Undefined while no login has room.
  */
 export function pickLaunch(view: View, now: number): Omit<LaunchPick, 'at'> | undefined {
   const ready = view.accounts.filter(a => view.health[a.id]?.kind === 'ok' && !isUnread(view, a) && hasRoom(view.readings[a.id], now))
@@ -247,11 +252,15 @@ export function pickLaunch(view: View, now: number): Omit<LaunchPick, 'at'> | un
     const found = after.find(a => ready.includes(a))
     return pick(found, found?.id === id ? 'you picked it' : `account ${id} has no room, and it is the next with room`)
   }
+  // A rule starts no session on a login the rotation would leave at its first check, while another login stays;
+  // with every login past that line, it picks among all with room, so a launch always has a login while one has room.
+  const staying = ready.filter(a => !isSpent(view.readings[a.id], now, view.weekLeave))
+  const pool = staying.length > 0 ? staying : ready
   const rule = on as 'room' | 'nonzero' | 'reset'
-  if (rule === 'nonzero') return pick(ready[0], LAUNCH_WHY.nonzero)
-  if (rule === 'room') return pick([...ready].sort((a, b) => room(b) - room(a))[0], LAUNCH_WHY.room)
+  if (rule === 'nonzero') return pick(pool[0], LAUNCH_WHY.nonzero)
+  if (rule === 'room') return pick([...pool].sort((a, b) => room(b) - room(a))[0], LAUNCH_WHY.room)
   const reset = (a: Account) => resetOf(view.readings[a.id], now)
-  return pick([...ready].sort((a, b) => (reset(a) === reset(b) ? room(b) - room(a) : reset(a) < reset(b) ? -1 : 1))[0], LAUNCH_WHY.reset)
+  return pick([...pool].sort((a, b) => (reset(a) === reset(b) ? room(b) - room(a) : reset(a) < reset(b) ? -1 : 1))[0], LAUNCH_WHY.reset)
 }
 
 /**
