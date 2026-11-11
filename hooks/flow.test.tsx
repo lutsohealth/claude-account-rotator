@@ -5618,7 +5618,7 @@ test('Review BOOT-GATE-STARVES other side: a boot that failed before it read the
 // that will not finish. Login 1's stored week lets a response's reading be told as login 1's.
 const LOGIN1_WEEK = { ...TWO_LOGINS, 'rotate-to': 'off', 'store-id': 'store-test', 'reading:1': { sevenDay: { pct: 40, resetsAt: '2026-10-18T03:00:00Z' }, at: NOW - HOUR, by: '1' } }
 const weekPct = (store: Map<string, unknown>) => (store.get('reading:1') as { sevenDay?: { pct?: number } } | undefined)?.sevenDay?.pct
-const respond = async ($: Engine, w: World, clock: MockClock, pct: number) => {
+const respondWeek = async ($: Engine, w: World, clock: MockClock, pct: number) => {
   w.limits = [{ kind: 'seven_day', percentUsed: pct, resetsAt: '2026-10-18T03:00:00Z' }]
   await $.session.measure({ context: { window: 200_000 }, rateLimits: w.limits, changed: ['rateLimits'] })
   await clock.settle()
@@ -5632,7 +5632,7 @@ test('Review BOOT-GATE-STARVES response: after a boot whose first bind failed on
   const clock = world(on, w, store)
   await start($, clock)
   expect(w.logged?.some(line => line.includes('start failed'))).toBe(true)
-  await respond($, w, clock, 45)
+  await respondWeek($, w, clock, 45)
   expect(weekPct(store), 'the response after a failed first bind was not stored').toBe(45)
 })
 
@@ -5669,7 +5669,7 @@ test('Review BOOT-GATE-STARVES other side, response and Bash watch: a boot that 
   await start($, clock)
   expect(w.logged?.some(line => line.includes('start failed'))).toBe(true)
   isFailing = false
-  await respond($, w, clock, 45)
+  await respondWeek($, w, clock, 45)
   const call = bashCall($, w, USE_COMMAND)
   w.files[`${REQUESTS}/${N1}.json`] = useRequest(N1, '2', 'store-test', clock.now(), ownMark(w))
   await beat(clock)
