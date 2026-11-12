@@ -8044,6 +8044,81 @@ test('a use that moves nothing leaves no unproven switch behind it: minutes on, 
   expect(offenders, `useAccount reached switchTo with the login in use, leaving pending { from: 1, id: 1 }, which holds responses and the rotation until the give-up and then reports a switch nobody made: ${offenders.join('; ')}`).toEqual([])
 })
 
+// puma-9arph.16: a give-up that read its pending switch before a network read undid a newer switch made meanwhile.
+const SLOT3_OF_3 = `${HOME}/.claude/accounts/3`
+/**
+ * Three logins, each its own week; the session moved to login 2 (proven), then by `use 1` to login 1, whose
+ * responses still carry login 2's week 4 minutes on. The next response's give-up holds its read of login 2's
+ * sign-in open while `during` runs. Answers the slots set, in order.
+ */
+async function staleGiveUp($: Engine, on: On, during: (w: World, clock: MockClock, store: Map<string, unknown>) => Promise<void>, rotateTo = 'reset', heldRead = 1): Promise<{ w: World; clock: MockClock }> {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.keychain[await keychainItem(SLOT3_OF_3)] = blob('tok-3')
+  w.usage = { 'tok-1': [5, 30], 'tok-2': [5, 30], 'tok-3': [1, 10] }
+  w.weekResets = { 'tok-1': WEEK_RESET, 'tok-2': OTHER_WEEK, 'tok-3': '2026-10-19T06:00:00Z' }
+  const store = new Map<string, unknown>(Object.entries({ accounts: [...TWO_LOGINS.accounts, { id: '3', slot: SLOT3_OF_3, email: 'three@example.com' }], 'rotate-to': rotateTo }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  await clock.advance(60_000)
+  const use = async (nonce: string, id: string) => {
+    const call = bashCall($, w, `account-rotator account use --account ${id}`)
+    w.files[`${REQUESTS}/${nonce}.json`] = useRequest(nonce, id, store.get('store-id'), clock.now(), ownMark(w))
+    await beat(clock)
+    await call.finish()
+  }
+  w.limits = limitsOf(5, 30, OTHER_WEEK)
+  await use('b0000000000000000000000000000002', '2')
+  await clock.advance(60_000)
+  await respond($, clock, w)
+  await use('b0000000000000000000000000000001', '1')
+  await clock.advance(4 * 60_000 + 30_000)
+  let open = () => {}
+  let reads = 0
+  w.beforeFetch = () => ((reads += 1) === heldRead ? new Promise<void>(resolve => (open = resolve)) : Promise.resolve())
+  const measuring = $.session.measure({ context: { window: 200_000 }, rateLimits: w.limits, changed: ['rateLimits'] })
+  await clock.advance(500)
+  expect(reads, `the settle reached read ${heldRead}`).toBe(heldRead)
+  w.beforeFetch = undefined
+  await during(w, clock, store)
+  open()
+  await measuring
+  await clock.settle()
+  return { w, clock }
+}
+
+for (const heldRead of [1, 2]) {
+  test(`a use that lands while an older switch's give-up waits on its read ${heldRead} stays: the give-up no longer points the session back over it`, async ($, on) => {
+    const { w } = await staleGiveUp($, on, async (w, clock, store) => {
+      const call = bashCall($, w, 'account-rotator account use --account 3')
+      w.files[`${REQUESTS}/${N1}.json`] = useRequest(N1, '3', store.get('store-id'), clock.now(), ownMark(w))
+      await beat(clock)
+      await call.finish()
+      expect(resultOf(w, N1)?.message).toMatch(/now uses account 3/)
+    }, 'reset', heldRead)
+    expect(slots(w).at(-1), `the give-up of the switch to login 1 put back login 2 after "now uses account 3": ${slots(w).join(' -> ')}`).toBe(SLOT3_OF_3)
+    expect(w.toasts.filter(t => /did not take/.test(t))).toEqual([])
+  })
+}
+
+test('a stop that moves the session while an older switch\'s give-up waits on a read stays where the stop moved it', async ($, on) => {
+  let moved: string | undefined
+  const { w } = await staleGiveUp($, on, async (w, clock) => {
+    await $.classic.StopFailure({ error: 'authentication_failed' })
+    await clock.settle()
+    moved = slots(w).at(-1)
+  }, 'room')
+  expect(moved, 'the stop moved the session to login 3, the most room, not to login 2 the give-up points at').toBe(SLOT3_OF_3)
+  expect(slots(w).at(-1), `the give-up undid the stop's move: ${slots(w).join(' -> ')}`).toBe(moved)
+})
+
+test('with no newer switch, a give-up whose read waited still points the session back to the login it left', async ($, on) => {
+  const { w } = await staleGiveUp($, on, async () => {})
+  expect(slots(w).at(-1)).toBe(SLOT2)
+  expect(w.toasts.filter(t => /The switch to Claude account 1 did not take/.test(t))).toHaveLength(1)
+})
+
 // Review C12-R1 F5 (Opus) [MARK-NOT-LOAD-STABLE] -> [MARK-LIFE].
 
 test('no fresh load strands a child started before it, however many come', async ($, on) => {
