@@ -653,6 +653,8 @@ test('puma-9arph.17: counts the list of a list_connected_browsers answer whose n
   expect(browsersFrom(`${list}\n${note}`)).toBe(2)
   expect(browsersFrom(`[]\n${note} [see the docs]`)).toBe(0)
   expect(browsersFrom("[Claude in Chrome] Claude in Chrome isn't paired with your browser")).toBeUndefined()
+  expect(browsersFrom('] no list')).toBeUndefined()
+  expect(browsersFrom('Error: none [here]')).toBeUndefined()
 })
 
 test('the notes about Claude in Chrome say what the mod does now and what to tell the user, never /login', () => {
