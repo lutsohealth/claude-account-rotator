@@ -2273,7 +2273,7 @@ export const register: Register = on => {
     if (done.deny !== undefined) return done
     const text = done.text ?? ''
     // list_connected_browsers answers an empty list, not an error, where no browser answers.
-    const isEmpty = e.tool.endsWith('__list_connected_browsers') && browsersFrom(text) === 0
+    const isEmpty = done.isError !== true && e.tool.endsWith('__list_connected_browsers') && browsersFrom(text) === 0
     const note = await onBrowserCall($, (done.isError === true && isNoBrowser(text)) || isEmpty, isEmpty).catch(async error => {
       await debug($, `browser call handling failed: ${String(error)}`)
       return undefined

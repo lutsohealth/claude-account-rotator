@@ -118,8 +118,9 @@ type World = {
    * connection was made as.
    */
   chrome?: { extensions: string[]; as?: string }
-  /** What every Claude in Chrome tool answers, no error, in place of the world's own answer. */
+  /** What every Claude in Chrome tool answers in place of the world's own answer, as an error where `isChromeError`. */
   chromeText?: string
+  isChromeError?: boolean
   /** The slot in use at each of the mod's calls to Claude in Chrome, the session having it or not. */
   chromeAsked: string[]
   /** The slash commands the mod ran, as typed. */
@@ -298,7 +299,7 @@ function world(on: On, w: World, store: Record<string, unknown> | Map<string, un
   })
   on('tool.call', { tool: /^mcp__claude-in-chrome__/ }, (_$, e) => {
     const text = w.chromeText ?? (w.chrome !== undefined && e.tool.endsWith('__list_connected_browsers') ? browsers(w.chrome) : undefined)
-    if (text !== undefined) return { result: [{ type: 'text', text }], text }
+    if (text !== undefined) return w.isChromeError === true ? { isError: true as const, result: text, text } : { result: [{ type: 'text', text }], text }
     if (w.chrome !== undefined && isAnswered(w.chrome)) return { result: [{ type: 'text', text: 'Tabs: none' }], text: 'Tabs: none' }
     return { isError: true as const, result: NO_BROWSER, text: NO_BROWSER }
   })
@@ -3476,12 +3477,14 @@ test('an empty list of browsers, with the extension\'s account named and the win
   await pane.unmount()
 })
 
-test('only list_connected_browsers reads an empty list as no browser, and only a list: another tool\'s "[]" or a text that is no list leaves Chrome paired', async ($, on) => {
+test('only list_connected_browsers reads an empty list as no browser, and only a list it answered: another tool\'s "[]", a text that is no list, or an error reading "[]" leaves Chrome as before', async ($, on) => {
   const w = fresh()
   const store = await chromeWorld(w, [''])
   await start($, world(on, w, store))
-  for (const [tool, text] of [['tabs_context_mcp', '[]'], ['list_connected_browsers', 'Browsers: none listed']]) {
+  const answers = [['tabs_context_mcp', '[]', false], ['list_connected_browsers', 'Browsers: none listed', false], ['list_connected_browsers', '[]', true]] as const
+  for (const [tool, text, isError] of answers) {
     w.chromeText = text
+    w.isChromeError = isError
     await browse($, tool)
     const pane = await mountPane($)
     expect((await pane.find({ key: 'chrome-row-1' }))?.text).toMatch(/● in use$/)
