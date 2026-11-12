@@ -646,6 +646,15 @@ test('counts the browsers Claude in Chrome lists, and knows its words for none a
   expect(isNoBrowser('Tab 12 no longer exists')).toBe(false)
 })
 
+test('puma-9arph.17: counts the list of a list_connected_browsers answer whose note block follows it, however the blocks are joined', () => {
+  const list = '[{"deviceId":"device-a","name":"Browser 1","osPlatform":"macOS","connectedAt":1,"isLocal":true},{"deviceId":"device-b","name":"Browser 2","osPlatform":"macOS","connectedAt":2,"isLocal":true,"inUse":true}]'
+  const note = '2 browsers are connected; "Browser 2" (deviceId device-b) is the one picked last and will be used. No question is needed unless the user wants a different browser (then select_browser with its deviceId, or switch_browser).'
+  expect(browsersFrom(list + note)).toBe(2)
+  expect(browsersFrom(`${list}\n${note}`)).toBe(2)
+  expect(browsersFrom(`[]\n${note} [see the docs]`)).toBe(0)
+  expect(browsersFrom("[Claude in Chrome] Claude in Chrome isn't paired with your browser")).toBeUndefined()
+})
+
 test('the notes about Claude in Chrome say what the mod does now and what to tell the user, never /login', () => {
   const accounts = [
     { id: '1', slot: '', email: 'one@example.com' },
