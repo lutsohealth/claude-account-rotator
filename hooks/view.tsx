@@ -699,6 +699,11 @@ function accountRow(ui: Ui, view: View, a: Account, now: number, act: Actions, c
           )}
         </Box>
       ))}
+      {view.useNote?.id === a.id && (
+        <Box key={`use-note-${a.id}`}>
+          <Text color="warning">{view.useNote.text}</Text>
+        </Box>
+      )}
       {expiry !== undefined && expiry - now < SIGN_IN_WARN_MS && (
         <Text color="warning">sign-in runs out {untilText(expiry, now)}; signing in again renews it</Text>
       )}

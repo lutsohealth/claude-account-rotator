@@ -206,6 +206,8 @@ export type View = {
   pending?: { id: string; from: string; since: number }
   /** Account id whose removal waits for a second press. */
   removing?: string
+  /** A Use now press that did not move the session: the pressed account and why, shown on its row until it is in use. */
+  useNote?: { id: string; text: string }
   footer: FooterStyle
   /** Which login the rotation moves to, picked in the pane and kept across sessions. */
   rotateTo: RotateTo
