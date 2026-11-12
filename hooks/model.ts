@@ -748,17 +748,24 @@ export const CHROME_TOOL = /^mcp__claude-in-chrome__/
 
 /**
  * How many browsers `list_connected_browsers` lists: the Chrome extensions
- * signed in to the account Claude in Chrome connected as. Undefined for an
- * answer that is no list.
+ * signed in to the account Claude in Chrome connected as. The list is its
+ * answer's first text block; a note block may follow, joined to it in `text`.
+ * Undefined for an answer that opens with no list.
  */
 export function browsersFrom(text: string): number | undefined {
-  try {
-    const parsed: unknown = JSON.parse(text)
-    return Array.isArray(parsed) ? parsed.length : undefined
-  } catch {
-    // Words, not a list: an error, which counts no browsers either way.
-    return undefined
+  const answer = text.trimStart()
+  if (!answer.startsWith('[')) return undefined
+  // The list ends at the one ']' up to which the answer parses; a ']' in the note does not.
+  for (let end = answer.lastIndexOf(']'); end > 0; end = answer.lastIndexOf(']', end - 1)) {
+    try {
+      const parsed: unknown = JSON.parse(answer.slice(0, end + 1))
+      return Array.isArray(parsed) ? parsed.length : undefined
+    } catch {
+      // Not the list's end: try the ']' before it.
+    }
   }
+  // Words, not a list: an error, which counts no browsers either way.
+  return undefined
 }
 
 /** Whether a browser call's error says no browser answered, as Claude Code words it over its bridge or its local socket. */
