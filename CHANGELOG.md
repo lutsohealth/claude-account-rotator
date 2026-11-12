@@ -2,6 +2,10 @@
 
 What each version of the account rotator changed. To get each one as Claude Code starts, turn on auto-update: in `/plugin`, open **Marketplaces**, pick **claude-account-rotator** and choose **Enable auto-update**. To update by hand, run `claude plugin marketplace update claude-account-rotator`, then `claude plugin update account-rotator@claude-account-rotator`, and start a new session.
 
+## Unreleased
+
+- **Use now says why it did not move the session, on that account's row**, where a switch held until the token in use refreshes said so only in a toast and looked like a dead button; and **Use now waits while Claude in Chrome connects**, as `account use` does, where the connection's visit moved the session back unsaid.
+
 ## 0.5.29-lutso.1 - 2026-11-12
 
 - **A switch stays made when an older switch gives up meanwhile**: after **Use now** or `account use`, the session no longer goes back a minute later to the account it left two switches before.
