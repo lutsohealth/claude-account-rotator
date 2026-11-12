@@ -2,6 +2,10 @@
 
 What each version of the account rotator changed. To get each one as Claude Code starts, turn on auto-update: in `/plugin`, open **Marketplaces**, pick **claude-account-rotator** and choose **Enable auto-update**. To update by hand, run `claude plugin marketplace update claude-account-rotator`, then `claude plugin update account-rotator@claude-account-rotator`, and start a new session.
 
+## Unreleased
+
+- **The Chrome box no longer marks an account in use when Claude in Chrome lists no browser**: `list_connected_browsers` answering an empty list leaves Chrome unpaired, lists no account and moves no window; Connect stays a press away.
+
 ## 0.5.28-lutso.1 - 2026-11-12
 
 - **A Fable stop stays known through `/clear`, `/resume` and `/branch` after the mod's code reloads**, where the session forgot it.

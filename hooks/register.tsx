@@ -1768,7 +1768,7 @@ async function leaveVisit($: Host, from: Account): Promise<void> {
  * and returns what Claude reads in place of Claude Code's advice to /login:
  * that the mod connects it now, or what to ask the person.
  */
-async function onBrowserCall($: Host, isUnanswered: boolean): Promise<string | undefined> {
+async function onBrowserCall($: Host, isUnanswered: boolean, isEmpty = false): Promise<string | undefined> {
   const view = await getView($)
   const isSure = movedAt === undefined || (await $.clock.now()) - movedAt >= SETTLE_MS
   const as = view.chrome?.as ?? (isSure ? view.activeId : undefined)
@@ -1781,6 +1781,8 @@ async function onBrowserCall($: Host, isUnanswered: boolean): Promise<string | u
     if (view.chrome === undefined && isSure && active !== undefined) await learnChrome($, active)
     return undefined
   }
+  // No browser listed, and no error: unpaired, but only a person's Connect moves the window.
+  if (isEmpty) return undefined
   if (after.chromeAccountId === undefined) {
     isChromeAwaited = true
     return chromeNote(after, 'unset')
@@ -2269,7 +2271,10 @@ export const register: Register = on => {
   on('tool.call', { tool: CHROME_TOOL }, async ($, e, next) => {
     const done = await next(e)
     if (done.deny !== undefined) return done
-    const note = await onBrowserCall($, done.isError === true && isNoBrowser(done.text ?? '')).catch(async error => {
+    const text = done.text ?? ''
+    // list_connected_browsers answers an empty list, not an error, where no browser answers. The mod's own ask judges its answer itself.
+    const isEmpty = !isAskingChrome && e.tool.endsWith('__list_connected_browsers') && browsersFrom(text) === 0
+    const note = await onBrowserCall($, (done.isError === true && isNoBrowser(text)) || isEmpty, isEmpty).catch(async error => {
       await debug($, `browser call handling failed: ${String(error)}`)
       return undefined
     })
