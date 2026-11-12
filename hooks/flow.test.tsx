@@ -3784,6 +3784,40 @@ test('a session without Claude in Chrome is asked once, and its pane has no Chro
   await pane.unmount()
 })
 
+// ---------------------------------------------------------------- puma-9arph.18: a Use now press that does not move says why on its row
+
+test('puma-9arph.18: Use now held back for a token about to refresh says so on the pressed row, and moves when the refresh lands', async ($, on) => {
+  const w = fresh()
+  const clock = await guarded(on, w, {}, [20, 30])
+  await start($, clock)
+  const pane = await mountPane($)
+  await pane.press({ key: 'use-2' })
+  await clock.settle()
+  expect(slots(w)).toEqual([])
+  expect((await pane.find({ key: 'use-note-2' }))?.text).toMatch(/^this session moves to account 2 .* in a few minutes, once account 1's token has refreshed$/)
+  refresh(w)
+  await clock.advance(60_000)
+  expect(slots(w)).toEqual([SLOT2])
+  await pane.redraw()
+  expect(await pane.find({ key: 'use-note-2' })).toBeUndefined()
+  await pane.unmount()
+})
+
+test('puma-9arph.18: Use now during Connect\'s visit moves nothing and says why on the pressed row', async ($, on) => {
+  const w = fresh()
+  w.chrome = { extensions: [SLOT2] }
+  await spentTwo(w)
+  const clock = world(on, w, { ...TWO_LOGINS, 'chrome-account': '2' })
+  await start($, clock)
+  expect(slots(w)).toEqual([SLOT2])
+  const pane = await mountPane($)
+  await pane.press({ key: 'use-1' })
+  await clock.settle()
+  expect(slots(w)).toEqual([SLOT2])
+  expect((await pane.find({ key: 'use-note-1' }))?.text).toMatch(/^Claude in Chrome is connecting/)
+  await pane.unmount()
+})
+
 // ---------------------------------------------------------------- a switch held back, a stay told, a carry-on that is still current
 
 /** Claude Code's own way out of the Fable limit, which every notice of a stay ends on. */
