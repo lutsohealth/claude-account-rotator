@@ -5,6 +5,7 @@ What each version of the account rotator changed. To get each one as Claude Code
 ## Unreleased
 
 - **The Chrome box no longer marks an account in use when Claude in Chrome lists no browser**: `list_connected_browsers` answering an empty list leaves Chrome unpaired, lists no account and moves no window; Connect stays a press away.
+- **Try to connect and Connect find a paired browser again when Claude in Chrome adds a note after its list of browsers**, where the answer read as failed, the account never became the Chrome one, and an empty list with a note marked Chrome in use.
 
 ## 0.5.28-lutso.1 - 2026-11-12
 

@@ -121,6 +121,8 @@ type World = {
   /** What every Claude in Chrome tool answers in place of the world's own answer, as an error where `isChromeError`. */
   chromeText?: string
   isChromeError?: boolean
+  /** A second text block every Claude in Chrome answer carries after its first, as list_connected_browsers adds a note. */
+  chromeNote?: string
   /** The slot in use at each of the mod's calls to Claude in Chrome, the session having it or not. */
   chromeAsked: string[]
   /** The slash commands the mod ran, as typed. */
@@ -292,14 +294,16 @@ function world(on: On, w: World, store: Record<string, unknown> | Map<string, un
   // What list_connected_browsers answers: an empty list, no error, where no browser answers.
   const browsers = (chrome: NonNullable<World['chrome']>) =>
     JSON.stringify(isAnswered(chrome) ? [{ deviceId: 'device-1', name: 'Browser 1', osPlatform: 'macOS', isLocal: true }] : [])
+  const note = () => (w.chromeNote === undefined ? [] : [{ type: 'text' as const, text: w.chromeNote }])
   on('mcp.call', (_$, e) => {
     w.chromeAsked.push(slot)
     if (w.chrome === undefined) return { deny: `no connected MCP tool "${e.tool}" on a server named "${e.server}"` }
-    return { value: { content: [{ type: 'text', text: browsers(w.chrome) }], isError: false } }
+    return { value: { content: [{ type: 'text', text: browsers(w.chrome) }, ...note()], isError: false } }
   })
   on('tool.call', { tool: /^mcp__claude-in-chrome__/ }, (_$, e) => {
     const text = w.chromeText ?? (w.chrome !== undefined && e.tool.endsWith('__list_connected_browsers') ? browsers(w.chrome) : undefined)
-    if (text !== undefined) return w.isChromeError === true ? { isError: true as const, result: text, text } : { result: [{ type: 'text', text }], text }
+    const blocks = [{ type: 'text' as const, text: text ?? '' }, ...note()]
+    if (text !== undefined) return w.isChromeError === true ? { isError: true as const, result: text, text } : { result: blocks, text: blocks.map(b => b.text).join('\n') }
     if (w.chrome !== undefined && isAnswered(w.chrome)) return { result: [{ type: 'text', text: 'Tabs: none' }], text: 'Tabs: none' }
     return { isError: true as const, result: NO_BROWSER, text: NO_BROWSER }
   })
@@ -3490,6 +3494,29 @@ test('only list_connected_browsers reads an empty list as no browser, and only a
     expect((await pane.find({ key: 'chrome-row-1' }))?.text).toMatch(/● in use$/)
     await pane.unmount()
   }
+})
+
+// Claude in Chrome answers list_connected_browsers with the list, then a note block naming the browser in use.
+const NOTE = '1 browser is connected; "Browser 1" (deviceId device-1) is the one picked last and will be used.'
+
+test('puma-9arph.17: a note block after the list of browsers still counts the list: Connect at open finds the browser, and the Chrome box lists its account in use', async ($, on) => {
+  const w = fresh()
+  const store = await chromeWorld(w, [''])
+  w.chromeNote = NOTE
+  await start($, world(on, w, store))
+  expect(w.chromeAsked).toEqual([''])
+  const pane = await mountPane($)
+  expect((await pane.find({ key: 'chrome-row-1' }))?.text).toMatch(/● in use$/)
+  await pane.unmount()
+})
+
+test('puma-9arph.17: an empty list of browsers with a note block after it still leaves Chrome unpaired and lists no account', async ($, on) => {
+  const w = fresh()
+  const store = await chromeWorld(w, [])
+  w.chromeNote = NOTE
+  await start($, world(on, w, store))
+  expect((await browse($, 'list_connected_browsers')).context).toBeUndefined()
+  expect(store.get('chrome-accounts') ?? []).toEqual([])
 })
 
 test('as a session opens it visits the extension\'s account to connect Claude in Chrome there, whatever usage that has left, and comes back; browser calls wait meanwhile', async ($, on) => {
