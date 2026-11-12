@@ -5480,6 +5480,148 @@ for (const [name, arrange] of REVIEW_F1_STARTS) {
   })
 }
 
+// puma-9arph.9: the Chrome link state the view alone held (hasChrome, chrome, chromeConnecting) after /clear.
+/** Both logins signed in with room, the Chrome extension named as login 1's, the session on login 1. */
+async function chromeWorld(w: World, extensions?: string[]): Promise<Map<string, unknown>> {
+  if (extensions !== undefined) w.chrome = { extensions }
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [20, 40]
+  w.usage['tok-2'] = [10, 30]
+  return new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'chrome-account': '1' }))
+}
+
+test('puma-9arph.9 hasChrome: after /clear a session without Claude in Chrome still says Chrome is not available here', async ($, on) => {
+  const w = fresh()
+  const store = await chromeWorld(w)
+  const s = clearable(on)
+  const clock = world(on, w, store)
+  on('classic.SessionStart', () => ({}))
+  await start($, clock)
+  expect(s.view()?.hasChrome, 'Connect at open found no Claude in Chrome').toBe(false)
+  await clearSession($, clock, s.clear)
+  const pane = await mountPane($)
+  const shown = await pane.find({ type: 'Text', text: 'Not available in this window.' })
+  expect(['hasChrome, the pane after /clear', s.view()?.hasChrome, shown !== undefined]).toEqual(['hasChrome, the pane after /clear', false, true])
+  await pane.unmount()
+})
+
+test('puma-9arph.9 chrome: after /clear a session paired at open still shows Chrome in use on login 1', async ($, on) => {
+  const w = fresh()
+  const store = await chromeWorld(w, [''])
+  const s = clearable(on)
+  const clock = world(on, w, store)
+  on('classic.SessionStart', () => ({}))
+  await start($, clock)
+  const before = [s.view()?.hasChrome, s.view()?.chrome]
+  expect(before).toEqual([true, { as: '1', isPaired: true }])
+  await clearSession($, clock, s.clear)
+  expect(['hasChrome and chrome after /clear', s.view()?.hasChrome, s.view()?.chrome]).toEqual(['hasChrome and chrome after /clear', ...before])
+  const pane = await mountPane($)
+  expect((await pane.find({ key: 'chrome-row-1' }))?.text).toMatch(/● in use$/)
+  expect(await pane.find({ key: 'chrome-use-1' })).toBeUndefined()
+  await pane.unmount()
+})
+
+// The connection made before /clear is login 1's: a Try to connect as login 2 must reconnect, or login 1's browser answers.
+test('puma-9arph.9 chrome: after /clear Try to connect reconnects Claude in Chrome, so no other login\'s browser answers for it', async ($, on) => {
+  const w = fresh()
+  const store = await chromeWorld(w, [''])
+  const s = clearable(on)
+  const clock = world(on, w, store)
+  on('classic.SessionStart', () => ({}))
+  await start($, clock)
+  await clearSession($, clock, s.clear)
+  const pane = await mountPane($)
+  await pane.press({ key: 'chrome-others' })
+  await clock.settle()
+  await pane.redraw()
+  await pane.press({ key: 'chrome-try-2' })
+  await clock.settle()
+  await clock.advance(36_000)
+  expect(['the first reconnect, the extension\'s account', w.commands.slice(0, 1), store.get('chrome-account')]).toEqual([
+    'the first reconnect, the extension\'s account',
+    ['/mcp reconnect claude-in-chrome'],
+    '1',
+  ])
+  await pane.unmount()
+})
+
+test('puma-9arph.9 chromeConnecting: a /clear during Connect keeps the connecting line until Connect ends', async ($, on) => {
+  const w = fresh()
+  const store = await chromeWorld(w, [''])
+  const s = clearable(on)
+  const clock = world(on, w, store)
+  on('classic.SessionStart', () => ({}))
+  await start($, clock)
+  const pane = await mountPane($)
+  await pane.press({ key: 'chrome-others' })
+  await clock.settle()
+  await pane.redraw()
+  await pane.press({ key: 'chrome-try-2' })
+  await clock.settle()
+  expect(s.view()?.chromeConnecting, 'Connect waits for its move to login 2 to land').toBe('2')
+  s.clear()
+  await $.classic.SessionStart({ source: 'clear' })
+  const during = s.view()?.chromeConnecting
+  // No browser answers as login 2: Connect goes back to login 1, a second move and settle.
+  await clock.advance(36_000)
+  await clock.advance(36_000)
+  expect(['chromeConnecting during Connect, after it', during, s.view()?.chromeConnecting]).toEqual(['chromeConnecting during Connect, after it', '2', undefined])
+  await pane.unmount()
+})
+
+// The other side: what a Connect writes between the reset and the rebind is newer than `kept`, and a Connect that has
+// ended leaves no connecting line behind.
+test('puma-9arph.9 a Connect that ends between the reset and classic.SessionStart keeps its own link and leaves no connecting line', async ($, on) => {
+  const w = fresh()
+  const store = await chromeWorld(w, ['', SLOT2])
+  const s = clearable(on)
+  const clock = world(on, w, store)
+  on('classic.SessionStart', () => ({}))
+  await start($, clock)
+  const pane = await mountPane($)
+  await pane.press({ key: 'chrome-others' })
+  await clock.settle()
+  await pane.redraw()
+  await pane.press({ key: 'chrome-try-2' })
+  await clock.settle()
+  s.clear()
+  await clock.advance(36_000)
+  await $.classic.SessionStart({ source: 'clear' })
+  await clock.settle()
+  expect(['chrome, chromeConnecting after /clear', s.view()?.chrome, s.view()?.chromeConnecting]).toEqual([
+    'chrome, chromeConnecting after /clear',
+    { as: '2', isPaired: true },
+    undefined,
+  ])
+  await pane.unmount()
+})
+
+// Codex round 1 on #73: noteChrome writes hasChrome in the same window, and that newer answer stands too.
+test('puma-9arph.9 a Connect that finds Claude in Chrome gone between the reset and classic.SessionStart leaves hasChrome false', async ($, on) => {
+  const w = fresh()
+  const store = await chromeWorld(w, ['', SLOT2])
+  const s = clearable(on)
+  const clock = world(on, w, store)
+  on('classic.SessionStart', () => ({}))
+  await start($, clock)
+  expect(s.view()?.hasChrome).toBe(true)
+  const pane = await mountPane($)
+  await pane.press({ key: 'chrome-others' })
+  await clock.settle()
+  await pane.redraw()
+  await pane.press({ key: 'chrome-try-2' })
+  await clock.settle()
+  s.clear()
+  delete w.chrome
+  await clock.advance(36_000)
+  await $.classic.SessionStart({ source: 'clear' })
+  await clock.settle()
+  expect(['hasChrome after /clear, Claude in Chrome gone', s.view()?.hasChrome]).toEqual(['hasChrome after /clear, Claude in Chrome gone', false])
+  await pane.unmount()
+})
+
 test('Review MISSING-RESTORE class: after /resume the font and the switch policy are back, and the refusal is not said again', async ($, on) => {
   const w = fresh()
   w.env = { TERM_PROGRAM: 'Apple_Terminal' }
