@@ -118,6 +118,9 @@ type World = {
    * connection was made as.
    */
   chrome?: { extensions: string[]; as?: string }
+  /** What every Claude in Chrome tool answers in place of the world's own answer, as an error where `isChromeError`. */
+  chromeText?: string
+  isChromeError?: boolean
   /** The slot in use at each of the mod's calls to Claude in Chrome, the session having it or not. */
   chromeAsked: string[]
   /** The slash commands the mod ran, as typed. */
@@ -286,13 +289,17 @@ function world(on: On, w: World, store: Record<string, unknown> | Map<string, un
     chrome.as ??= slot
     return chrome.extensions.includes(chrome.as)
   }
+  // What list_connected_browsers answers: an empty list, no error, where no browser answers.
+  const browsers = (chrome: NonNullable<World['chrome']>) =>
+    JSON.stringify(isAnswered(chrome) ? [{ deviceId: 'device-1', name: 'Browser 1', osPlatform: 'macOS', isLocal: true }] : [])
   on('mcp.call', (_$, e) => {
     w.chromeAsked.push(slot)
     if (w.chrome === undefined) return { deny: `no connected MCP tool "${e.tool}" on a server named "${e.server}"` }
-    const browsers = isAnswered(w.chrome) ? [{ deviceId: 'device-1', name: 'Browser 1', osPlatform: 'macOS', isLocal: true }] : []
-    return { value: { content: [{ type: 'text', text: JSON.stringify(browsers) }], isError: false } }
+    return { value: { content: [{ type: 'text', text: browsers(w.chrome) }], isError: false } }
   })
-  on('tool.call', { tool: /^mcp__claude-in-chrome__/ }, () => {
+  on('tool.call', { tool: /^mcp__claude-in-chrome__/ }, (_$, e) => {
+    const text = w.chromeText ?? (w.chrome !== undefined && e.tool.endsWith('__list_connected_browsers') ? browsers(w.chrome) : undefined)
+    if (text !== undefined) return w.isChromeError === true ? { isError: true as const, result: text, text } : { result: [{ type: 'text', text }], text }
     if (w.chrome !== undefined && isAnswered(w.chrome)) return { result: [{ type: 'text', text: 'Tabs: none' }], text: 'Tabs: none' }
     return { isError: true as const, result: NO_BROWSER, text: NO_BROWSER }
   })
@@ -3434,6 +3441,55 @@ test('a window opening while the picked account\'s Chrome is closed lists that a
   expect((await pane.find({ key: 'chrome-row-1' }))?.text).toMatch(/● in use$/)
   expect(await pane.find({ type: 'Text', text: /^⚠/ })).toBeUndefined()
   await pane.unmount()
+})
+
+test('list_connected_browsers answering an empty list leaves Chrome unpaired and lists no account; once a browser answers, it is in use', async ($, on) => {
+  const w = fresh()
+  const store = await chromeWorld(w, [])
+  await start($, world(on, w, store))
+  expect((await browse($, 'list_connected_browsers')).context).toBeUndefined()
+  expect(store.get('chrome-accounts') ?? []).toEqual([])
+  w.chrome?.extensions.push('')
+  await browse($, 'list_connected_browsers')
+  expect(store.get('chrome-accounts')).toEqual(['1'])
+  const pane = await mountPane($)
+  expect((await pane.find({ key: 'chrome-row-1' }))?.text).toMatch(/● in use$/)
+  await pane.unmount()
+})
+
+test('an empty list of browsers, with the extension\'s account named and the window on another, starts no Connect: no move, no command, no prompt', async ($, on) => {
+  const w = fresh()
+  const store = await chromeWorld(w, [SLOT2])
+  store.set('chrome-account', '2')
+  const clock = world(on, w, store)
+  await start($, clock)
+  await clock.advance(72_000)
+  expect(slots(w)).toEqual([SLOT2, ''])
+  // Chrome closes; the connection, made as login 2, stays.
+  w.chrome = { extensions: [], as: SLOT2 }
+  const before = { slots: slots(w), commands: [...w.commands], submitted: [...w.submitted] }
+  expect((await browse($, 'list_connected_browsers')).context).toBeUndefined()
+  await clock.advance(72_000)
+  expect({ slots: slots(w), commands: w.commands, submitted: w.submitted }).toEqual(before)
+  expect(store.get('chrome-accounts')).toEqual(['2'])
+  const pane = await mountPane($)
+  expect((await pane.find({ key: 'chrome-row-2' }))?.text).toMatch(/Use for Chrome$/)
+  await pane.unmount()
+})
+
+test('only list_connected_browsers reads an empty list as no browser, and only a list it answered: another tool\'s "[]", a text that is no list, or an error reading "[]" leaves Chrome as before', async ($, on) => {
+  const w = fresh()
+  const store = await chromeWorld(w, [''])
+  await start($, world(on, w, store))
+  const answers = [['tabs_context_mcp', '[]', false], ['list_connected_browsers', 'Browsers: none listed', false], ['list_connected_browsers', '[]', true]] as const
+  for (const [tool, text, isError] of answers) {
+    w.chromeText = text
+    w.isChromeError = isError
+    await browse($, tool)
+    const pane = await mountPane($)
+    expect((await pane.find({ key: 'chrome-row-1' }))?.text).toMatch(/● in use$/)
+    await pane.unmount()
+  }
 })
 
 test('as a session opens it visits the extension\'s account to connect Claude in Chrome there, whatever usage that has left, and comes back; browser calls wait meanwhile', async ($, on) => {
