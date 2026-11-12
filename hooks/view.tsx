@@ -699,6 +699,13 @@ function accountRow(ui: Ui, view: View, a: Account, now: number, act: Actions, c
           )}
         </Box>
       ))}
+      {view.held?.target.id === a.id && (
+        <Box key={`held-${a.id}`}>
+          <Text color="warning">
+            switching here once account {view.activeId}'s token has refreshed, at the next request on account {view.activeId}
+          </Text>
+        </Box>
+      )}
       {expiry !== undefined && expiry - now < SIGN_IN_WARN_MS && (
         <Text color="warning">sign-in runs out {untilText(expiry, now)}; signing in again renews it</Text>
       )}

@@ -605,12 +605,12 @@ async function pickAnswer($: Host): Promise<{ text: string; pickId?: string }> {
 }
 
 /** Why a request waits out Connect: its visit moves the session and back, unsaid. */
-const CONNECTING_TEXT = 'Claude in Chrome is connecting, which moves this session and back: run this again in a minute'
+const CONNECTING_TEXT = 'Claude in Chrome is connecting, which moves this session and back: try again in a minute'
 
 /**
  * Moves this session as the panel's Use now does, under the same rule: only a login signed in. The result reads back
- * where it stands. Unlike a press, nobody watches what comes after: Connect's visit would move the session back
- * unsaid, so a use waits it out; and the account in use needs no switch, only the end of one held for later.
+ * where it stands. Connect's visit would move the session back unsaid, so a use waits it out, as a press does; and the
+ * account in use needs no switch, only the end of one held for later.
  */
 async function useAccount($: Host, target: Account): Promise<{ ok: boolean; message: string; activeId: string }> {
   const view = await getView($)
@@ -627,6 +627,14 @@ async function useAccount($: Host, target: Account): Promise<{ ok: boolean; mess
   // switchTo holds a switch for a token about to refresh, and otherwise declines only on a policy refusal.
   if ((await getView($)).held !== undefined) return { ok: true, message: `this session moves to account ${name} in a few minutes, once account ${view.activeId}'s token has refreshed`, activeId: view.activeId }
   return { ok: false, message: blockedText(isOnNormalLogin(view)), activeId: view.activeId }
+}
+
+/** Use now. A switch held for a token about to refresh says so on the pressed row while it waits (view.tsx). */
+async function pressUse($: Host, id: string): Promise<void> {
+  // As for `account use`: Connect's visit would move the session back unsaid.
+  if (isConnectingChrome) return tell($, CONNECTING_TEXT)
+  const target = (await getView($)).accounts.find(a => a.id === id)
+  if (target !== undefined) await switchTo($, target, 'you picked it')
 }
 
 /** What a Bash command spells to be watched: both bins' names hold it. */
@@ -2070,13 +2078,7 @@ function actions($: Host): Actions {
     signInOne: id => background(signInOne($, id)),
     cancelSignIn: () => background(Promise.resolve(running?.return({ code: null, signal: 'SIGTERM' }))),
     add: () => background(addAccount($)),
-    use: id =>
-      background(
-        getView($).then(view => {
-          const account = view.accounts.find(a => a.id === id)
-          return account === undefined ? false : switchTo($, account, 'you picked it')
-        }),
-      ),
+    use: id => background(pressUse($, id)),
     askRemove: id => background(setView($, v => ({ ...v, removing: id }))),
     remove: id =>
       background(
