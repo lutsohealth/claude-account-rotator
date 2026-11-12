@@ -1305,6 +1305,12 @@ async function settlePending($: Host, isResponse: boolean): Promise<void> {
   const reading = readingFromLimits((await $.session.usage()).rateLimits, now)
   const target = accounts.find(a => a.id === pending.id)
   if (isResponse && target !== undefined) await checkAccount($, target, { since: pending.since })
+  // A switch made while this waited (a use, a stop) owns the session now: this one's proof or give-up is void.
+  const isStill = async () => {
+    const current = (await getView($)).pending
+    return current?.id === pending.id && current.since === pending.since
+  }
+  if (!(await isStill())) return
   // A response proves its login by its week's reset, which each account has at a time of its own; its percents prove
   // nothing, as two logins can stand within a few points of each other.
   const isTarget = (v: View) => whoseWeek(reading, v.readings).includes(pending.id)
@@ -1316,6 +1322,7 @@ async function settlePending($: Host, isResponse: boolean): Promise<void> {
   } else if (isResponse && now - pending.since > CONFIRM_GIVE_UP_MS) {
     const from = accounts.find(a => a.id === pending.from)
     if (from !== undefined) await checkAccount($, from, { since: pending.since })
+    if (!(await isStill())) return
     const after = await getView($)
     // Minutes on, a switch has landed if it ever will: only a response that is the old login's alone points back.
     if (isTarget(after) && isSource(after)) {
