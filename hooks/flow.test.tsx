@@ -3794,7 +3794,7 @@ test('puma-9arph.18: Use now held back for a token about to refresh says so on t
   await pane.press({ key: 'use-2' })
   await clock.settle()
   expect(slots(w)).toEqual([])
-  expect((await pane.find({ key: 'use-note-2' }))?.text).toMatch(/^this session moves to account 2 .* in a few minutes, once account 1's token has refreshed$/)
+  expect((await pane.find({ key: 'use-note-2' }))?.text).toMatch(/^this session moves to account 2 .* in a few minutes, once account 1's token has refreshed at this session's next request$/)
   refresh(w)
   await clock.advance(60_000)
   expect(slots(w)).toEqual([SLOT2])
