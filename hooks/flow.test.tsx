@@ -3798,6 +3798,7 @@ test('puma-9arph.18: Use now held back for a token about to refresh says so on t
   refresh(w)
   await clock.advance(60_000)
   expect(slots(w)).toEqual([SLOT2])
+  expect(w.toasts.filter(t => /^Switched to Claude account 2 .*: you picked it\.$/.test(t))).toHaveLength(1)
   await pane.redraw()
   expect(await pane.find({ key: 'use-note-2' })).toBeUndefined()
   await pane.unmount()
