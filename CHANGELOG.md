@@ -4,7 +4,7 @@ What each version of the account rotator changed. To get each one as Claude Code
 
 ## Unreleased
 
-- **Use now says why it did not move the session, on that account's row**, where a switch held until the token in use refreshes said so only in a toast and looked like a dead button; and **Use now waits while Claude in Chrome connects**, as `account use` does, where the connection's visit moved the session back unsaid.
+- **A switch waiting for the token in use to refresh says so on the row of the account it goes to**, where it said so only in a short notice and **Use now** looked like a dead button; and **Use now waits while Claude in Chrome connects**, as `account use` does, where the connection's visit moved the session back unsaid.
 
 ## 0.5.29-lutso.1 - 2026-11-12
 

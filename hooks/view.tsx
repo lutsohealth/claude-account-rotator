@@ -699,9 +699,11 @@ function accountRow(ui: Ui, view: View, a: Account, now: number, act: Actions, c
           )}
         </Box>
       ))}
-      {view.useNote?.id === a.id && (
-        <Box key={`use-note-${a.id}`}>
-          <Text color="warning">{view.useNote.text}</Text>
+      {view.held?.target.id === a.id && (
+        <Box key={`held-${a.id}`}>
+          <Text color="warning">
+            switching here once account {view.activeId}'s token has refreshed, at the next request on account {view.activeId}
+          </Text>
         </Box>
       )}
       {expiry !== undefined && expiry - now < SIGN_IN_WARN_MS && (

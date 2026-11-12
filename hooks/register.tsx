@@ -608,11 +608,11 @@ async function pickAnswer($: Host): Promise<{ text: string; pickId?: string }> {
 const CONNECTING_TEXT = 'Claude in Chrome is connecting, which moves this session and back: try again in a minute'
 
 /**
- * Moves this session for `account use` and the panel's Use now: only a login signed in. The result reads back where it
- * stands. Connect's visit would move the session back unsaid, so a use waits it out; and the account in use needs no
- * switch, only the end of one held for later.
+ * Moves this session as the panel's Use now does, under the same rule: only a login signed in. The result reads back
+ * where it stands. Connect's visit would move the session back unsaid, so a use waits it out, as a press does; and the
+ * account in use needs no switch, only the end of one held for later.
  */
-async function useAccount($: Host, target: Account, why = 'a command asked for it'): Promise<{ ok: boolean; message: string; activeId: string }> {
+async function useAccount($: Host, target: Account): Promise<{ ok: boolean; message: string; activeId: string }> {
   const view = await getView($)
   const name = label(target)
   if (isConnectingChrome) return { ok: false, message: CONNECTING_TEXT, activeId: view.activeId }
@@ -622,23 +622,19 @@ async function useAccount($: Host, target: Account, why = 'a command asked for i
   }
   const health = view.health[target.id]
   if (health?.kind !== 'ok') return { ok: false, message: `account ${name} cannot take over: ${health?.kind === 'login-needed' ? health.why : 'it is not signed in yet'}`, activeId: view.activeId }
-  const hasMoved = await switchTo($, target, why)
+  const hasMoved = await switchTo($, target, 'a command asked for it')
   if (hasMoved) return { ok: true, message: `this session now uses account ${name}`, activeId: target.id }
   // switchTo holds a switch for a token about to refresh, and otherwise declines only on a policy refusal.
-  if ((await getView($)).held !== undefined) return { ok: true, message: `this session moves to account ${name} in a few minutes, once account ${view.activeId}'s token has refreshed at this session's next request`, activeId: view.activeId }
+  if ((await getView($)).held !== undefined) return { ok: true, message: `this session moves to account ${name} in a few minutes, once account ${view.activeId}'s token has refreshed`, activeId: view.activeId }
   return { ok: false, message: blockedText(isOnNormalLogin(view)), activeId: view.activeId }
 }
 
-/**
- * Use now: as `account use`, and an answer that moves nothing (a switch held for a refresh, a refusal, a throw)
- * stays on the pressed account's row, as nobody reads the toast in time.
- */
+/** Use now. A switch held for a token about to refresh says so on the pressed row while it waits (view.tsx). */
 async function pressUse($: Host, id: string): Promise<void> {
-  await setView($, v => ({ ...v, useNote: undefined }))
+  // As for `account use`: Connect's visit would move the session back unsaid.
+  if (isConnectingChrome) return tell($, CONNECTING_TEXT)
   const target = (await getView($)).accounts.find(a => a.id === id)
-  if (target === undefined) return
-  const answer = await useAccount($, target, 'you picked it').catch(error => ({ message: `Something went wrong: ${String(error)}`, activeId: '' }))
-  if (answer.activeId !== id) await setView($, v => ({ ...v, useNote: { id, text: answer.message } }))
+  if (target !== undefined) await switchTo($, target, 'you picked it')
 }
 
 /** What a Bash command spells to be watched: both bins' names hold it. */
@@ -1293,7 +1289,6 @@ async function switchTo($: Host, target: Account, why: string, isQuiet = false, 
     activeId: target.id,
     pending: { id: target.id, from: v.activeId, since: now },
     removing: undefined,
-    useNote: undefined,
   }))
   if (!isQuiet) $.ui.toast(`Switched to Claude account ${label(target)}: ${why}.`, { timeoutMs: 6000 })
   if (owed !== undefined) carryOnAfterSettle($, owed)

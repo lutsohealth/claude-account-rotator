@@ -3786,7 +3786,7 @@ test('a session without Claude in Chrome is asked once, and its pane has no Chro
 
 // ---------------------------------------------------------------- puma-9arph.18: a Use now press that does not move says why on its row
 
-test('puma-9arph.18: Use now held back for a token about to refresh says so on the pressed row, and moves when the refresh lands', async ($, on) => {
+test('puma-9arph.18: Use now held back for a token about to refresh says so on the pressed row while it waits, and moves when the refresh lands', async ($, on) => {
   const w = fresh()
   const clock = await guarded(on, w, {}, [20, 30])
   await start($, clock)
@@ -3794,17 +3794,17 @@ test('puma-9arph.18: Use now held back for a token about to refresh says so on t
   await pane.press({ key: 'use-2' })
   await clock.settle()
   expect(slots(w)).toEqual([])
-  expect((await pane.find({ key: 'use-note-2' }))?.text).toMatch(/^this session moves to account 2 .* in a few minutes, once account 1's token has refreshed at this session's next request$/)
+  expect((await pane.find({ key: 'held-2' }))?.text).toBe("switching here once account 1's token has refreshed, at the next request on account 1")
   refresh(w)
   await clock.advance(60_000)
   expect(slots(w)).toEqual([SLOT2])
   expect(w.toasts.filter(t => /^Switched to Claude account 2 .*: you picked it\.$/.test(t))).toHaveLength(1)
   await pane.redraw()
-  expect(await pane.find({ key: 'use-note-2' })).toBeUndefined()
+  expect(await pane.find({ key: 'held-2' })).toBeUndefined()
   await pane.unmount()
 })
 
-test('puma-9arph.18: Use now during Connect\'s visit moves nothing and says why on the pressed row', async ($, on) => {
+test('puma-9arph.18: Use now during Connect\'s visit moves nothing and says why', async ($, on) => {
   const w = fresh()
   w.chrome = { extensions: [SLOT2] }
   await spentTwo(w)
@@ -3815,7 +3815,7 @@ test('puma-9arph.18: Use now during Connect\'s visit moves nothing and says why 
   await pane.press({ key: 'use-1' })
   await clock.settle()
   expect(slots(w)).toEqual([SLOT2])
-  expect((await pane.find({ key: 'use-note-1' }))?.text).toMatch(/^Claude in Chrome is connecting/)
+  expect(w.toasts.filter(t => /^Claude in Chrome is connecting, which moves this session and back/.test(t))).toHaveLength(1)
   await pane.unmount()
 })
 
