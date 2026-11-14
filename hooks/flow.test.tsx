@@ -3609,6 +3609,22 @@ test('as a session opens it leaves a spent extension account be; the first brows
   expect((await browse($, 'navigate', { url: 'https://example.com' })).isError).toBeUndefined()
 })
 
+test('as a session opens it leaves be an extension account whose week is down to the Week setting, as the rotation counts it', async ($, on) => {
+  const w = fresh()
+  w.chrome = { extensions: [SLOT2] }
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [20, 30]
+  w.usage['tok-2'] = [10, 85]
+  const atLine = { fiveHour: { pct: 10, resetsAt: '2026-10-12T12:00:00Z' }, sevenDay: { pct: 85, resetsAt: '2026-10-18T03:00:00Z' }, at: NOW - 60_000, by: '2', v: 1, src: 'body' }
+  const clock = world(on, w, { ...TWO_LOGINS, 'chrome-account': '2', 'chrome-accounts': ['2'], 'usage:2': atLine, 'week-leave': 20 })
+  await start($, clock)
+  await clock.advance(36_000)
+  // 15% of its week left at a Week setting of 20: a prompt sent during a visit would leave it again at once.
+  expect(slots(w)).toEqual([])
+  expect(w.chromeAsked).toEqual([])
+})
+
 test('as a session opens it leaves be an extension account no browser answered as last time, while one did as another', async ($, on) => {
   const w = fresh()
   w.chrome = { extensions: [''] }

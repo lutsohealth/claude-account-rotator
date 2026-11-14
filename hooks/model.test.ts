@@ -657,6 +657,12 @@ test('a session that can\'t switch says to stop a background session, which /exi
   expect(stuckText({ ...view({ '1': [95, 30], '2': [100, 30] }), activeId: '2', isSwitchBlocked: true }, NOW)).toBeUndefined()
 })
 
+test('a session that can\'t switch is told so once its week is down to the Week setting, as the rotation counts it', () => {
+  const atLine = { ...view({ '1': [10, 10], '2': [10, 85] }), activeId: '2', sessionId: 'session-1', isSwitchBlocked: true, weekLeave: 20 }
+  expect(stuckText(atLine, NOW)).toMatch(/^Account 2 is out of usage, and this window can't switch accounts\./)
+  expect(stuckText({ ...atLine, weekLeave: 0 }, NOW)).toBeUndefined()
+})
+
 test('counts the browsers Claude in Chrome lists, and knows its words for none answering', () => {
   expect(browsersFrom('[{"deviceId":"d","name":"Browser 1","osPlatform":"macOS","isLocal":true}]')).toBe(1)
   expect(browsersFrom('[]')).toBe(0)

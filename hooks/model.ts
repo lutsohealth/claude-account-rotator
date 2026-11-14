@@ -758,7 +758,7 @@ export function restartSteps(view: View): string {
  * spent, a new session would not help either.
  */
 export function stuckText(view: View, now: number): string | undefined {
-  if (!view.isSwitchBlocked || !isSpent(view.readings[view.activeId], now) || pickTarget(view, now) === undefined) return undefined
+  if (!view.isSwitchBlocked || !isSpent(view.readings[view.activeId], now, view.weekLeave) || pickTarget(view, now) === undefined) return undefined
   const login = isOnNormalLogin(view) ? '/login with your personal (Pro or Max) account. ' : ''
   return `Account ${view.activeId} is out of usage, and this window can't switch accounts. ${login}${restartSteps(view)}`
 }

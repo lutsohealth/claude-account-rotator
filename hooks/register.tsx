@@ -1676,7 +1676,7 @@ function shouldConnectAtOpen(view: View, now: number): boolean {
   return (
     health !== 'login-needed' &&
     health !== 'logging-in' &&
-    !isSpent(view.readings[target.id], now) &&
+    !isSpent(view.readings[target.id], now, view.weekLeave) &&
     (answered.length === 0 || answered.includes(target.id))
   )
 }
