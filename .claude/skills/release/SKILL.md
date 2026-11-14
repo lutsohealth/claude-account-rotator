@@ -10,12 +10,12 @@ Claude Code updates an installed plugin only when the `version` in `.claude-plug
 ## 1. Check the tree
 
 - On a branch cut from `origin/main`: `git fetch origin && git switch -c <branch> origin/main`. Everything merged to `main` goes out with the release.
-- Nothing uncommitted. Work another session left uncommitted gets a commit of its own first, with a message that says what it does, never folded into the release commit. If that session is still busy (`ListAgents`), ask the user before committing its work.
+- Nothing uncommitted. Work another session left uncommitted gets a commit of its own on its own branch first, with a message that says what it does, never in the release branch. If that session is still busy (`ListAgents`), ask the user before committing its work.
 - The three checks of the README's **Develop** section pass.
 
 ## 2. Pick the version
 
-The last release is `git describe --tags --abbrev=0 --match 'account-rotator--v*'`. Read `git log <last tag>..HEAD` and pick by semver, and keep the suffix every tag of this fork carries: `0.5.30-lutso.1` goes to `0.5.31-lutso.1`. While below 1.0:
+The last release is `git describe --tags --abbrev=0 --match 'account-rotator--v*'`. Read `git log <last tag>..HEAD` and pick by semver. Every tag of this fork carries a suffix: `0.5.30-lutso.1` goes to `0.5.31-lutso.1`. While below 1.0:
 
 - **minor** (0.2.0 to 0.3.0): new behavior, or anything a user does differently.
 - **patch** (0.2.0 to 0.2.1): fixes and wording only.
@@ -43,7 +43,7 @@ Show the user the version and the entry before publishing, unless they already s
 
 ## 5. Publish
 
-Write the entry's bullets to a file in the session's scratchpad. Open the release pull request and merge it when its checks are green:
+Write the entry's bullets and the two ways to update (step 7) to a file in the session's scratchpad. Open the release pull request and merge it when its checks are green:
 
 ```sh
 git push origin <branch>
@@ -52,7 +52,7 @@ gh pr checks <number> --watch
 gh pr merge <number> --squash
 ```
 
-Tag only after the merge: the squash makes a new commit on `main`, and the tag goes on that one.
+Tag only after the merge, on the squash commit it made: after the pull, `git log -1 --format=%s` reads `Release 0.5.31-lutso.1 (#<number>)`.
 
 ```sh
 git switch main && git pull --ff-only
