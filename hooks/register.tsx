@@ -1583,8 +1583,10 @@ async function markStop($: Host, active: Account, said: string | undefined, afte
     const now = await $.clock.now()
     const after = await getView($)
     const r = after.readings[active.id]
-    // A mark goes on the read as stored, so a 5-hour window the limit hides stays in it.
-    const read = (await ownedReading($, active.id)) ?? r
+    // A mark goes on the read as stored, so a 5-hour window the limit hides stays in it; with none stored, the view's
+    // gives the resets.
+    const owned = await ownedReading($, active.id)
+    const read = owned ?? r
     // Claude's own words tell the Fable week from any other limit; the usage read decides only where there are none.
     const isFable = said === undefined || said === '' ? isFableSpent(r, now) : isFableStop(said)
     if (isFable) {
@@ -1593,7 +1595,7 @@ async function markStop($: Host, active: Account, said: string | undefined, afte
       await setView($, v => ({ ...v, isFableStopped: true }))
       // The limit was hit before the usage call shows it: count the Fable week as full, under the mark's own key. Judged on
       // the read as stored, never the view's, which carries the mark: a stop on a login its mark holds renews the mark.
-      if (!isFableSpent(read, now)) {
+      if (!isFableSpent(owned, now)) {
         const spent = fableMark(read?.fable, now)
         await saveFableMark($, active.id, { pct: spent.pct, resetsAt: spent.resetsAt ?? new Date(now + WEEK_MS).toISOString(), at: now })
       }
