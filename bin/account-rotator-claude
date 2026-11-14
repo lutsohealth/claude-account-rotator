@@ -124,11 +124,11 @@ def note(why: str) -> None:
 
 
 def next_claude() -> str | None:
-    """The first `claude` on PATH past this file's own folder, else Claude Code's install path."""
-    own = os.path.dirname(os.path.realpath(os.path.abspath(sys.argv[0])))
+    """The first `claude` on PATH that is not this file, by any link or folder spelling, else Claude Code's install path."""
+    me = os.path.realpath(__file__)
     for folder in os.environ.get("PATH", "").split(os.pathsep):
         candidate = os.path.join(folder, "claude")
-        if folder and os.path.realpath(folder) != own and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+        if folder and os.path.isfile(candidate) and os.access(candidate, os.X_OK) and os.path.realpath(candidate) != me:
             return candidate
     fallback = os.path.join(os.path.expanduser("~"), ".local", "bin", "claude")
     return fallback if os.access(fallback, os.X_OK) else None

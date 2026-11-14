@@ -141,6 +141,12 @@ class InstalledCopy(LauncherCase):
         seen = self.launch(launcher=self.copy, path=path)
         self.assertEqual((seen["slot"], seen["path"]), (str(self.slot), path))
 
+    def test_a_link_to_the_launcher_runs_the_next_claude_not_itself(self) -> None:
+        self.copy.unlink()
+        self.copy.symlink_to(LAUNCHER)
+        seen = self.launch(launcher=self.copy, path=f"{self.own}:{self.stub_bin}:/usr/bin:/bin")
+        self.assertEqual(seen["slot"], str(self.slot))
+
 
 if __name__ == "__main__":
     unittest.main()
