@@ -223,6 +223,8 @@ export type View = {
   isSwitchBlocked?: boolean
   /** This session only: an older version of the mod wrote a reading after this session started, so it still runs somewhere. */
   hasOlderWriter?: boolean
+  /** This session only: it was told that the login in use is spent and the session can't leave it. */
+  isStuckTold?: boolean
   /**
    * The account the Chrome extension is signed in to, the only one it answers:
    * picked in the pane, or learned when Claude in Chrome paired; kept across sessions.

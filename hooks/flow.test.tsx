@@ -396,6 +396,9 @@ const fresh = (system: World['system'] = 'macOS'): World => ({
 })
 const TWO_LOGINS ={ accounts: [{ id: '1', slot: '', email: 'one@example.com' }, { id: '2', slot: SLOT2, email: 'two@example.com' }] }
 
+/** What a refused switch says in the world's session, on login 1, Claude Code's login. */
+const BLOCKED_ON_LOGIN = blockedText({ ...EMPTY_VIEW, ...TWO_LOGINS, activeId: '1', sessionId: 'session-1' })
+
 /** The props of every Text drawn with a color or on one, its hover with them, in document order. */
 function painted(node: unknown): Record<string, unknown>[] {
   if (typeof node !== 'object' || node === null) return []
@@ -632,8 +635,10 @@ test('where Claude Code\'s security policy refuses switching, as on a Team seat,
   const notice = (t: string) => /^Can't switch accounts in this session/.test(t) && /#team-and-enterprise-accounts/.test(t)
   expect(w.toasts.filter(notice)).toHaveLength(1)
   // On the normal login, a personal sign-in there gives the next session one that can switch.
-  expect(w.toasts.find(notice)).toMatch(/session that starts on a Team or Enterprise account\. Fix: \/login with your personal \(Pro or Max\) account, then restart Claude/)
-  // The login in use runs out: no switch is tried, and nothing more is said.
+  expect(w.toasts.find(notice)).toMatch(
+    /session that starts on a Team or Enterprise account\. Fix: \/login with your personal \(Pro or Max\) account\. Quit \(in a background session, \/stop: \/exit only detaches\), then run: claude --resume session-1\./,
+  )
+  // The login in use runs out: no switch is tried, and what to do about it is said once.
   w.usage['tok-1'] = [95, 41]
   await clock.advance(21 * 60_000)
   w.usage['tok-1'] = [100, 41]
@@ -641,6 +646,7 @@ test('where Claude Code\'s security policy refuses switching, as on a Team seat,
   await clock.settle()
   await clock.advance(36_000)
   expect(w.toasts.filter(notice)).toHaveLength(1)
+  expect(w.toasts.filter(t => /^Account 1 is near its limit, and this window can't switch accounts\. \/login with your personal/.test(t))).toHaveLength(1)
   expect(w.submitted).toEqual([])
   const footer = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'SessionMode', props: { modes: [] } })
   expect((await footer.find({ type: 'Text', text: '⚠' }))?.props).toMatchObject({ color: 'warning' })
@@ -669,11 +675,80 @@ test('where the policy starts refusing once the mod has moved the session to a s
   await start($, clock)
   const notice = w.toasts.filter(t => /^Can't switch accounts/.test(t))
   expect(notice).toHaveLength(1)
-  expect(notice[0]).toMatch(/starts or reloads plugins\. Fix: quit Claude and run `claude --continue` or `claude --resume`\. Not \/restart, which keeps this account\./)
+  expect(notice[0]).toMatch(
+    /starts or reloads plugins\. Fix: Quit \(in a background session, \/stop: \/exit only detaches\), then run: claude --resume session-1\. Not \/restart, which keeps this account\./,
+  )
   expect(notice[0]).not.toMatch(/\/login/)
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
-  expect(await pane.find({ type: 'Text', text: /^Can't switch accounts.*Fix: quit Claude and run `claude --continue`/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /^Can't switch accounts.*Fix: Quit \(in a background session, \/stop/ })).toBeDefined()
   await pane.unmount()
+})
+
+test('a window that can\'t switch, on a seat that runs out while another login has room, says once how to bring the conversation back where it can, /stop for a background session, which /exit leaves running', async ($, on) => {
+  const w = fresh()
+  w.refuseEnv = true
+  w.env.CLAUDE_SECURESTORAGE_CONFIG_DIR = SLOT2
+  await spentTwo(w)
+  const clock = world(on, w, TWO_LOGINS)
+  await start($, clock)
+  const stuck =
+    "Account 2 is near its limit, and this window can't switch accounts. Quit (in a background session, /stop: /exit only detaches), then run: claude --resume session-1"
+  expect(w.toasts.filter(t => t === stuck)).toHaveLength(1)
+  const band = await mountBand($)
+  expect((await band.find({ type: 'Text', text: `⚠ ${stuck}` }))?.props).toMatchObject({ color: 'warning' })
+  await band.unmount()
+  // Said once: the minute's checks and the usage checks after say no more.
+  await clock.advance(21 * 60_000)
+  expect(w.toasts.filter(t => t === stuck)).toHaveLength(1)
+  expect(w.envSets).toEqual([])
+})
+
+// Review F1 (PR #85, round 1): upstream's isStuckTold lived only in the view, which /clear, /resume and /branch reset.
+test('a window that can\'t switch, told once it is stuck, is not told again after /clear', async ($, on) => {
+  const w = fresh()
+  w.refuseEnv = true
+  w.env.CLAUDE_SECURESTORAGE_CONFIG_DIR = SLOT2
+  await spentTwo(w)
+  const s = clearable(on)
+  const clock = world(on, w, TWO_LOGINS)
+  on('classic.SessionStart', () => ({}))
+  await start($, clock)
+  const stuck = (t: string) => /^Account 2 is near its limit, and this window can't switch accounts\./.test(t)
+  expect(['told before /clear', w.toasts.filter(stuck).length]).toEqual(['told before /clear', 1])
+  await clearSession($, clock, s.clear)
+  await clock.advance(21 * 60_000)
+  expect(['stuck toasts after /clear', w.toasts.filter(stuck).length]).toEqual(['stuck toasts after /clear', 1])
+})
+
+// Review F1, the class: every once-only notice a window that can't switch gets (the policy refusal, the stuck window),
+// through every reset that clears the view (/clear, /resume, /branch), on toasts and on the terminal's notifications.
+test('no once-only notice of a window that can\'t switch is said again after any reset of the view', async ($, on) => {
+  const NOTICES: [string, RegExp][] = [
+    ['policy refusal', /^Can't switch accounts in this session\./],
+    ['stuck window', /^Account 2 is near its limit, and this window can't switch accounts\./],
+  ]
+  const w = fresh()
+  w.refuseEnv = true
+  w.env.CLAUDE_SECURESTORAGE_CONFIG_DIR = SLOT2
+  await spentTwo(w)
+  const s = clearable(on)
+  const clock = world(on, w, TWO_LOGINS)
+  on('classic.SessionStart', () => ({}))
+  await start($, clock)
+  const count = () => NOTICES.map(([name, re]) => [name, w.toasts.filter(t => re.test(t)).length, w.notices.map(String).filter(t => re.test(t)).length] as const)
+  // The sweep inspected something: each notice was said at the start, once on each channel.
+  expect(count().map(([name, toasts, notices]) => [name, toasts, notices])).toEqual(NOTICES.map(([name]) => [name, 1, 1]))
+  const offenders: string[] = []
+  for (const source of ['clear', 'resume', 'fork'] as const) {
+    const at = count()
+    await clearSession($, clock, s.clear, source)
+    await clock.advance(21 * 60_000)
+    count().forEach(([name, toasts, notices], i) => {
+      if (toasts > at[i][1] || notices > at[i][2]) offenders.push(`${name} said again after ${source} (toasts ${at[i][1]} -> ${toasts}, notices ${at[i][2]} -> ${notices})`)
+    })
+  }
+  // Fix: each once-only flag of the view (isSwitchBlocked, isStuckTold) goes in register.tsx's `kept` and back in rebindSession.
+  expect(offenders).toEqual([])
 })
 
 test('a switch that does not take, its responses still the old login\'s minutes later, points the session back and marks the old login in use, and the rotation does not try it again', async ($, on) => {
@@ -3519,11 +3594,14 @@ test('puma-9arph.17: an empty list of browsers with a note block after it still 
   expect(store.get('chrome-accounts') ?? []).toEqual([])
 })
 
-test('as a session opens it visits the extension\'s account to connect Claude in Chrome there, whatever usage that has left, and comes back; browser calls wait meanwhile', async ($, on) => {
+test('as a session opens it visits the extension\'s account, which has room, to connect Claude in Chrome there, and comes back; browser calls wait meanwhile', async ($, on) => {
   const w = fresh()
   w.chrome = { extensions: [SLOT2] }
-  await spentTwo(w)
-  const clock = world(on, w, { ...TWO_LOGINS, 'chrome-account': '2' })
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [20, 30]
+  w.usage['tok-2'] = [40, 30]
+  const clock = world(on, w, { ...TWO_LOGINS, 'chrome-account': '2', 'chrome-accounts': ['2'] })
   await start($, clock)
   expect(slots(w)).toEqual([SLOT2])
   // Not asked before Claude Code reads login 2's sign-in, which a call would connect as.
@@ -3553,7 +3631,67 @@ test('as a session opens it visits the extension\'s account to connect Claude in
   expect((await browse($, 'navigate', { url: 'https://example.com' })).isError).toBeUndefined()
 })
 
-test('a turn that hits the usage limit while the session visits a spent extension account carries on once it is back', async ($, on) => {
+test('as a session opens it leaves a spent extension account be; the first browser call that finds no browser connects there, comes back, and tells Claude to carry on', async ($, on) => {
+  const w = fresh()
+  w.chrome = { extensions: [SLOT2] }
+  await spentTwo(w)
+  const spent = { fiveHour: { pct: 100, resetsAt: '2026-10-12T12:00:00Z' }, at: NOW - 60_000, by: '2', v: 1, src: 'body' }
+  const clock = world(on, w, { ...TWO_LOGINS, 'chrome-account': '2', 'chrome-accounts': ['2'], 'usage:2': spent })
+  await start($, clock)
+  await clock.advance(36_000)
+  // A prompt sent now goes out as login 1, which has room: the window stays there.
+  expect(slots(w)).toEqual([])
+  expect(w.chromeAsked).toEqual([])
+  // Claude in Chrome connects as login 1, which no extension answers: the mod visits login 2 now.
+  const called = await browse($, 'navigate', { url: 'https://example.com' })
+  expect(called.isError).toBe(true)
+  expect(called.context?.[0]).toMatch(/^Claude in Chrome connected as Claude account 1 \(one@example\.com\) and found no browser\. The account-rotator mod is now connecting it as Claude account 2 \(two@example\.com\)/)
+  await clock.settle()
+  expect(slots(w)).toEqual([SLOT2])
+  await clock.advance(36_000)
+  expect(w.commands).toEqual(['/mcp reconnect claude-in-chrome'])
+  expect(w.chromeAsked).toEqual([SLOT2])
+  expect(slots(w)).toEqual([SLOT2, ''])
+  await clock.advance(36_000)
+  expect(w.submitted).toEqual(['Claude in Chrome is connected as Claude account 2 (two@example.com). Continue where you left off.'])
+  expect((await browse($, 'navigate', { url: 'https://example.com' })).isError).toBeUndefined()
+})
+
+test('as a session opens it leaves be an extension account whose week is down to the Week setting, as the rotation counts it', async ($, on) => {
+  const w = fresh()
+  w.chrome = { extensions: [SLOT2] }
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [20, 30]
+  w.usage['tok-2'] = [10, 85]
+  const atLine = { fiveHour: { pct: 10, resetsAt: '2026-10-12T12:00:00Z' }, sevenDay: { pct: 85, resetsAt: '2026-10-18T03:00:00Z' }, at: NOW - 60_000, by: '2', v: 1, src: 'body' }
+  const clock = world(on, w, { ...TWO_LOGINS, 'chrome-account': '2', 'chrome-accounts': ['2'], 'usage:2': atLine, 'week-leave': 20 })
+  await start($, clock)
+  await clock.advance(36_000)
+  // 15% of its week left at a Week setting of 20: a prompt sent during a visit would leave it again at once.
+  expect(slots(w)).toEqual([])
+  expect(w.chromeAsked).toEqual([])
+})
+
+test('as a session opens it leaves be an extension account no browser answered as last time, while one did as another', async ($, on) => {
+  const w = fresh()
+  w.chrome = { extensions: [''] }
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [20, 30]
+  w.usage['tok-2'] = [10, 30]
+  const clock = world(on, w, { ...TWO_LOGINS, 'chrome-account': '2', 'chrome-accounts': ['1'] })
+  await start($, clock)
+  await clock.advance(36_000)
+  expect(slots(w)).toEqual([])
+  expect(w.chromeAsked).toEqual([])
+  // The extension answers as login 1, the one in use: the first browser call just works.
+  expect((await browse($, 'tabs_context_mcp')).isError).toBeUndefined()
+  await clock.settle()
+  expect(slots(w)).toEqual([])
+})
+
+test('a turn that hits the usage limit while the session visits an extension account it didn\'t know was spent carries on once it is back', async ($, on) => {
   const w = fresh()
   w.chrome = { extensions: [SLOT2] }
   await spentTwo(w)
@@ -3617,10 +3755,15 @@ test('a session Claude Code stops from switching, on another account than the ex
   const clock = world(on, w, { ...TWO_LOGINS, 'chrome-account': '1' })
   await start($, clock)
   const called = await browse($, 'tabs_context_mcp')
-  expect(called.context?.[0]).toMatch(/Tell the user that to use Chrome, they quit Claude Code and run `claude --resume session-1` in this terminal/)
+  expect(called.context?.[0]).toMatch(
+    /Tell the user that to use Chrome, they quit Claude Code \(in a background session, with \/stop: \/exit only detaches\) and run `claude --resume session-1` in a terminal/,
+  )
   const band = await mountBand($)
   expect(
-    await band.find({ type: 'Text', text: "⚠ This window can't switch to account 1 (one@example.com). Quit, then run: claude --resume session-1" }),
+    await band.find({
+      type: 'Text',
+      text: "⚠ This window can't switch to account 1 (one@example.com). Quit (in a background session, /stop: /exit only detaches), then run: claude --resume session-1",
+    }),
   ).toBeDefined()
   expect(await band.find({ key: 'chrome-connect-band' })).toBeUndefined()
   await band.unmount()
@@ -3638,7 +3781,10 @@ test('a session Claude Code stops from switching, on another account than the ex
   expect(await pane.find({ key: 'chrome-row-1' })).toBeDefined()
   expect(await pane.find({ key: 'chrome-try-1' })).toBeUndefined()
   expect(
-    await pane.find({ type: 'Text', text: "⚠ This window can't switch accounts, so Chrome can't move to another one here. Quit, then run: claude --resume session-1" }),
+    await pane.find({
+      type: 'Text',
+      text: "⚠ This window can't switch accounts, so Chrome can't move to another one here. Quit (in a background session, /stop: /exit only detaches), then run: claude --resume session-1",
+    }),
   ).toBeDefined()
   await pane.unmount()
 })
@@ -7836,7 +7982,7 @@ test('a policy refusal answers not ok with the blocked text', async ($, on) => {
   w.files[`${REQUESTS}/${N1}.json`] = useRequest(N1, '2', store.get('store-id'), clock.now(), ownMark(w))
   await beat(clock)
   await call.finish()
-  expect(resultOf(w, N1)).toMatchObject({ ok: false, message: blockedText(true), activeId: '1' })
+  expect(resultOf(w, N1)).toMatchObject({ ok: false, message: BLOCKED_ON_LOGIN, activeId: '1' })
 })
 
 test('a switch held for a token refresh answers ok, names the wait, and moves once the token has refreshed', async ($, on) => {
@@ -7971,7 +8117,7 @@ test('a hold in words of the engine\'s own is a refusal too: the reason is not t
   w.files[`${REQUESTS}/${N1}.json`] = useRequest(N1, '2', store.get('store-id'), clock.now(), ownMark(w))
   await untilTick(clock)
   expect(w.envSets, 'the fixture wrote the slot under a hold').toEqual([])
-  expect(resultOf(w, N1)).toMatchObject({ ok: false, message: blockedText(true), activeId: '1' })
+  expect(resultOf(w, N1)).toMatchObject({ ok: false, message: BLOCKED_ON_LOGIN, activeId: '1' })
 })
 
 test('every $.env.set site reads a hold the engine resolves: the boot check, the panel press', async ($, on) => {
@@ -7985,7 +8131,7 @@ test('every $.env.set site reads a hold the engine resolves: the boot check, the
   await start($, clock)
   await clock.advance(60_000)
   const offenders: string[] = []
-  const text = blockedText(true)
+  const text = BLOCKED_ON_LOGIN
   const said = [...w.notices, ...w.toasts].map(String)
   if (!said.some(t => t.includes(text))) offenders.push('checkSwitching (useSlot): the boot check says nothing of the hold')
   const pane = await mountPane($)

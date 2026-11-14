@@ -54,9 +54,9 @@ import {
   reportsNoFiveHour,
   isLoginOf,
   isNoBrowser,
-  isOnNormalLogin,
   isPolicyRefusal,
   keepFable,
+  isSpent,
   keychainItem,
   keychainUser,
   label,
@@ -70,6 +70,7 @@ import {
   WRITER_VERSION,
   whoseWeek,
   slotEnv,
+  stuckText,
   windowPct,
   USAGE_CLAIM_WAIT_MS,
   USAGE_IDLE_MS,
@@ -136,7 +137,7 @@ let isPaneShown = false
  * view, and rebindSession copies these back. Each is set where its value is born; undefined until then. The records
  * of a switch in flight and the Chrome link are copied by setView instead, from every write of a bound view.
  */
-let kept: { slot?: string; mark?: string; hasFontBlocks?: boolean; isSwitchBlocked?: boolean; isFableStopped?: boolean } & InFlight & ChromeLink = {}
+let kept: { slot?: string; mark?: string; hasFontBlocks?: boolean; isSwitchBlocked?: boolean; isFableStopped?: boolean; isStuckTold?: boolean } & InFlight & ChromeLink = {}
 /** When this session's boot read the store: an older version's reading written after it says that version still runs. */
 let bootedAt: number | undefined
 /** An older version writes its reading at every check, every 10 minutes at most: one this old has stopped. */
@@ -626,7 +627,7 @@ async function useAccount($: Host, target: Account): Promise<{ ok: boolean; mess
   if (hasMoved) return { ok: true, message: `this session now uses account ${name}`, activeId: target.id }
   // switchTo holds a switch for a token about to refresh, and otherwise declines only on a policy refusal.
   if ((await getView($)).held !== undefined) return { ok: true, message: `this session moves to account ${name} in a few minutes, once account ${view.activeId}'s token has refreshed`, activeId: view.activeId }
-  return { ok: false, message: blockedText(isOnNormalLogin(view)), activeId: view.activeId }
+  return { ok: false, message: blockedText(view), activeId: view.activeId }
 }
 
 /** Use now. A switch held for a token about to refresh says so on the pressed row while it waits (view.tsx). */
@@ -847,7 +848,7 @@ async function blocked($: Host): Promise<boolean> {
   const view = await getView($)
   if (view.isSwitchBlocked) return false
   await setView($, v => ({ ...v, isSwitchBlocked: true }))
-  const text = blockedText(isOnNormalLogin(view))
+  const text = blockedText(view)
   $.ui.toast(text, { timeoutMs: 15_000 })
   await $.ui.notify(text, { title: TITLE })
   return true
@@ -1181,10 +1182,13 @@ function whyLeave(view: View, now: number, need?: Need): string {
 /**
  * Once the active login is spent or locked out, moves to the one the pane's
  * Rotation setting picks; never while it is off, Claude Code's policy refuses
- * it, or Connect holds the session where it is. After a turn that died on the
- * Fable week (`need`), it leaves for that too, and only for a login with Fable
- * room: the ticks and responses pass none, so a session that never hit the
- * Fable week stays on a login whose Fable week is spent.
+ * it, or Connect holds the session where it is. Refused, it says once how to
+ * get a session that can move: a background session nobody watches gets the
+ * notification. Not from a turn that dies on the limit: Claude Code's security
+ * default, seated in such a session, passes its StopFailure hook over. After a
+ * turn that died on the Fable week (`need`), it leaves for that too, and only
+ * for a login with Fable room: the ticks and responses pass none, so a session
+ * that never hit the Fable week stays on a login whose Fable week is spent.
  */
 async function maybeRotate($: Host, need?: Need, carry?: CarryOn): Promise<boolean> {
   // A view at its defaults names login 1 in use, whichever login this session runs on.
@@ -1193,11 +1197,22 @@ async function maybeRotate($: Host, need?: Need, carry?: CarryOn): Promise<boole
   await saveLaunchPick($).catch(error => debug($, `launch pick failed: ${String(error)}`))
   const now = await $.clock.now()
   const view = await getView($)
+  if (view.isSwitchBlocked) {
+    // Said once a session: `kept` carries it through /clear, /resume and /branch, as it does isSwitchBlocked.
+    const stuck = view.isStuckTold ? undefined : stuckText(view, now)
+    if (stuck !== undefined) {
+      await setView($, v => ({ ...v, isStuckTold: true }))
+      kept = { ...kept, isStuckTold: true }
+      $.ui.toast(stuck, { timeoutMs: 15_000 })
+      await $.ui.notify(stuck, { title: TITLE })
+    }
+    return false
+  }
   // A tick or a response is no stop: it leaves a held Fable recovery where it is going, to a login with Fable room.
   if (need === undefined && carry === undefined && view.held?.carry !== undefined) return false
   // A settling switch holds every tick and response; a stop (it carries on) may move the session on from it.
   const isSettling = view.pending !== undefined && carry === undefined
-  if (isConnectingChrome || view.rotateTo === 'off' || view.isSwitchBlocked || isSettling || !shouldLeave(view, now, need)) return false
+  if (isConnectingChrome || view.rotateTo === 'off' || isSettling || !shouldLeave(view, now, need)) return false
   // With none to move to, the band above the prompt says when the next login frees up.
   const target = pickTarget({ ...view, accounts: view.accounts.filter(a => !untaken.has(a.id)) }, now, need)
   return target === undefined ? false : switchTo($, target, whyLeave(view, now, need), false, carry, true)
@@ -1274,7 +1289,7 @@ async function switchTo($: Host, target: Account, why: string, isQuiet = false, 
   } catch (error) {
     if (!isPolicyRefusal(error)) throw error
     // A press of Use now or Rotate now gets an answer, even once the notice has shown.
-    if (!(await blocked($))) tell($, blockedText(isOnNormalLogin(await getView($))))
+    if (!(await blocked($))) tell($, blockedText(await getView($)))
     return false
   }
   // A switch that replaces an unproven one ends it unproven. A stop's own move (it carries on) keeps what the stop
@@ -1647,15 +1662,27 @@ async function keepChrome($: Host): Promise<void> {
 
 /**
  * Whether the session connects Claude in Chrome as it opens: an account is
- * named for the extension, signed in. Whatever usage it has left: connecting
- * uses its sign-in, not its usage. Later, a session Claude Code stops from
- * switching couldn't go there.
+ * named for the extension, and the session is on it, or can visit it: signed
+ * in, with room, and a browser answered there last time. Later, a session
+ * Claude Code stops from switching couldn't go there. One the rotation would
+ * leave (its 5-hour window at 90%, or its week down to the Week setting) is
+ * left be: a prompt sent during the visit would go out as it, spending room the
+ * rotation keeps, or hitting its limit. One no
+ * browser answered as, while another did, is likely the extension's no more.
+ * Either connects at the first browser call that finds no browser instead.
  */
-function shouldConnectAtOpen(view: View): boolean {
+function shouldConnectAtOpen(view: View, now: number): boolean {
   const target = view.accounts.find(a => a.id === view.chromeAccountId)
   if (target === undefined || !canConnectChrome(view)) return false
+  if (target.id === view.activeId) return true
   const health = view.health[target.id]?.kind
-  return target.id === view.activeId || (health !== 'login-needed' && health !== 'logging-in')
+  const answered = view.chromeAccountIds ?? []
+  return (
+    health !== 'login-needed' &&
+    health !== 'logging-in' &&
+    !isSpent(view.readings[target.id], now, view.weekLeave) &&
+    (answered.length === 0 || answered.includes(target.id))
+  )
 }
 
 /**
@@ -1834,7 +1861,13 @@ async function signIn($: Host, account: Account): Promise<void> {
     running = undefined
     signingIn = undefined
   }
-  const code = await child.result.then(r => r.code, () => null)
+  // Keep `r?.code ?? null`, though ProcessSpawnResult says `r` is never undefined:
+  // after Cancel's return(), Claude Code fulfills the result with undefined, and
+  // the test kit cannot fake that, so no test fails if this goes back to `r.code`.
+  // That throws here, skips the save below, and leaves the login stuck at
+  // 'logging-in' behind a "Something went wrong" toast. `git log -S 'r?.code'`
+  // has the commit whose PR holds the repro.
+  const code = await child.result.then(r => r?.code ?? null, () => null)
   await saveHealth($, account.id, { kind: 'login-needed', why: 'sign-in not finished' })
   if (code !== 0) {
     tell($, `Sign-in for Claude account ${account.id} did not finish${errors.trim() ? `: ${errors.trim().slice(0, 160)}` : '.'}`)
@@ -2130,7 +2163,7 @@ async function bindSession($: Host, slot: string): Promise<void> {
  * reset left it unset, a write since being newer; the Connect line only while a Connect is under way.
  */
 async function rebindSession($: Host): Promise<void> {
-  const { slot, mark, hasFontBlocks, isSwitchBlocked, isFableStopped, pending, provisionalStop, held, hasChrome, chrome: link, chromeConnecting } = kept
+  const { slot, mark, hasFontBlocks, isSwitchBlocked, isFableStopped, isStuckTold, pending, provisionalStop, held, hasChrome, chrome: link, chromeConnecting } = kept
   await setView($, v => ({
     ...v,
     ...(pending === undefined ? {} : { pending }),
@@ -2139,6 +2172,7 @@ async function rebindSession($: Host): Promise<void> {
     ...(hasFontBlocks === undefined ? {} : { hasFontBlocks }),
     ...(isSwitchBlocked === undefined ? {} : { isSwitchBlocked }),
     ...(isFableStopped === undefined ? {} : { isFableStopped }),
+    ...(isStuckTold === undefined ? {} : { isStuckTold }),
     ...(mark === undefined ? {} : { sessionMark: mark }),
     ...(hasChrome === undefined || v.hasChrome !== undefined ? {} : { hasChrome }),
     ...(link === undefined || v.chrome !== undefined ? {} : { chrome: link }),
@@ -2161,10 +2195,11 @@ async function isBound($: Host): Promise<boolean> {
 
 /** First run makes the normal login number 1; then: which login this session uses, and Claude in Chrome connected as the extension's account. */
 async function boot($: Host, isInteractive: boolean): Promise<void> {
-  // A view still bound outlived a reload of this code, which emptied `kept`: its Fable stop mark goes back into `kept`,
-  // so a later /clear, /resume or /branch restores it.
+  // A view still bound outlived a reload of this code, which emptied `kept`: its Fable stop mark and its stuck notice
+  // said go back into `kept`, so a later /clear, /resume or /branch restores them.
   const survived = await getView($)
   if (survived.isBound === true && survived.isFableStopped !== undefined) kept = { ...kept, isFableStopped: survived.isFableStopped }
+  if (survived.isBound === true && survived.isStuckTold !== undefined) kept = { ...kept, isStuckTold: survived.isStuckTold }
   // Terminal.app is the terminal that names itself so and draws block characters from its font.
   const hasFontBlocks = (await $.env.get('TERM_PROGRAM')) === 'Apple_Terminal'
   kept = { ...kept, hasFontBlocks }
@@ -2175,7 +2210,7 @@ async function boot($: Host, isInteractive: boolean): Promise<void> {
   await bindSession($, slot)
   await checkSwitching($, slot)
   // First, while the session can still move: the rotation waits for it.
-  if (isInteractive && shouldConnectAtOpen(await getView($))) {
+  if (isInteractive && shouldConnectAtOpen(await getView($), await $.clock.now())) {
     void connectChrome($, true).catch(error => debug($, `Chrome connect failed: ${String(error)}`))
   }
   // A live sign-in names its login as it checks; one whose token has run out, from what `claude auth login` left in its folder.
