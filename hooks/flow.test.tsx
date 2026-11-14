@@ -9186,9 +9186,9 @@ test('a session started on a slot nobody listed takes the free id, wearing nothi
 
 /**
  * A Fable stop on login 1 (its Fable week spent) moves the session to login 2, whose own week reads Fable 10%. With
- * `isReadOld`, the stop comes 30 s on, so login 2's last read is over a minute old by the carry-on and a stop reads it again.
+ * `isReadOld`, the stop comes 30 s on, so login 2's last read is over a minute old by the carry-on.
  */
-async function fableMoved($: Engine, on: On, isReadOld = true): Promise<{ w: World; store: Map<string, unknown>; clock: MockClock }> {
+async function fableMoved($: Engine, on: On, isReadOld = false): Promise<{ w: World; store: Map<string, unknown>; clock: MockClock }> {
   const w = fresh()
   w.keychain['Claude Code-credentials'] = blob('tok-1')
   w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
@@ -9223,8 +9223,8 @@ test('a Fable stop in the 35 seconds after a switch marks nothing on the account
 
 // Measured on vox (2026-11-12 11:48Z): the turn the mod's own carry-on started, sent as the settle ended, still went
 // out on the login left and died on its Fable week; it marked the login moved to, whose usage read 35% that week.
-test('a Fable stop answering the mod\'s own carry-on just past the settle, before any response, marks nothing on the account moved to, whose read shows Fable room, and carries on once more', async ($, on) => {
-  const { w, store, clock } = await fableMoved($, on)
+for (const isReadOld of [false, true]) test(`a Fable stop answering the mod's own carry-on just past the settle, before any response, marks nothing on the account moved to, whose read ${isReadOld ? 'over' : 'under'} a minute old shows Fable room, and carries on once more`, async ($, on) => {
+  const { w, store, clock } = await fableMoved($, on, isReadOld)
   await clock.advance(35_500)
   expect(w.submitted).toHaveLength(1)
   await $.classic.StopFailure(FABLE_STOP)
@@ -9381,23 +9381,25 @@ test('a window that can\'t switch, stuck on its Fable week with Fable room on an
   expect(w.toasts.filter(stuck)).toHaveLength(1)
 })
 
-// Review codex-r1 [STALE-FABLE-PROOF], the instance: a check its gate skipped stored no fresh body, which proves nothing.
+// Review codex-r1 [STALE-FABLE-PROOF], the instance: a 35-second-old reading proves nothing, so the stop reads the
+// target again, and a body that shows its Fable week spent lets the stop stand.
 test('Review codex-r1: a real Fable stop on the target is not cleared by its 35-second-old reading', async ($, on) => {
-  const { w, store, clock } = await fableMoved($, on, false)
+  const { w, clock } = await fableMoved($, on, false)
   await clock.advance(35_500)
   expect(w.submitted).toHaveLength(1)
   w.usage['tok-2'] = [10, 30, 100]
   const calls = callsWith(w, 'tok-2')
   await $.classic.StopFailure(FABLE_STOP)
   await clock.settle()
-  expect(callsWith(w, 'tok-2')).toBe(calls)
-  expect(markOf(store.get('fable-mark:2'))).toEqual([100, FABLE_RESET])
+  expect(callsWith(w, 'tok-2')).toBe(calls + 1)
+  expect(await fableRows($)).toEqual([`${longBar(100)} 100%`, `${longBar(100)} 100%`])
   await clock.advance(36_000)
   expect(w.submitted).toHaveLength(1)
 })
 
-// Review codex-r1 [STALE-FABLE-PROOF], the class: every gate that skips the stop's read.
-for (const gate of ['recent', 'backoff', 'other-claim', 'expired-token'] as const) {
+// Review codex-r1 [STALE-FABLE-PROOF], the class: every gate that skips the stop's read. A reading that is only
+// recent is the instance above, which reads again.
+for (const gate of ['backoff', 'other-claim', 'expired-token'] as const) {
   test(`Review codex-r1 class: a skipped ${gate} check cannot clear a real target Fable stop`, async ($, on) => {
     const { w, store, clock } = await fableMoved($, on, false)
     const prior = store.get('usage-due:2') as { next: number; fails: number; at?: number; v?: number; claim?: string }
