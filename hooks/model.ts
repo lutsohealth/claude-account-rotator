@@ -1105,11 +1105,14 @@ function statePart(view: View, a: Account, timeZone: string | undefined): RowPar
   if (health?.kind === 'login-needed') return [{ text: '⚠ sign in needed', tone: 'warning' }]
   const readAt = view.readAt?.[a.id]
   const hasReading = readAt !== undefined && view.readings[a.id] !== undefined
-  // The login this session runs on is not idle: the session refreshes its token at its next request.
-  if (health?.kind === 'ok' && health.isIdle === true && a.id !== view.activeId) {
+  // The login this session runs on, once the session is bound, is not idle: the session refreshes its token at its
+  // next request, and a failure from before the token ran out is not what that read will meet.
+  const isIdle = health?.kind === 'ok' && health.isIdle === true
+  const isInUse = view.isBound === true && a.id === view.activeId
+  if (isIdle && !isInUse) {
     return hasReading ? [{ text: `updated ${clockText(readAt, timeZone)} · idle`, runs: ['updated ', { clock: readAt }, ' · idle'] }] : [{ text: 'idle' }]
   }
-  const failure = view.checkErrors?.[a.id]
+  const failure = isIdle ? undefined : view.checkErrors?.[a.id]
   // A good read clears the failure, so one standing at the good read's own millisecond came after it.
   if (failure !== undefined && (readAt === undefined || failure.at >= readAt)) return failedParts(failure, view.nextAt?.[a.id], timeZone)
   // A time over no reading would name a read the row cannot show.
