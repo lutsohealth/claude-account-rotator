@@ -1169,9 +1169,9 @@ for (const rotateTo of ['reset', 'room', 'order']) {
   })
 }
 
-// C6 (puma-eslxj.7), a changed expected value. SOURCE: the C6 CASE, RULING 4467: a Fable stop means the week was full,
-// and no body of the same week can read it lower but by lagging the stop, so the mark stands until its reset.
-test('a check whose usage lists the same Fable week lower leaves the mark a stop left, so the session does not move back before the week resets', async ($, on) => {
+// C6 (puma-eslxj.7), RULING 4467, a changed expected value: a body of the same week reading the Fable week lower lags
+// the stop. puma-9arph.23, a DEFAULT of the plan, the MASTER's call: only for 30 minutes; a body read later ends the mark.
+test('a check whose usage lists the same Fable week lower, 30 minutes or more after the stop, ends the mark the stop left, so the session can move back', async ($, on) => {
   const w = fresh()
   const clock = await markedThenReread($, on, w, {})
   w.usage['tok-1'] = [20, 30, 40]
@@ -1179,8 +1179,8 @@ test('a check whose usage lists the same Fable week lower leaves the mark a stop
   await $.classic.StopFailure(FABLE_STOP)
   await clock.settle()
   await clock.advance(36_000)
-  expect(slots(w)).toEqual([SLOT2])
-  expect(w.submitted).toHaveLength(1)
+  expect(slots(w)).toEqual([SLOT2, ''])
+  expect(w.submitted).toHaveLength(2)
 })
 
 test('the mark a stop left ends at the reset time of the week it marks: a check after it lists no Fable week, and the session can move back', async ($, on) => {
@@ -4190,8 +4190,6 @@ type StayCase = {
   store?: Record<string, unknown>
   /** The policy refuses switching. */
   isBlocked?: boolean
-  /** The session visits the Claude in Chrome account while the stops come. */
-  isVisiting?: boolean
 }
 
 const STAY_CASES: StayCase[] = [
@@ -4199,14 +4197,12 @@ const STAY_CASES: StayCase[] = [
   { name: 'the other login has its week full', notice: /^Fable limit reached on account 1, and no other Claude account can take over/, usage: { 'tok-1': [20, 30, 100], 'tok-2': [10, 100, 10] } },
   { name: 'the rotation is off', notice: /^Fable limit reached on account 1, and usage based rotation is disabled/, usage: { 'tok-1': [20, 30, 100], 'tok-2': [10, 30, 10] }, store: { 'rotate-to': 'off' } },
   { name: 'Claude Code\'s policy refuses switching', notice: /^Fable limit reached on account 1, and Claude Code's policy stops this session from switching accounts/, usage: { 'tok-1': [20, 30, 100], 'tok-2': [10, 30, 10] }, isBlocked: true },
-  { name: 'Connect holds the session on the Claude in Chrome account', notice: /^Fable limit reached on account 2 while Claude in Chrome connects/, usage: { 'tok-1': [20, 30], 'tok-2': [100, 30] }, store: { 'chrome-account': '2' }, isVisiting: true },
 ]
 
-for (const { name, notice, usage, store = {}, isBlocked = false, isVisiting = false } of STAY_CASES) {
+for (const { name, notice, usage, store = {}, isBlocked = false } of STAY_CASES) {
   test(`when ${name}, a Fable stop that cannot move tells the terminal why and the way out, once however many stops follow`, async ($, on) => {
     const w = fresh()
     w.refuseEnv = isBlocked
-    if (isVisiting) w.chrome = { extensions: [SLOT2] }
     w.keychain['Claude Code-credentials'] = blob('tok-1')
     w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
     Object.assign(w.usage, usage)
@@ -4215,14 +4211,13 @@ for (const { name, notice, usage, store = {}, isBlocked = false, isVisiting = fa
     for (let i = 0; i < 3; i++) {
       await $.classic.StopFailure(FABLE_STOP)
       await clock.settle()
-      // A visit lasts until the clock moves on; the other stays are over at the next stop.
-      if (!isVisiting) await clock.advance(36_000)
+      await clock.advance(36_000)
       expect(w.notices.filter(t => /Fable/.test(t))).toHaveLength(1)
     }
     const told = w.notices.filter(t => /Fable/.test(t))[0] ?? ''
     expect(told).toMatch(notice)
     expect(told.endsWith(WAY_OUT)).toBe(true)
-    if (!isVisiting) expect(w.envSets).toEqual([])
+    expect(w.envSets).toEqual([])
   })
 }
 
@@ -4810,7 +4805,7 @@ test('a usage call that throws backs off as a failed one, for every session', as
   expect(callsWith(w, 'tok-1')).toBe(1)
 })
 
-test('a claimed read of a login whose token has run out releases its claim, and its row says it failed to update', async ($, on) => {
+test('a claimed read of a login whose token has run out releases its claim, and its row says it is idle', async ($, on) => {
   const w = fresh()
   w.keychain['Claude Code-credentials'] = blob('tok-1')
   // Login 2 is idle: its access token ran out an hour ago and no session has refreshed it.
@@ -4832,7 +4827,7 @@ test('a claimed read of a login whose token has run out releases its claim, and 
   expect(store.get('usage-due:2')).not.toHaveProperty('claim')
   expect(store.get('usage-due:2')).toMatchObject({ fails: 0, at: lastRead })
   expect((store.get('usage-due:2') as { next: number }).next).toBeGreaterThanOrEqual(NOW + USAGE_IDLE_MS)
-  expect(lineOne(store, '2')).toMatch(/ Failed to update \(token run out\), until a session refreshes its token$/)
+  expect(lineOne(store, '2')).toMatch(/  updated \d\d:\d\d · idle$/)
 })
 
 test('a login whose token has run out and that has no reading saves no failure for its skipped read, so it stays in the pick', async ($, on) => {
@@ -4868,7 +4863,7 @@ test('a skipped read gives back only the claim its check made: a read this sessi
   // Between the skip and the release, a stop or a /login in this session renews login 2's claim for a read of its own.
   const renewed = { next: NOW + 10 * 60_000, fails: 0, claim: 'session-1', at: lastRead, v: 1 }
   w.afterStoreSet = key => {
-    if (key === 'check-error:2' && w.afterStoreSet !== undefined) {
+    if (key === 'health:2' && w.afterStoreSet !== undefined) {
       w.afterStoreSet = undefined
       store.set('usage-due:2', renewed)
     }
@@ -7253,7 +7248,7 @@ for (const [name, fail] of FAILED_USAGE_CALLS) {
   })
 }
 
-test('a login with a failed read and no reading, whose token has since run out, says it waits for a session, not a next try nothing will take', async ($, on) => {
+test('a login with a failed read and no reading, whose token has since run out, says it is idle, not a next try nothing will take', async ($, on) => {
   const w = fresh()
   w.keychain['Claude Code-credentials'] = blob('tok-1')
   w.keychain[await keychainItem(SLOT2)] = blob('tok-2', NOW - HOUR)
@@ -7269,7 +7264,7 @@ test('a login with a failed read and no reading, whose token has since run out, 
   await start($, clock)
   await clock.advance(61_000)
   expect(callsWith(w, 'tok-2')).toBe(0)
-  expect(lineOne(store, '2')).toMatch(/ Failed to update \(token run out\), until a session refreshes its token$/)
+  expect(lineOne(store, '2')).toMatch(/  idle$/)
 })
 
 // C9 (puma-eslxj.10, problem g part 2): the pane draws each account's row fitted to its body's width, the buttons at
@@ -9262,6 +9257,10 @@ test('a Fable stop while Chrome connects marks nothing on the visited account, t
   expect(slots(w)).toEqual([SLOT2, ''])
   expect(store.get('fable-mark:2')).toBeUndefined()
   expect(await fableRows($)).toEqual([`${longBar(100)} 100%`, `${longBar(10)} 10%`])
+  // Nor is the stop told as login 2's limit: it was the turn's on login 1, which carries on once the visit ends.
+  expect(w.notices.map(String).filter(t => /Fable/.test(t))).toEqual([])
+  await clock.advance(36_000)
+  expect(w.submitted).toHaveLength(1)
 })
 
 // A DEFAULT of the plan, the MASTER's call (puma-9arph.23): a body read more than 30 minutes after a mark's `at`,

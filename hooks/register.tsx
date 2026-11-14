@@ -37,6 +37,7 @@ import {
   continueTextFrom,
   credentialFrom,
   credentialsFile,
+  endsFableMark,
   fableMark,
   fableStay,
   fingerprint,
@@ -71,6 +72,8 @@ import {
   whoseWeek,
   slotEnv,
   stuckText,
+  TOKEN_LIVE_MARGIN_MS,
+  isBackedOff,
   windowPct,
   USAGE_CLAIM_WAIT_MS,
   USAGE_IDLE_MS,
@@ -196,8 +199,12 @@ let signingIn: string | undefined
 let signInQueue: Promise<void> = Promise.resolve()
 /** The carry-on a switch owes: what the turn that stopped died on, which picks the line sent. */
 type CarryOn = { need?: Need }
-/** When the switch began whose landing a turn that died before it already carries on after. */
+/** When the switch began whose landing a carry-on already follows: the switch's own, or one for a turn that died before it landed. */
 let carriedFor: number | undefined
+/** The last carry-on sent: when the switch it follows began, and when it went. The turn it starts may answer as the login left. */
+let carriedOn: { since: number | undefined; at: number } | undefined
+/** When the switch began whose one Fable stop on its carry-on the login moved to's usage read cleared. */
+let clearedFor: number | undefined
 /** How many switches this session has made: a carry-on goes out only if no switch came after the one it follows. */
 let moves = 0
 /** Logins a switch to did not take this session: the rotation leaves them be; Use now still tries. */
@@ -317,6 +324,15 @@ async function saveFableMark($: Host, id: string, mark: Mark): Promise<void> {
   await setView($, v => {
     const fableMarks = { ...v.fableMarks, [id]: fableMark }
     return { ...v, fableMarks, readings: { ...v.readings, [id]: viewed(read, { ...besideOf(v, id), fableMark }, v.fiveHourLimit, now) } }
+  })
+}
+
+/** Ends a login's Fable mark for every session; the next save of its reading draws it without the mark. */
+async function dropFableMark($: Host, id: string): Promise<void> {
+  await $.store.delete(`fable-mark:${id}`)
+  await setView($, v => {
+    const { [id]: _ended, ...fableMarks } = v.fableMarks ?? {}
+    return { ...v, fableMarks }
   })
 }
 
@@ -909,12 +925,15 @@ async function holderOf($: Host, account: Account, credential: Credential, isLiv
   }
   const holder = { token, who: { ...who, email: who.email, ...(credential.plan === undefined ? {} : { plan: credential.plan }) } }
   await saveHolder($, account.id, holder)
-  // The schedule, its back-off and its minute gate were the old token's: the new one is read at once. What another
-  // account's usage said is its own, not this one's (its plan above all): it goes with it. The same account under a
-  // new token (a refresh, or the same person signing in again) keeps its reading.
+  // What another account's usage said is its own, not this one's (its plan above all): it goes with it. The same
+  // account under a new token (a refresh, or the same person signing in again) keeps its reading, and is read at once
+  // unless a back-off stands, which keeps its time: a refresh each time would otherwise end it, read after read.
   const isOtherAccount = known !== undefined && (known.who.email !== who.email || known.who.orgId !== who.orgId)
   if (isOtherAccount) await dropSignInUsage($, account.id)
-  else if (known !== undefined) await $.store.delete(`usage-due:${account.id}`)
+  else if (known !== undefined) {
+    const key = `usage-due:${account.id}`
+    if (!isBackedOff(usageDueFrom(await $.store.get(key)), await $.clock.now())) await $.store.delete(key)
+  }
   return holder
 }
 
@@ -1075,7 +1094,7 @@ async function checkAccount($: Host, account: Account, gate: UsageGate): Promise
   const credential = stored.state === 'present' ? stored.credential : undefined
   let health = healthOf(credential, now)
   if (health.kind === 'ok' && credential !== undefined) {
-    const isLive = credential.expiresAt > now + 60_000
+    const isLive = credential.expiresAt > now + TOKEN_LIVE_MARGIN_MS
     const holder = await holderOf($, account, credential, isLive)
     // The tier is the sign-in's own, read at every check: a holder named before it was kept lacks it.
     const who = holder === undefined ? undefined : { ...holder.who, ...(credential.tier === undefined ? {} : { tier: credential.tier }) }
@@ -1093,14 +1112,17 @@ async function checkAccount($: Host, account: Account, gate: UsageGate): Promise
           const { noFiveHour, ...reading } = read
           // A body whose 5-hour window it cannot read leaves what the last one said.
           if (reading.fiveHour !== undefined || noFiveHour === true) await saveNoFiveHour($, account.id, noFiveHour === true)
+          // A Fable mark that this body's own week, read long enough after the stop, contradicts ends before the reading is drawn.
+          const fableMarked = markFrom(await $.store.get(`fable-mark:${account.id}`))
+          if (fableMarked !== undefined && endsFableMark(reading.fable, now, fableMarked)) await dropFableMark($, account.id)
           // A body with no Fable row keeps the stored one's: the stored read, never the view, which carries the marks.
           await saveReading($, account.id, { ...keepFable(reading, await ownedReading($, account.id), now), by: account.id }, 'body')
         }
       }
-    } else if (!isLive && gate === 'claimed' && ((await storedReading($, account.id)) !== undefined || (await $.store.get(`check-error:${account.id}`)) !== undefined)) {
-      // The reading stands unrefreshed, so the row says so; with a reading the login stays in the pick, as before. A
-      // failure already standing is replaced: its next try would move 30 minutes on each pass with nothing tried.
-      await saveCheckError($, account.id, 'its token has run out and no session has refreshed it, so its usage is not read until one does')
+    } else if (!isLive && gate === 'claimed') {
+      // Nothing reads it until a session refreshes its token, and its row says so (idle, from its health); a failure
+      // standing from before no longer holds its usage back, and the reading keeps the login in the pick, as before.
+      await saveCheckError($, account.id, undefined)
     }
   }
   const before = await saveHealth($, account.id, health)
@@ -1306,7 +1328,10 @@ async function switchTo($: Host, target: Account, why: string, isQuiet = false, 
     removing: undefined,
   }))
   if (!isQuiet) $.ui.toast(`Switched to Claude account ${label(target)}: ${why}.`, { timeoutMs: 6000 })
-  if (owed !== undefined) carryOnAfterSettle($, owed)
+  if (owed !== undefined) {
+    carryOnAfterSettle($, owed)
+    carriedFor = now
+  }
   return true
 }
 
@@ -1415,7 +1440,9 @@ async function onMeasure($: Host, limits: readonly SessionRateLimit[]): Promise<
  * and a Fable one with no line kept, sends the mod's own line under its name.
  */
 async function carryOn($: Host, need?: Need): Promise<void> {
-  const kept = need === 'fable' ? (await getView($)).fableContinueText : undefined
+  const view = await getView($)
+  const kept = need === 'fable' ? view.fableContinueText : undefined
+  carriedOn = { since: view.pending?.since, at: await $.clock.now() }
   await $.prompt.submit(kept === undefined ? { text: CONTINUE } : { text: kept, asUser: true })
 }
 
@@ -1437,12 +1464,13 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
     if (before?.kind !== 'login-needed') await announceLockout($, active, 'sign-in rejected')
   } else {
     // Claude Code reads the new login only once the switch lands: a turn that dies before then went out on the
-    // login being left, which the switch already leaves. Nothing is marked on the login moved to; the turn carries on there.
-    // A Connect visit and a Fable stop keep their own handling below.
+    // login being left, which the switch already leaves. Nothing is marked on the login moved to; the turn carries on
+    // there, once a switch however many turns die before it lands; during a Connect visit, once the visit ends.
+    const isFable = isFableStop(stop.last_assistant_message)
     const isSettling = view.pending !== undefined && (await $.clock.now()) - view.pending.since < SETTLE_MS
-    if (isSettling && !isConnectingChrome && !isFableStop(stop.last_assistant_message)) {
-      // One carry-on per switch, however many turns die before it lands.
-      if (carriedFor !== view.pending?.since) carryOnAfterSettle($, {})
+    if (isSettling) {
+      if (isConnectingChrome) isCutByVisit = true
+      else if (carriedFor !== view.pending?.since) carryOnAfterSettle($, isFable ? { need: 'fable' } : {})
       carriedFor = view.pending?.since
       return
     }
@@ -1453,6 +1481,21 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
     const hasResponseSince = since !== undefined && lastMeasured !== undefined && lastMeasured.at > since
     const owner = since === undefined || !hasResponseSince ? active : provenStopper(view, lastMeasured?.reading)
     const isProvisional = since !== undefined && !hasResponseSince
+    // The landing can lag the settle: the turn the carry-on starts as the settle ends can still go out on the login
+    // left (measured on vox), and a turn over the Fable limit dies at once. So a Fable stop within SETTLE_MS of the
+    // carry-on, before any response proves the switch, that the login moved to's own usage read contradicts (it lists
+    // the Fable week, with room) is not that login's: once a switch it marks nothing and carries on again.
+    const isOnCarryOn = carriedOn !== undefined && carriedOn.since === since && (await $.clock.now()) - carriedOn.at < SETTLE_MS
+    if (isProvisional && isFable && isOnCarryOn && clearedFor !== since) {
+      await checkAccount($, active, 'force')
+      const read = (await getView($)).readings[active.id]
+      if (read?.fable !== undefined && !isFableSpent(read, await $.clock.now())) {
+        clearedFor = since
+        if (isConnectingChrome) isCutByVisit = true
+        else carryOnAfterSettle($, { need: 'fable' })
+        return
+      }
+    }
     let before: Record<string, unknown> = {}
     let wasFableStopped = false
     let readAt = 0
