@@ -1,6 +1,6 @@
 ---
 name: release
-description: Publish a new version of the account-rotator plugin - pick the version, write its CHANGELOG entry, bump plugin.json, push, tag it with `claude plugin tag`, create the GitHub release, and check that an older install updates to it. Use when asked to release, publish, ship or cut a version.
+description: Publish a new version of the account-rotator plugin - pick the version, write its CHANGELOG entry, bump plugin.json, open and merge a release pull request, tag it with `claude plugin tag`, create the GitHub release, and check that an older install updates to it. Use when asked to release, publish, ship or cut a version.
 ---
 
 # Release a version
@@ -9,13 +9,13 @@ Claude Code updates an installed plugin only when the `version` in `.claude-plug
 
 ## 1. Check the tree
 
-- On `main`, not behind `origin`: `git fetch origin && git status -sb`. Commits ahead of it go out with the release.
+- On a branch cut from `origin/main`: `git fetch origin && git switch -c <branch> origin/main`. Everything merged to `main` goes out with the release.
 - Nothing uncommitted. Work another session left uncommitted gets a commit of its own first, with a message that says what it does, never folded into the release commit. If that session is still busy (`ListAgents`), ask the user before committing its work.
-- `claude plugin test .`, `python3 -m unittest discover -s tests` and `claude plugin validate .` pass.
+- The three checks of the README's **Develop** section pass.
 
 ## 2. Pick the version
 
-The last release is `git describe --tags --abbrev=0 --match 'account-rotator--v*'`. Read `git log <last tag>..HEAD` and pick by semver. While below 1.0:
+The last release is `git describe --tags --abbrev=0 --match 'account-rotator--v*'`. Read `git log <last tag>..HEAD` and pick by semver, and keep the suffix every tag of this fork carries: `0.5.30-lutso.1` goes to `0.5.31-lutso.1`. While below 1.0:
 
 - **minor** (0.2.0 to 0.3.0): new behavior, or anything a user does differently.
 - **patch** (0.2.0 to 0.2.1): fixes and wording only.
@@ -27,7 +27,7 @@ Going to 1.0.0 is the user's call: ask.
 Add a section at the top of `CHANGELOG.md`, below its intro, headed with the version and the date:
 
 ```
-## 0.3.0 - 2026-11-02
+## 0.5.31-lutso.1 - 2026-11-14
 ```
 
 - Bullets with a bold lead-in, in the README's voice: what a user sees or does, not how the code does it. Most important first.
@@ -37,18 +37,27 @@ Add a section at the top of `CHANGELOG.md`, below its intro, headed with the ver
 ## 4. Bump and commit
 
 - Set `"version"` in `.claude-plugin/plugin.json`. The entry in `.claude-plugin/marketplace.json` carries no version: keep it that way, or keep the two equal, since `claude plugin tag` refuses when they differ.
-- One commit, `Release 0.3.0`, holding the bump and the changelog entry.
+- One commit on the branch, `Release 0.5.31-lutso.1`, holding the bump and the changelog entry.
 
 Show the user the version and the entry before publishing, unless they already said to go ahead.
 
 ## 5. Publish
 
-Write the entry's bullets to a file in the session's scratchpad, then:
+Write the entry's bullets to a file in the session's scratchpad. Open the release pull request and merge it when its checks are green:
 
 ```sh
-git push origin main
+git push origin <branch>
+gh pr create --title "Release 0.5.31-lutso.1" --body-file <a body file>
+gh pr checks <number> --watch
+gh pr merge <number> --squash
+```
+
+Tag only after the merge: the squash makes a new commit on `main`, and the tag goes on that one.
+
+```sh
+git switch main && git pull --ff-only
 claude plugin tag . --push -m "account-rotator %s"
-gh release create account-rotator--v0.3.0 --verify-tag --title "0.3.0" --notes-file <the bullets file>
+gh release create account-rotator--v0.5.31-lutso.1 --verify-tag --title "0.5.31-lutso.1" --notes-file <the bullets file>
 ```
 
 `claude plugin tag` refuses while anything is uncommitted, checks the versions agree, and makes `account-rotator--v<version>`: the tag form Claude Code reads when someone pins a version range. Never move or reuse a tag; a mistake gets a new patch version.
@@ -59,7 +68,7 @@ In a folder in the session's scratchpad, install the previous release from GitHu
 
 ```sh
 T=<scratchpad>/release-check; rm -rf "$T"; mkdir -p "$T"
-CLAUDE_CONFIG_DIR="$T" claude plugin marketplace add ivokund/claude-account-rotator
+CLAUDE_CONFIG_DIR="$T" claude plugin marketplace add lutsohealth/claude-account-rotator
 M="$T/plugins/marketplaces/claude-account-rotator"
 git -C "$M" fetch -q --unshallow --tags; git -C "$M" reset -q --hard <previous tag>
 CLAUDE_CONFIG_DIR="$T" claude plugin install account-rotator@claude-account-rotator
