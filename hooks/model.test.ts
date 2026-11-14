@@ -1232,6 +1232,17 @@ test('an idle login, its token run out, says when it was last read and idle, nev
   expect(rowLines(rowView({ ...idle, readings: {} }))[0]).toBe('andres@lutsohealth.com · Company · Ultra  idle')
 })
 
+// Review of 84bc902, LOW (b): the session's own login, its token run out, drew a failure from before the run-out.
+test('the login this session runs on, its token run out, says when it was last read, neither idle nor Failed to update', () => {
+  const v = rowView({ isBound: true, health: { '1': { kind: 'ok', isIdle: true } }, checkErrors: { '1': HTTP_429 }, nextAt: { '1': NEXT_AT } })
+  expect(rowLines(v)[0]).toBe('andres@lutsohealth.com · Company · Ultra  updated 18:34')
+})
+
+// Review of 84bc902, LOW (c): before the session is bound, the view's activeId is a default, which spares no login its idle row.
+test('before the session is bound, login 1, its token run out, reads idle', () => {
+  expect(rowLines(rowView({ health: { '1': { kind: 'ok', isIdle: true } } }))[0]).toBe('andres@lutsohealth.com · Company · Ultra  updated 18:34 · idle')
+})
+
 test('a failed row names the next try, the time its schedule gives, in the zone\'s clock', () => {
   const v = rowView({ checkErrors: { '1': HTTP_429 }, nextAt: { '1': NEXT_AT } })
   expect(rowLines(v)[0]).toBe(FAILED_NEXT_L1)

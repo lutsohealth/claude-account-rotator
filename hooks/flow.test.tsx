@@ -9462,6 +9462,23 @@ for (const [cause, extra, otherFable] of [
   })
 }
 
+// Review of 84bc902, LOW (a): with no stored reading of its own, the stop judged the view's, which carries the mark.
+test('a Fable stop on a marked login with no reading of its own renews the mark in its week', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1', NOW - HOUR)
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-2'] = [10, 30, 10]
+  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off', 'fable-mark:1': { pct: 100, resetsAt: FABLE_RESET, at: NOW - 25 * 60_000 } }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  expect(store.get('usage:1'), 'the premise: login 1 has no reading').toBeUndefined()
+  await clock.advance(2 * 60_000)
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  const mark = store.get('fable-mark:1') as { at: number }
+  expect([markOf(mark), mark.at >= NOW + 2 * 60_000]).toEqual([[100, FABLE_RESET], true])
+})
+
 // Review opus-r1 R1F2 [IDLE-IN-USE], the instance: idle is for a login with no session on it, never this session's own.
 test('Review R1F2: the login this session runs on, its token just run out, never reads idle', async ($, on) => {
   const w = fresh()
