@@ -85,8 +85,9 @@ class ValueAlreadySet(LauncherCase):
     def test_a_slot_already_set_wins_over_the_pick(self) -> None:
         self.assertEqual(self.launch(**{SLOT_VAR: "/hand"})["slot"], "/hand")
 
-    def test_an_empty_value_starts_on_the_login_and_is_unset(self) -> None:
-        self.assertEqual(self.launch(**{SLOT_VAR: ""})["slot"], UNSET)
+    def test_an_empty_value_reaches_claude_empty_and_asks_no_pick(self) -> None:
+        """Claude Code 2.1.325 reads an empty value as its own login, whatever CLAUDE_CONFIG_DIR says."""
+        self.assertEqual(self.launch(**{SLOT_VAR: ""})["slot"], "")
 
 
 class StalePick(LauncherCase):
@@ -95,6 +96,13 @@ class StalePick(LauncherCase):
         seen = self.launch()
         self.assertEqual(seen["slot"], UNSET)
         self.assertIn("starting on Claude Code's own login", seen["stderr"])
+
+    def test_rows_stamped_in_the_future_drop_the_pick(self) -> None:
+        """Review R1 F3: rows written in the last 60 minutes, never later than now."""
+        for minutes in (-1, -24 * 60):
+            with self.subTest(minutes=minutes):
+                self.write_store(pick=str(self.slot), rows_age_minutes=minutes)
+                self.assertEqual(self.launch()["slot"], UNSET)
 
     def test_rows_59_minutes_old_keep_the_pick(self) -> None:
         self.write_store(pick=str(self.slot), rows_age_minutes=59)
@@ -146,6 +154,35 @@ class InstalledCopy(LauncherCase):
         self.copy.symlink_to(LAUNCHER)
         seen = self.launch(launcher=self.copy, path=f"{self.own}:{self.stub_bin}:/usr/bin:/bin")
         self.assertEqual(seen["slot"], str(self.slot))
+
+    def test_hard_links_to_the_launcher_on_path_run_the_next_claude_not_each_other(self) -> None:
+        """Review R1 F1: the launcher knows itself by file identity, not by its path's spelling."""
+        second = self.home / "second"
+        second.mkdir()
+        os.link(self.copy, second / "claude")
+        seen = self.launch(launcher=self.copy, path=f"{self.own}:{second}:{self.stub_bin}:/usr/bin:/bin")
+        self.assertEqual(seen["slot"], str(self.slot))
+
+    def test_a_hard_link_to_the_launcher_at_the_fallback_path_is_not_run(self) -> None:
+        """Review R1 F1: with no other claude, the launcher says so and exits 127."""
+        fallback = self.home / ".local" / "bin"
+        fallback.mkdir(parents=True)
+        os.link(self.copy, fallback / "claude")
+        env = {k: v for k, v in os.environ.items() if k != SLOT_VAR}
+        done = run(self.copy, env={**env, "HOME": str(self.home), "PATH": f"{self.own}:/usr/bin:/bin"})
+        self.assertEqual(done.returncode, 127, done.stderr)
+        self.assertIn("found no claude", done.stderr)
+
+    def test_a_claude_that_cannot_run_is_passed_over_for_the_next(self) -> None:
+        """Review R1 F2: one broken claude on PATH never stops a working one later."""
+        for name, text in (("bad-interpreter", "#!/no/such/interpreter\n"), ("bad-format", "not a program\n")):
+            with self.subTest(name):
+                bad = self.home / name
+                bad.mkdir()
+                (bad / "claude").write_text(text, encoding="utf-8")
+                (bad / "claude").chmod(0o755)
+                seen = self.launch(launcher=self.copy, path=f"{self.own}:{bad}:{self.stub_bin}:/usr/bin:/bin")
+                self.assertEqual(seen["slot"], str(self.slot))
 
 
 if __name__ == "__main__":
