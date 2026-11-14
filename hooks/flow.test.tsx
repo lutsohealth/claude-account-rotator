@@ -9221,6 +9221,18 @@ test('a Fable stop in the 35 seconds after a switch marks nothing on the account
   expect(await fableRows($)).toEqual([`${longBar(100)} 100%`, `${longBar(10)} 10%`])
 })
 
+// Upstream b90ff1b: a turn that dies in the 35 seconds after a switch may have gone out on the login left, a rejected sign-in too.
+test('a rejected sign-in in the 35 seconds after a switch marks nothing on the account moved to, and the switch carries on once', async ($, on) => {
+  const { w, store, clock } = await fableMoved($, on)
+  await clock.advance(5_000)
+  await $.classic.StopFailure({ error: 'authentication_failed' })
+  await clock.settle()
+  expect((store.get('health:2') as { kind?: string } | undefined)?.kind).not.toBe('login-needed')
+  expect(slots(w)).toEqual([SLOT2])
+  await clock.advance(36_000)
+  expect(w.submitted).toHaveLength(1)
+})
+
 // Measured on vox (2026-11-12 11:48Z): the turn the mod's own carry-on started, sent as the settle ended, still went
 // out on the login left and died on its Fable week; it marked the login moved to, whose usage read 35% that week.
 for (const isReadOld of [false, true]) test(`a Fable stop answering the mod's own carry-on just past the settle, before any response, marks nothing on the account moved to, whose read ${isReadOld ? 'over' : 'under'} a minute old shows Fable room, and carries on once more`, async ($, on) => {
