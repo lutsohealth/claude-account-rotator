@@ -20,7 +20,7 @@ import sys
 # The store module stands beside this file. Run as a script, Python puts the file's own folder first on sys.path,
 # links resolved; this line is for a loader that does not.
 sys.path.insert(0, os.path.dirname(__file__))
-from account_rotator_store import STORE_GLOB, StoreError, read, same_pick_since  # noqa: E402
+from account_rotator_store import STORE_GLOB, StoreError, launch_pick, read, same_pick_since  # noqa: E402
 
 
 def main() -> int:
@@ -36,8 +36,8 @@ def main() -> int:
     except StoreError as error:
         print(f"account-rotator-launch: {error}", file=sys.stderr)
         return 1
-    pick = data.get("launch-slot")
-    if not isinstance(pick, dict) or not isinstance(pick.get("slot"), str) or not isinstance(pick.get("id"), str):
+    pick = launch_pick(data)
+    if pick is None:
         print("account-rotator-launch: no pick stored (no account has room on every limit, or no session of this version has run); a new session starts on Claude Code's login", file=sys.stderr)
         return 1
     since = same_pick_since(pick.get("at"))

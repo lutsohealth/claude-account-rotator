@@ -6,10 +6,12 @@ sets CLAUDE_SECURESTORAGE_CONFIG_DIR to the slot `account-rotator-launch` would 
 PATH with every word as given. It takes no option of its own, so `--help` is claude's.
 
 - A command that starts no session (`claude mcp list`, `claude --version`) runs untouched.
-- A value already set wins. An empty value means Claude Code's own login on purpose, and is unset.
-- The pick counts only while a session of the mod wrote the store's rows in the last 60 minutes.
-- A pick of Claude Code's own login unsets the variable. CLAUDE_CONFIG_DIR is never set.
+- A value already set wins. An empty one passes through as it is: Claude Code reads it as its own login.
+- The pick counts only while a session of the mod wrote the store's rows in the last 60 minutes, never later than now.
+- A pick of Claude Code's own login leaves the variable unset. CLAUDE_CONFIG_DIR is never set.
 - Any fault in these starts claude on Claude Code's own login, with one line on stderr, and never stops a claude.
+- It runs the first `claude` on PATH that is not itself (by file identity), then the next where one cannot run, then
+  ~/.local/bin/claude; with none, one line on stderr and exit 127.
 """
 
 # Read as text, so `str | None` is no error on a macOS python3 older than 3.10.
@@ -107,12 +109,10 @@ def picked_slot() -> str | None:
         _, data = store.read(None)
     except store.StoreError as error:
         return note(str(error))
-    rows = data.get("rows")
-    at = rows.get("at") if isinstance(rows, dict) else None
-    if not store.is_instant(at) or time.time() * 1000 - at >= PICK_FRESH_MINUTES * 60_000:
+    if not store.rows_written_within(data, PICK_FRESH_MINUTES, time.time() * 1000):
         return note(f"no session of the mod wrote its rows in the last {PICK_FRESH_MINUTES} minutes")
-    pick = data.get("launch-slot")
-    if not isinstance(pick, dict) or not isinstance(pick.get("slot"), str) or not isinstance(pick.get("id"), str):
+    pick = store.launch_pick(data)
+    if pick is None:
         return note("no pick stored")
     if pick["slot"] and not os.path.isdir(pick["slot"]):
         return note(f"the picked slot {pick['slot']} is no folder")
@@ -123,37 +123,44 @@ def note(why: str) -> None:
     print(f"claude launcher: starting on Claude Code's own login: {why}", file=sys.stderr)
 
 
-def next_claude() -> str | None:
-    """The first `claude` on PATH that is not this file, by any link or folder spelling, else Claude Code's install path."""
-    me = os.path.realpath(__file__)
-    for folder in os.environ.get("PATH", "").split(os.pathsep):
-        candidate = os.path.join(folder, "claude")
-        if folder and os.path.isfile(candidate) and os.access(candidate, os.X_OK) and os.path.realpath(candidate) != me:
-            return candidate
-    fallback = os.path.join(os.path.expanduser("~"), ".local", "bin", "claude")
-    return fallback if os.access(fallback, os.X_OK) else None
+def is_this_file(path: str) -> bool:
+    """By file identity, so a hard link, a symlink or another spelling of this file is this file."""
+    try:
+        return os.path.samefile(path, __file__)
+    except OSError:
+        return False
+
+
+def claude_candidates() -> list[str]:
+    """Every runnable `claude` on PATH that is not this file, then Claude Code's install path, in that order."""
+    folders = [folder for folder in os.environ.get("PATH", "").split(os.pathsep) if folder]
+    paths = [os.path.join(folder, "claude") for folder in folders]
+    paths.append(os.path.join(os.path.expanduser("~"), ".local", "bin", "claude"))
+    found: list[str] = []
+    for path in paths:
+        if os.path.isfile(path) and os.access(path, os.X_OK) and not is_this_file(path) and path not in found:
+            found.append(path)
+    return found
 
 
 def main() -> int:
     args = sys.argv[1:]
-    value = os.environ.get(SLOT_VAR)
-    if value == "":
-        del os.environ[SLOT_VAR]
-    elif value is None and starts_session(args):
+    # An empty value passes through: Claude Code 2.1.325 reads it as its own login, whatever CLAUDE_CONFIG_DIR says.
+    if os.environ.get(SLOT_VAR) is None and starts_session(args):
         try:
             slot = picked_slot()
         except Exception as error:  # noqa: BLE001  (any fault: Claude Code's own login, never a stopped claude)
             slot = note(f"the launcher failed ({type(error).__name__}: {error})")
         if slot:
             os.environ[SLOT_VAR] = slot
-    target = next_claude()
-    if target is None:
-        print("claude launcher: found no claude on PATH or in ~/.local/bin; install Claude Code, or remove this launcher's folder from PATH", file=sys.stderr)
-        return 127
-    try:
-        os.execv(target, ["claude", *args])
-    except OSError as error:
-        print(f"claude launcher: cannot run {target} ({error.strerror}); remove this launcher's folder from PATH", file=sys.stderr)
+    failures = []
+    for target in claude_candidates():
+        try:
+            os.execv(target, ["claude", *args])
+        except OSError as error:
+            failures.append(f"{target} ({error.strerror})")
+    tried = f"; cannot run {', '.join(failures)}" if failures else ""
+    print(f"claude launcher: found no claude to run on PATH or in ~/.local/bin{tried}; install Claude Code, or remove this launcher's folder from PATH", file=sys.stderr)
     return 127
 
 
