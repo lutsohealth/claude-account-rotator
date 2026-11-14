@@ -9236,6 +9236,32 @@ test('a Fable stop answering the mod\'s own carry-on just past the settle, befor
   expect(markOf(store.get('fable-mark:2'))).toEqual([100, FABLE_RESET])
 })
 
+// The other side of the carry-on rule: a login whose own read shows its Fable week spent did stop the turn.
+test('a Fable stop answering the mod\'s own carry-on, whose login\'s own read shows its Fable week spent, is that login\'s: no carry-on again, and the pane reads it spent', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [20, 30, 100]
+  w.usage['tok-2'] = [10, 30, 10]
+  w.weekResets = { 'tok-2': OTHER_WEEK }
+  const clock = world(on, w, TWO_LOGINS)
+  await start($, clock)
+  // Login 2's last read is over a minute old by the stop, so the stop reads it again.
+  await clock.advance(30_000)
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  expect(slots(w)).toEqual([SLOT2])
+  await clock.advance(35_500)
+  expect(w.submitted).toHaveLength(1)
+  w.usage['tok-2'] = [10, 30, 100]
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  await clock.advance(36_000)
+  expect(w.submitted).toHaveLength(1)
+  expect(await fableRows($)).toEqual([`${longBar(100)} 100%`, `${longBar(100)} 100%`])
+  expect(w.notices.map(String).filter(t => /Fable week/.test(t))).toHaveLength(1)
+})
+
 test('a Fable stop while Chrome connects marks nothing on the visited account, though a browser answering proves the visit', async ($, on) => {
   const w = fresh()
   w.chrome = { extensions: [SLOT2] }
