@@ -1119,11 +1119,8 @@ async function checkAccount($: Host, account: Account, gate: UsageGate): Promise
           await saveReading($, account.id, { ...keepFable(reading, await ownedReading($, account.id), now), by: account.id }, 'body')
         }
       }
-    } else if (!isLive && gate === 'claimed') {
-      // Nothing reads it until a session refreshes its token, and its row says so (idle, from its health); a failure
-      // standing from before no longer holds its usage back, and the reading keeps the login in the pick, as before.
-      await saveCheckError($, account.id, undefined)
     }
+    // A token run out is not read until a session refreshes it: its row says idle, from its health.
   }
   const before = await saveHealth($, account.id, health)
   if (health.kind === 'login-needed' && before?.kind !== 'login-needed') {

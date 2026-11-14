@@ -9208,8 +9208,8 @@ test('a Fable stop in the 35 seconds after a switch marks nothing on the account
   await $.classic.StopFailure(FABLE_STOP)
   await clock.settle()
   expect(store.get('fable-mark:2')).toBeUndefined()
-  // The switch's own carry-on goes once; the stop adds none.
-  await clock.advance(31_000)
+  // The switch's own carry-on goes once; the stop adds none, at its own 35 s either.
+  await clock.advance(36_000)
   expect(w.submitted).toHaveLength(1)
   w.limits = limitsOf(10, 30, OTHER_WEEK)
   await respond($, clock, w)
