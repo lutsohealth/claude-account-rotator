@@ -646,7 +646,7 @@ test('where Claude Code\'s security policy refuses switching, as on a Team seat,
   await clock.settle()
   await clock.advance(36_000)
   expect(w.toasts.filter(notice)).toHaveLength(1)
-  expect(w.toasts.filter(t => /^Account 1 is out of usage, and this window can't switch accounts\. \/login with your personal/.test(t))).toHaveLength(1)
+  expect(w.toasts.filter(t => /^Account 1 is near its limit, and this window can't switch accounts\. \/login with your personal/.test(t))).toHaveLength(1)
   expect(w.submitted).toEqual([])
   const footer = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'SessionMode', props: { modes: [] } })
   expect((await footer.find({ type: 'Text', text: '⚠' }))?.props).toMatchObject({ color: 'warning' })
@@ -692,7 +692,7 @@ test('a window that can\'t switch, on a seat that runs out while another login h
   const clock = world(on, w, TWO_LOGINS)
   await start($, clock)
   const stuck =
-    "Account 2 is out of usage, and this window can't switch accounts. Quit (in a background session, /stop: /exit only detaches), then run: claude --resume session-1"
+    "Account 2 is near its limit, and this window can't switch accounts. Quit (in a background session, /stop: /exit only detaches), then run: claude --resume session-1"
   expect(w.toasts.filter(t => t === stuck)).toHaveLength(1)
   const band = await mountBand($)
   expect((await band.find({ type: 'Text', text: `⚠ ${stuck}` }))?.props).toMatchObject({ color: 'warning' })
@@ -701,6 +701,54 @@ test('a window that can\'t switch, on a seat that runs out while another login h
   await clock.advance(21 * 60_000)
   expect(w.toasts.filter(t => t === stuck)).toHaveLength(1)
   expect(w.envSets).toEqual([])
+})
+
+// Review F1 (PR #85, round 1): upstream's isStuckTold lived only in the view, which /clear, /resume and /branch reset.
+test('a window that can\'t switch, told once it is stuck, is not told again after /clear', async ($, on) => {
+  const w = fresh()
+  w.refuseEnv = true
+  w.env.CLAUDE_SECURESTORAGE_CONFIG_DIR = SLOT2
+  await spentTwo(w)
+  const s = clearable(on)
+  const clock = world(on, w, TWO_LOGINS)
+  on('classic.SessionStart', () => ({}))
+  await start($, clock)
+  const stuck = (t: string) => /^Account 2 is near its limit, and this window can't switch accounts\./.test(t)
+  expect(['told before /clear', w.toasts.filter(stuck).length]).toEqual(['told before /clear', 1])
+  await clearSession($, clock, s.clear)
+  await clock.advance(21 * 60_000)
+  expect(['stuck toasts after /clear', w.toasts.filter(stuck).length]).toEqual(['stuck toasts after /clear', 1])
+})
+
+// Review F1, the class: every once-only notice a window that can't switch gets (the policy refusal, the stuck window),
+// through every reset that clears the view (/clear, /resume, /branch), on toasts and on the terminal's notifications.
+test('no once-only notice of a window that can\'t switch is said again after any reset of the view', async ($, on) => {
+  const NOTICES: [string, RegExp][] = [
+    ['policy refusal', /^Can't switch accounts in this session\./],
+    ['stuck window', /^Account 2 is near its limit, and this window can't switch accounts\./],
+  ]
+  const w = fresh()
+  w.refuseEnv = true
+  w.env.CLAUDE_SECURESTORAGE_CONFIG_DIR = SLOT2
+  await spentTwo(w)
+  const s = clearable(on)
+  const clock = world(on, w, TWO_LOGINS)
+  on('classic.SessionStart', () => ({}))
+  await start($, clock)
+  const count = () => NOTICES.map(([name, re]) => [name, w.toasts.filter(t => re.test(t)).length, w.notices.map(String).filter(t => re.test(t)).length] as const)
+  // The sweep inspected something: each notice was said at the start, once on each channel.
+  expect(count().map(([name, toasts, notices]) => [name, toasts, notices])).toEqual(NOTICES.map(([name]) => [name, 1, 1]))
+  const offenders: string[] = []
+  for (const source of ['clear', 'resume', 'fork'] as const) {
+    const at = count()
+    await clearSession($, clock, s.clear, source)
+    await clock.advance(21 * 60_000)
+    count().forEach(([name, toasts, notices], i) => {
+      if (toasts > at[i][1] || notices > at[i][2]) offenders.push(`${name} said again after ${source} (toasts ${at[i][1]} -> ${toasts}, notices ${at[i][2]} -> ${notices})`)
+    })
+  }
+  // Fix: each once-only flag of the view (isSwitchBlocked, isStuckTold) goes in register.tsx's `kept` and back in rebindSession.
+  expect(offenders).toEqual([])
 })
 
 test('a switch that does not take, its responses still the old login\'s minutes later, points the session back and marks the old login in use, and the rotation does not try it again', async ($, on) => {

@@ -5,7 +5,7 @@ import { weekLeaveFrom, launchOnFrom, pickLaunch, isSessionStop } from './model'
 import { isSameWeek, whoseWeek } from './model'
 import { companyOf, identityFromStatus, planName } from './model'
 import { laterMark, spentMark, withFableMark } from './model'
-import { EMPTY_VIEW, USAGE_IDLE_MS, fitRow, rowOf, rowsOf, rowText, storedLine, storedLineText } from './model'
+import { EMPTY_VIEW, USAGE_IDLE_MS, fitRow, hasRoom, rowOf, rowsOf, rowText, storedLine, storedLineText } from './model'
 import ROWS_FIXTURE from '../tests/fixtures/rows'
 import { REQUEST_TTL_MS, holdsLogin, requestFrom, requestsDir, slotNumber } from './model'
 import { USAGE_BACKOFF_MAX_MS, USAGE_CLAIM_MS, USAGE_CLAIM_WAIT_MS, USAGE_EARLY_MS, WRITER_VERSION, afterUsage, claimDueReads, gatingDue, isUsageDue, mayForceUsage, mayReadSince, renewClaim, retryAfterFrom, usageDueFrom } from './model'
@@ -648,9 +648,9 @@ test('a session that can\'t switch says to stop a background session, which /exi
   expect(blockedAdvice(onLogin)).toMatch(/Fix: \/login with your personal \(Pro or Max\) account\. Quit .*claude --resume session-1\.$/)
   // Spent where it can't leave, while another login has room: what to do.
   expect(stuckText(onSeat, NOW)).toBe(
-    "Account 2 is out of usage, and this window can't switch accounts. Quit (in a background session, /stop: /exit only detaches), then run: claude --resume session-1",
+    "Account 2 is near its limit, and this window can't switch accounts. Quit (in a background session, /stop: /exit only detaches), then run: claude --resume session-1",
   )
-  expect(stuckText(onLogin, NOW)).toMatch(/^Account 1 is out of usage, and this window can't switch accounts\. \/login with your personal \(Pro or Max\) account\. Quit /)
+  expect(stuckText(onLogin, NOW)).toMatch(/^Account 1 is near its limit, and this window can't switch accounts\. \/login with your personal \(Pro or Max\) account\. Quit /)
   // Free to switch, with room, or with nowhere to go: nothing to say.
   expect(stuckText({ ...onSeat, isSwitchBlocked: false }, NOW)).toBeUndefined()
   expect(stuckText({ ...onSeat, activeId: '1' }, NOW)).toBeUndefined()
@@ -659,8 +659,52 @@ test('a session that can\'t switch says to stop a background session, which /exi
 
 test('a session that can\'t switch is told so once its week is down to the Week setting, as the rotation counts it', () => {
   const atLine = { ...view({ '1': [10, 10], '2': [10, 85] }), activeId: '2', sessionId: 'session-1', isSwitchBlocked: true, weekLeave: 20 }
-  expect(stuckText(atLine, NOW)).toMatch(/^Account 2 is out of usage, and this window can't switch accounts\./)
+  expect(stuckText(atLine, NOW)).toMatch(/^Account 2 is near its limit, and this window can't switch accounts\./)
   expect(stuckText({ ...atLine, weekLeave: 0 }, NOW)).toBeUndefined()
+})
+
+/** Review F2 (PR #85, round 1): two signed-in logins, the session on login 2, which can't switch; login 1 has room. */
+function stuckOn(five: number, week: number, weekLeave: number): View {
+  const weekResets = '2026-10-18T03:00:00Z'
+  return {
+    ...EMPTY_VIEW,
+    accounts: [{ id: '1', slot: '' }, { id: '2', slot: '/h/.claude/accounts/2' }],
+    health: { '1': { kind: 'ok' }, '2': { kind: 'ok' } },
+    readings: {
+      '1': { fiveHour: { pct: 10, resetsAt: LATER }, sevenDay: { pct: 10, resetsAt: weekResets }, at: NOW, by: '1' },
+      '2': { fiveHour: { pct: five, resetsAt: LATER }, sevenDay: { pct: week, resetsAt: weekResets }, at: NOW, by: '2' },
+    },
+    activeId: '2',
+    sessionId: 'session-1',
+    isSwitchBlocked: true,
+    weekLeave,
+  } as View
+}
+
+test('a stuck window whose login has 15% of its week left is told that login is near its limit, not out of usage', () => {
+  // 85% of the week used at a Week setting of 20: past the line the rotation leaves at, with room left.
+  const text = stuckText(stuckOn(10, 85, 20), NOW)
+  expect(text, 'the line is still said at the Week setting').toMatch(/^Account 2 is near its limit, and this window can't switch accounts\./)
+  expect(text).not.toMatch(/out of usage/)
+})
+
+test('stuckText says a login is out of usage only where that login has no room left', () => {
+  const offenders: string[] = []
+  let said = 0
+  for (const weekLeave of [0, 20, 50]) {
+    for (const five of [0, 50, 89, 90, 95, 100]) {
+      for (const week of [0, 50, 80, 85, 95, 100]) {
+        const view = stuckOn(five, week, weekLeave)
+        const text = stuckText(view, NOW)
+        if (text === undefined) continue
+        said += 1
+        if (/out of usage/.test(text) && hasRoom(view.readings['2'], NOW)) offenders.push(`5h ${five}%, week ${week}%, Week setting ${weekLeave}`)
+      }
+    }
+  }
+  // The sweep inspected something.
+  expect(said).toBeGreaterThan(0)
+  expect(offenders, 'says "out of usage" for a login with room; word it as the leave line, or say it only at 100%').toEqual([])
 })
 
 test('counts the browsers Claude in Chrome lists, and knows its words for none answering', () => {

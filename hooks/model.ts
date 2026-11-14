@@ -753,14 +753,17 @@ export function restartSteps(view: View): string {
 }
 
 /**
- * A session that can't switch, on a login that is spent while another has
+ * A session that can't switch, on a login the rotation would leave (its
+ * 5-hour window at 90% or its week down to the Week setting) while another has
  * room: what the person does about it. Undefined otherwise; with every login
- * spent, a new session would not help either.
+ * spent, a new session would not help either. It says "near its limit", as the
+ * band does for the same check: the login may still have room, so upstream's
+ * "out of usage" would tell the person a false thing.
  */
 export function stuckText(view: View, now: number): string | undefined {
   if (!view.isSwitchBlocked || !isSpent(view.readings[view.activeId], now, view.weekLeave) || pickTarget(view, now) === undefined) return undefined
   const login = isOnNormalLogin(view) ? '/login with your personal (Pro or Max) account. ' : ''
-  return `Account ${view.activeId} is out of usage, and this window can't switch accounts. ${login}${restartSteps(view)}`
+  return `Account ${view.activeId} is near its limit, and this window can't switch accounts. ${login}${restartSteps(view)}`
 }
 
 /** The MCP server Claude Code runs Claude in Chrome as, and the names of its tools. */

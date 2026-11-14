@@ -137,7 +137,7 @@ let isPaneShown = false
  * view, and rebindSession copies these back. Each is set where its value is born; undefined until then. The records
  * of a switch in flight and the Chrome link are copied by setView instead, from every write of a bound view.
  */
-let kept: { slot?: string; mark?: string; hasFontBlocks?: boolean; isSwitchBlocked?: boolean; isFableStopped?: boolean } & InFlight & ChromeLink = {}
+let kept: { slot?: string; mark?: string; hasFontBlocks?: boolean; isSwitchBlocked?: boolean; isFableStopped?: boolean; isStuckTold?: boolean } & InFlight & ChromeLink = {}
 /** When this session's boot read the store: an older version's reading written after it says that version still runs. */
 let bootedAt: number | undefined
 /** An older version writes its reading at every check, every 10 minutes at most: one this old has stopped. */
@@ -1198,9 +1198,11 @@ async function maybeRotate($: Host, need?: Need, carry?: CarryOn): Promise<boole
   const now = await $.clock.now()
   const view = await getView($)
   if (view.isSwitchBlocked) {
+    // Said once a session: `kept` carries it through /clear, /resume and /branch, as it does isSwitchBlocked.
     const stuck = view.isStuckTold ? undefined : stuckText(view, now)
     if (stuck !== undefined) {
       await setView($, v => ({ ...v, isStuckTold: true }))
+      kept = { ...kept, isStuckTold: true }
       $.ui.toast(stuck, { timeoutMs: 15_000 })
       await $.ui.notify(stuck, { title: TITLE })
     }
@@ -1662,8 +1664,10 @@ async function keepChrome($: Host): Promise<void> {
  * Whether the session connects Claude in Chrome as it opens: an account is
  * named for the extension, and the session is on it, or can visit it: signed
  * in, with room, and a browser answered there last time. Later, a session
- * Claude Code stops from switching couldn't go there. A spent one is left be:
- * a prompt sent during the visit would go out as it and hit its limit. One no
+ * Claude Code stops from switching couldn't go there. One the rotation would
+ * leave (its 5-hour window at 90%, or its week down to the Week setting) is
+ * left be: a prompt sent during the visit would go out as it, spending room the
+ * rotation keeps, or hitting its limit. One no
  * browser answered as, while another did, is likely the extension's no more.
  * Either connects at the first browser call that finds no browser instead.
  */
@@ -2159,7 +2163,7 @@ async function bindSession($: Host, slot: string): Promise<void> {
  * reset left it unset, a write since being newer; the Connect line only while a Connect is under way.
  */
 async function rebindSession($: Host): Promise<void> {
-  const { slot, mark, hasFontBlocks, isSwitchBlocked, isFableStopped, pending, provisionalStop, held, hasChrome, chrome: link, chromeConnecting } = kept
+  const { slot, mark, hasFontBlocks, isSwitchBlocked, isFableStopped, isStuckTold, pending, provisionalStop, held, hasChrome, chrome: link, chromeConnecting } = kept
   await setView($, v => ({
     ...v,
     ...(pending === undefined ? {} : { pending }),
@@ -2168,6 +2172,7 @@ async function rebindSession($: Host): Promise<void> {
     ...(hasFontBlocks === undefined ? {} : { hasFontBlocks }),
     ...(isSwitchBlocked === undefined ? {} : { isSwitchBlocked }),
     ...(isFableStopped === undefined ? {} : { isFableStopped }),
+    ...(isStuckTold === undefined ? {} : { isStuckTold }),
     ...(mark === undefined ? {} : { sessionMark: mark }),
     ...(hasChrome === undefined || v.hasChrome !== undefined ? {} : { hasChrome }),
     ...(link === undefined || v.chrome !== undefined ? {} : { chrome: link }),
@@ -2190,10 +2195,11 @@ async function isBound($: Host): Promise<boolean> {
 
 /** First run makes the normal login number 1; then: which login this session uses, and Claude in Chrome connected as the extension's account. */
 async function boot($: Host, isInteractive: boolean): Promise<void> {
-  // A view still bound outlived a reload of this code, which emptied `kept`: its Fable stop mark goes back into `kept`,
-  // so a later /clear, /resume or /branch restores it.
+  // A view still bound outlived a reload of this code, which emptied `kept`: its Fable stop mark and its stuck notice
+  // said go back into `kept`, so a later /clear, /resume or /branch restores them.
   const survived = await getView($)
   if (survived.isBound === true && survived.isFableStopped !== undefined) kept = { ...kept, isFableStopped: survived.isFableStopped }
+  if (survived.isBound === true && survived.isStuckTold !== undefined) kept = { ...kept, isStuckTold: survived.isStuckTold }
   // Terminal.app is the terminal that names itself so and draws block characters from its font.
   const hasFontBlocks = (await $.env.get('TERM_PROGRAM')) === 'Apple_Terminal'
   kept = { ...kept, hasFontBlocks }
