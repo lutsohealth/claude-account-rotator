@@ -15,14 +15,14 @@ import {
   fitRow,
   glyph,
   hasFiveHour,
-  isOnNormalLogin,
   isSpent,
   nextReset,
-  resumeCommand,
+  restartSteps,
   rowOf,
   roomColor,
   roomLeft,
   shown,
+  stuckText,
   untilText,
   windowPct,
 } from './model'
@@ -425,7 +425,7 @@ function chromeProblem(view: View): string | undefined {
   if (link?.as === own) {
     return `No Chrome extension answers as ${named(view, own)}. Open Chrome and check its Claude extension is signed in with that email; if it is, restart Chrome.`
   }
-  if (!canConnectChrome(view)) return `This window can't switch to ${named(view, own)}. Quit, then run: ${resumeCommand(view)}`
+  if (!canConnectChrome(view)) return `This window can't switch to ${named(view, own)}. ${restartSteps(view)}`
   return undefined
 }
 
@@ -484,7 +484,7 @@ function ChromeSettings(ui: Ui, view: View, act: Actions) {
   // A window that can't switch accounts has a press on its own account only: it says why, once.
   const isStuck = view.isSwitchBlocked === true && listed.some(a => a.id !== view.activeId)
   const problem =
-    chromeProblem(view) ?? (isStuck ? `This window can't switch accounts, so Chrome can't move to another one here. Quit, then run: ${resumeCommand(view)}` : undefined)
+    chromeProblem(view) ?? (isStuck ? `This window can't switch accounts, so Chrome can't move to another one here. ${restartSteps(view)}` : undefined)
   return section(ui, 'chrome', 'Chrome', [
     found.length === 0 ? (
       <Text key="chrome-intro" dimColor>No Chrome extension found yet. Which account is yours signed in to?</Text>
@@ -569,6 +569,8 @@ export function Band(ui: Ui, view: View, now: number, act: Actions) {
   }
   const chrome = ChromeBand(ui, view, act)
   if (chrome !== undefined) return chrome
+  const stuck = stuckText(view, now)
+  if (stuck !== undefined) return <Text color="warning">{`⚠ ${stuck}`}</Text>
   const spent = view.accounts.every(a => isSpent(view.readings[a.id], now, view.weekLeave))
   if (view.accounts.length > 0 && spent) {
     const at = nextReset(view, now)
@@ -719,7 +721,7 @@ const ROTATION_OFF = 'Rotation is disabled: the session stays on the account in 
 /** The pane's first line while Claude Code's security policy refuses every switch. */
 function blockedRule(view: View): string {
   return (
-    `Can't switch accounts in this session. ${blockedAdvice(isOnNormalLogin(view))} More in the README.`
+    `Can't switch accounts in this session. ${blockedAdvice(view)} More in the README.`
   )
 }
 
