@@ -1081,15 +1081,17 @@ const failedWhy = (usage: { status: number; retryAfter?: number }): string =>
 /**
  * Re-reads one login's stored sign-in: who it belongs to and, while its token
  * is live and its gate lets it, its usage. One that is another login's on the
- * list leaves this login needing its own, its usage that other's.
+ * list leaves this login needing its own, its usage that other's. Answers whether it stored a body that listed the
+ * Fable week: a check its gate skipped answers false.
  */
-async function checkAccount($: Host, account: Account, gate: UsageGate): Promise<void> {
+async function checkAccount($: Host, account: Account, gate: UsageGate): Promise<boolean> {
   const now = await $.clock.now()
-  if (signingIn === account.id) return
+  let hasFreshFable = false
+  if (signingIn === account.id) return hasFreshFable
   const stored = await readStored($, account.slot)
   if (stored.state === 'unreadable') {
     tell($, `Could not read Claude account ${account.id} from the keychain (exit ${stored.code}); is it locked?`)
-    return
+    return hasFreshFable
   }
   const credential = stored.state === 'present' ? stored.credential : undefined
   let health = healthOf(credential, now)
@@ -1117,6 +1119,7 @@ async function checkAccount($: Host, account: Account, gate: UsageGate): Promise
           if (fableMarked !== undefined && endsFableMark(reading.fable, now, fableMarked)) await dropFableMark($, account.id)
           // A body with no Fable row keeps the stored one's: the stored read, never the view, which carries the marks.
           await saveReading($, account.id, { ...keepFable(reading, await ownedReading($, account.id), now), by: account.id }, 'body')
+          hasFreshFable = reading.fable !== undefined
         }
       }
     }
@@ -1126,6 +1129,7 @@ async function checkAccount($: Host, account: Account, gate: UsageGate): Promise
   if (health.kind === 'login-needed' && before?.kind !== 'login-needed') {
     await announceLockout($, account, health.why)
   }
+  return hasFreshFable
 }
 
 /**
@@ -1480,13 +1484,13 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
     const isProvisional = since !== undefined && !hasResponseSince
     // The landing can lag the settle: the turn the carry-on starts as the settle ends can still go out on the login
     // left (measured on vox), and a turn over the Fable limit dies at once. So a Fable stop within SETTLE_MS of the
-    // carry-on, before any response proves the switch, that the login moved to's own usage read contradicts (it lists
-    // the Fable week, with room) is not that login's: once a switch it marks nothing and carries on again.
+    // carry-on, before any response proves the switch, that the login moved to's own usage read contradicts (a body this
+    // stop's check read lists the Fable week, with room) is not that login's: once a switch it marks nothing and carries
+    // on again. A check its gate skipped proves nothing: the stop then goes the way any other does.
     const isOnCarryOn = carriedOn !== undefined && carriedOn.since === since && (await $.clock.now()) - carriedOn.at < SETTLE_MS
     if (isProvisional && isFable && isOnCarryOn && clearedFor !== since) {
-      await checkAccount($, active, 'force')
-      const read = (await getView($)).readings[active.id]
-      if (read?.fable !== undefined && !isFableSpent(read, await $.clock.now())) {
+      const hasFreshFable = await checkAccount($, active, 'force')
+      if (hasFreshFable && !isFableSpent((await getView($)).readings[active.id], await $.clock.now())) {
         clearedFor = since
         if (isConnectingChrome) isCutByVisit = true
         else carryOnAfterSettle($, { need: 'fable' })
@@ -1586,8 +1590,9 @@ async function markStop($: Host, active: Account, said: string | undefined, afte
       need = 'fable'
       kept = { ...kept, isFableStopped: true }
       await setView($, v => ({ ...v, isFableStopped: true }))
-      // The limit was hit before the usage call shows it: count the Fable week as full, under the mark's own key.
-      if (!isFableSpent(r, now)) {
+      // The limit was hit before the usage call shows it: count the Fable week as full, under the mark's own key. Judged on
+      // the read as stored, never the view's, which carries the mark: a stop on a login its mark holds renews the mark.
+      if (!isFableSpent(read, now)) {
         const spent = fableMark(read?.fable, now)
         await saveFableMark($, active.id, { pct: spent.pct, resetsAt: spent.resetsAt ?? new Date(now + WEEK_MS).toISOString(), at: now })
       }

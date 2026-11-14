@@ -9184,8 +9184,11 @@ test('a session started on a slot nobody listed takes the free id, wearing nothi
 
 // puma-9arph.23: a Fable figure in the pane is what the usage endpoint reports for the account.
 
-/** A Fable stop on login 1 (its Fable week spent) moves the session to login 2, whose own week reads Fable 10%. */
-async function fableMoved($: Engine, on: On): Promise<{ w: World; store: Map<string, unknown>; clock: MockClock }> {
+/**
+ * A Fable stop on login 1 (its Fable week spent) moves the session to login 2, whose own week reads Fable 10%. With
+ * `isReadOld`, the stop comes 30 s on, so login 2's last read is over a minute old by the carry-on and a stop reads it again.
+ */
+async function fableMoved($: Engine, on: On, isReadOld = true): Promise<{ w: World; store: Map<string, unknown>; clock: MockClock }> {
   const w = fresh()
   w.keychain['Claude Code-credentials'] = blob('tok-1')
   w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
@@ -9195,6 +9198,7 @@ async function fableMoved($: Engine, on: On): Promise<{ w: World; store: Map<str
   const store = new Map<string, unknown>(Object.entries(TWO_LOGINS))
   const clock = world(on, w, store)
   await start($, clock)
+  if (isReadOld) await clock.advance(30_000)
   await $.classic.StopFailure(FABLE_STOP)
   await clock.settle()
   expect(slots(w)).toEqual([SLOT2])
@@ -9376,3 +9380,127 @@ test('a window that can\'t switch, stuck on its Fable week with Fable room on an
   await clock.advance(21 * 60_000)
   expect(w.toasts.filter(stuck)).toHaveLength(1)
 })
+
+// Review codex-r1 [STALE-FABLE-PROOF], the instance: a check its gate skipped stored no fresh body, which proves nothing.
+test('Review codex-r1: a real Fable stop on the target is not cleared by its 35-second-old reading', async ($, on) => {
+  const { w, store, clock } = await fableMoved($, on, false)
+  await clock.advance(35_500)
+  expect(w.submitted).toHaveLength(1)
+  w.usage['tok-2'] = [10, 30, 100]
+  const calls = callsWith(w, 'tok-2')
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  expect(callsWith(w, 'tok-2')).toBe(calls)
+  expect(markOf(store.get('fable-mark:2'))).toEqual([100, FABLE_RESET])
+  await clock.advance(36_000)
+  expect(w.submitted).toHaveLength(1)
+})
+
+// Review codex-r1 [STALE-FABLE-PROOF], the class: every gate that skips the stop's read.
+for (const gate of ['recent', 'backoff', 'other-claim', 'expired-token'] as const) {
+  test(`Review codex-r1 class: a skipped ${gate} check cannot clear a real target Fable stop`, async ($, on) => {
+    const { w, store, clock } = await fableMoved($, on, false)
+    const prior = store.get('usage-due:2') as { next: number; fails: number; at?: number; v?: number; claim?: string }
+    if (gate === 'backoff') store.set('usage-due:2', { ...prior, fails: 1, next: NOW + HOUR })
+    if (gate === 'other-claim') store.set('usage-due:2', { ...prior, fails: 0, claim: 'other-session', next: NOW + HOUR })
+    if (gate === 'expired-token') w.keychain[await keychainItem(SLOT2)] = blob('tok-2', NOW - 1)
+    await clock.advance(35_500)
+    w.usage['tok-2'] = [10, 30, 100]
+    const calls = callsWith(w, 'tok-2')
+    await $.classic.StopFailure(FABLE_STOP)
+    await clock.settle()
+    expect([gate, callsWith(w, 'tok-2')]).toEqual([gate, calls])
+    expect([gate, markOf(store.get('fable-mark:2'))]).toEqual([gate, [100, FABLE_RESET]])
+  })
+}
+
+// Review opus-r1 R1F1 [FABLE-MARK-ANCHOR], the instance: a later Fable stop on a login its mark holds left `at` at the first stop.
+test('Review R1F1: a Fable stop on a login its mark already holds restarts the 30 minutes, so a lower read 5 minutes after it keeps the mark', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [null, 39, 35]
+  w.usage['tok-2'] = [10, 30, 10]
+  const mark = { pct: 100, resetsAt: FABLE_RESET, at: NOW - 25 * 60_000 }
+  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off', 'fable-mark:1': mark }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  await clock.advance(2 * 60_000)
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  expect(store.get('fable-mark:1'), 'the premise: the stop leaves login 1 marked').toBeDefined()
+  await clock.advance(5 * 60_000)
+  await $.command.run(LOGIN)
+  await clock.settle()
+  expect(store.get('fable-mark:1'), 'a read of the week at 35%, 5 minutes after a Fable stop, ended its mark. Fix: a Fable stop on a login its mark holds renews the mark\'s at.').toBeDefined()
+})
+
+// Review opus-r1 R1F1 [FABLE-MARK-ANCHOR], the class: whatever keeps a Fable-stopped session on a marked login, the stop renews the 30 minutes.
+for (const [cause, extra, otherFable] of [
+  ['rotation off', { 'rotate-to': 'off' }, 10],
+  ['no other login with Fable room', {}, 100],
+] as const) {
+  test(`Review R1F1 class: a session kept on a marked login by ${cause}: its Fable stop renews the mark, so a lower read 5 minutes after it keeps it`, async ($, on) => {
+    const w = fresh()
+    w.keychain['Claude Code-credentials'] = blob('tok-1')
+    w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+    w.usage['tok-1'] = [null, 39, 35]
+    w.usage['tok-2'] = [10, 30, otherFable]
+    const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, ...extra, 'fable-mark:1': { pct: 100, resetsAt: FABLE_RESET, at: NOW - 25 * 60_000 } }))
+    const clock = world(on, w, store)
+    await start($, clock)
+    await clock.advance(2 * 60_000)
+    await $.classic.StopFailure(FABLE_STOP)
+    await clock.settle()
+    expect(slots(w), `the premise (${cause}): the session stays on login 1`).toEqual([])
+    await clock.advance(5 * 60_000)
+    await $.command.run(LOGIN)
+    await clock.settle()
+    expect(store.get('fable-mark:1'), `${cause}: a lower read 5 minutes after a Fable stop ended the mark. Fix: renew the mark's at on every Fable stop on a login it holds.`).toBeDefined()
+  })
+}
+
+// Review opus-r1 R1F2 [IDLE-IN-USE], the instance: idle is for a login with no session on it, never this session's own.
+test('Review R1F2: the login this session runs on, its token just run out, never reads idle', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1', NOW + 30_000)
+  w.usage['tok-1'] = [10, 20]
+  const store = new Map<string, unknown>(
+    Object.entries({
+      accounts: [{ id: '1', slot: '', email: 'one@example.com' }],
+      'holder:1': { token: await fingerprint('refresh-tok-1'), who: { email: 'one@example.com' } },
+      'usage:1': { fiveHour: { pct: 10 }, sevenDay: { pct: 20, resetsAt: WEEK_RESET }, at: NOW - 5 * 60_000, by: '1', v: 1, src: 'body' },
+      'usage-due:1': { next: NOW - 1, fails: 0, at: NOW - 5 * 60_000, v: 1 },
+    }),
+  )
+  const clock = world(on, w, store)
+  await start($, clock)
+  await clock.advance(61_000)
+  expect(lineOne(store, '1'), 'the row of the login in use says idle. Fix: no isIdle for the login the session runs on.').not.toMatch(/idle$/)
+})
+
+// Review opus-r1 R1F2 [IDLE-IN-USE], the class: on either kind of slot, with a last read or none, the login in use never reads idle.
+for (const [slot, hasRead] of [['', true], ['', false], [SLOT2, true], [SLOT2, false]] as const) {
+  const where = slot === '' ? "Claude Code's login" : 'folder 2'
+  test(`Review R1F2 class: the login in use on ${where}, ${hasRead ? 'with' : 'without'} a last read, its token run out, never reads idle`, async ($, on) => {
+    const w = fresh()
+    if (slot !== '') w.env.CLAUDE_SECURESTORAGE_CONFIG_DIR = slot
+    const id = slot === '' ? '1' : '2'
+    w.keychain['Claude Code-credentials'] = blob('tok-1', slot === '' ? NOW + 30_000 : NOW + 6 * HOUR)
+    w.keychain[await keychainItem(SLOT2)] = blob('tok-2', slot === '' ? NOW + 6 * HOUR : NOW + 30_000)
+    w.usage['tok-1'] = [10, 20]
+    w.usage['tok-2'] = [10, 30]
+    const store = new Map<string, unknown>(
+      Object.entries({
+        ...TWO_LOGINS,
+        'holder:1': { token: await fingerprint('refresh-tok-1'), who: { email: 'one@example.com' } },
+        'holder:2': { token: await fingerprint('refresh-tok-2'), who: { email: 'two@example.com' } },
+        ...(hasRead ? { [`usage:${id}`]: { fiveHour: { pct: 10 }, sevenDay: { pct: 20, resetsAt: WEEK_RESET }, at: NOW - 5 * 60_000, by: id, v: 1, src: 'body' } } : {}),
+      }),
+    )
+    const clock = world(on, w, store)
+    await start($, clock)
+    await clock.advance(61_000)
+    expect(lineOne(store, id), `${where}, ${hasRead ? 'with' : 'without'} a read: the login in use reads idle. Fix: isIdle only for a login no session runs on.`).not.toMatch(/idle$/)
+  })
+}

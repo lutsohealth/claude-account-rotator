@@ -1226,7 +1226,8 @@ test('a check that threw says (check failed), and the error\'s kind stays in the
 })
 
 test('an idle login, its token run out, says when it was last read and idle, never Failed to update, though a failure stands', () => {
-  const idle = { health: { '1': { kind: 'ok', isIdle: true } as const }, checkErrors: { '1': HTTP_429 }, nextAt: { '1': NEXT_AT } }
+  // Another login is in use: the session's own login is never drawn idle.
+  const idle = { activeId: '2', health: { '1': { kind: 'ok', isIdle: true } as const }, checkErrors: { '1': HTTP_429 }, nextAt: { '1': NEXT_AT } }
   expect(rowLines(rowView(idle))[0]).toBe('andres@lutsohealth.com · Company · Ultra  updated 18:34 · idle')
   expect(rowLines(rowView({ ...idle, readings: {} }))[0]).toBe('andres@lutsohealth.com · Company · Ultra  idle')
 })

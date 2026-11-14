@@ -1095,7 +1095,7 @@ function failedParts(failure: CheckError, nextAt: number | undefined, timeZone: 
 }
 
 /**
- * Line 1's end: a sign-in needed; else, for an idle login (its token run out), the last good read's time and `idle`,
+ * Line 1's end: a sign-in needed; else, for an idle login (its token run out, another session's or none's), the last good read's time and `idle`,
  * as nothing reads it until a session refreshes the token; else a failed check no older than the last good read, at
  * its time, with its cause and next try; else the last good read's time, while a reading stands. With no good read
  * known and no failure, nothing.
@@ -1105,7 +1105,8 @@ function statePart(view: View, a: Account, timeZone: string | undefined): RowPar
   if (health?.kind === 'login-needed') return [{ text: '⚠ sign in needed', tone: 'warning' }]
   const readAt = view.readAt?.[a.id]
   const hasReading = readAt !== undefined && view.readings[a.id] !== undefined
-  if (health?.kind === 'ok' && health.isIdle === true) {
+  // The login this session runs on is not idle: the session refreshes its token at its next request.
+  if (health?.kind === 'ok' && health.isIdle === true && a.id !== view.activeId) {
     return hasReading ? [{ text: `updated ${clockText(readAt, timeZone)} · idle`, runs: ['updated ', { clock: readAt }, ' · idle'] }] : [{ text: 'idle' }]
   }
   const failure = view.checkErrors?.[a.id]
