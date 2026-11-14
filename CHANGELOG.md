@@ -2,6 +2,10 @@
 
 What each version of the account rotator changed. To get each one as Claude Code starts, turn on auto-update: in `/plugin`, open **Marketplaces**, pick **claude-account-rotator** and choose **Enable auto-update**. To update by hand, run `claude plugin marketplace update claude-account-rotator`, then `claude plugin update account-rotator@claude-account-rotator`, and start a new session.
 
+## 0.5.31-lutso.1 - 2026-11-14
+
+- **A plain `claude` can start on the account New on picks**: `bin/account-rotator-claude`, copied as `claude` into a folder ahead of Claude Code's own on PATH, starts every plain `claude` (a terminal, a script, Orca's background actions) on that pick while a session of the mod wrote the store's rows in the last 60 minutes, else on Claude Code's login. A `CLAUDE_SECURESTORAGE_CONFIG_DIR` already set wins, and an empty one starts on Claude Code's login. Install and undo: README, **Picks where new sessions start**.
+
 ## 0.5.30-lutso.1 - 2026-11-12
 
 - **A switch waiting for the token in use to refresh says so on the row of the account it goes to**, where it said so only in a short notice and **Use now** looked like a dead button; and **Use now waits while Claude in Chrome connects**, as `account use` does, where the connection's visit moved the session back unsaid.
