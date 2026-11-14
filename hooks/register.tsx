@@ -1460,21 +1460,22 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
   const active = view.accounts.find(a => a.id === view.activeId)
   if (active === undefined) return
   let need: Need | undefined
+  // Claude Code reads the new login only once the switch lands: a turn that dies before then, on a limit or a rejected
+  // sign-in, went out on the login being left, which the switch already leaves. Nothing is marked on the login moved
+  // to; the turn carries on there, once a switch however many turns die before it lands; during a Connect visit, once
+  // the visit ends.
+  const isFable = isFableStop(stop.last_assistant_message)
+  const isSettling = view.pending !== undefined && (await $.clock.now()) - view.pending.since < SETTLE_MS
+  if (isSettling) {
+    if (isConnectingChrome) isCutByVisit = true
+    else if (carriedFor !== view.pending?.since) carryOnAfterSettle($, isFable ? { need: 'fable' } : {})
+    carriedFor = view.pending?.since
+    return
+  }
   if (error === 'authentication_failed') {
     const before = await saveHealth($, active.id, { kind: 'login-needed', why: 'sign-in rejected' })
     if (before?.kind !== 'login-needed') await announceLockout($, active, 'sign-in rejected')
   } else {
-    // Claude Code reads the new login only once the switch lands: a turn that dies before then went out on the
-    // login being left, which the switch already leaves. Nothing is marked on the login moved to; the turn carries on
-    // there, once a switch however many turns die before it lands; during a Connect visit, once the visit ends.
-    const isFable = isFableStop(stop.last_assistant_message)
-    const isSettling = view.pending !== undefined && (await $.clock.now()) - view.pending.since < SETTLE_MS
-    if (isSettling) {
-      if (isConnectingChrome) isCutByVisit = true
-      else if (carriedFor !== view.pending?.since) carryOnAfterSettle($, isFable ? { need: 'fable' } : {})
-      carriedFor = view.pending?.since
-      return
-    }
     // While a switch is unproven, a response since it began names the stop's login by its week, alone, or none at all
     // (a mark is every session's). With no response since, the switch has landed by now: the stop is the login moved
     // to, provisionally, and a settle that finds the switch did not take drops what the stop marked there.
