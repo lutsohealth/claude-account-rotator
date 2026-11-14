@@ -28,6 +28,23 @@ def is_instant(value: object) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and 0 <= value <= MAX_INSTANT_MS
 
 
+def launch_pick(data: dict) -> dict | None:
+    """The stored `launch-slot` pick where it has the shape the mod writes (a slot string, "" for Claude Code's own
+    login, and an id string), else None: the one reading bin/account-rotator-launch and bin/account-rotator-claude share."""
+    pick = data.get("launch-slot")
+    if isinstance(pick, dict) and isinstance(pick.get("slot"), str) and isinstance(pick.get("id"), str):
+        return pick
+    return None
+
+
+def rows_written_within(data: dict, minutes: float, now_ms: float) -> bool:
+    """Whether a session wrote the store's `rows` in the last `minutes`, at or before `now_ms`: a stamp in the future
+    is not recent, since a clock moved back says nothing about a session running now."""
+    rows = data.get("rows")
+    at = rows.get("at") if isinstance(rows, dict) else None
+    return is_instant(at) and 0 <= now_ms - at < minutes * 60_000
+
+
 def clock_text(at_ms: float, zone: tzinfo | None) -> str:
     """HH:MM on a 24-hour clock in `zone`, else in this machine's own: hooks/model.ts clockText."""
     return datetime.fromtimestamp(at_ms / 1000, zone).strftime("%H:%M")

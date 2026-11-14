@@ -1,0 +1,168 @@
+#!/usr/bin/env python3
+"""account-rotator-claude: start a plain `claude` on the account slot the account-rotator mod picked.
+
+Installed as `claude` in a folder ahead of Claude Code's own on PATH (README, "Picks where new sessions start"), it
+sets CLAUDE_SECURESTORAGE_CONFIG_DIR to the slot `account-rotator-launch` would print and execs the next `claude` on
+PATH with every word as given. It takes no option of its own, so `--help` is claude's.
+
+- A command that starts no session (`claude mcp list`, `claude --version`) runs untouched.
+- A value already set wins. An empty one passes through as it is: Claude Code reads it as its own login.
+- The pick counts only while a session of the mod wrote the store's rows in the last 60 minutes, never later than now.
+- A pick of Claude Code's own login leaves the variable unset. CLAUDE_CONFIG_DIR is never set.
+- Any fault in these starts claude on Claude Code's own login, with one line on stderr, and never stops a claude.
+- It runs the first `claude` on PATH that is not itself (by file identity), then the next where one cannot run, then
+  ~/.local/bin/claude; with none, one line on stderr and exit 127.
+"""
+
+# Read as text, so `str | None` is no error on a macOS python3 older than 3.10.
+from __future__ import annotations
+
+import json
+import os
+import sys
+import time
+
+SLOT_VAR = "CLAUDE_SECURESTORAGE_CONFIG_DIR"
+ROTATOR = "account-rotator@claude-account-rotator"
+STORE_MODULE = "account_rotator_store"
+PICK_FRESH_MINUTES = 60
+
+# Which claude commands start a session, as agents-shared's plugins/lutso/scripts/guard_launch_account.py reads them.
+NO_SESSION = frozenset({
+    "plugin", "plugins", "mcp", "auth", "auto-mode", "config", "doctor", "gateway", "import", "install", "logs",
+    "migrate-installer", "project", "purge", "rm", "setup-token", "stop", "kill", "update", "upgrade",
+})
+PRINT_AND_EXIT = frozenset({"-h", "--help", "-v", "--version"})
+PRINT = frozenset({"-p", "--print"})
+TAKES_ONE = frozenset({
+    "--agent", "--agents", "--append-system-prompt", "--autocompact", "--debug-file", "--effort", "--environment",
+    "--fallback-model", "--input-format", "--json-schema", "--max-budget-usd", "--model", "-n", "--name",
+    "--output-format", "--permission-mode", "--permission-prompts", "--plugin-dir", "--plugin-url",
+    "--remote-control-session-name-prefix", "--session-id", "--setting-sources", "--settings", "--system-prompt",
+    "--system-prompt-snapshot",
+})
+TAKES_MAYBE = frozenset({
+    "--cloud", "-d", "--debug", "--from-pr", "--prompt-suggestions", "--remote-control", "-r", "--resume", "--teleport",
+    "-w", "--worktree",
+})
+TAKES_MANY = frozenset({
+    "--add-dir", "--allowedTools", "--allowed-tools", "--betas", "--disallowedTools", "--disallowed-tools", "--file",
+    "--mcp-config", "--tools",
+})
+
+
+def first_operand(args: list[str]) -> str | None:
+    """The first word past claude's options, or None in print mode, where the next word is the prompt."""
+    i = 0
+    while i < len(args):
+        word, i = args[i], i + 1
+        if word == "--":
+            return args[i] if i < len(args) else None
+        if not word.startswith("-"):
+            return word
+        if word in PRINT:
+            return None
+        if "=" in word:
+            continue
+        if word in TAKES_ONE:
+            i += 1
+        elif word in TAKES_MAYBE and i < len(args) and not args[i].startswith("-"):
+            i += 1
+        elif word in TAKES_MANY:
+            while i < len(args) and not args[i].startswith("-"):
+                i += 1
+    return None
+
+
+def starts_session(args: list[str]) -> bool:
+    if PRINT_AND_EXIT.intersection(args):
+        return False
+    first = first_operand(args)
+    return not (first in NO_SESSION or (first == "agents" and "--json" in args))
+
+
+def store_folder() -> str | None:
+    """The folder holding the mod's store module: beside this file in the repo, else the installed mod's `bin/`."""
+    here = os.path.dirname(os.path.realpath(__file__))
+    if os.path.isfile(os.path.join(here, STORE_MODULE + ".py")):
+        return here
+    config = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(os.path.expanduser("~"), ".claude")
+    with open(os.path.join(config, "plugins", "installed_plugins.json"), encoding="utf-8") as f:
+        installs = json.load(f)["plugins"][ROTATOR]
+    for install in installs:
+        if install.get("scope") == "user" and install.get("installPath"):
+            return os.path.join(install["installPath"], "bin")
+    return None
+
+
+def picked_slot() -> str | None:
+    """The slot the mod picked; "" for Claude Code's own login; None when no fresh pick stands."""
+    folder = store_folder()
+    if folder is None:
+        return note("found no user-scope install of the mod")
+    sys.path.insert(0, folder)
+    try:
+        store = __import__(STORE_MODULE)
+    finally:
+        sys.path.remove(folder)
+    try:
+        _, data = store.read(None)
+    except store.StoreError as error:
+        return note(str(error))
+    if not store.rows_written_within(data, PICK_FRESH_MINUTES, time.time() * 1000):
+        return note(f"no session of the mod wrote its rows in the last {PICK_FRESH_MINUTES} minutes")
+    pick = store.launch_pick(data)
+    if pick is None:
+        return note("no pick stored")
+    if pick["slot"] and not os.path.isdir(pick["slot"]):
+        return note(f"the picked slot {pick['slot']} is no folder")
+    return pick["slot"]
+
+
+def note(why: str) -> None:
+    print(f"claude launcher: starting on Claude Code's own login: {why}", file=sys.stderr)
+
+
+def is_this_file(path: str) -> bool:
+    """By file identity, so a hard link, a symlink or another spelling of this file is this file."""
+    try:
+        return os.path.samefile(path, __file__)
+    except OSError:
+        return False
+
+
+def claude_candidates() -> list[str]:
+    """Every runnable `claude` on PATH that is not this file, then Claude Code's install path, in that order."""
+    folders = [folder for folder in os.environ.get("PATH", "").split(os.pathsep) if folder]
+    paths = [os.path.join(folder, "claude") for folder in folders]
+    paths.append(os.path.join(os.path.expanduser("~"), ".local", "bin", "claude"))
+    found: list[str] = []
+    for path in paths:
+        if os.path.isfile(path) and os.access(path, os.X_OK) and not is_this_file(path) and path not in found:
+            found.append(path)
+    return found
+
+
+def main() -> int:
+    args = sys.argv[1:]
+    # An empty value passes through: Claude Code 2.1.325 reads it as its own login, whatever CLAUDE_CONFIG_DIR says.
+    if os.environ.get(SLOT_VAR) is None and starts_session(args):
+        try:
+            slot = picked_slot()
+        except Exception as error:  # noqa: BLE001  (any fault: Claude Code's own login, never a stopped claude)
+            slot = note(f"the launcher failed ({type(error).__name__}: {error})")
+        if slot:
+            os.environ[SLOT_VAR] = slot
+    failures = []
+    for target in claude_candidates():
+        try:
+            os.execv(target, ["claude", *args])
+        except OSError as error:
+            failures.append(f"{target} ({error.strerror})")
+    tried = f"; cannot run {', '.join(failures)}" if failures else ""
+    print(f"claude launcher: found no claude to run on PATH or in ~/.local/bin{tried}; install Claude Code, or remove this launcher's folder from PATH", file=sys.stderr)
+    return 127
+
+
+if __name__ == "__main__":
+    sys.exit(main())
