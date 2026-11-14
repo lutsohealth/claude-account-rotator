@@ -627,7 +627,7 @@ async function useAccount($: Host, target: Account): Promise<{ ok: boolean; mess
   if (hasMoved) return { ok: true, message: `this session now uses account ${name}`, activeId: target.id }
   // switchTo holds a switch for a token about to refresh, and otherwise declines only on a policy refusal.
   if ((await getView($)).held !== undefined) return { ok: true, message: `this session moves to account ${name} in a few minutes, once account ${view.activeId}'s token has refreshed`, activeId: view.activeId }
-  return { ok: false, message: blockedText(isOnNormalLogin(view)), activeId: view.activeId }
+  return { ok: false, message: blockedText(view), activeId: view.activeId }
 }
 
 /** Use now. A switch held for a token about to refresh says so on the pressed row while it waits (view.tsx). */

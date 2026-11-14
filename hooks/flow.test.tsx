@@ -396,6 +396,9 @@ const fresh = (system: World['system'] = 'macOS'): World => ({
 })
 const TWO_LOGINS ={ accounts: [{ id: '1', slot: '', email: 'one@example.com' }, { id: '2', slot: SLOT2, email: 'two@example.com' }] }
 
+/** What a refused switch says in the world's session, on login 1, Claude Code's login. */
+const BLOCKED_ON_LOGIN = blockedText({ ...EMPTY_VIEW, ...TWO_LOGINS, activeId: '1', sessionId: 'session-1' })
+
 /** The props of every Text drawn with a color or on one, its hover with them, in document order. */
 function painted(node: unknown): Record<string, unknown>[] {
   if (typeof node !== 'object' || node === null) return []
@@ -7915,7 +7918,7 @@ test('a policy refusal answers not ok with the blocked text', async ($, on) => {
   w.files[`${REQUESTS}/${N1}.json`] = useRequest(N1, '2', store.get('store-id'), clock.now(), ownMark(w))
   await beat(clock)
   await call.finish()
-  expect(resultOf(w, N1)).toMatchObject({ ok: false, message: blockedText(true), activeId: '1' })
+  expect(resultOf(w, N1)).toMatchObject({ ok: false, message: BLOCKED_ON_LOGIN, activeId: '1' })
 })
 
 test('a switch held for a token refresh answers ok, names the wait, and moves once the token has refreshed', async ($, on) => {
@@ -8050,7 +8053,7 @@ test('a hold in words of the engine\'s own is a refusal too: the reason is not t
   w.files[`${REQUESTS}/${N1}.json`] = useRequest(N1, '2', store.get('store-id'), clock.now(), ownMark(w))
   await untilTick(clock)
   expect(w.envSets, 'the fixture wrote the slot under a hold').toEqual([])
-  expect(resultOf(w, N1)).toMatchObject({ ok: false, message: blockedText(true), activeId: '1' })
+  expect(resultOf(w, N1)).toMatchObject({ ok: false, message: BLOCKED_ON_LOGIN, activeId: '1' })
 })
 
 test('every $.env.set site reads a hold the engine resolves: the boot check, the panel press', async ($, on) => {
@@ -8064,7 +8067,7 @@ test('every $.env.set site reads a hold the engine resolves: the boot check, the
   await start($, clock)
   await clock.advance(60_000)
   const offenders: string[] = []
-  const text = blockedText(true)
+  const text = BLOCKED_ON_LOGIN
   const said = [...w.notices, ...w.toasts].map(String)
   if (!said.some(t => t.includes(text))) offenders.push('checkSwitching (useSlot): the boot check says nothing of the hold')
   const pane = await mountPane($)
