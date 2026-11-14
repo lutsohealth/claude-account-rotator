@@ -3587,8 +3587,8 @@ test('as a session opens it leaves a spent extension account be; the first brows
   const w = fresh()
   w.chrome = { extensions: [SLOT2] }
   await spentTwo(w)
-  const spent = { fiveHour: { pct: 100, resetsAt: '2026-10-12T12:00:00Z' }, at: NOW - 60_000 }
-  const clock = world(on, w, { ...TWO_LOGINS, 'chrome-account': '2', 'chrome-accounts': ['2'], 'reading:2': spent })
+  const spent = { fiveHour: { pct: 100, resetsAt: '2026-10-12T12:00:00Z' }, at: NOW - 60_000, by: '2', v: 1, src: 'body' }
+  const clock = world(on, w, { ...TWO_LOGINS, 'chrome-account': '2', 'chrome-accounts': ['2'], 'usage:2': spent })
   await start($, clock)
   await clock.advance(36_000)
   // A prompt sent now goes out as login 1, which has room: the window stays there.
