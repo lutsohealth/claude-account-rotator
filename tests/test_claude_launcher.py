@@ -25,8 +25,34 @@ STUB = f"""#!/bin/sh
 echo "slot=${{{SLOT_VAR}-{UNSET}}}"
 echo "config=${{CLAUDE_CONFIG_DIR-{UNSET}}}"
 echo "path=$PATH"
-echo "args=$*"
+printf 'args='; for word in "$@"; do printf '%s:%s;' "${{#word}}" "$word"; done; echo
 """
+# Every option of the launcher's TAKES_ONE, TAKES_MAYBE and TAKES_MANY, named here by hand, so an option dropped
+# from a table is a failing test: each takes the next word as its value, never as a subcommand.
+VALUE_OPTIONS = (
+    "--agent", "--agents", "--append-system-prompt", "--autocompact", "--debug-file", "--effort", "--environment",
+    "--fallback-model", "--input-format", "--json-schema", "--max-budget-usd", "--model", "-n", "--name",
+    "--output-format", "--permission-mode", "--permission-prompts", "--plugin-dir", "--plugin-url",
+    "--remote-control-session-name-prefix", "--session-id", "--setting-sources", "--settings", "--system-prompt",
+    "--system-prompt-snapshot",
+    "--cloud", "-d", "--debug", "--from-pr", "--prompt-suggestions", "--remote-control", "-r", "--resume", "--teleport",
+    "-w", "--worktree",
+    "--add-dir", "--allowedTools", "--allowed-tools", "--betas", "--disallowedTools", "--disallowed-tools", "--file",
+    "--mcp-config", "--tools",
+)
+
+
+def words(encoded: str) -> list[str]:
+    """The words the stub printed as `<length>:<word>;` each, so no word can read as two or two as one."""
+    found, i = [], 0
+    while i < len(encoded):
+        colon = encoded.index(":", i)
+        end = colon + 1 + int(encoded[i:colon])
+        if encoded[end] != ";":
+            raise ValueError(f"not the stub's encoding at {i}: {encoded!r}")
+        found.append(encoded[colon + 1:end])
+        i = end + 1
+    return found
 
 
 class LauncherCase(unittest.TestCase):
@@ -78,7 +104,38 @@ class SessionStart(LauncherCase):
                 self.assertEqual(self.launch(*args)["slot"], UNSET)
 
     def test_every_argument_reaches_claude_as_given(self) -> None:
-        self.assertEqual(self.launch("-p", "reply OK", "--settings", "{}")["args"], "-p reply OK --settings {}")
+        self.assertEqual(words(self.launch("-p", "reply OK", "--settings", "{}")["args"]), ["-p", "reply OK", "--settings", "{}"])
+
+    def test_each_word_reaches_claude_whole_and_apart(self) -> None:
+        """Review of #81 and of #83 F1: a space, a delimiter or an empty word never joins or splits words."""
+        for given in (["-p", "a b"], ["-p", "a", "b"], ["-p", "a><b"], ["-p", "a:1;b"], ["-p", ""]):
+            with self.subTest(given=given):
+                self.assertEqual(words(self.launch(*given)["args"]), given)
+
+    def test_an_option_value_that_reads_like_a_subcommand_still_gets_the_pick(self) -> None:
+        """Review of #83 F2: every option the launcher's tables list takes the next word as its value."""
+        for option in VALUE_OPTIONS:
+            with self.subTest(option=option):
+                self.assertEqual(self.launch(option, "mcp")["slot"], str(self.slot))
+
+    def test_help_starts_no_session(self) -> None:
+        for args in (("-h",), ("--help",), ("mcp", "--help")):
+            with self.subTest(args=args):
+                self.assertEqual(self.launch(*args)["slot"], UNSET)
+
+    def test_agents_starts_a_session_unless_it_prints_json(self) -> None:
+        self.assertEqual(self.launch("agents", "--json")["slot"], UNSET)
+        self.assertEqual(self.launch("agents")["slot"], str(self.slot))
+
+    def test_the_value_of_resume_is_not_read_as_a_subcommand(self) -> None:
+        for args in (("--resume", "mcp"), ("-r", "auth"), ("--resume",)):
+            with self.subTest(args=args):
+                self.assertEqual(self.launch(*args)["slot"], str(self.slot))
+
+    def test_a_word_after_a_double_dash_is_an_operand_even_when_it_starts_with_a_dash(self) -> None:
+        """`claude -- -x mcp` starts a session: `-x mcp` is the prompt, not an option and a subcommand."""
+        self.assertEqual(self.launch("--", "-x", "mcp")["slot"], str(self.slot))
+        self.assertEqual(self.launch("--", "mcp")["slot"], UNSET)
 
 
 class ValueAlreadySet(LauncherCase):
@@ -120,6 +177,12 @@ class StalePick(LauncherCase):
                 self.write_store(**store)
                 self.assertEqual(self.launch()["slot"], UNSET)
 
+    def test_no_store_file_starts_on_the_login_and_names_the_store_error(self) -> None:
+        (self.home / ".claude" / "plugins" / "store" / STORE).unlink()
+        seen = self.launch()
+        self.assertEqual(seen["slot"], UNSET)
+        self.assertIn("starting on Claude Code's own login: no account-rotator store found", seen["stderr"])
+
 
 class SystemLogin(LauncherCase):
     def test_a_pick_of_the_login_leaves_both_variables_unset(self) -> None:
@@ -143,6 +206,36 @@ class InstalledCopy(LauncherCase):
 
     def test_it_finds_the_store_through_the_installed_mod(self) -> None:
         self.assertEqual(self.launch(launcher=self.copy, path=f"{self.own}:{self.stub_bin}:/usr/bin:/bin")["slot"], str(self.slot))
+
+    def test_a_mod_missing_from_the_install_record_starts_claude_on_the_login(self) -> None:
+        """No record, a record without the mod, or only a project-scope install: claude still runs, on the login."""
+        record = self.home / ".claude" / "plugins" / "installed_plugins.json"
+        cases = {
+            "no record file": None,
+            "the mod not listed": {"plugins": {}},
+            "only a project install": {"plugins": {"account-rotator@claude-account-rotator": [
+                {"scope": "project", "installPath": str(ROOT)}]}},
+        }
+        for name, installs in cases.items():
+            with self.subTest(name):
+                if installs is None:
+                    record.unlink(missing_ok=True)
+                else:
+                    record.write_text(json.dumps(installs), encoding="utf-8")
+                seen = self.launch(launcher=self.copy, path=f"{self.own}:{self.stub_bin}:/usr/bin:/bin")
+                self.assertEqual(seen["slot"], UNSET)
+                self.assertIn("starting on Claude Code's own login", seen["stderr"])
+
+    def test_the_user_install_is_found_wherever_it_stands_in_the_record(self) -> None:
+        """Review of #83 F3: a record that lists a project install before or after the user one."""
+        record = self.home / ".claude" / "plugins" / "installed_plugins.json"
+        project = {"scope": "project", "installPath": str(self.home / "no-such-install")}
+        user = {"scope": "user", "installPath": str(ROOT)}
+        for entries in ([project, user], [user, project]):
+            with self.subTest(first=entries[0]["scope"]):
+                record.write_text(json.dumps({"plugins": {"account-rotator@claude-account-rotator": entries}}), encoding="utf-8")
+                seen = self.launch(launcher=self.copy, path=f"{self.own}:{self.stub_bin}:/usr/bin:/bin")
+                self.assertEqual(seen["slot"], str(self.slot))
 
     def test_its_own_folder_twice_on_path_runs_the_next_claude_and_keeps_path_whole(self) -> None:
         path = f"{self.own}:{self.own}/:{self.stub_bin}:/usr/bin:/bin"
