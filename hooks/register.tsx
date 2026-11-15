@@ -992,8 +992,9 @@ const SELF = `module-${Math.random().toString(36).slice(2, 10)}`
 /**
  * How a check may read a login's usage. `claimed`: the schedule says it is due and this session claimed it.
  * `force`: a stop, a /login or a sign-in asks, so it reads unless a back-off stands, another session's read is under
- * way, or the last good read is under a minute old. `since`: a settling switch, read once unless a good read came
- * after the switch began. `none`: the sign-in only, no usage call.
+ * way, or the last good read is under a minute old. `since`: read unless a back-off stands, another session's read is
+ * under way, or a good read came after `since`: a settling switch passes when it began, the carry-on stop passes now.
+ * `none`: the sign-in only, no usage call.
  */
 type UsageGate = 'claimed' | 'force' | 'none' | { since: number }
 
@@ -1460,26 +1461,29 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
   const active = view.accounts.find(a => a.id === view.activeId)
   if (active === undefined) return
   let need: Need | undefined
+  // Claude Code reads the new login only once the switch lands: a turn that dies before then, on a limit or a rejected
+  // sign-in, went out on the login being left, which the switch already leaves. Nothing is marked on the login moved
+  // to; the turn carries on there, once a switch however many turns die before it lands; during a Connect visit, once
+  // the visit ends. A rejected sign-in after a response with the moved-to login's week went out on that login: the
+  // switch has landed.
+  const isFable = isFableStop(stop.last_assistant_message)
+  const since = view.pending?.since
+  const hasResponseSince = since !== undefined && lastMeasured !== undefined && lastMeasured.at > since
+  const isProvenRejection = error === 'authentication_failed' && hasResponseSince && provenStopper(view, lastMeasured?.reading)?.id === active.id
+  const isSettling = view.pending !== undefined && (await $.clock.now()) - view.pending.since < SETTLE_MS
+  if (isSettling && !isProvenRejection) {
+    if (isConnectingChrome) isCutByVisit = true
+    else if (carriedFor !== view.pending?.since) carryOnAfterSettle($, isFable ? { need: 'fable' } : {})
+    carriedFor = view.pending?.since
+    return
+  }
   if (error === 'authentication_failed') {
     const before = await saveHealth($, active.id, { kind: 'login-needed', why: 'sign-in rejected' })
     if (before?.kind !== 'login-needed') await announceLockout($, active, 'sign-in rejected')
   } else {
-    // Claude Code reads the new login only once the switch lands: a turn that dies before then went out on the
-    // login being left, which the switch already leaves. Nothing is marked on the login moved to; the turn carries on
-    // there, once a switch however many turns die before it lands; during a Connect visit, once the visit ends.
-    const isFable = isFableStop(stop.last_assistant_message)
-    const isSettling = view.pending !== undefined && (await $.clock.now()) - view.pending.since < SETTLE_MS
-    if (isSettling) {
-      if (isConnectingChrome) isCutByVisit = true
-      else if (carriedFor !== view.pending?.since) carryOnAfterSettle($, isFable ? { need: 'fable' } : {})
-      carriedFor = view.pending?.since
-      return
-    }
     // While a switch is unproven, a response since it began names the stop's login by its week, alone, or none at all
     // (a mark is every session's). With no response since, the switch has landed by now: the stop is the login moved
     // to, provisionally, and a settle that finds the switch did not take drops what the stop marked there.
-    const since = view.pending?.since
-    const hasResponseSince = since !== undefined && lastMeasured !== undefined && lastMeasured.at > since
     const owner = since === undefined || !hasResponseSince ? active : provenStopper(view, lastMeasured?.reading)
     const isProvisional = since !== undefined && !hasResponseSince
     // The landing can lag the settle: the turn the carry-on starts as the settle ends can still go out on the login

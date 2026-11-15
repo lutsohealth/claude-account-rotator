@@ -9221,6 +9221,53 @@ test('a Fable stop in the 35 seconds after a switch marks nothing on the account
   expect(await fableRows($)).toEqual([`${longBar(100)} 100%`, `${longBar(10)} 10%`])
 })
 
+// Upstream b90ff1b: a turn that dies in the 35 seconds after a switch may have gone out on the login left, a rejected sign-in too.
+test('a rejected sign-in in the 35 seconds after a switch marks nothing on the account moved to, and the switch carries on once', async ($, on) => {
+  const { w, store, clock } = await fableMoved($, on)
+  await clock.advance(5_000)
+  await $.classic.StopFailure({ error: 'authentication_failed' })
+  await clock.settle()
+  expect((store.get('health:2') as { kind?: string } | undefined)?.kind).not.toBe('login-needed')
+  expect(slots(w)).toEqual([SLOT2])
+  await clock.advance(36_000)
+  expect(w.submitted).toHaveLength(1)
+})
+
+// Review codex-r2 A1 [AUTH-SETTLE], the instance: a response with the moved-to login's week proves the switch took, so a
+// rejected sign-in after it, still inside the 35 seconds, is that login's.
+test('Review codex-r2 A1: a target response during settle makes its rejected sign-in belong to the target', async ($, on) => {
+  const { w, store, clock } = await fableMoved($, on)
+  await clock.advance(5_000)
+  w.limits = limitsOf(10, 30, OTHER_WEEK)
+  await respond($, clock, w)
+  await $.classic.StopFailure({ error: 'authentication_failed' })
+  await clock.settle()
+  expect((store.get('health:2') as { kind?: string } | undefined)?.kind, 'A1: a target response already identified account 2; a real rejected sign-in must mark it sign-in-needed during settle').toBe('login-needed')
+})
+
+// Review codex-r2 A1 [AUTH-SETTLE], the class: target-proven rejected sign-ins must pass the common settle return.
+test('Review codex-r2 A1 class: target-proven rejected sign-ins must pass the common settle return', async ($, on) => {
+  const { w, store, clock } = await fableMoved($, on)
+  await clock.advance(5_000)
+  w.limits = limitsOf(10, 30, OTHER_WEEK)
+  await respond($, clock, w)
+  await $.classic.StopFailure({ error: 'authentication_failed' })
+  await clock.settle()
+  const offenders = [] as string[]
+  if ((store.get('health:2') as { kind?: string } | undefined)?.kind !== 'login-needed') offenders.push('settling switch after a target response')
+  expect(offenders, 'Offender: settling switch after a target response. Fix: use response ownership before the blanket settle return for authentication_failed; the same settle return is also used during Connect visits.').toEqual([])
+})
+
+// Review of 3f4e021 [UNPINNED-AUTH-AFTER-SETTLE]: past the 35 seconds, the switch has landed, so a rejected sign-in is the
+// moved-to login's though no response has proved the switch yet.
+test('a rejected sign-in past the 35 seconds after a switch, before any response, sets the account moved to as needing a sign-in', async ($, on) => {
+  const { store, clock } = await fableMoved($, on)
+  await clock.advance(36_000)
+  await $.classic.StopFailure({ error: 'authentication_failed' })
+  await clock.settle()
+  expect((store.get('health:2') as { kind?: string } | undefined)?.kind).toBe('login-needed')
+})
+
 // Measured on vox (2026-11-12 11:48Z): the turn the mod's own carry-on started, sent as the settle ended, still went
 // out on the login left and died on its Fable week; it marked the login moved to, whose usage read 35% that week.
 for (const isReadOld of [false, true]) test(`a Fable stop answering the mod's own carry-on just past the settle, before any response, marks nothing on the account moved to, whose read ${isReadOld ? 'over' : 'under'} a minute old shows Fable room, and carries on once more`, async ($, on) => {
@@ -9432,18 +9479,23 @@ test('Review codex-r2 R1: a good target read after switch does not turn a stale 
   expect(callsWith(w, 'tok-2')).toBe(calls + 1)
 })
 
-// Review codex-r2 R1 [POST-SWITCH-READ], the class: whoever made the read after the switch, a finished read leaves no
-// claim; a live claim is the codex-r1 other-claim row, which marks. One switch clears once, so each row is its own session.
-for (const site of ['scheduled read', 'another session read'] as const) {
-  test(`Review codex-r2 R1 class: a ${site} of the target after the switch does not let a stale carry-on stop mark it`, async ($, on) => {
-    const { store, clock } = await fableMoved($, on)
+// Review codex-r2 R1 [POST-SWITCH-READ], the class: a finished read of the target after the switch, by any session,
+// leaves the same keys and no claim (a live claim is the codex-r1 other-claim row, which marks). The stop reads the
+// target again, as a stored body is no proof: it clears while the endpoint reads room, and stands once it reads the
+// week spent. One switch clears once, so each row is its own session.
+for (const [site, fable] of [['the endpoint still reads Fable room', 10], ['the endpoint reads the Fable week spent since', 100]] as const) {
+  test(`Review codex-r2 R1 class: a good read of the target stored after the switch is read again by the carry-on stop: ${site}`, async ($, on) => {
+    const { w, store, clock } = await fableMoved($, on)
     await clock.advance(35_500)
     const { claim: _claim, ...due } = store.get('usage-due:2') as { next: number; fails: number; at?: number; claim?: string }
     store.set('usage:2', { ...(store.get('usage:2') as object), at: NOW + 10_000, src: 'body' })
     store.set('usage-due:2', { ...due, at: NOW + 10_000 })
+    w.usage['tok-2'] = [10, 30, fable]
     await $.classic.StopFailure(FABLE_STOP)
     await clock.settle()
-    expect([site, store.get('fable-mark:2')], `Offender: ${site}. Fix: re-read the target before marking; a stored body is no proof (keepFable).`).toEqual([site, undefined])
+    await clock.advance(36_000)
+    const isCleared = fable < 100
+    expect([site, store.get('fable-mark:2'), w.submitted.length], `Offender: ${site}. Fix: re-read the target before judging the stop; a stored body is no proof (keepFable).`).toEqual([site, undefined, isCleared ? 2 : 1])
   })
 }
 
