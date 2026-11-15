@@ -248,9 +248,16 @@ function isAccount(value: unknown): value is Account {
   return typeof id === 'string' && typeof slot === 'string'
 }
 
+/** An account as read from the store: only a string is an email, so one stored as null or a number is no email. */
+function withEmailOnlyIfString(account: Account): Account {
+  if (account.email === undefined || typeof account.email === 'string') return account
+  const { email: _notAnEmail, ...rest } = account
+  return rest
+}
+
 async function loadAccounts($: Host): Promise<Account[]> {
   const stored = await $.store.get('accounts')
-  return Array.isArray(stored) ? stored.filter(isAccount) : []
+  return Array.isArray(stored) ? stored.filter(isAccount).map(withEmailOnlyIfString) : []
 }
 
 async function saveAccounts($: Host, accounts: Account[]): Promise<void> {
@@ -592,7 +599,7 @@ async function applyRequest($: Host, request: RotatorRequest): Promise<{ ok: boo
   if (request.kind === 'add') return adoptSlot($, request.slot)
   if (request.kind === 'continue-text') return setContinueText($, request.text)
   const target = (await getView($)).accounts.find(a => a.id === request.id)
-  if (target === undefined) return { ok: false, message: `${request.id} names no account listed in this store` }
+  if (target === undefined) return { ok: false, message: `${labelOf([], request.id)} is not listed in this store` }
   if (request.kind === 'use') return useAccount($, target)
   await setLaunchOn($, `account:${request.id}`)
   const { text, pickId } = await pickAnswer($)
@@ -1380,6 +1387,9 @@ async function settlePending($: Host, isResponse: boolean): Promise<void> {
     if (from !== undefined) await checkAccount($, from, { since: pending.since })
     if (!(await isStill())) return
     const after = await getView($)
+    // Another session may have removed the account moved to meanwhile: it is then named by its id, never "?".
+    const movedTo = accounts.find(a => a.id === pending.id)
+    const named = movedTo === undefined ? labelOf(accounts, pending.id) : claudeAccount(movedTo, accounts)
     // Minutes on, a switch has landed if it ever will: only a response that is the old login's alone points back.
     if (isTarget(after) && isSource(after)) {
       await proveSwitch($, pending.id)
@@ -1389,7 +1399,7 @@ async function settlePending($: Host, isResponse: boolean): Promise<void> {
       // No response proved either login: a stop marked on the one moved to is a guess, and every session reads marks.
       await undoProvisionalStop($)
       await setView($, v => ({ ...v, pending: undefined }))
-      tell($, `The switch to ${claudeAccount(accounts.find(a => a.id === pending.id), accounts)} has not shown in responses.`)
+      tell($, `The switch to ${named} has not shown in responses.`)
       return
     }
     untaken.add(pending.id)
@@ -1404,7 +1414,7 @@ async function settlePending($: Host, isResponse: boolean): Promise<void> {
     await setView($, v => ({ ...v, activeId: from.id, pending: undefined }))
     tell(
       $,
-      `The switch to ${claudeAccount(accounts.find(a => a.id === pending.id), accounts)} did not take: responses still use ${label(from, accounts)}, so it shows in use again. ` +
+      `The switch to ${named} did not take: responses still use ${label(from, accounts)}, so it shows in use again. ` +
         `The rotation leaves ${labelOf(accounts, pending.id)} be in this session; Use now tries it again.`,
     )
   }

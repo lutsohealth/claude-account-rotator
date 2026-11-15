@@ -7,7 +7,7 @@ import { companyOf, identityFromStatus, planName } from './model'
 import { laterMark, spentMark, withFableMark } from './model'
 import { EMPTY_VIEW, USAGE_IDLE_MS, fitRow, hasRoom, rowOf, rowsOf, rowText, storedLine, storedLineText } from './model'
 import ROWS_FIXTURE from '../tests/fixtures/rows'
-import { REQUEST_TTL_MS, holdsLogin, requestFrom, requestsDir, slotNumber } from './model'
+import { REQUEST_TTL_MS, holdsLogin, isLoginOf, sameLogin, requestFrom, requestsDir, slotNumber } from './model'
 import { USAGE_BACKOFF_MAX_MS, USAGE_CLAIM_MS, USAGE_CLAIM_WAIT_MS, USAGE_EARLY_MS, WRITER_VERSION, afterUsage, claimDueReads, gatingDue, isUsageDue, mayForceUsage, mayReadSince, renewClaim, retryAfterFrom, usageDueFrom } from './model'
 import { DEFAULT_FOOTER, availableNow, claudeAccount, blockedAdvice, braille, browsersFrom, chromeNote, continueTextFrom, counted, fiveHourLimitFrom, credentialFrom, credentialsFile, fableMark, fableSpentNotice, fableStay, footerStyleFrom, healthOf, identityFromProfile, isFableSpent, isFableStop, isNoBrowser, isPolicyRefusal, keepFable, keychainItem, label, legacyMark, markFrom, nextReset, pickTarget, pie, readingFromUsage, restartSteps, rotateToFrom, shouldLeave, roomColor, stuckText, windowPct, withMark, withWeekMark } from './model'
 
@@ -150,6 +150,8 @@ test('new sessions start on the login the setting picks among those with room on
   expect(on('account:3')).toMatchObject({ id: '3', why: 'you picked it' })
   expect(on('account:4')).toMatchObject({ id: '2', why: 'account 4 (not signed in yet) has no room, and it is the next with room' })
   expect(on('account:1')?.id).toBe('2')
+  // puma-9arph.28 item 2: a named id the list no longer holds opens its reason as "account <id>", never the bare id.
+  expect(on('account:9')).toMatchObject({ id: '2', why: 'account 9 is not on the list, and it is the first with room' })
   expect(pickLaunch(view({ '1': [100, 10], '2': [10, 100] }), NOW)).toBeUndefined()
   expect(['room', 'nonzero', 'reset', 'account:3', 'account:', 'other', 7].map(launchOnFrom)).toEqual(['room', 'nonzero', 'reset', 'account:3', 'room', 'room', 'room'])
 })
@@ -1199,6 +1201,10 @@ function rowView(change: Partial<View> = {}, account: View['accounts'][number] =
 }
 const rowLines = (v: View, timeZone = TALLINN) => rowText(rowOf(v, v.accounts[0] ?? ANDRES, ROW_NOW, timeZone))
 const OPERATOR_LINE_2 = 'Used ▰▰▰▱▱▱▱▱▱▱  31% Fable ▰▰▰▰▱▱▱▱▱▱  38%  resets 2d 3h 14m'
+/** A line with no Fable part keeps the Fable part's cells blank, so its "resets" stands where OPERATOR_LINE_2's does (puma-9arph.28). */
+const NO_FABLE_GAP = ' '.repeat(24)
+const PRO_LINE_2 = `Used ▰▰▰▱▱▱▱▱▱▱  31%${NO_FABLE_GAP}resets 2d 3h 14m`
+const FIVE_HOUR_50 = `5h   ▰▰▰▰▰▱▱▱▱▱  50%${NO_FABLE_GAP}resets 1h 20m`
 
 test('the row is the operator\'s two lines: who, Company and plan, the last good read\'s time, then the week and Fable used', () => {
   expect(rowLines(rowView())).toEqual(['andres@lutsohealth.com · Company · Ultra  updated 18:34', OPERATOR_LINE_2])
@@ -1217,11 +1223,28 @@ test('the usage line pads each percent to three cells, so Fable and resets stand
   expect(new Set(lines.map(line => line.indexOf('resets'))).size).toBe(1)
 })
 
+// puma-9arph.28 item 3: the lines line up across plans too: a Pro row has no Fable cells, and "5h" is shorter than "Used".
+test('a Pro row, a Max row and a 5-hour line start their bars and "resets" at one column each', () => {
+  const pro = { ...ANDRES, plan: 'pro', tier: undefined }
+  const proLines = rowLines(rowView({ readings: { '1': { sevenDay: { pct: 31, resetsAt: ROW_WEEK_END }, noFiveHour: true, at: READ_AT, by: '1' } } }, pro))
+  const max = { ...ANDRES, tier: 'default_claude_max_5x' }
+  const maxLines = rowLines(
+    rowView({ readings: { '1': { sevenDay: { pct: 31, resetsAt: ROW_WEEK_END }, fable: { pct: 38, resetsAt: ROW_WEEK_END }, fiveHour: { pct: 50, resetsAt: ahead(0, 1, 20) }, at: READ_AT, by: '1' } }, noFiveHour: { '1': false } }, max),
+  )
+  const lines = [proLines[1] ?? '', maxLines[1] ?? '', maxLines[2] ?? '']
+  expect(lines.map(line => [line.search(/[▰▱]/), line.indexOf('resets')])).toEqual([[5, 44], [5, 44], [5, 44]])
+  // A 5-hour window whose percent is unread draws its dash in the bar column too (RULING 5918).
+  const unread = rowLines(
+    rowView({ readings: { '1': { sevenDay: { pct: 31, resetsAt: ROW_WEEK_END }, fable: { pct: 38, resetsAt: ROW_WEEK_END }, fiveHour: { resetsAt: ahead(0, 1, 20) } as never, at: READ_AT, by: '1' } }, noFiveHour: { '1': false } }, max),
+  )[2] ?? ''
+  expect(unread.indexOf('–')).toBe(5)
+})
+
 test('the 5-hour line pads its percent the same way', () => {
   const max = { ...ANDRES, tier: 'default_claude_max_5x' }
   const five = (pct: number) =>
     rowLines(rowView({ readings: { '1': { sevenDay: { pct: 31, resetsAt: ROW_WEEK_END }, fiveHour: { pct, resetsAt: ahead(0, 1, 20) }, at: READ_AT, by: '1' } }, noFiveHour: { '1': false } }, max))[2]
-  expect([five(4), five(50), five(100)]).toEqual(['5h ▱▱▱▱▱▱▱▱▱▱   4%  resets 1h 20m', '5h ▰▰▰▰▰▱▱▱▱▱  50%  resets 1h 20m', '5h ▰▰▰▰▰▰▰▰▰▰ 100%  resets 1h 20m'])
+  expect([five(4), five(50), five(100)]).toEqual([`5h   ▱▱▱▱▱▱▱▱▱▱   4%${NO_FABLE_GAP}resets 1h 20m`, FIVE_HOUR_50, `5h   ▰▰▰▰▰▰▰▰▰▰ 100%${NO_FABLE_GAP}resets 1h 20m`])
 })
 
 test('a dash takes the cells of a bar and its percent, so what follows keeps its column, and one that ends a line leaves no blank after it', () => {
@@ -1350,7 +1373,7 @@ test('on Max and Ultra a Fable week no body listed is a dash; on other plans the
   const noFable = { ...v.readings['1'], fable: undefined } as View['readings'][string]
   expect(rowLines({ ...v, readings: { '1': noFable } })[1]).toBe('Used ▰▰▰▱▱▱▱▱▱▱  31% Fable –                resets 2d 3h 14m')
   const pro = { ...ANDRES, plan: 'pro', tier: undefined }
-  expect(rowLines({ ...rowView({}, pro), readings: { '1': noFable }, noFiveHour: {} })).toEqual(['andres@lutsohealth.com · Company · Pro  updated 18:34', 'Used ▰▰▰▱▱▱▱▱▱▱  31%  resets 2d 3h 14m'])
+  expect(rowLines({ ...rowView({}, pro), readings: { '1': noFable }, noFiveHour: {} })).toEqual(['andres@lutsohealth.com · Company · Pro  updated 18:34', PRO_LINE_2])
 })
 
 test('a Fable week that resets at another time than the week says its own reset after the week\'s', () => {
@@ -1376,7 +1399,7 @@ test('a login with a 5-hour window in its counted reading has a third line for i
   const max = { ...ANDRES, tier: 'default_claude_max_5x' }
   const r = { sevenDay: { pct: 31, resetsAt: ROW_WEEK_END }, fable: { pct: 38, resetsAt: ROW_WEEK_END }, fiveHour: { pct: 50, resetsAt: ahead(0, 1, 20) }, at: READ_AT, by: '1' }
   const v = rowView({ readings: { '1': r }, noFiveHour: { '1': false } }, max)
-  expect(rowLines(v)).toEqual(['andres@lutsohealth.com · Company · Max  updated 18:34', OPERATOR_LINE_2, '5h ▰▰▰▰▰▱▱▱▱▱  50%  resets 1h 20m'])
+  expect(rowLines(v)).toEqual(['andres@lutsohealth.com · Company · Max  updated 18:34', OPERATOR_LINE_2, FIVE_HOUR_50])
   expect(rowLines(rowView())).toHaveLength(2)
 })
 
@@ -1446,10 +1469,15 @@ test('with no Company the row is the same but for line 1, at 82 and at 64', () =
 test('a failed read\'s longer line 1 moves the buttons to the end of line 2 where they fit, else to a line of their own', () => {
   const v = rowView({ checkErrors: { '1': HTTP_429 } })
   expect(fitted(v, 82)).toEqual({ lines: [FAILED_L1, OPERATOR_LINE_2, ''], end: 'own' })
-  // A Pro login's line 2 has no Fable part, so it leaves room for the buttons; a dash takes a bar's cells, so it does not.
+  // A Pro login's line 2 keeps the Fable part's cells blank so its resets line up (puma-9arph.28), so at 82 its
+  // buttons take a line of their own, as a Max row's do.
   const pro = { ...ANDRES, plan: 'pro', tier: undefined }
   const short = rowView({ checkErrors: { '1': HTTP_429 }, readings: { '1': { sevenDay: { pct: 31, resetsAt: ROW_WEEK_END }, noFiveHour: true, at: READ_AT, by: '1' } } }, pro)
-  expect(fitted(short, 82)).toEqual({ lines: ['andres@lutsohealth.com · Company · Pro  18:39 Failed to update (HTTP 429)', 'Used ▰▰▰▱▱▱▱▱▱▱  31%  resets 2d 3h 14m'], end: 1 })
+  expect(fitted(short, 82)).toEqual({ lines: ['andres@lutsohealth.com · Company · Pro  18:39 Failed to update (HTTP 429)', PRO_LINE_2, ''], end: 'own' })
+  // puma-9arph.28 item 4: a Max failed row whose usage lists no Fable week draws a dash in the Fable cells, and fits at 82.
+  const max = { ...ANDRES, tier: 'default_claude_max_5x' }
+  const dash = rowView({ checkErrors: { '1': HTTP_429 }, readings: { '1': { sevenDay: { pct: 31, resetsAt: ROW_WEEK_END }, at: READ_AT, by: '1' } } }, max)
+  expect(fitted(dash, 82)).toEqual({ lines: ['andres@lutsohealth.com · Company · Max  18:39 Failed to update (HTTP 429)', 'Used ▰▰▰▱▱▱▱▱▱▱  31% Fable –                resets 2d 3h 14m', ''], end: 'own' })
 })
 
 test('a line 1 wider than the pane cuts the cause, then the Company, then the email\'s middle, never the state', () => {
@@ -1472,8 +1500,8 @@ test('a login with no reading, no Fable row, a 5-hour window or a sign-in needed
   const max = { ...ANDRES, tier: 'default_claude_max_5x' }
   const five = rowView({ readings: { '1': { sevenDay: { pct: 31, resetsAt: ROW_WEEK_END }, fable: { pct: 38, resetsAt: ROW_WEEK_END }, fiveHour: { pct: 50, resetsAt: ahead(0, 1, 20) }, at: READ_AT, by: '1' } }, noFiveHour: { '1': false } }, max)
   const maxL1 = 'andres@lutsohealth.com · Company · Max  updated 18:34'
-  expect(fitted(five, 82)).toEqual({ lines: [maxL1, OPERATOR_LINE_2, '5h ▰▰▰▰▰▱▱▱▱▱  50%  resets 1h 20m'], end: 0 })
-  expect(fitted(five, 64)).toEqual({ lines: [maxL1, OPERATOR_LINE_2, '', '5h ▰▰▰▰▰▱▱▱▱▱  50%  resets 1h 20m'], end: 'own' })
+  expect(fitted(five, 82)).toEqual({ lines: [maxL1, OPERATOR_LINE_2, FIVE_HOUR_50], end: 0 })
+  expect(fitted(five, 64)).toEqual({ lines: [maxL1, OPERATOR_LINE_2, '', FIVE_HOUR_50], end: 'own' })
   const signIn = rowView({ health: { '1': { kind: 'login-needed', why: 'sign-in expired' } } })
   expect(fitted(signIn, 82)).toEqual({ lines: ['andres@lutsohealth.com · Company · Ultra  ⚠ sign in needed', OPERATOR_LINE_2, ''], end: 'own' })
   expect(fitted(signIn, 64)).toEqual({ lines: ['andres@lutsohealth.com · Company · Ultra  ⚠ sign in needed', OPERATOR_LINE_2, ''], end: 'own' })
@@ -1607,7 +1635,7 @@ test('no stored row changes with the writer\'s clock while no reset passes, at a
 // Review C10-R1 F4 (Opus) [ROW-AT-ANOTHER-NOW]: a stored reset read after it passed says so, as bin/account-rotator does.
 test('a stored reset read after it passed says passed, not 0m', () => {
   const line3 = rowsOf(FIXTURE_VIEW, ROWS_FIXTURE.now).find(r => r.id === '2')?.lines[2] ?? []
-  expect(storedLineText(line3, ROWS_FIXTURE.now + 2 * 3_600_000, TALLINN)).toBe('5h ▰▰▰▰▰▱▱▱▱▱  50%  resets passed')
+  expect(storedLineText(line3, ROWS_FIXTURE.now + 2 * 3_600_000, TALLINN)).toBe(`5h   ▰▰▰▰▰▱▱▱▱▱  50%${NO_FABLE_GAP}resets passed`)
 })
 
 test('a stored line read a minute later counts its resets down, and read in UTC says its times in UTC', () => {
@@ -1687,6 +1715,13 @@ test('an account holds the login a request read: another slot, email or organiza
     ['an organization the store no longer holds', A, { id: '2', slot: A.slot, email: A.email }, false],
   ]
   expect(cases.filter(([, seen, account, expected]) => holdsLogin(seen, account) !== expected).map(([name]) => name)).toEqual([])
+})
+
+// puma-9arph.28 item 5: the store is JSON another session wrote, so an email stored as null is no email, not one shared.
+test('two stored accounts whose email is null are two logins to sameLogin and isLoginOf', () => {
+  const [one, two] = JSON.parse('[{"id":"1","slot":"/slot/1","email":null},{"id":"2","slot":"/slot/2","email":null}]')
+  expect(sameLogin(one, two)).toBe(false)
+  expect(isLoginOf(one, two)).toBe(false)
 })
 
 test('the requests live in the Claude config folder of the session, CLAUDE_CONFIG_DIR or ~/.claude', () => {

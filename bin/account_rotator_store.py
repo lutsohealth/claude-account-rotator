@@ -39,9 +39,9 @@ def label(account: dict, accounts: list) -> str:
 
 
 def label_of(accounts: list, account_id: object) -> str:
-    """The account `account_id` names, by label; the bare id where `accounts` holds none."""
+    """The account `account_id` names, by label; "account <id>" where `accounts` holds none, as hooks/model.ts labelOf."""
     found = next((a for a in accounts if isinstance(a, dict) and a.get("id") == account_id), None)
-    return str(account_id) if found is None else label(found, accounts)
+    return f"account {account_id}" if found is None else label(found, accounts)  # id fallback
 
 
 def launch_pick(data: dict) -> dict | None:
