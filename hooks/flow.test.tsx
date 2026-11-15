@@ -2679,7 +2679,7 @@ test('a /login in a session on login 3 that signs in login 2\'s account leaves 3
   await $.command.run(LOGIN)
   await clock.settle()
   const band = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'AbovePrompt', props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 120, scroll: { offset: 0, bodyRows: 9 }, view: {} } })
-  expect(await band.find({ text: /account 3 \(three@example.com\) needs a sign-in \(signed in as account 2 now\)/ })).toBeDefined()
+  expect(await band.find({ text: /Claude account three@example.com needs a sign-in \(signed in as two@example.com now\)/ })).toBeDefined()
   await band.unmount()
   // The session moves off it, to the login the rotation picks: 2, with the most room.
   expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
@@ -3225,7 +3225,7 @@ test('a /login on Claude Code\'s login that signs in a Team seat on the list lea
   w.owners['tok-2b'] = 'two@example.com'
   await $.command.run(LOGIN)
   await clock.settle()
-  expect(w.toasts.filter(t => /^Claude account 1 \(one@example.com · Org\) needs a sign-in \(signed in as account 2 now\)/.test(t))).toHaveLength(1)
+  expect(w.toasts.filter(t => /^Claude account one@example.com needs a sign-in \(signed in as two@example.com now\)/.test(t))).toHaveLength(1)
   expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
 })
 
@@ -7338,20 +7338,20 @@ test('the pane asks the dock for the operator\'s 82-cell row and the 4 cells of 
   expect(PANE_COLUMNS).toBe(82 + 4)
 })
 
-// Mutation P1 survived: a bar is drawn in the color of the room its account has left.
-test('a row\'s bars are drawn in the color of the room left: login 1\'s week, 30% used, in the color of 70% left', async ($, on) => {
+// The operator's order of 2026-11-14 20:17Z: "Remove colors from the percent bars showing usage".
+test('a row\'s bars are drawn with no color: login 1\'s week, 30% used, plain', async ($, on) => {
   await rowsWorld($, on)
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: { ...PANE_PROPS, bodyColumns: 86 } })
-  const colors: unknown[] = []
+  const styles: unknown[] = []
   const walk = (n: unknown): void => {
     if (typeof n !== 'object' || n === null) return
     const { type, props, children } = n as DrawnNode
-    if (type === 'Text' && shownText(n) === '▰▰▰▱▱▱▱▱▱▱ 30%') colors.push(props?.color)
+    if (type === 'Text' && /^▰{3}▱{7} +30%$/.test(shownText(n))) styles.push({ color: props?.color, backgroundColor: props?.backgroundColor })
     ;(children ?? []).forEach(walk)
   }
   walk(await pane.drawn())
   await pane.unmount()
-  expect(colors).toEqual([roomColor(70)])
+  expect(styles).toEqual([{ color: undefined, backgroundColor: undefined }])
 })
 
 /** An element's whole text, its buttons' boxes included. */
@@ -7390,9 +7390,9 @@ for (const spare of [0, 1, 2]) {
   })
 }
 
-// Review C9-R1 FAILED-BAR-LOSES-COLOR (Codex) [FAILED-BAR-LOSES-COLOR] (RULING 4555): a failed row's bars stay in the
-// color of their room left, drawn dim.
-test('a failed row\'s bars keep the color of their room left, dim', async ($, on) => {
+// Review C9-R1 FAILED-BAR-LOSES-COLOR (Codex) [FAILED-BAR-LOSES-COLOR] (RULING 4555), then the operator's order of
+// 2026-11-14 20:17Z: a failed row's bars are drawn dim, with no color.
+test('a failed row\'s bars are drawn dim, with no color', async ($, on) => {
   const { w, store, clock } = await rowsWorld($, on)
   w.failing = { 'tok-1': 429, 'tok-2': 429 }
   store.delete('usage-due:1')
@@ -7401,9 +7401,9 @@ test('a failed row\'s bars keep the color of their room left, dim', async ($, on
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
   const tree = await pane.drawn()
   await pane.unmount()
-  for (const [id, text, left] of [['1', '▰▰▰▱▱▱▱▱▱▱ 30%', 70], ['2', '▰▰▰▰▱▱▱▱▱▱ 40%', 60]] as const) {
+  for (const [id, text] of [['1', '▰▰▰▱▱▱▱▱▱▱  30%'], ['2', '▰▰▰▰▱▱▱▱▱▱  40%']] as const) {
     const bar = findDrawn(findDrawn(tree, { key: `line-${id}-1` }), { text })
-    expect([id, bar?.props?.dimColor, bar?.props?.color]).toEqual([id, true, roomColor(left)])
+    expect([id, bar?.props?.dimColor, bar?.props?.color]).toEqual([id, true, undefined])
   }
 })
 
@@ -7637,7 +7637,7 @@ test('a select of a login with no room is applied, and its result names the logi
   await clock.advance(60_000)
   expect([store.get('launch-on'), (store.get('launch-slot') as { id?: string } | undefined)?.id]).toEqual(['account:2', '1'])
   expect(resultOf(w, N1)).toMatchObject({ ok: true, pickId: '1' })
-  expect(resultOf(w, N1)?.message).toMatch(/new sessions start on account 1 \(account 2 has no room/)
+  expect(resultOf(w, N1)?.message).toMatch(/new sessions start on one@example.com \(two@example.com has no room/)
 })
 
 test('a request read from another store, a stale one, one whose nonce is not its file\'s and one for a login not listed change nothing', async ($, on) => {

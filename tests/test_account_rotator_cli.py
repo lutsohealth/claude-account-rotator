@@ -212,8 +212,8 @@ class StorePick(StoreCase):
         since = datetime.fromtimestamp(self.fixture["now"] / 1000, ZoneInfo(self.fixture["zone"])).strftime("%H:%M")
         launch = run(LAUNCH, env=env)
         listed = run(CLI, "account", "list", env=env)
-        self.assertEqual(launch.stderr.strip(), f"account-rotator: new session starts on account 1 (the most room, the same pick since {since})")
-        self.assertIn(f"new sessions start on account 1 (the most room, the same pick since {since})", listed.stdout)
+        self.assertEqual(launch.stderr.strip(), f"account-rotator: new session starts on andres@lutsohealth.com (the most room, the same pick since {since})")
+        self.assertIn(f"new sessions start on andres@lutsohealth.com (the most room, the same pick since {since})", listed.stdout)
         self.assertNotIn("picked ", launch.stderr + listed.stdout)
 
     def test_a_pick_with_no_stored_time_says_no_since_on_either_start_line(self) -> None:
@@ -222,8 +222,8 @@ class StorePick(StoreCase):
         self.write(STORE, store, mtime=1_000_000)
         launch = run(LAUNCH, env=self.env())
         listed = run(CLI, "account", "list", env=self.env())
-        self.assertEqual(launch.stderr.strip(), "account-rotator: new session starts on account 1 (the most room)")
-        self.assertIn("new sessions start on account 1 (the most room)", listed.stdout)
+        self.assertEqual(launch.stderr.strip(), "account-rotator: new session starts on andres@lutsohealth.com (the most room)")
+        self.assertIn("new sessions start on andres@lutsohealth.com (the most room)", listed.stdout)
         for text in (launch.stderr, listed.stdout):
             for words in ("the same pick since", "picked ", "unknown time"):
                 self.assertNotIn(words, text)
@@ -1211,6 +1211,24 @@ class Add(RequestCase):
         exits = ("1 no store or a damaged one", "2 a usage error", "3 no session", "4 a session refused", "5 the sign-in did not finish", "130 stopped")
         for words in ("browser", "--folder", "twin", "Claude Code's own login", "keeps", *exits):
             self.assertIn(words, said)
+
+
+class Label(unittest.TestCase):
+    """The bins name an account as hooks/model.ts label does: its email, the organization only to tell one email's accounts apart."""
+
+    def test_an_email_names_the_account_with_its_organization_only_where_the_email_is_on_several(self) -> None:
+        sys.path.insert(0, str(ROOT / "bin"))
+        import account_rotator_store
+
+        one = {"id": "1", "slot": "", "email": "one@example.com", "orgName": "Org"}
+        two_a = {"id": "2", "slot": "/s/2", "email": "two@example.com", "orgName": "Alpha"}
+        two_b = {"id": "3", "slot": "/s/3", "email": "two@example.com", "orgName": "Beta"}
+        accounts = [one, two_a, two_b, {"id": "4", "slot": "/s/4"}]
+        names = [account_rotator_store.label(a, accounts) for a in accounts]
+        self.assertEqual(names, ["one@example.com", "two@example.com · Alpha", "two@example.com · Beta", "account 4 (not signed in yet)"])
+        self.assertEqual(account_rotator_store.label({"id": "1", "slot": ""}, accounts), "Claude Code's login")
+        self.assertEqual(account_rotator_store.label_of(accounts, "3"), "two@example.com · Beta")
+        self.assertEqual(account_rotator_store.label_of(accounts, "9"), "9")
 
 
 if __name__ == "__main__":

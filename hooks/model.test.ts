@@ -9,7 +9,7 @@ import { EMPTY_VIEW, USAGE_IDLE_MS, fitRow, hasRoom, rowOf, rowsOf, rowText, sto
 import ROWS_FIXTURE from '../tests/fixtures/rows'
 import { REQUEST_TTL_MS, holdsLogin, requestFrom, requestsDir, slotNumber } from './model'
 import { USAGE_BACKOFF_MAX_MS, USAGE_CLAIM_MS, USAGE_CLAIM_WAIT_MS, USAGE_EARLY_MS, WRITER_VERSION, afterUsage, claimDueReads, gatingDue, isUsageDue, mayForceUsage, mayReadSince, renewClaim, retryAfterFrom, usageDueFrom } from './model'
-import { DEFAULT_FOOTER, availableNow, blockedAdvice, braille, browsersFrom, chromeNote, continueTextFrom, counted, fiveHourLimitFrom, credentialFrom, credentialsFile, fableMark, fableSpentNotice, fableStay, footerStyleFrom, healthOf, identityFromProfile, isFableSpent, isFableStop, isNoBrowser, isPolicyRefusal, keepFable, keychainItem, legacyMark, markFrom, nextReset, pickTarget, pie, readingFromUsage, restartSteps, rotateToFrom, shouldLeave, roomColor, stuckText, windowPct, withMark, withWeekMark } from './model'
+import { DEFAULT_FOOTER, availableNow, blockedAdvice, braille, browsersFrom, chromeNote, continueTextFrom, counted, fiveHourLimitFrom, credentialFrom, credentialsFile, fableMark, fableSpentNotice, fableStay, footerStyleFrom, healthOf, identityFromProfile, isFableSpent, isFableStop, isNoBrowser, isPolicyRefusal, keepFable, keychainItem, label, legacyMark, markFrom, nextReset, pickTarget, pie, readingFromUsage, restartSteps, rotateToFrom, shouldLeave, roomColor, stuckText, windowPct, withMark, withWeekMark } from './model'
 
 const NOW = Date.parse('2026-10-12T10:00:00Z')
 const LATER = '2026-10-12T12:00:00Z'
@@ -1202,6 +1202,45 @@ const OPERATOR_LINE_2 = 'Used ▰▰▰▱▱▱▱▱▱▱ 31% Fable ▰▰▰
 
 test('the row is the operator\'s two lines: who, Company and plan, the last good read\'s time, then the week and Fable used', () => {
   expect(rowLines(rowView())).toEqual(['andres@lutsohealth.com · Company · Ultra  updated 18:34', OPERATOR_LINE_2])
+})
+
+// The operator's order of 2026-11-14 20:17Z: each line under an account lines up, whatever its percents' digits.
+test('the usage line pads each percent to three cells, so Fable and resets stand at one column from 0% to 100%', () => {
+  const at = (week: number, fable: number) =>
+    rowLines(rowView({ readings: { '1': { sevenDay: { pct: week, resetsAt: ahead(3, 16, 50) }, fable: { pct: fable, resetsAt: ahead(3, 16, 50) }, noFiveHour: true, at: READ_AT, by: '1' } } }))[1] ?? ''
+  const lines = [at(0, 0), at(46, 38), at(100, 100)]
+  expect(lines).toEqual([
+    'Used ▱▱▱▱▱▱▱▱▱▱   0% Fable ▱▱▱▱▱▱▱▱▱▱   0%  resets 3d 16h 50m',
+    'Used ▰▰▰▰▰▱▱▱▱▱  46% Fable ▰▰▰▰▱▱▱▱▱▱  38%  resets 3d 16h 50m',
+    'Used ▰▰▰▰▰▰▰▰▰▰ 100% Fable ▰▰▰▰▰▰▰▰▰▰ 100%  resets 3d 16h 50m',
+  ])
+  expect(new Set(lines.map(line => line.indexOf('resets'))).size).toBe(1)
+})
+
+test('the 5-hour line pads its percent the same way', () => {
+  const max = { ...ANDRES, tier: 'default_claude_max_5x' }
+  const five = (pct: number) =>
+    rowLines(rowView({ readings: { '1': { sevenDay: { pct: 31, resetsAt: ROW_WEEK_END }, fiveHour: { pct, resetsAt: ahead(0, 1, 20) }, at: READ_AT, by: '1' } }, noFiveHour: { '1': false } }, max))[2]
+  expect([five(4), five(50), five(100)]).toEqual(['5h ▱▱▱▱▱▱▱▱▱▱   4%  resets 1h 20m', '5h ▰▰▰▰▰▱▱▱▱▱  50%  resets 1h 20m', '5h ▰▰▰▰▰▰▰▰▰▰ 100%  resets 1h 20m'])
+})
+
+test('a dash takes the cells of a bar and its percent, so what follows keeps its column, and one that ends a line leaves no blank after it', () => {
+  const v = rowView()
+  const noFable = { ...v.readings['1'], fable: undefined } as View['readings'][string]
+  expect((rowLines({ ...v, readings: { '1': noFable } })[1] ?? '').indexOf('resets')).toBe((rowLines(v)[1] ?? '').indexOf('resets'))
+  const passed = rowView({ readings: { '1': { sevenDay: { pct: 31, resetsAt: ahead(0, 0, -1) }, noFiveHour: true, at: READ_AT, by: '1' } } })
+  expect(rowLines(passed)[1]).toBe('Used ▱▱▱▱▱▱▱▱▱▱   0% Fable –')
+})
+
+// The operator's order of 2026-11-14 20:17Z: an account is named by its email (+ org, if multiple orgs available).
+test('label names an account by its email, with its organization only where that email is on more than one account', () => {
+  const one = { id: '1', slot: '', email: 'one@example.com', orgName: 'Org' }
+  const twoA = { id: '2', slot: '/s/2', email: 'two@example.com', orgName: 'Alpha' }
+  const twoB = { id: '3', slot: '/s/3', email: 'two@example.com', orgName: 'Beta' }
+  const unread = { id: '4', slot: '/s/4' }
+  const all = [one, twoA, twoB, unread]
+  expect(all.map(a => label(a, all))).toEqual(['one@example.com', 'two@example.com · Alpha', 'two@example.com · Beta', 'account 4 (not signed in yet)'])
+  expect(label({ id: '1', slot: '' }, all)).toBe("Claude Code's login")
 })
 
 test('a failed read newer than the last good one ends line 1 with its time and status, and dims line 2', () => {
