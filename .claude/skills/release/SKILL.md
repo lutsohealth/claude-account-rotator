@@ -15,20 +15,11 @@ Claude Code updates an installed plugin only when the `version` in `.claude-plug
 
 ## 2. Pick the version
 
-The last release is `git describe --tags --abbrev=0 --match 'account-rotator--v*'`. Read `git log <last tag>..HEAD` and pick by semver. Every tag of this fork carries a suffix: `0.5.30-lutso.1` goes to `0.5.31-lutso.1`. While below 1.0:
-
-- **minor** (0.2.0 to 0.3.0): new behavior, or anything a user does differently.
-- **patch** (0.2.0 to 0.2.1): fixes and wording only.
-
-Going to 1.0.0 is the user's call: ask.
+The last release is `git describe --tags --abbrev=0 --match 'account-rotator--v*'`. Read `git log <last tag>..HEAD`. The new `<version>` is the last one with its patch number raised by one, keeping the `-lutso.1` suffix every tag of this fork carries: `0.5.9-lutso.1` goes to `0.5.10-lutso.1`. A minor step, and going to 1.0.0, is the user's call: ask.
 
 ## 3. Write the changelog entry
 
-Add a section at the top of `CHANGELOG.md`, below its intro, headed with the version and the date:
-
-```
-## 0.5.31-lutso.1 - 2026-11-14
-```
+Add a section at the top of `CHANGELOG.md`, below its intro, headed as the entry below it is: `## <version> - <YYYY-MM-DD>`.
 
 - Bullets with a bold lead-in, in the README's voice: what a user sees or does, not how the code does it. Most important first.
 - Leave out refactors, tests, demo tooling and README-only edits, unless the README change is the point (a new way to do something).
@@ -37,7 +28,7 @@ Add a section at the top of `CHANGELOG.md`, below its intro, headed with the ver
 ## 4. Bump and commit
 
 - Set `"version"` in `.claude-plugin/plugin.json`. The entry in `.claude-plugin/marketplace.json` carries no version: keep it that way, or keep the two equal, since `claude plugin tag` refuses when they differ.
-- One commit on the branch, `Release 0.5.31-lutso.1`, holding the bump and the changelog entry.
+- One commit on the branch, `Release <version>`, holding the bump and the changelog entry.
 
 Show the user the version and the entry before publishing, unless they already said to go ahead.
 
@@ -47,17 +38,17 @@ Write the entry's bullets and the two ways to update (step 7) to a file in the s
 
 ```sh
 git push origin <branch>
-gh pr create --title "Release 0.5.31-lutso.1" --body-file <a body file>
+gh pr create --title "Release <version>" --body-file <a body file>
 gh pr checks <number> --watch
 gh pr merge <number> --squash
 ```
 
-Tag only after the merge, on the squash commit it made: after the pull, `git log -1 --format=%s` reads `Release 0.5.31-lutso.1 (#<number>)`.
+Tag only after the merge, on the squash commit it made: after the switch, `git log -1 --format=%s` reads `Release <version> (#<number>)`. The switch detaches at `origin/main`, so it works in a worktree while another checkout holds `main`.
 
 ```sh
-git switch main && git pull --ff-only
+git fetch origin && git switch --detach origin/main
 claude plugin tag . --push -m "account-rotator %s"
-gh release create account-rotator--v0.5.31-lutso.1 --verify-tag --title "0.5.31-lutso.1" --notes-file <the bullets file>
+gh release create account-rotator--v<version> --verify-tag --title "<version>" --notes-file <the bullets file>
 ```
 
 `claude plugin tag` refuses while anything is uncommitted, checks the versions agree, and makes `account-rotator--v<version>`: the tag form Claude Code reads when someone pins a version range. Never move or reuse a tag; a mistake gets a new patch version.
