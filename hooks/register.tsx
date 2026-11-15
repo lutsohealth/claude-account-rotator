@@ -1486,11 +1486,11 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
     // left (measured on vox), and a turn over the Fable limit dies at once. So a Fable stop within SETTLE_MS of the
     // carry-on, before any response proves the switch, that the login moved to's own usage read contradicts (a body this
     // stop's check read lists the Fable week, with room) is not that login's: once a switch it marks nothing and carries
-    // on again. The check reads as a settling switch does, whatever the last read's age, as that read predates the
-    // switch. A check its gate skipped proves nothing: the stop then goes the way any other does.
+    // on again. The check reads whatever the last read's age, one made since the switch included, as a stored body is no
+    // proof (it can carry an older Fable row). A check its gate skipped proves nothing: the stop then goes the way any other does.
     const isOnCarryOn = carriedOn !== undefined && carriedOn.since === since && (await $.clock.now()) - carriedOn.at < SETTLE_MS
     if (isProvisional && isFable && isOnCarryOn && clearedFor !== since) {
-      const hasFreshFable = await checkAccount($, active, { since })
+      const hasFreshFable = await checkAccount($, active, { since: await $.clock.now() })
       if (hasFreshFable && !isFableSpent((await getView($)).readings[active.id], await $.clock.now())) {
         clearedFor = since
         if (isConnectingChrome) isCutByVisit = true
