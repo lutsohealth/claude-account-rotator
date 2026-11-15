@@ -1178,9 +1178,11 @@ function fiveHourLine(view: View, a: Account, now: number): RowPart[] | undefine
   const w = view.readings[a.id]?.fiveHour
   if (w === undefined) return [{ text: '5h –', tone: 'dim' }]
   const reset = resetAhead(w, now)
-  // "5h" is shorter than "Used": the cells between keep each bar at one column; the label part stays "5h ".
-  const [name, ...used] = usedParts('5h', w, now)
-  const parts = name === undefined ? [] : [name, { text: ' '.repeat(LABEL_CELLS - '5h'.length) }, ...used]
+  // "5h" is shorter than "Used": the cells between keep each bar, or the dash of an unread percent, at one column. A
+  // bar's label part stays "5h "; the dash is one part with its label, so the label is padded there.
+  const isRead = windowPct(w, now) !== undefined
+  const [name, ...used] = usedParts(isRead ? '5h' : '5h'.padEnd(LABEL_CELLS), w, now)
+  const parts = name === undefined ? [] : isRead ? [name, { text: ' '.repeat(LABEL_CELLS - '5h'.length) }, ...used] : [name]
   return trimEnd([...parts, { text: ' '.repeat(FABLE_CELLS) }, ...(reset === undefined ? [] : [resetsPart(['  resets ', reset])])])
 }
 
