@@ -7051,6 +7051,19 @@ test('the merge stores each login\'s row lines under rows, stamped with when and
   expect(clock.now()).toBeLessThan(NOW + 2 * 60_000)
 })
 
+// puma-9arph.28 item 5, RULING 5918: the store is JSON another session wrote; loadAccounts keeps an email only where it is a string.
+test('an email stored as null or as a number is no email once loaded: its row names no stored value', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.usage['tok-1'] = [null, 30, 40]
+  const accounts = [TWO_LOGINS.accounts[0], { id: '2', slot: SLOT2, email: null }, { id: '3', slot: SLOT3, email: 7 }]
+  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, accounts, 'rotate-to': 'off' }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  await clock.advance(61_000)
+  expect([lineOne(store, '2'), lineOne(store, '3')].map(line => /^not signed in yet/.test(line ?? ''))).toEqual([true, true])
+})
+
 test('a response that rewrites login 1\'s reading leaves its row\'s updated time at the last good usage read', async ($, on) => {
   const { w, store, clock } = await rowsWorld($, on)
   const readAt = goodReadAt(store, '1')

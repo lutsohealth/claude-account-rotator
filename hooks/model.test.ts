@@ -1233,6 +1233,11 @@ test('a Pro row, a Max row and a 5-hour line start their bars and "resets" at on
   )
   const lines = [proLines[1] ?? '', maxLines[1] ?? '', maxLines[2] ?? '']
   expect(lines.map(line => [line.search(/[▰▱]/), line.indexOf('resets')])).toEqual([[5, 44], [5, 44], [5, 44]])
+  // A 5-hour window whose percent is unread draws its dash in the bar column too (RULING 5918).
+  const unread = rowLines(
+    rowView({ readings: { '1': { sevenDay: { pct: 31, resetsAt: ROW_WEEK_END }, fable: { pct: 38, resetsAt: ROW_WEEK_END }, fiveHour: { resetsAt: ahead(0, 1, 20) } as never, at: READ_AT, by: '1' } }, noFiveHour: { '1': false } }, max),
+  )[2] ?? ''
+  expect(unread.indexOf('–')).toBe(5)
 })
 
 test('the 5-hour line pads its percent the same way', () => {
