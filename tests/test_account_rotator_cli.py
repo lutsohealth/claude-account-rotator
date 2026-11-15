@@ -1217,10 +1217,13 @@ class Label(unittest.TestCase):
     """The bins name an account as hooks/model.ts label does: its email, the organization only to tell one email's accounts apart."""
 
     def test_an_email_names_the_account_with_its_organization_only_where_the_email_is_on_several(self) -> None:
-        sys.path.insert(0, str(ROOT / "bin"))
-        import account_rotator_store
+        # Loaded by its path, so no test after this one finds bin/ on sys.path.
+        spec = importlib.util.spec_from_file_location("account_rotator_store_label", ROOT / "bin" / "account_rotator_store.py")
+        assert spec is not None and spec.loader is not None
+        account_rotator_store = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(account_rotator_store)
 
-        one = {"id": "1", "slot": "", "email": "one@example.com", "orgName": "Org"}
+        one ={"id": "1", "slot": "", "email": "one@example.com", "orgName": "Org"}
         two_a = {"id": "2", "slot": "/s/2", "email": "two@example.com", "orgName": "Alpha"}
         two_b = {"id": "3", "slot": "/s/3", "email": "two@example.com", "orgName": "Beta"}
         accounts = [one, two_a, two_b, {"id": "4", "slot": "/s/4"}]
