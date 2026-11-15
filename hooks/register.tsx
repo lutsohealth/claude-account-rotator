@@ -336,8 +336,13 @@ async function saveFableMark($: Host, id: string, mark: Mark): Promise<void> {
   })
 }
 
-/** Ends a login's Fable mark for every session; the next save of its reading draws it without the mark. */
-async function dropFableMark($: Host, id: string): Promise<void> {
+/**
+ * Ends a login's Fable mark for every session; the next save of its reading draws it without the mark. Only the mark
+ * judged ended goes: a stop another session marked since stands. The store has no conditional write, so this narrows
+ * the gap between the read and the delete to one store call.
+ */
+async function dropFableMark($: Host, id: string, judged: Mark): Promise<void> {
+  if (!sameValue(markFrom(await $.store.get(`fable-mark:${id}`)), judged)) return
   await $.store.delete(`fable-mark:${id}`)
   await setView($, v => {
     const { [id]: _ended, ...fableMarks } = v.fableMarks ?? {}
@@ -1126,7 +1131,7 @@ async function checkAccount($: Host, account: Account, gate: UsageGate): Promise
           if (reading.fiveHour !== undefined || noFiveHour === true) await saveNoFiveHour($, account.id, noFiveHour === true)
           // A Fable mark that this body's own week, read long enough after the stop, contradicts ends before the reading is drawn.
           const fableMarked = markFrom(await $.store.get(`fable-mark:${account.id}`))
-          if (fableMarked !== undefined && endsFableMark(reading.fable, now, fableMarked)) await dropFableMark($, account.id)
+          if (fableMarked !== undefined && endsFableMark(reading.fable, now, fableMarked)) await dropFableMark($, account.id, fableMarked)
           // A body with no Fable row keeps the stored one's: the stored read, never the view, which carries the marks.
           await saveReading($, account.id, { ...keepFable(reading, await ownedReading($, account.id), now), by: account.id }, 'body')
           hasFreshFable = reading.fable !== undefined

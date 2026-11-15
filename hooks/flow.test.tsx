@@ -9502,6 +9502,37 @@ for (const [age, isEnded] of [[31, true], [10, false]] as const) {
   })
 }
 
+/**
+ * A store another session writes into: on its `nth` read of `fable-mark:2` it answers what stood, then stores
+ * `renewed` at once, as a Fable stop in another session would land between this session's read and delete.
+ */
+class RenewingMarkStore extends Map<string, unknown> {
+  reads = 0
+  constructor(entries: Iterable<[string, unknown]>, readonly nth: number, readonly renewed: unknown) { super(entries) }
+  get(key: string): unknown {
+    const value = super.get(key)
+    if (key === 'fable-mark:2' && ++this.reads === this.nth) super.set(key, this.renewed)
+    return value
+  }
+}
+
+// puma-9arph.29 MARK-DROP-RACE (Codex advisory on #86): a body read judged a Fable mark ended and deleted the key
+// whatever stood there by then, so a stop another session wrote between the read and the delete was lost.
+test('a Fable mark another session renews between a read that ends the old mark and its delete stands', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [20, 30, 10]
+  w.usage['tok-2'] = [null, 39, 35]
+  const renewed = { pct: 100, resetsAt: FABLE_RESET, at: NOW }
+  // The start reads fable-mark:2 once to draw it, then once in the body read that ends it: the second read is the race's.
+  const store = new RenewingMarkStore(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off', 'fable-mark:2': { pct: 100, resetsAt: FABLE_RESET, at: NOW - 31 * 60_000 } }), 2, renewed)
+  const clock = world(on, w, store)
+  await start($, clock)
+  expect(store.reads, 'the premise: the body read read the mark').toBeGreaterThanOrEqual(2)
+  expect(store.get('fable-mark:2'), 'the body read deleted a mark another session wrote after it judged the old one. Fix: delete only while the stored mark is the one judged.').toEqual(renewed)
+})
+
 test('a token refresh of the account in use keeps its usage back-off', async ($, on) => {
   const w = fresh()
   w.keychain['Claude Code-credentials'] = blob('tok-1')
