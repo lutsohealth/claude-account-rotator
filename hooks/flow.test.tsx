@@ -446,7 +446,7 @@ test('a login with nothing in the keychain shows as needing a sign-in, with one 
       component: 'AbovePrompt',
       props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 120, scroll: { offset: 0, bodyRows: 9 }, view: {} },
     })
-    expect(await band.find({ text: /account 2 \(two@example.com\) needs a sign-in \(not signed in\)/ })).toBeDefined()
+    expect(await band.find({ text: /two@example.com needs a sign-in \(not signed in\)/ })).toBeDefined()
     expect(await band.find({ key: 'sign-in-all' })).toBeDefined()
     await band.unmount()
   }
@@ -511,7 +511,7 @@ test('on Linux a login whose file is missing, holds no Claude login, cannot be r
     component: 'AbovePrompt',
     props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 120, scroll: { offset: 0, bodyRows: 9 }, view: {} },
   })
-  const names = /account 2 \(two@example.com\), 3 \(3@example.com\), 4 \(4@example.com\), 5 \(5@example.com\) needs a sign-in \(not signed in\)\./
+  const names = /two@example.com, 3@example.com, 4@example.com, 5@example.com needs a sign-in \(not signed in\)\./
   expect(await band.find({ text: names })).toBeDefined()
   expect(await band.find({ key: 'sign-in-all' })).toBeDefined()
   await band.unmount()
@@ -769,7 +769,7 @@ test('a switch that does not take, its responses still the old login\'s minutes 
   await clock.advance(5 * 60_000)
   await $.session.measure({ context: { window: 200_000 }, rateLimits: w.limits, changed: ['rateLimits'] })
   await clock.settle()
-  expect(w.toasts.filter(t => /did not take: responses still use account 1/.test(t))).toHaveLength(1)
+  expect(w.toasts.filter(t => /did not take: responses still use one@example.com/.test(t))).toHaveLength(1)
   expect(w.envSets).toEqual([
     { name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 },
     { name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: undefined },
@@ -813,7 +813,7 @@ const FABLE_STOP = {
 }
 
 /** Login 1's 5-hour window as the pane draws it at 20% used, and the week at 30%. */
-const ONE_AT_20 = /^▰{2}▱{8} 20%$/
+const ONE_AT_20 = /^▰{2}▱{8} +20%$/
 
 test('a Fable stop moves to the login with Fable room and carries on, and the toast names the Fable week, not the 5-hour window', async ($, on) => {
   const w = fresh()
@@ -829,7 +829,7 @@ test('a Fable stop moves to the login with Fable room and carries on, and the to
   await $.classic.StopFailure(FABLE_STOP)
   await clock.settle()
   expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
-  expect(w.toasts.filter(t => /^Switched to Claude account 2.*: account 1 has 0% of its Fable week left\.$/.test(t))).toHaveLength(1)
+  expect(w.toasts.filter(t => /^Switched to Claude account two@example.com.*: one@example.com has 0% of its Fable week left\.$/.test(t))).toHaveLength(1)
   expect(w.toasts.filter(t => /5-hour/.test(t))).toEqual([])
   expect(w.submitted).toEqual([])
   await clock.advance(36_000)
@@ -926,7 +926,7 @@ for (const message of PLAIN_STOPS) {
     await $.classic.StopFailure({ error: 'rate_limit', last_assistant_message: message })
     await clock.settle()
     expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
-    expect(w.toasts.filter(t => /^Switched to Claude account 2.*: account 1 has 0% of its 5-hour window left\.$/.test(t))).toHaveLength(1)
+    expect(w.toasts.filter(t => /^Switched to Claude account two@example.com.*: one@example.com has 0% of its 5-hour window left\.$/.test(t))).toHaveLength(1)
     expect(w.toasts.filter(t => /Fable/.test(t))).toEqual([])
     expect(await hasFableBand($)).toBe(false)
     await clock.advance(36_000)
@@ -1455,8 +1455,8 @@ test('a switch is confirmed once a response reports the new login usage, and an 
   await clock.settle()
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
   // Room left, as the footer counts it: login 2 has used 20% of its 5-hour window and 30% of its week.
-  expect(await pane.find({ text: /^▰{2}▱{8} 20%$/ })).toBeDefined()
-  expect(await pane.find({ text: /^▰{3}▱{7} 30%$/ })).toBeDefined()
+  expect(await pane.find({ text: /^▰{2}▱{8} +20%$/ })).toBeDefined()
+  expect(await pane.find({ text: /^▰{3}▱{7} +30%$/ })).toBeDefined()
   expect(w.toasts.filter(t => /has not shown/.test(t))).toEqual([])
   await pane.unmount()
 })
@@ -1703,7 +1703,7 @@ test('a plain usage-limit stop on an account that reports no 5-hour window moves
   await $.classic.StopFailure({ error: 'rate_limit', last_assistant_message: 'Claude usage limit reached.' })
   await clock.settle()
   expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
-  expect(w.toasts.filter(t => /: account 1 has 0% of its week left\.$/.test(t))).toHaveLength(1)
+  expect(w.toasts.filter(t => /: one@example.com has 0% of its week left\.$/.test(t))).toHaveLength(1)
   await pane.redraw()
   expect(await pane.find({ text: /^  resets [0-9]+h/ })).toBeUndefined()
   expect(await pane.findAll({ type: 'Text', text: /^5h(?: | –)$/ })).toHaveLength(0)
@@ -1814,7 +1814,7 @@ test('a turn that dies on the weekly limit marks the week spent, never a 5-hour 
   await $.classic.StopFailure(WEEKLY_STOP)
   await clock.settle()
   expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
-  expect(w.toasts.filter(t => /^Switched to Claude account 2.*: account 1 has 0% of its week left\.$/.test(t))).toHaveLength(1)
+  expect(w.toasts.filter(t => /^Switched to Claude account two@example.com.*: one@example.com has 0% of its week left\.$/.test(t))).toHaveLength(1)
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
   expect(await pane.findAll({ type: 'Text', text: /^5h(?: | –)$/ })).toHaveLength(0)
   expect(await pane.find({ text: /^  resets [0-9]+h/ })).toBeUndefined()
@@ -1955,13 +1955,13 @@ test('turning the 5-hour limit off and back on restores a reported 5-hour window
   const clock = world(on, w, TWO_LOGINS)
   await start($, clock)
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
-  expect(await pane.find({ text: /^▰{8}▱{2} 80%$/ })).toBeDefined()
+  expect(await pane.find({ text: /^▰{8}▱{2} +80%$/ })).toBeDefined()
   await pane.press({ key: 'five-hour-limit-off' })
   await clock.settle()
   await pane.press({ key: 'five-hour-limit-on' })
   await clock.settle()
   await pane.redraw()
-  expect(await pane.find({ text: /^▰{8}▱{2} 80%$/ })).toBeDefined()
+  expect(await pane.find({ text: /^▰{8}▱{2} +80%$/ })).toBeDefined()
   await pane.unmount()
 })
 
@@ -1974,11 +1974,11 @@ test('a read saved while the 5-hour limit is off keeps its 5-hour window in the 
   const clock = world(on, w, { ...TWO_LOGINS, 'five-hour-limit': 'off' })
   await start($, clock)
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
-  expect(await pane.find({ text: /^▰{8}▱{2} 80%$/ })).toBeUndefined()
+  expect(await pane.find({ text: /^▰{8}▱{2} +80%$/ })).toBeUndefined()
   await pane.press({ key: 'five-hour-limit-on' })
   await clock.settle()
   await pane.redraw()
-  expect(await pane.find({ text: /^▰{8}▱{2} 80%$/ })).toBeDefined()
+  expect(await pane.find({ text: /^▰{8}▱{2} +80%$/ })).toBeDefined()
   await pane.unmount()
 })
 
@@ -1992,13 +1992,13 @@ test('another session turning the 5-hour limit on shows this session\'s reported
   const clock = world(on, w, store)
   await start($, clock)
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
-  expect(await pane.find({ text: /^▰{8}▱{2} 80%$/ })).toBeUndefined()
+  expect(await pane.find({ text: /^▰{8}▱{2} +80%$/ })).toBeUndefined()
   // Another session's press.
   store.set('five-hour-limit', 'on')
   await clock.advance(61_000)
   await clock.settle()
   await pane.redraw()
-  expect(await pane.find({ text: /^▰{8}▱{2} 80%$/ })).toBeDefined()
+  expect(await pane.find({ text: /^▰{8}▱{2} +80%$/ })).toBeDefined()
   await pane.unmount()
 })
 
@@ -2033,7 +2033,7 @@ test('a Fable stop while the 5-hour limit is off keeps the login\'s reported 5-h
   await pane.press({ key: 'five-hour-limit-on' })
   await clock.settle()
   await pane.redraw()
-  expect(await pane.find({ text: /^▰{5}▱{5} 50%$/ })).toBeDefined()
+  expect(await pane.find({ text: /^▰{5}▱{5} +50%$/ })).toBeDefined()
   await pane.unmount()
 })
 
@@ -2193,7 +2193,7 @@ test('a reported 5-hour window survives a save, the limit off and on, and a stor
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
   const visible = async () => {
     await pane.redraw()
-    return (await pane.find({ text: /^▰{8}▱{2} 80%$/ })) !== undefined
+    return (await pane.find({ text: /^▰{8}▱{2} +80%$/ })) !== undefined
   }
   const offenders: string[] = []
   for (const rotateTo of ['reset', 'room', 'order', 'off'] as const) {
@@ -2227,12 +2227,12 @@ test('a switch held back for a token about to refresh is said once and made once
   await clock.settle()
   await clock.advance(2 * 60_000)
   expect(w.envSets).toEqual([])
-  expect(w.toasts.filter(t => /Switching to Claude account 2/.test(t))).toHaveLength(1)
+  expect(w.toasts.filter(t => /Switching to Claude account two@example.com/.test(t))).toHaveLength(1)
   // Claude Code refreshes the token: the next try goes through, once.
   w.keychain['Claude Code-credentials'] = blob('tok-1', NOW + 8 * HOUR)
   await clock.advance(3 * 60_000)
   expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
-  expect(w.toasts.filter(t => /Switched to Claude account 2/.test(t))).toHaveLength(1)
+  expect(w.toasts.filter(t => /Switched to Claude account two@example.com/.test(t))).toHaveLength(1)
   await pane.unmount()
 })
 
@@ -2291,7 +2291,7 @@ test('a session that starts on a spent login whose token has run out holds the s
   await start($, clock)
   await clock.advance(2 * 60_000)
   expect(w.envSets).toEqual([])
-  expect(w.toasts.filter(t => /Switching to Claude account 2/.test(t))).toHaveLength(1)
+  expect(w.toasts.filter(t => /Switching to Claude account two@example.com/.test(t))).toHaveLength(1)
   w.keychain['Claude Code-credentials'] = blob('tok-1', NOW + 8 * HOUR)
   await clock.advance(61_000)
   expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
@@ -2405,7 +2405,7 @@ test('a login whose usage reports no 5-hour window has no 5h row in the pane; a 
   expect(await pane.findAll({ type: 'Text', text: /^5h $/ })).toHaveLength(1)
   expect(await pane.findAll({ type: 'Text', text: /^Used $/ })).toHaveLength(2)
   expect(await pane.find({ text: /^5h –$/ })).toBeUndefined()
-  expect(await pane.find({ text: /^▰{1}▱{9} 10%$/ })).toBeDefined()
+  expect(await pane.find({ text: /^▰{1}▱{9} +10%$/ })).toBeDefined()
   await pane.unmount()
 })
 
@@ -2624,7 +2624,7 @@ test('the pane picks each footer row\'s style for every session, and previews it
   expect(usedOne).toMatchObject({ color: roomColor(70) })
   expect(usedTwo).toMatchObject({ color: roomColor(40) })
   // The pane's bars draw the percent used whatever the footer fills with.
-  expect(await pane.find({ text: /^▰{2}▱{8} 20%$/ })).toBeDefined()
+  expect(await pane.find({ text: /^▰{2}▱{8} +20%$/ })).toBeDefined()
   await pane.unmount()
   await footer.unmount()
 })
@@ -2683,7 +2683,7 @@ test('a /login in a session on login 3 that signs in login 2\'s account leaves 3
   await band.unmount()
   // The session moves off it, to the login the rotation picks: 2, with the most room.
   expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
-  expect(w.toasts.filter(t => /^Switched to Claude account 2 .*: account 3 needs a sign-in\.$/.test(t))).toHaveLength(1)
+  expect(w.toasts.filter(t => /^Switched to Claude account two@example.com: three@example.com needs a sign-in\.$/.test(t))).toHaveLength(1)
   // A later check, its token run out, keeps 3 needing a sign-in: the sign-in it holds is still 2's.
   w.keychain[await keychainItem(SLOT3)] = blob('tok-2b', NOW + 30 * 60_000)
   await clock.advance(41 * 60_000)
@@ -2703,7 +2703,7 @@ test('a /login in a session on login 3 that signs in an account not on the list 
   w.owners['tok-x'] = 'x@example.com'
   await $.command.run(LOGIN)
   await clock.settle()
-  expect(w.toasts.filter(t => /^Claude account 3 is x@example.com · Org now: a \/login in a session on account 3 signs in there, not Claude Code's login\.$/.test(t))).toHaveLength(1)
+  expect(w.toasts.filter(t => /^The Claude account that was three@example.com is x@example.com now: a \/login in a session on it signs in there, not Claude Code's login\.$/.test(t))).toHaveLength(1)
   expect(w.envSets).toEqual([])
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
   expect(await pane.find({ text: 'x@example.com' })).toBeDefined()
@@ -2828,7 +2828,7 @@ test('the login new sessions start on is stored for a launcher, by the New on se
   await pane.press({ key: 'launch-on-account:1' })
   await clock.settle()
   expect(store.get('launch-on')).toBe('account:1')
-  expect(store.get('launch-slot')).toMatchObject({ id: '2', why: 'account 1 has no room, and it is the next with room' })
+  expect(store.get('launch-slot')).toMatchObject({ id: '2', why: 'one@example.com has no room, and it is the next with room' })
   await pane.unmount()
 })
 
@@ -3348,7 +3348,7 @@ test('before the rotation moves the session off Claude Code\'s login, Claude in 
   // Asked once, on login 1, and only then moved to login 2.
   expect(w.chromeAsked).toEqual([''])
   expect(slots(w)).toEqual([SLOT2])
-  const learned = /^Claude in Chrome connects as Claude account 1 \(one@example\.com[^)]*\): your Chrome extension is signed in to it\.$/
+  const learned = /^Claude in Chrome connects as Claude account one@example\.com: your Chrome extension is signed in to it\.$/
   expect(w.toasts.filter(t => learned.test(t))).toHaveLength(1)
   // On login 2 a browser call is answered, the connection still login 1's, and Claude is told nothing more.
   const called = await browse($, 'tabs_context_mcp')
@@ -3396,7 +3396,7 @@ test('a Chrome opened later on an account the box hasn\'t listed is a press away
   await clock.advance(36_000)
   expect(w.commands).toEqual(['/mcp reconnect claude-in-chrome'])
   expect(w.chromeAsked).toEqual(['', SLOT2])
-  expect(w.toasts).toContain('Claude in Chrome is connected as Claude account 2 (two@example.com).')
+  expect(w.toasts).toContain('Claude in Chrome is connected as Claude account two@example.com.')
   expect(slots(w)).toEqual([SLOT2, ''])
   // Kept in the store every session reads: both listed from now on, login 2 in use, none left behind the press.
   await clock.advance(61_000)
@@ -3427,15 +3427,15 @@ test('Try to connect as an account no Chrome answers as changes nothing: the box
   await clock.advance(36_000)
   expect(w.chromeAsked).toEqual(['', SLOT2])
   expect(w.toasts).toContain(
-    'No Chrome extension answers as Claude account 2 (two@example.com). Open Chrome and check its Claude extension is signed in with that email; if it is, restart Chrome and try again. ' +
-      'Claude in Chrome goes back to account 1 (one@example.com).',
+    'No Chrome extension answers as Claude account two@example.com. Open Chrome and check its Claude extension is signed in with that email; if it is, restart Chrome and try again. ' +
+      'Claude in Chrome goes back to one@example.com.',
   )
   // Back on login 1, Claude in Chrome connects there again once the move lands.
   expect(slots(w)).toEqual([SLOT2, ''])
   await clock.advance(36_000)
   expect(w.commands).toEqual(['/mcp reconnect claude-in-chrome', '/mcp reconnect claude-in-chrome'])
   expect(w.chromeAsked).toEqual(['', SLOT2, ''])
-  expect(w.toasts).toContain('Claude in Chrome is connected as Claude account 1 (one@example.com).')
+  expect(w.toasts).toContain('Claude in Chrome is connected as Claude account one@example.com.')
   // Kept in the store every session reads: login 1 still picked, listed and in use; login 2 only behind Other accounts.
   await clock.advance(61_000)
   await pane.redraw()
@@ -3472,8 +3472,8 @@ test('Use for Chrome on a listed account whose Chrome has closed since finds no 
   await clock.advance(36_000)
   expect(w.chromeAsked).toEqual(['', SLOT2])
   expect(w.toasts).toContain(
-    'No Chrome extension answers as Claude account 2 (two@example.com). Open Chrome and check its Claude extension is signed in with that email; if it is, restart Chrome and try again. ' +
-      'Claude in Chrome goes back to account 1 (one@example.com).',
+    'No Chrome extension answers as Claude account two@example.com. Open Chrome and check its Claude extension is signed in with that email; if it is, restart Chrome and try again. ' +
+      'Claude in Chrome goes back to one@example.com.',
   )
   expect(slots(w)).toEqual([SLOT2, ''])
   await clock.advance(36_000)
@@ -3509,7 +3509,7 @@ test('a window opening while the picked account\'s Chrome is closed lists that a
   expect(
     await pane.find({
       type: 'Text',
-      text: '⚠ No Chrome extension answers as account 1 (one@example.com). Open Chrome and check its Claude extension is signed in with that email; if it is, restart Chrome.',
+      text: '⚠ No Chrome extension answers as one@example.com. Open Chrome and check its Claude extension is signed in with that email; if it is, restart Chrome.',
     }),
   ).toBeDefined()
   // Chrome opens, signed in to login 1's account.
@@ -3607,7 +3607,7 @@ test('as a session opens it visits the extension\'s account, which has room, to 
   // Not asked before Claude Code reads login 2's sign-in, which a call would connect as.
   expect(w.chromeAsked).toEqual([])
   const band = await mountBand($)
-  expect(await band.find({ type: 'Text', text: '◌ Connecting Chrome as account 2 (two@example.com)…' })).toBeDefined()
+  expect(await band.find({ type: 'Text', text: '◌ Connecting Chrome as two@example.com…' })).toBeDefined()
   await band.unmount()
   // The visit is no switch: login 2's line says so, not "in use".
   const visiting = await mountPane($)
@@ -3616,7 +3616,7 @@ test('as a session opens it visits the extension\'s account, which has room, to 
   await visiting.unmount()
   const held = await $.tool.check({ tool: 'mcp__claude-in-chrome__navigate', input: { url: 'https://example.com' } })
   expect(held.decision).toBe('deny')
-  expect(held.reason).toMatch(/^The account-rotator mod is connecting Claude in Chrome as Claude account 2 \(two@example\.com\).* End your turn now/)
+  expect(held.reason).toMatch(/^The account-rotator mod is connecting Claude in Chrome as Claude account two@example\.com.* End your turn now/)
   await clock.advance(36_000)
   // A first connection, nothing to reconnect; then back on login 1, which has room. No switch was told: the visit is the band's.
   expect(w.chromeAsked).toEqual([SLOT2])
@@ -3645,7 +3645,7 @@ test('as a session opens it leaves a spent extension account be; the first brows
   // Claude in Chrome connects as login 1, which no extension answers: the mod visits login 2 now.
   const called = await browse($, 'navigate', { url: 'https://example.com' })
   expect(called.isError).toBe(true)
-  expect(called.context?.[0]).toMatch(/^Claude in Chrome connected as Claude account 1 \(one@example\.com\) and found no browser\. The account-rotator mod is now connecting it as Claude account 2 \(two@example\.com\)/)
+  expect(called.context?.[0]).toMatch(/^Claude in Chrome connected as Claude account one@example\.com and found no browser\. The account-rotator mod is now connecting it as Claude account two@example\.com/)
   await clock.settle()
   expect(slots(w)).toEqual([SLOT2])
   await clock.advance(36_000)
@@ -3653,7 +3653,7 @@ test('as a session opens it leaves a spent extension account be; the first brows
   expect(w.chromeAsked).toEqual([SLOT2])
   expect(slots(w)).toEqual([SLOT2, ''])
   await clock.advance(36_000)
-  expect(w.submitted).toEqual(['Claude in Chrome is connected as Claude account 2 (two@example.com). Continue where you left off.'])
+  expect(w.submitted).toEqual(['Claude in Chrome is connected as Claude account two@example.com. Continue where you left off.'])
   expect((await browse($, 'navigate', { url: 'https://example.com' })).isError).toBeUndefined()
 })
 
@@ -3724,24 +3724,24 @@ test('when the connection drops and comes back as the account in use, the next b
   const called = await browse($, 'navigate', { url: 'https://example.com' })
   expect(called.isError).toBe(true)
   expect(called.context?.[0]).toBe(
-    'Claude in Chrome connected as Claude account 1 (one@example.com) and found no browser. ' +
-      "The account-rotator mod is now reconnecting it as Claude account 1 (one@example.com), the account the user's Chrome extension is signed in to, which takes under a minute. " +
+    'Claude in Chrome connected as Claude account one@example.com and found no browser. ' +
+      "The account-rotator mod is now reconnecting it as Claude account one@example.com, the account the user's Chrome extension is signed in to, which takes under a minute. " +
       "End your turn now: you'll get a message once it's connected. Don't suggest /login: it doesn't fix this.",
   )
   await clock.settle()
   expect(slots(w)).toEqual(['', SLOT2, ''])
   const band = await mountBand($)
-  expect(await band.find({ type: 'Text', text: '◌ Connecting Chrome as account 1 (one@example.com)…' })).toBeDefined()
+  expect(await band.find({ type: 'Text', text: '◌ Connecting Chrome as one@example.com…' })).toBeDefined()
   await band.unmount()
   await clock.advance(36_000)
   expect(w.commands).toEqual(['/mcp reconnect claude-in-chrome'])
   expect(w.chromeAsked).toEqual(['', ''])
-  expect(w.toasts).toContain('Claude in Chrome is connected as Claude account 1 (one@example.com).')
+  expect(w.toasts).toContain('Claude in Chrome is connected as Claude account one@example.com.')
   // Back on login 2, and Claude is told to carry on once that lands.
   expect(slots(w)).toEqual(['', SLOT2, '', SLOT2])
   expect(w.submitted).toEqual([])
   await clock.advance(36_000)
-  expect(w.submitted).toEqual(['Claude in Chrome is connected as Claude account 1 (one@example.com). Continue where you left off.'])
+  expect(w.submitted).toEqual(['Claude in Chrome is connected as Claude account one@example.com. Continue where you left off.'])
   expect((await browse($, 'navigate', { url: 'https://example.com' })).isError).toBeUndefined()
   expect(w.toasts.filter(t => /Something went wrong/.test(t))).toEqual([])
 })
@@ -3762,7 +3762,7 @@ test('a session Claude Code stops from switching, on another account than the ex
   expect(
     await band.find({
       type: 'Text',
-      text: "⚠ This window can't switch to account 1 (one@example.com). Quit (in a background session, /stop: /exit only detaches), then run: claude --resume session-1",
+      text: "⚠ This window can't switch to one@example.com. Quit (in a background session, /stop: /exit only detaches), then run: claude --resume session-1",
     }),
   ).toBeDefined()
   expect(await band.find({ key: 'chrome-connect-band' })).toBeUndefined()
@@ -3800,7 +3800,7 @@ test('with no account named for the Chrome extension, a browser call that finds 
   const clock = world(on, w, TWO_LOGINS)
   await start($, clock)
   const called = await browse($, 'tabs_context_mcp')
-  expect(called.context?.[0]).toMatch(/^Claude in Chrome connected as Claude account 2 \(two@example\.com\) and found no browser\. .* Ask the user to press Use for Chrome or Try to connect next to it under Chrome in the Claude accounts panel/)
+  expect(called.context?.[0]).toMatch(/^Claude in Chrome connected as Claude account two@example\.com and found no browser\. .* Ask the user to press Use for Chrome or Try to connect next to it under Chrome in the Claude accounts panel/)
   const band = await mountBand($)
   expect(await band.find({ type: 'Text', text: '⚠ Claude in Chrome: which account is your Chrome extension signed in to?' })).toBeDefined()
   await band.press({ key: 'chrome-pick' })
@@ -3821,7 +3821,7 @@ test('with no account named for the Chrome extension, a browser call that finds 
   // Back on login 2, where the session was; Claude is told once that lands.
   expect(slots(w)).toEqual(['', SLOT2])
   await clock.advance(36_000)
-  expect(w.submitted).toEqual(['Claude in Chrome is connected as Claude account 1 (one@example.com). Continue where you left off.'])
+  expect(w.submitted).toEqual(['Claude in Chrome is connected as Claude account one@example.com. Continue where you left off.'])
 })
 
 test('a Connect that finds no browser says to check Chrome and its extension\'s email, and a call that finds none then asks the person instead of connecting again', async ($, on) => {
@@ -3838,19 +3838,19 @@ test('a Connect that finds no browser says to check Chrome and its extension\'s 
   expect(w.toasts.filter(t => /Chrome extension answers/.test(t))).toEqual([])
   const called = await browse($, 'tabs_context_mcp')
   expect(called.context?.[0]).toMatch(
-    /^No Chrome extension answers as Claude account 1 \(one@example\.com\).*Ask the user to open Chrome and check the email its Claude extension is signed in with\..*press Connect above the prompt/,
+    /^No Chrome extension answers as Claude account one@example\.com.*Ask the user to open Chrome and check the email its Claude extension is signed in with\..*press Connect above the prompt/,
   )
   await clock.settle()
   expect(slots(w)).toEqual(['', SLOT2])
   const band = await mountBand($)
-  const noBrowser = '⚠ No Chrome extension answers as account 1 (one@example.com). Open Chrome and check its Claude extension is signed in with that email; if it is, restart Chrome.'
+  const noBrowser = '⚠ No Chrome extension answers as one@example.com. Open Chrome and check its Claude extension is signed in with that email; if it is, restart Chrome.'
   expect(await band.find({ type: 'Text', text: noBrowser })).toBeDefined()
   await band.press({ key: 'chrome-connect-band' })
   await clock.settle()
   await band.unmount()
   await clock.advance(36_000)
   expect(w.commands).toEqual(['/mcp reconnect claude-in-chrome'])
-  expect(w.toasts).toContain('No Chrome extension answers as Claude account 1 (one@example.com). Open Chrome and check its Claude extension is signed in with that email; if it is, restart Chrome.')
+  expect(w.toasts).toContain('No Chrome extension answers as Claude account one@example.com. Open Chrome and check its Claude extension is signed in with that email; if it is, restart Chrome.')
   expect(slots(w)).toEqual(['', SLOT2, '', SLOT2])
   await clock.advance(36_000)
   expect(w.submitted).toEqual([])
@@ -3940,11 +3940,11 @@ test('puma-9arph.18: Use now held back for a token about to refresh says so on t
   await pane.press({ key: 'use-2' })
   await clock.settle()
   expect(slots(w)).toEqual([])
-  expect((await pane.find({ key: 'held-2' }))?.text).toBe("switching here once account 1's token has refreshed, at the next request on account 1")
+  expect((await pane.find({ key: 'held-2' }))?.text).toBe("switching here once one@example.com's token has refreshed, at the next request on it")
   refresh(w)
   await clock.advance(60_000)
   expect(slots(w)).toEqual([SLOT2])
-  expect(w.toasts.filter(t => /^Switched to Claude account 2 .*: you picked it\.$/.test(t))).toHaveLength(1)
+  expect(w.toasts.filter(t => /^Switched to Claude account two@example.com: you picked it\.$/.test(t))).toHaveLength(1)
   await pane.redraw()
   expect(await pane.find({ key: 'held-2' })).toBeUndefined()
   await pane.unmount()
@@ -4193,10 +4193,10 @@ type StayCase = {
 }
 
 const STAY_CASES: StayCase[] = [
-  { name: 'the other login has its 5-hour window full', notice: /^Fable limit reached on account 1, and no other Claude account can take over/, usage: { 'tok-1': [20, 30, 100], 'tok-2': [95, 30, 10] } },
-  { name: 'the other login has its week full', notice: /^Fable limit reached on account 1, and no other Claude account can take over/, usage: { 'tok-1': [20, 30, 100], 'tok-2': [10, 100, 10] } },
-  { name: 'the rotation is off', notice: /^Fable limit reached on account 1, and usage based rotation is disabled/, usage: { 'tok-1': [20, 30, 100], 'tok-2': [10, 30, 10] }, store: { 'rotate-to': 'off' } },
-  { name: 'Claude Code\'s policy refuses switching', notice: /^Fable limit reached on account 1, and Claude Code's policy stops this session from switching accounts/, usage: { 'tok-1': [20, 30, 100], 'tok-2': [10, 30, 10] }, isBlocked: true },
+  { name: 'the other login has its 5-hour window full', notice: /^Fable limit reached on one@example\.com, and no other Claude account can take over/, usage: { 'tok-1': [20, 30, 100], 'tok-2': [95, 30, 10] } },
+  { name: 'the other login has its week full', notice: /^Fable limit reached on one@example\.com, and no other Claude account can take over/, usage: { 'tok-1': [20, 30, 100], 'tok-2': [10, 100, 10] } },
+  { name: 'the rotation is off', notice: /^Fable limit reached on one@example\.com, and usage based rotation is disabled/, usage: { 'tok-1': [20, 30, 100], 'tok-2': [10, 30, 10] }, store: { 'rotate-to': 'off' } },
+  { name: 'Claude Code\'s policy refuses switching', notice: /^Fable limit reached on one@example\.com, and Claude Code's policy stops this session from switching accounts/, usage: { 'tok-1': [20, 30, 100], 'tok-2': [10, 30, 10] }, isBlocked: true },
 ]
 
 for (const { name, notice, usage, store = {}, isBlocked = false } of STAY_CASES) {
@@ -4661,7 +4661,7 @@ test('a stored reading no login can be shown to own is dropped, and a login whos
   await start($, clock)
   expect((store.get('launch-slot') as { id?: string } | undefined)?.id).toBe('2')
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
-  expect(await pane.find({ text: /^▰▱{9} 11%$/ })).toBeUndefined()
+  expect(await pane.find({ text: /^▰▱{9} +11%$/ })).toBeUndefined()
   await pane.unmount()
 })
 
@@ -5698,7 +5698,7 @@ for (const isThrowing of [false, true]) {
     expect(['the rebind threw', w.logged.some(line => line.includes('rebind after clear failed'))]).toEqual(['the rebind threw', isThrowing])
     w.usage['tok-2'] = [100, 100]
     await pastNextRead(clock)
-    expect(w.toasts.filter(t => /^Switched to Claude account 1\b/.test(t))).toHaveLength(1)
+    expect(w.toasts.filter(t => /^Switched to Claude account one@example.com\b/.test(t))).toHaveLength(1)
   })
 }
 
@@ -6257,7 +6257,7 @@ test('a stop that moves the session on from an unproven switch keeps its mark th
   await clock.advance(40_000)
   await $.classic.StopFailure({ error: 'rate_limit', last_assistant_message: 'Claude usage limit reached.' })
   await clock.settle()
-  expect(w.toasts.some(t => /^Switched to Claude account 1/.test(t))).toBe(true)
+  expect(w.toasts.some(t => /^Switched to Claude account one@example.com/.test(t))).toBe(true)
   await endSession($, clock)
   expect(store.get('mark:2')).toBeDefined()
 })
@@ -6579,13 +6579,13 @@ test('a minute after a /login as another max login whose read fails, the row sho
   w.loginPlan = 'max'
   const clock = world(on, w, { accounts: [{ id: '1', slot: '', email: 'one@example.com' }], 'rotate-to': 'off' })
   await start($, clock)
-  expect(await paneText($)).toMatch(/^▰{3}▱{7} 30%$/m)
+  expect(await paneText($)).toMatch(/^▰{3}▱{7} +30%$/m)
   w.failing = { 'tok-9': 503 }
   await $.command.run(LOGIN)
   await clock.settle()
   await clock.advance(61_000)
   const text = await paneText($)
-  expect([/^▰{3}▱{7} 30%$/m.test(text), await aboutOf($, 'nine@example.com')]).toEqual([false, 'Org · Max'])
+  expect([/^▰{3}▱{7} +30%$/m.test(text), await aboutOf($, 'nine@example.com')]).toEqual([false, 'Org · Max'])
 })
 
 // [SIGN-IN-OWNED-STATE], RULING 4455: a refresh of the same account (a new refresh token, the profile naming the same
@@ -6635,14 +6635,14 @@ for (const status of [503, 429, 500]) {
 /** What the pane draws after each `Fable` row's label, in order: one entry per row. */
 async function fableRows($: Engine): Promise<string[]> {
   const texts = (await paneText($)).split('\n')
-  return texts.flatMap((t, i) => (t === ' Fable ' ? [texts[i + 1] ?? ''] : t === ' Fable –' ? ['–'] : []))
+  return texts.flatMap((t, i) => (t === ' Fable ' ? [texts[i + 1] ?? ''] : t.trimEnd() === ' Fable –' ? ['–'] : []))
 }
 
 test('a reading with Fable 66% draws a Fable row under the week with its bar at 66%', async ($, on) => {
   const w = planWorld(blob('tok-1'), [10, 30, 66])
   const clock = world(on, w, { ...TWO_LOGINS, 'rotate-to': 'off', footer: { ...DEFAULT_FOOTER, fill: 'used' } })
   await start($, clock)
-  expect(await fableRows($)).toEqual([`${longBar(66)} 66%`])
+  expect(await fableRows($)).toEqual([`${longBar(66)}  66%`])
   const text = await paneText($)
   expect(text.indexOf(' Fable ')).toBeGreaterThan(text.indexOf('Used '))
 })
@@ -6650,12 +6650,12 @@ test('a reading with Fable 66% draws a Fable row under the week with its bar at 
 const FABLE_ROW_CASES: [string, () => World, string[]][] = [
   ['Max whose usage lists no Fable week', () => planWorld(blob('tok-1'), [10, 30]), ['–']],
   ['Ultra whose usage lists no Fable week', () => planWorld(blob('tok-1'), [null, 30]), ['–']],
-  ['Max with its Fable week at 66%', () => planWorld(blob('tok-1'), [10, 30, 66]), [`${longBar(66)} 66%`]],
+  ['Max with its Fable week at 66%', () => planWorld(blob('tok-1'), [10, 30, 66]), [`${longBar(66)}  66%`]],
   ['Pro whose usage lists no Fable week', () => planWorld(blob('tok-1', NOW + 6 * HOUR, 'pro'), [10, 30]), []],
   ['Team whose usage lists no Fable week', () => planWorld(blob('tok-1', NOW + 6 * HOUR, 'team'), [10, 30]), []],
   ['Enterprise whose usage lists no Fable week', () => planWorld(blob('tok-1', NOW + 6 * HOUR, 'enterprise'), [10, 30]), []],
   ['a plan word the mod does not know, with no Fable week', () => planWorld(blob('tok-1', NOW + 6 * HOUR, 'galaxy'), [10, 30]), []],
-  ['Pro whose usage lists a Fable week at 50%', () => planWorld(blob('tok-1', NOW + 6 * HOUR, 'pro'), [10, 30, 50]), [`${longBar(50)} 50%`]],
+  ['Pro whose usage lists a Fable week at 50%', () => planWorld(blob('tok-1', NOW + 6 * HOUR, 'pro'), [10, 30, 50]), [`${longBar(50)}  50%`]],
 ]
 for (const [name, make, expected] of FABLE_ROW_CASES) {
   test(`the pane's Fable rows for ${name}: ${JSON.stringify(expected)}`, async ($, on) => {
@@ -6732,7 +6732,7 @@ test('a Fable stop before any response proves a switch marks fable-mark on the l
   expect(w.toasts.some(t => /did not take/.test(t))).toBe(true)
   expect(store.get('fable-mark:2')).toBeUndefined()
   // This session's view drops it too: login 2 draws its body's week again.
-  expect(await fableRows($)).toEqual(['–', `${longBar(50)} 50%`])
+  expect(await fableRows($)).toEqual(['–', `${longBar(50)}  50%`])
 })
 
 test('a check whose usage lists no Fable week after a Fable stop keeps the stored week in usage:<id>, never the mark', async ($, on) => {
@@ -6754,7 +6754,7 @@ test('a Fable mark another session stored on a login with no reading yet counts:
   w.failing = { 'tok-2': 429 }
   const clock = world(on, w, { ...TWO_LOGINS, 'rotate-to': 'off', 'fable-mark:2': { pct: 100, resetsAt: FABLE_RESET, at: NOW } })
   await start($, clock)
-  expect(await fableRows($)).toEqual([`${longBar(10)} 10%`, `${longBar(100)} 100%`])
+  expect(await fableRows($)).toEqual([`${longBar(10)}  10%`, `${longBar(100)} 100%`])
 })
 
 // Review codex-c6 MARK-RETAINED and opus-c6 F3 [VIEW-OUTLIVES-STORE-DELETE] (RULING 4481): a store key another session
@@ -7022,7 +7022,7 @@ test('the merge stores each login\'s row lines under rows, stamped with when and
   const rows = rowsOf(store)
   expect([rows?.v, typeof rows?.at, rows?.rows?.map(r => r.id)]).toEqual([1, 'number', ['1', '2']])
   expect(lineOne(store, '1')).toMatch(new RegExp(`^one@example\\.com.*  updated ${localTime(goodReadAt(store, '1'))}$`))
-  expect(rowsText(store, clock.now())?.[0]?.lines[1]).toBe('Used ▰▰▰▱▱▱▱▱▱▱ 30% Fable ▰▰▰▰▱▱▱▱▱▱ 40%  resets 5d 16h 59m · Fable 4d 16h 59m')
+  expect(rowsText(store, clock.now())?.[0]?.lines[1]).toBe('Used ▰▰▰▱▱▱▱▱▱▱  30% Fable ▰▰▰▰▱▱▱▱▱▱  40%  resets 5d 16h 59m · Fable 4d 16h 59m')
   expect(clock.now()).toBeLessThan(NOW + 2 * 60_000)
 })
 
@@ -7890,7 +7890,7 @@ test('during a Bash call that names account-rotator, a use for this session is a
   await beat(clock)
   expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
   expect(resultOf(w, N1)).toMatchObject({ nonce: N1, ok: true, activeId: '2' })
-  expect(resultOf(w, N1)?.message).toMatch(/this session now uses account 2/)
+  expect(resultOf(w, N1)?.message).toMatch(/this session now uses two@example.com/)
   await call.finish()
 })
 
@@ -7989,7 +7989,7 @@ test('a switch held for a token refresh answers ok, names the wait, and moves on
   await call.finish()
   expect(w.envSets).toEqual([])
   expect(resultOf(w, N1)).toMatchObject({ ok: true, activeId: '1' })
-  expect(resultOf(w, N1)?.message).toMatch(/this session moves to account 2 .*in a few minutes, once account 1's token has refreshed/)
+  expect(resultOf(w, N1)?.message).toMatch(/this session moves to two@example.com .*in a few minutes, once one@example.com's token has refreshed/)
   w.keychain['Claude Code-credentials'] = blob('tok-1', clock.now() + 6 * HOUR)
   await untilTick(clock)
   expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
@@ -8015,7 +8015,7 @@ test('a use of the account in use answers ok and moves nothing', async ($, on) =
   await untilTick(clock)
   expect(w.envSets).toEqual([])
   expect(resultOf(w, N1)).toMatchObject({ ok: true, activeId: '1' })
-  expect(resultOf(w, N1)?.message).toMatch(/this session already uses account 1/)
+  expect(resultOf(w, N1)?.message).toMatch(/this session already uses one@example.com/)
 })
 
 test('a use of an account not listed, or one the panel offers no Use now for, answers not ok and moves nothing', async ($, on) => {
@@ -8026,9 +8026,9 @@ test('a use of an account not listed, or one the panel offers no Use now for, an
   w.files[`${REQUESTS}/${N1}.json`] = useRequest(N1, '2', store.get('store-id'), clock.now(), ownMark(w))
   await untilTick(clock)
   expect(w.envSets).toEqual([])
-  expect(resultOf(w, 'gone-00001')).toMatchObject({ ok: false, message: 'account 9 is not listed in this store' })
+  expect(resultOf(w, 'gone-00001')).toMatchObject({ ok: false, message: '9 names no account listed in this store' })
   expect(resultOf(w, N1)?.ok).toBe(false)
-  expect(resultOf(w, N1)?.message).toMatch(/account 2 .*cannot take over: its sign-in has run out/)
+  expect(resultOf(w, N1)?.message).toMatch(/two@example.com .*cannot take over: its sign-in has run out/)
 })
 
 test('a select during a Bash call that names account-rotator is applied within a beat too', async ($, on) => {
@@ -8134,7 +8134,7 @@ test('every $.env.set site reads a hold the engine resolves: the boot check, the
   expect(useButton, 'the sweep found no Use now to press').toBeDefined()
   await pane.press({ key: 'use-2' })
   await clock.settle()
-  const claimed = w.toasts.filter(t => t.startsWith('Switched to Claude account 2'))
+  const claimed = w.toasts.filter(t => t.startsWith('Switched to Claude account two@example.com'))
   if (claimed.length > 0) offenders.push(`switchTo by press (useSlot): "${claimed[0]}" with the slot unmoved`)
   await pane.unmount()
   expect(offenders, `sites that read a resolved { deny } as done; check the result of $.env.set in useSlot: ${offenders.join('; ')}`).toEqual([])
@@ -8224,7 +8224,7 @@ test('a use of the account in use with a switch held says it already uses it, an
   await untilTick(clock)
   const offenders = [
     ...(/already uses/.test(String(resultOf(w, N1)?.message)) ? [] : [`the answer: "${resultOf(w, N1)?.message}"`]),
-    ...w.toasts.filter(t => t.startsWith('Switched to Claude account 1')).map(t => `the toast: "${t}"`),
+    ...w.toasts.filter(t => t.startsWith('Switched to Claude account one@example.com')).map(t => `the toast: "${t}"`),
   ]
   expect(offenders, `the PR says this "moves nothing", yet switchTo ran on the login in use; cancel the held switch and answer "already uses": ${offenders.join('; ')}`).toEqual([])
 })
@@ -8298,9 +8298,9 @@ for (const heldRead of [1, 2]) {
       w.files[`${REQUESTS}/${N1}.json`] = useRequest(N1, '3', store.get('store-id'), clock.now(), ownMark(w))
       await beat(clock)
       await call.finish()
-      expect(resultOf(w, N1)?.message).toMatch(/now uses account 3/)
+      expect(resultOf(w, N1)?.message).toMatch(/now uses three@example.com/)
     }, 'reset', heldRead)
-    expect(slots(w).at(-1), `the give-up of the switch to login 1 put back login 2 after "now uses account 3": ${slots(w).join(' -> ')}`).toBe(SLOT3_OF_3)
+    expect(slots(w).at(-1), `the give-up of the switch to login 1 put back login 2 after "now uses three@example.com": ${slots(w).join(' -> ')}`).toBe(SLOT3_OF_3)
     expect(w.toasts.filter(t => /did not take/.test(t))).toEqual([])
   })
 }
@@ -8319,7 +8319,7 @@ test('a stop that moves the session while an older switch\'s give-up waits on a 
 test('with no newer switch, a give-up whose read waited still points the session back to the login it left', async ($, on) => {
   const { w } = await staleGiveUp($, on, async () => {})
   expect(slots(w).at(-1)).toBe(SLOT2)
-  expect(w.toasts.filter(t => /The switch to Claude account 1 did not take/.test(t))).toHaveLength(1)
+  expect(w.toasts.filter(t => /The switch to Claude account one@example.com did not take/.test(t))).toHaveLength(1)
 })
 
 // Review C12-R1 F5 (Opus) [MARK-NOT-LOAD-STABLE] -> [MARK-LIFE].
@@ -8437,7 +8437,7 @@ test('an rm during a Bash call that names the CLI signs the slot out, drops the 
   expect(left, `keys left behind: ${left.join(', ')}`).toEqual([])
   expect((store.get('launch-slot') as { id?: string } | undefined)?.id).toBe('1')
   expect(resultOf(w, N1)).toMatchObject({ nonce: N1, ok: true, pickId: '1' })
-  expect(resultOf(w, N1)?.message).toMatch(/account 2 is removed; new sessions start on account 1/)
+  expect(resultOf(w, N1)?.message).toMatch(/two@example.com is removed; new sessions start on one@example.com/)
 })
 
 test('with no Bash call the minute applies an rm', async ($, on) => {
@@ -8469,7 +8469,7 @@ test('two sessions on one store: an rm of an account another session already rem
   await untilTick(clock)
   expect(w.logouts ?? []).toEqual([])
   expect(resultOf(w, N1)).toMatchObject({ ok: true })
-  expect(resultOf(w, N1)?.message).toMatch(/account 2 is already gone/)
+  expect(resultOf(w, N1)?.message).toMatch(/the account with id 2 is already gone/)
 })
 
 test('two sessions on one store: a press of Remove from a view that still lists an account another session removed signs nothing out', async ($, on) => {
@@ -8528,9 +8528,9 @@ test('an rm of an account that shares its slot with one that stays signs nothing
   store.set('accounts', [...TWO_LOGINS.accounts, { id: '3', slot: SLOT2, email: 'same-slot@example.com' }])
   w.files[`${REQUESTS}/${N1}.json`] = rmRequest(N1, '2', store.get('store-id'), clock.now())
   await untilTick(clock)
-  expect(w.logouts ?? [], 'the logout signed out account 3, which stays listed').toEqual([])
+  expect(w.logouts ?? [], 'the logout signed out three@example.com, which stays listed').toEqual([])
   expect(resultOf(w, N1)?.ok).toBe(false)
-  expect(resultOf(w, N1)?.message).toMatch(/account 2 shares its sign-in with account 3/)
+  expect(resultOf(w, N1)?.message).toMatch(/two@example.com shares its sign-in with same-slot@example.com/)
   expect((store.get('accounts') as unknown[]).length).toBe(3)
 })
 
@@ -8563,7 +8563,7 @@ test('in use with no other account signed in: not ok, naming it, no logout, the 
   w.files[`${REQUESTS}/${N1}.json`] = rmRequest(N1, '2', store.get('store-id'), clock.now())
   await untilTick(clock)
   expect(resultOf(w, N1)?.ok).toBe(false)
-  expect(resultOf(w, N1)?.message).toMatch(/account 2 is in use and no other account can take over yet; not removed/)
+  expect(resultOf(w, N1)?.message).toMatch(/two@example.com is in use and no other account can take over yet; not removed/)
   expect(w.logouts ?? []).toEqual([])
   expect((store.get('accounts') as { id: string }[]).map(a => a.id)).toEqual(['1', '2'])
   expect(store.has('reading:2')).toBe(true)
@@ -8611,7 +8611,7 @@ for (const [name, failure] of [
     w.files[`${REQUESTS}/${N1}.json`] = rmRequest(N1, '2', store.get('store-id'), clock.now())
     await untilTick(clock)
     expect(resultOf(w, N1)?.ok).toBe(false)
-    expect(resultOf(w, N1)?.message).toMatch(/account 2 .*could not be signed out/)
+    expect(resultOf(w, N1)?.message).toMatch(/two@example.com .*could not be signed out/)
     if (failure.stderr !== '') expect(resultOf(w, N1)?.message).toMatch(/keychain is locked$/)
     expect((store.get('accounts') as { id: string }[]).map(a => a.id)).toEqual(['1', '2'])
     // A usage read that works clears check-error, in the same minute.
@@ -8645,7 +8645,7 @@ test('an rm that leaves no room anywhere says new sessions start on Claude Code\
   w.files[`${REQUESTS}/${N1}.json`] = rmRequest(N1, '2', store.get('store-id'), clock.now())
   await untilTick(clock)
   expect(resultOf(w, N1)?.ok).toBe(true)
-  expect(resultOf(w, N1)?.message).toMatch(/account 2 is removed; no account has room, so new sessions start on Claude Code's login/)
+  expect(resultOf(w, N1)?.message).toMatch(/two@example.com is removed; no account has room, so new sessions start on Claude Code's login/)
   expect(resultOf(w, N1)?.pickId).toBeUndefined()
 })
 
@@ -8674,7 +8674,7 @@ test('an add lists the folder under its number with who signed in, for a session
   expect(listedRow(store, '7')).toMatchObject({ id: '7', slot: SLOT7, email: 'seven@example.com', orgId: 'org-seven@example.com', plan: 'max' })
   expect(store.get('health:7')).toMatchObject({ kind: 'ok' })
   expect(resultOf(w, N1)).toMatchObject({ nonce: N1, ok: true, accountId: '7' })
-  expect(resultOf(w, N1)?.message).toMatch(/account 7 .*seven@example\.com.* is added/)
+  expect(resultOf(w, N1)?.message).toMatch(/^seven@example\.com is added/)
   expect(w.usageCalls, 'the same minute reads the new account: it needs no read of its own').toContain('tok-7')
   await untilTick(clock)
   expect(store.get('health:7')).toMatchObject({ kind: 'ok' })
@@ -8706,7 +8706,7 @@ test('an add of a folder an account already lists says which, and changes nothin
   w.statusAsked = []
   w.files[`${REQUESTS}/${N1}.json`] = addRequest(N1, SLOT2, store.get('store-id'), clock.now())
   await untilTick(clock)
-  expect(resultOf(w, N1)).toMatchObject({ ok: true, accountId: '2', message: 'already account 2', pickId: (store.get('launch-slot') as { id: string }).id })
+  expect(resultOf(w, N1)).toMatchObject({ ok: true, accountId: '2', message: 'already two@example.com', pickId: (store.get('launch-slot') as { id: string }).id })
   expect(JSON.stringify(store.get('accounts'))).toBe(before)
 })
 
@@ -8723,7 +8723,7 @@ test('an add of a login an account already holds is refused, Claude Code own log
     await untilTick(clock)
     const result = resultOf(w, nonce)
     const said = String(result?.message)
-    if (result?.ok !== false || !said.includes(`account ${twin.id}`) || !said.includes(SLOT7) || !said.includes('claude auth logout')) offenders.push(`${twin.id}: ${said}`)
+    if (result?.ok !== false || !said.includes(`that sign-in is ${twin.email} already`) || !said.includes(SLOT7) || !said.includes('claude auth logout')) offenders.push(`${twin.id}: ${said}`)
     if (listedIds(store).includes('7') || store.has('health:7')) offenders.push(`${twin.id}: listed`)
     delete w.files[`${REQUESTS}/${nonce}.json`]
   }
@@ -8778,7 +8778,7 @@ test('two sessions on one store, accounts: a write that took the place of the ne
   w.files[`${REQUESTS}/${N2}.json`] = addRequest(N2, SLOT7, store.get('store-id'), clock.now())
   await untilTick(clock)
   expect(resultOf(w, N2)).toMatchObject({ ok: true, accountId: '9' })
-  expect(String(resultOf(w, N2)?.message)).toMatch(/account 9 /)
+  expect(String(resultOf(w, N2)?.message)).toMatch(/seven@example\.com/)
 })
 
 // puma-eslxj.28 [STORE-ID-THROW-SKIPS-MINUTE]: a refused store-id rejects no merge, so the minute settles and checks, in that order: a check read means the settle ran.
@@ -8925,7 +8925,7 @@ test('two sessions on one store, accounts: a session that lists the folder while
   w.files[`${REQUESTS}/${N1}.json`] = addRequest(N1, SLOT7, store.get('store-id'), clock.now())
   await untilTick(clock)
   expect(listedIds(store)).toEqual(['1', '2', '7'])
-  expect(resultOf(w, N1)).toMatchObject({ ok: true, accountId: '7', message: 'already account 7' })
+  expect(resultOf(w, N1)).toMatchObject({ ok: true, accountId: '7', message: 'already seven@example.com' })
 })
 
 test('two sessions on one store, accounts: an account another session listed while this one read who signed in stays', async ($, on) => {
@@ -8960,7 +8960,7 @@ test('two sessions on one store, accounts: the session that takes one request se
   w.files[`${REQUESTS}/${N2}.json`] = addRequest(N2, SLOT7, store.get('store-id'), clock.now() + 1)
   await untilTick(clock)
   expect(listedIds(store)).toEqual(['1', '2', '7'])
-  expect([resultOf(w, N1)?.accountId, resultOf(w, N2)?.message]).toEqual(['7', 'already account 7'])
+  expect([resultOf(w, N1)?.accountId, resultOf(w, N2)?.message]).toEqual(['7', 'already seven@example.com'])
 })
 
 test('two sessions on one store, health: the health stands before the row, so a session that merges between them never finds the account not signed in', async ($, on) => {
@@ -9163,7 +9163,7 @@ test('a press that signs in a login a row holds with its organization unread is 
   w.loginEmail = 'two@example.com'
   await pressAdd($, clock)
   expect(store.get('health:3')).toMatchObject({ kind: 'login-needed' })
-  expect(JSON.stringify(store.get('health:3'))).toMatch(/account 2/)
+  expect(JSON.stringify(store.get('health:3'))).toMatch(/two@example.com/)
   expect((listedRow(store, '3') as { email?: string }).email).toBeUndefined()
 })
 
@@ -9218,7 +9218,7 @@ test('a Fable stop in the 35 seconds after a switch marks nothing on the account
   w.limits = limitsOf(10, 30, OTHER_WEEK)
   await respond($, clock, w)
   expect(store.get('fable-mark:2')).toBeUndefined()
-  expect(await fableRows($)).toEqual([`${longBar(100)} 100%`, `${longBar(10)} 10%`])
+  expect(await fableRows($)).toEqual([`${longBar(100)} 100%`, `${longBar(10)}  10%`])
 })
 
 // Upstream b90ff1b: a turn that dies in the 35 seconds after a switch may have gone out on the login left, a rejected sign-in too.
@@ -9242,7 +9242,7 @@ test('Review codex-r2 A1: a target response during settle makes its rejected sig
   await respond($, clock, w)
   await $.classic.StopFailure({ error: 'authentication_failed' })
   await clock.settle()
-  expect((store.get('health:2') as { kind?: string } | undefined)?.kind, 'A1: a target response already identified account 2; a real rejected sign-in must mark it sign-in-needed during settle').toBe('login-needed')
+  expect((store.get('health:2') as { kind?: string } | undefined)?.kind, 'A1: a target response already identified two@example.com; a real rejected sign-in must mark it sign-in-needed during settle').toBe('login-needed')
 })
 
 // Review codex-r2 A1 [AUTH-SETTLE], the class: target-proven rejected sign-ins must pass the common settle return.
@@ -9333,7 +9333,7 @@ test('a Fable stop while Chrome connects marks nothing on the visited account, t
   expect(w.chromeAsked).toEqual([SLOT2])
   expect(slots(w)).toEqual([SLOT2, ''])
   expect(store.get('fable-mark:2')).toBeUndefined()
-  expect(await fableRows($)).toEqual([`${longBar(100)} 100%`, `${longBar(10)} 10%`])
+  expect(await fableRows($)).toEqual([`${longBar(100)} 100%`, `${longBar(10)}  10%`])
   // Nor is the stop told as login 2's limit: it was the turn's on login 1, which carries on once the visit ends.
   expect(w.notices.map(String).filter(t => /Fable/.test(t))).toEqual([])
   await clock.advance(36_000)
@@ -9354,7 +9354,7 @@ for (const [age, isEnded] of [[31, true], [10, false]] as const) {
     const clock = world(on, w, store)
     await start($, clock)
     expect([age, store.get('fable-mark:2')]).toEqual([age, isEnded ? undefined : mark])
-    expect(await fableRows($)).toEqual([`${longBar(10)} 10%`, isEnded ? `${longBar(35)} 35%` : `${longBar(100)} 100%`])
+    expect(await fableRows($)).toEqual([`${longBar(10)}  10%`, isEnded ? `${longBar(35)}  35%` : `${longBar(100)} 100%`])
   })
 }
 

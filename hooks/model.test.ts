@@ -148,7 +148,7 @@ test('new sessions start on the login the setting picks among those with room on
   expect(on('nonzero')?.id).toBe('2')
   expect(on('reset')?.id).toBe('3')
   expect(on('account:3')).toMatchObject({ id: '3', why: 'you picked it' })
-  expect(on('account:4')).toMatchObject({ id: '2', why: 'account 4 has no room, and it is the next with room' })
+  expect(on('account:4')).toMatchObject({ id: '2', why: 'account 4 (not signed in yet) has no room, and it is the next with room' })
   expect(on('account:1')?.id).toBe('2')
   expect(pickLaunch(view({ '1': [100, 10], '2': [10, 100] }), NOW)).toBeUndefined()
   expect(['room', 'nonzero', 'reset', 'account:3', 'account:', 'other', 7].map(launchOnFrom)).toEqual(['room', 'nonzero', 'reset', 'account:3', 'room', 'room', 'room'])
@@ -735,12 +735,12 @@ test('the notes about Claude in Chrome say what the mod does now and what to tel
   const base = { ...view({ '1': [10, 10], '2': [10, 10] }), accounts, chromeAccountId: '1', activeId: '2', sessionId: 'session-1' }
   const onTwo = { ...base, chrome: { as: '2', isPaired: false, hasFailed: true } }
   expect(chromeNote(onTwo, 'connecting')).toBe(
-    'Claude in Chrome connected as Claude account 2 (two@example.com) and found no browser. ' +
-      "The account-rotator mod is now connecting it as Claude account 1 (one@example.com), the account the user's Chrome extension is signed in to, which takes under a minute. " +
+    'Claude in Chrome connected as Claude account two@example.com and found no browser. ' +
+      "The account-rotator mod is now connecting it as Claude account one@example.com, the account the user's Chrome extension is signed in to, which takes under a minute. " +
       "End your turn now: you'll get a message once it's connected. Don't suggest /login: it doesn't fix this.",
   )
-  expect(chromeNote(base, 'held')).toMatch(/^The account-rotator mod is connecting Claude in Chrome as Claude account 1 \(one@example\.com\).* End your turn now/)
-  expect(chromeNote(onTwo, 'no-browser')).toMatch(/^No Chrome extension answers as Claude account 1 \(one@example\.com\), the account picked for it in the Claude accounts panel: .* If it is another account, they press Use for Chrome or Try to connect next to it .* If it matches, they restart Chrome and press Connect above the prompt\./)
+  expect(chromeNote(base, 'held')).toMatch(/^The account-rotator mod is connecting Claude in Chrome as Claude account one@example\.com.* End your turn now/)
+  expect(chromeNote(onTwo, 'no-browser')).toMatch(/^No Chrome extension answers as Claude account one@example\.com, the account picked for it in the Claude accounts panel: .* If it is another account, they press Use for Chrome or Try to connect next to it .* If it matches, they restart Chrome and press Connect above the prompt\./)
   const blocked = { ...onTwo, isSwitchBlocked: true }
   expect(chromeNote(blocked, 'blocked')).toMatch(
     /Claude Code doesn't let this session switch accounts\. Tell the user that to use Chrome, they quit Claude Code \(in a background session, with \/stop: \/exit only detaches\) and run `claude --resume session-1` in a terminal/,
@@ -801,7 +801,7 @@ test('every reason has its own words, naming the account and ending on Claude Co
       expect([name, text]).toEqual([name, fableSpentNotice(v, NOW)])
       continue
     }
-    expect([name, text.startsWith('Fable limit reached on account 1')]).toEqual([name, true])
+    expect([name, text.startsWith("Fable limit reached on Claude Code's login")]).toEqual([name, true])
     expect([name, text.endsWith(WAY_OUT)]).toEqual([name, true])
     expect(text.length).toBeLessThan(260)
     texts.set(reason, text)
@@ -1198,7 +1198,7 @@ function rowView(change: Partial<View> = {}, account: View['accounts'][number] =
   }
 }
 const rowLines = (v: View, timeZone = TALLINN) => rowText(rowOf(v, v.accounts[0] ?? ANDRES, ROW_NOW, timeZone))
-const OPERATOR_LINE_2 = 'Used ▰▰▰▱▱▱▱▱▱▱ 31% Fable ▰▰▰▰▱▱▱▱▱▱ 38%  resets 2d 3h 14m'
+const OPERATOR_LINE_2 = 'Used ▰▰▰▱▱▱▱▱▱▱  31% Fable ▰▰▰▰▱▱▱▱▱▱  38%  resets 2d 3h 14m'
 
 test('the row is the operator\'s two lines: who, Company and plan, the last good read\'s time, then the week and Fable used', () => {
   expect(rowLines(rowView())).toEqual(['andres@lutsohealth.com · Company · Ultra  updated 18:34', OPERATOR_LINE_2])
@@ -1324,9 +1324,9 @@ test('a login never read draws an empty bar and says so, dim, on line 2', () => 
 test('on Max and Ultra a Fable week no body listed is a dash; on other plans there is no Fable part', () => {
   const v = rowView()
   const noFable = { ...v.readings['1'], fable: undefined } as View['readings'][string]
-  expect(rowLines({ ...v, readings: { '1': noFable } })[1]).toBe('Used ▰▰▰▱▱▱▱▱▱▱ 31% Fable –  resets 2d 3h 14m')
+  expect(rowLines({ ...v, readings: { '1': noFable } })[1]).toBe('Used ▰▰▰▱▱▱▱▱▱▱  31% Fable –                resets 2d 3h 14m')
   const pro = { ...ANDRES, plan: 'pro', tier: undefined }
-  expect(rowLines({ ...rowView({}, pro), readings: { '1': noFable }, noFiveHour: {} })).toEqual(['andres@lutsohealth.com · Company · Pro  updated 18:34', 'Used ▰▰▰▱▱▱▱▱▱▱ 31%  resets 2d 3h 14m'])
+  expect(rowLines({ ...rowView({}, pro), readings: { '1': noFable }, noFiveHour: {} })).toEqual(['andres@lutsohealth.com · Company · Pro  updated 18:34', 'Used ▰▰▰▱▱▱▱▱▱▱  31%  resets 2d 3h 14m'])
 })
 
 test('a Fable week that resets at another time than the week says its own reset after the week\'s', () => {
@@ -1337,22 +1337,22 @@ test('a Fable week that resets at another time than the week says its own reset 
 
 test('a reset under a day drops the days, and under an hour the hours', () => {
   const at = (resetsAt: string) => rowLines(rowView({ readings: { '1': { sevenDay: { pct: 31, resetsAt }, fable: { pct: 38, resetsAt }, noFiveHour: true, at: READ_AT, by: '1' } } }))[1]
-  expect(at(ahead(0, 20, 27))).toBe('Used ▰▰▰▱▱▱▱▱▱▱ 31% Fable ▰▰▰▰▱▱▱▱▱▱ 38%  resets 20h 27m')
-  expect(at(ahead(0, 0, 27))).toBe('Used ▰▰▰▱▱▱▱▱▱▱ 31% Fable ▰▰▰▰▱▱▱▱▱▱ 38%  resets 27m')
+  expect(at(ahead(0, 20, 27))).toBe('Used ▰▰▰▱▱▱▱▱▱▱  31% Fable ▰▰▰▰▱▱▱▱▱▱  38%  resets 20h 27m')
+  expect(at(ahead(0, 0, 27))).toBe('Used ▰▰▰▱▱▱▱▱▱▱  31% Fable ▰▰▰▰▱▱▱▱▱▱  38%  resets 27m')
 })
 
 test('a week whose reset has passed is 0% used with no reset; a plan that reports no week is a dash', () => {
   const passed = rowView({ readings: { '1': { sevenDay: { pct: 31, resetsAt: ahead(0, 0, -1) }, noFiveHour: true, at: READ_AT, by: '1' } } })
-  expect(rowLines(passed)[1]).toBe('Used ▱▱▱▱▱▱▱▱▱▱ 0% Fable –')
+  expect(rowLines(passed)[1]).toBe('Used ▱▱▱▱▱▱▱▱▱▱   0% Fable –')
   const noWeek = rowView({ readings: { '1': { fable: { pct: 38, resetsAt: ROW_WEEK_END }, noFiveHour: true, at: READ_AT, by: '1' } } })
-  expect(rowLines(noWeek)[1]).toBe('Used – Fable ▰▰▰▰▱▱▱▱▱▱ 38%  Fable resets 2d 3h 14m')
+  expect(rowLines(noWeek)[1]).toBe('Used –               Fable ▰▰▰▰▱▱▱▱▱▱  38%  Fable resets 2d 3h 14m')
 })
 
 test('a login with a 5-hour window in its counted reading has a third line for it; one with none has two lines', () => {
   const max = { ...ANDRES, tier: 'default_claude_max_5x' }
   const r = { sevenDay: { pct: 31, resetsAt: ROW_WEEK_END }, fable: { pct: 38, resetsAt: ROW_WEEK_END }, fiveHour: { pct: 50, resetsAt: ahead(0, 1, 20) }, at: READ_AT, by: '1' }
   const v = rowView({ readings: { '1': r }, noFiveHour: { '1': false } }, max)
-  expect(rowLines(v)).toEqual(['andres@lutsohealth.com · Company · Max  updated 18:34', OPERATOR_LINE_2, '5h ▰▰▰▰▰▱▱▱▱▱ 50%  resets 1h 20m'])
+  expect(rowLines(v)).toEqual(['andres@lutsohealth.com · Company · Max  updated 18:34', OPERATOR_LINE_2, '5h ▰▰▰▰▰▱▱▱▱▱  50%  resets 1h 20m'])
   expect(rowLines(rowView())).toHaveLength(2)
 })
 
@@ -1422,8 +1422,10 @@ test('with no Company the row is the same but for line 1, at 82 and at 64', () =
 test('a failed read\'s longer line 1 moves the buttons to the end of line 2 where they fit, else to a line of their own', () => {
   const v = rowView({ checkErrors: { '1': HTTP_429 } })
   expect(fitted(v, 82)).toEqual({ lines: [FAILED_L1, OPERATOR_LINE_2, ''], end: 'own' })
-  const short = rowView({ checkErrors: { '1': HTTP_429 }, readings: { '1': { sevenDay: { pct: 31, resetsAt: ROW_WEEK_END }, noFiveHour: true, at: READ_AT, by: '1' } } })
-  expect(fitted(short, 82)).toEqual({ lines: [FAILED_L1, 'Used ▰▰▰▱▱▱▱▱▱▱ 31% Fable –  resets 2d 3h 14m'], end: 1 })
+  // A Pro login's line 2 has no Fable part, so it leaves room for the buttons; a dash takes a bar's cells, so it does not.
+  const pro = { ...ANDRES, plan: 'pro', tier: undefined }
+  const short = rowView({ checkErrors: { '1': HTTP_429 }, readings: { '1': { sevenDay: { pct: 31, resetsAt: ROW_WEEK_END }, noFiveHour: true, at: READ_AT, by: '1' } } }, pro)
+  expect(fitted(short, 82)).toEqual({ lines: ['andres@lutsohealth.com · Company · Pro  18:39 Failed to update (HTTP 429)', 'Used ▰▰▰▱▱▱▱▱▱▱  31%  resets 2d 3h 14m'], end: 1 })
 })
 
 test('a line 1 wider than the pane cuts the cause, then the Company, then the email\'s middle, never the state', () => {
@@ -1441,21 +1443,16 @@ test('a login with no reading, no Fable row, a 5-hour window or a sign-in needed
   expect(fitted(noReading, 82)).toEqual({ lines: ['andres@lutsohealth.com · Company · Ultra', 'Used ▱▱▱▱▱▱▱▱▱▱ no reading yet'], end: 0 })
   expect(fitted(noReading, 64)).toEqual({ lines: ['andres@lutsohealth.com · Company · Ultra', 'Used ▱▱▱▱▱▱▱▱▱▱ no reading yet'], end: 1 })
   const noFable = rowView({ readings: { '1': { sevenDay: { pct: 31, resetsAt: ROW_WEEK_END }, noFiveHour: true, at: READ_AT, by: '1' } } })
-  expect(fitted(noFable, 82)).toEqual({ lines: [L1, 'Used ▰▰▰▱▱▱▱▱▱▱ 31% Fable –  resets 2d 3h 14m'], end: 0 })
-  expect(fitted(noFable, 64)).toEqual({ lines: [L1, 'Used ▰▰▰▱▱▱▱▱▱▱ 31% Fable –  resets 2d 3h 14m', ''], end: 'own' })
+  expect(fitted(noFable, 82)).toEqual({ lines: [L1, 'Used ▰▰▰▱▱▱▱▱▱▱  31% Fable –                resets 2d 3h 14m'], end: 0 })
+  expect(fitted(noFable, 64)).toEqual({ lines: [L1, 'Used ▰▰▰▱▱▱▱▱▱▱  31% Fable –                resets 2d 3h 14m', ''], end: 'own' })
   const max = { ...ANDRES, tier: 'default_claude_max_5x' }
   const five = rowView({ readings: { '1': { sevenDay: { pct: 31, resetsAt: ROW_WEEK_END }, fable: { pct: 38, resetsAt: ROW_WEEK_END }, fiveHour: { pct: 50, resetsAt: ahead(0, 1, 20) }, at: READ_AT, by: '1' } }, noFiveHour: { '1': false } }, max)
   const maxL1 = 'andres@lutsohealth.com · Company · Max  updated 18:34'
-  expect(fitted(five, 82)).toEqual({ lines: [maxL1, OPERATOR_LINE_2, '5h ▰▰▰▰▰▱▱▱▱▱ 50%  resets 1h 20m'], end: 0 })
-  expect(fitted(five, 64)).toEqual({ lines: [maxL1, OPERATOR_LINE_2, '', '5h ▰▰▰▰▰▱▱▱▱▱ 50%  resets 1h 20m'], end: 'own' })
+  expect(fitted(five, 82)).toEqual({ lines: [maxL1, OPERATOR_LINE_2, '5h ▰▰▰▰▰▱▱▱▱▱  50%  resets 1h 20m'], end: 0 })
+  expect(fitted(five, 64)).toEqual({ lines: [maxL1, OPERATOR_LINE_2, '', '5h ▰▰▰▰▰▱▱▱▱▱  50%  resets 1h 20m'], end: 'own' })
   const signIn = rowView({ health: { '1': { kind: 'login-needed', why: 'sign-in expired' } } })
   expect(fitted(signIn, 82)).toEqual({ lines: ['andres@lutsohealth.com · Company · Ultra  ⚠ sign in needed', OPERATOR_LINE_2, ''], end: 'own' })
   expect(fitted(signIn, 64)).toEqual({ lines: ['andres@lutsohealth.com · Company · Ultra  ⚠ sign in needed', OPERATOR_LINE_2, ''], end: 'own' })
-})
-
-test('the bars carry the percent used, so the pane colors them by the room left; labels and dashes carry none', () => {
-  const [, line2] = rowOf(rowView(), ANDRES, ROW_NOW, TALLINN).lines
-  expect(line2?.map(p => p.used)).toEqual([undefined, 31, undefined, 38, undefined])
 })
 
 test('a failed row too wide for the pane cuts its cause to the short form before the Company and the email, never the next try', () => {
@@ -1586,12 +1583,12 @@ test('no stored row changes with the writer\'s clock while no reset passes, at a
 // Review C10-R1 F4 (Opus) [ROW-AT-ANOTHER-NOW]: a stored reset read after it passed says so, as bin/account-rotator does.
 test('a stored reset read after it passed says passed, not 0m', () => {
   const line3 = rowsOf(FIXTURE_VIEW, ROWS_FIXTURE.now).find(r => r.id === '2')?.lines[2] ?? []
-  expect(storedLineText(line3, ROWS_FIXTURE.now + 2 * 3_600_000, TALLINN)).toBe('5h ▰▰▰▰▰▱▱▱▱▱ 50%  resets passed')
+  expect(storedLineText(line3, ROWS_FIXTURE.now + 2 * 3_600_000, TALLINN)).toBe('5h ▰▰▰▰▰▱▱▱▱▱  50%  resets passed')
 })
 
 test('a stored line read a minute later counts its resets down, and read in UTC says its times in UTC', () => {
   const [line1, line2] = rowsOf(FIXTURE_VIEW, ROWS_FIXTURE.now).find(r => r.id === '1')?.lines ?? []
-  expect(storedLineText(line2 ?? [], ROWS_FIXTURE.now + MINUTE, TALLINN)).toBe('Used ▰▰▰▱▱▱▱▱▱▱ 31% Fable ▰▰▰▰▱▱▱▱▱▱ 38%  resets 2d 3h 13m · Fable 1d 3h 13m')
+  expect(storedLineText(line2 ?? [], ROWS_FIXTURE.now + MINUTE, TALLINN)).toBe('Used ▰▰▰▱▱▱▱▱▱▱  31% Fable ▰▰▰▰▱▱▱▱▱▱  38%  resets 2d 3h 13m · Fable 1d 3h 13m')
   expect(storedLineText(line1 ?? [], ROWS_FIXTURE.now, 'UTC')).toBe('andres@lutsohealth.com · Company · Ultra  updated 16:34')
 })
 

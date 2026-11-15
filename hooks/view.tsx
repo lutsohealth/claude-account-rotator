@@ -16,6 +16,8 @@ import {
   glyph,
   hasFiveHour,
   isSpent,
+  label,
+  labelOf,
   nextReset,
   restartSteps,
   rowOf,
@@ -386,14 +388,14 @@ function weekLeaveRow(ui: Ui, view: View, act: Actions) {
   )
 }
 
-/** The login new sessions start on: by a rule over the logins with room, or one account, each listed by number. */
+/** The login new sessions start on: by a rule over the logins with room, or one account, each listed by label. */
 function launchChoices(view: View): readonly (readonly [LaunchOn, string])[] {
   const rules = [
     ['room', 'most room'],
     ['nonzero', 'first with room'],
     ['reset', 'soonest reset'],
   ] as const
-  return [...rules, ...view.accounts.map(a => [`account:${a.id}` as LaunchOn, `account ${a.id}`] as const)]
+  return [...rules, ...view.accounts.map(a => [`account:${a.id}` as LaunchOn, label(a, view.accounts)] as const)]
 }
 
 /** Which login the rotation moves to, whether the 5-hour window counts, at what week left it leaves, and where new sessions start. */
@@ -408,11 +410,8 @@ function RotationSettings(ui: Ui, view: View, act: Actions) {
   ])
 }
 
-/** An account as the band names it: its number, and its email once known. */
-function named(view: View, id: string): string {
-  const email = view.accounts.find(a => a.id === id)?.email
-  return email === undefined ? `account ${id}` : `account ${id} (${email})`
-}
+/** An account as the band names it, by label. */
+const named = (view: View, id: string): string => labelOf(view.accounts, id)
 
 /**
  * What keeps Claude in Chrome from working in this window, in a sentence: no
@@ -454,10 +453,7 @@ function chromeRow(ui: Ui, view: View, a: Account, act: Actions) {
   return (
     <Box key={`chrome-row-${a.id}`} flexDirection="row" flexWrap="wrap" columnGap={2}>
       <Box flexDirection="row" flexShrink={1}>
-        <Box width={3} flexShrink={0}>
-          <Text bold={isInUse} dimColor={!isInUse}>{a.id}</Text>
-        </Box>
-        <Text bold={isInUse} dimColor={!isInUse}>{a.email ?? `account ${a.id}`}</Text>
+        <Text bold={isInUse} dimColor={!isInUse}>{label(a, view.accounts)}</Text>
       </Box>
       <Box flexDirection="row" flexGrow={1} justifyContent="flex-end">
         {end}
@@ -554,7 +550,7 @@ export function Band(ui: Ui, view: View, now: number, act: Actions) {
   }
   const locked = needsSignIn(view)
   if (locked.length > 0) {
-    const names = locked.map(a => (a.email ? `${a.id} (${a.email})` : a.id)).join(', ')
+    const names = locked.map(a => label(a, view.accounts)).join(', ')
     const why = locked.map(a => view.health[a.id]).find(h => h?.kind === 'login-needed')
     return (
       <Box flexDirection="row" columnGap={2}>
@@ -666,12 +662,10 @@ function endWidthOf(view: View, a: Account): number {
   return remove + BUTTON_GAP + slotWidthOf(view, a)
 }
 
-/** How a row part is drawn: its tone, a bar in the color of its room left, and the login in use bright, the rest dim. */
+/** How a row part is drawn: its tone, and the login in use bright, the rest dim; a bar carries no color. */
 function partStyle(p: RowPart, isActive: boolean) {
-  // A failed row's bar stays in its room's color, drawn dim.
-  if (p.tone === 'dim') return p.used === undefined ? { dimColor: true } : { dimColor: true, color: roomColor(100 - p.used) }
+  if (p.tone === 'dim') return { dimColor: true }
   if (p.tone === 'warning') return { color: 'warning' }
-  if (p.used !== undefined) return { color: roomColor(100 - p.used) }
   return { bold: isActive && p.shrink === 'email', dimColor: !isActive }
 }
 
@@ -704,7 +698,7 @@ function accountRow(ui: Ui, view: View, a: Account, now: number, act: Actions, c
       {view.held?.target.id === a.id && (
         <Box key={`held-${a.id}`}>
           <Text color="warning">
-            switching here once account {view.activeId}'s token has refreshed, at the next request on account {view.activeId}
+            switching here once {named(view, view.activeId)}'s token has refreshed, at the next request on it
           </Text>
         </Box>
       )}

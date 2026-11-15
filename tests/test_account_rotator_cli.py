@@ -129,14 +129,14 @@ class ListText(StoreCase):
         first = out.getvalue().split("\n\n")[0].split("\n")
         self.assertEqual(first, [
             "andres@lutsohealth.com · Company · Ultra  updated 16:34",
-            "Used ▰▰▰▱▱▱▱▱▱▱ 31% Fable ▰▰▰▰▱▱▱▱▱▱ 38%  resets 2d 3h 13m · Fable 1d 3h 13m",
+            "Used ▰▰▰▱▱▱▱▱▱▱  31% Fable ▰▰▰▰▱▱▱▱▱▱  38%  resets 2d 3h 13m · Fable 1d 3h 13m",
         ])
 
     def test_the_last_line_says_when_the_rows_were_written_and_where_new_sessions_start(self) -> None:
         _, out = self.list_in_process()
         last = out.rstrip("\n").split("\n")[-1]
         self.assertIn("rows written 18:40", last)
-        self.assertIn("new sessions start on account 1 (the most room", last)
+        self.assertIn("new sessions start on andres@lutsohealth.com (the most room", last)
 
     def test_a_line_an_older_session_stored_as_text_prints_as_is_and_says_so(self) -> None:
         store = json.loads(json.dumps(self.fixture["store"]))
@@ -331,7 +331,7 @@ class ReviewPassedReset(StoreCase):
         line = self.fixture["store"]["rows"]["rows"][1]["lines"][2]
         until = next(r["until"] for r in line if isinstance(r, dict))
         text = load_cli().line_text(line, until + 2 * HOUR_MS, ZoneInfo(self.fixture["zone"]))
-        self.assertEqual(text, "5h ▰▰▰▰▰▱▱▱▱▱ 50%  resets passed")
+        self.assertEqual(text, "5h ▰▰▰▰▰▱▱▱▱▱  50%  resets passed")
 
     def test_no_stored_until_reads_as_due_now_once_it_has_passed(self) -> None:
         cli, zone = load_cli(), ZoneInfo(self.fixture["zone"])
@@ -347,7 +347,7 @@ class ReviewPassedReset(StoreCase):
         with redirect_stdout(out):
             load_cli().main(["account", "list", "--store", str(self.store)], now=self.fixture["now"] + 2 * HOUR_MS, zone=ZoneInfo("UTC"))
         last = out.getvalue().rstrip("\n").split("\n")[-1]
-        self.assertIn("a reset has passed since its row was written for account 2", last)
+        self.assertIn("a reset has passed since its row was written for two@example.com", last)
 
 
 class RequestCase(StoreCase):

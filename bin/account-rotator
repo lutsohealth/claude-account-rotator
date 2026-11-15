@@ -42,7 +42,7 @@ from datetime import tzinfo
 # The store module stands beside this file. Run as a script, Python puts the file's own folder first on sys.path,
 # links resolved; this line is for a loader that does not, such as the tests' in-process import.
 sys.path.insert(0, os.path.dirname(__file__))
-from account_rotator_store import STORE_GLOB, StoreError, clock_text, is_instant, read, requests_folder, same_pick_since  # noqa: E402
+from account_rotator_store import STORE_GLOB, StoreError, clock_text, is_instant, label_of, read, requests_folder, same_pick_since  # noqa: E402
 
 EXIT_NO_STORE = 1
 EXIT_USAGE = 2
@@ -164,14 +164,15 @@ def footer(data: dict, now_ms: float, zone: tzinfo | None, older: bool, passed: 
     at = stored.get("at") if isinstance(stored, dict) else None
     written = f"rows written {clock_text(at, zone)} ({minutes_ago(at, now_ms)})" if is_instant(at) else "no session has stored rows yet"
     pick = data.get("launch-slot")
+    accounts = data.get("accounts") if isinstance(data.get("accounts"), list) else []
     if isinstance(pick, dict) and isinstance(pick.get("id"), str):
         since = same_pick_since(pick.get("at"), zone)
-        starts = f"new sessions start on account {pick['id']} ({pick.get('why', 'the setting picked it')}{', ' + since if since else ''})"
+        starts = f"new sessions start on {label_of(accounts, pick['id'])} ({pick.get('why', 'the setting picked it')}{', ' + since if since else ''})"
     else:
         starts = "no account picked for new sessions"
     notes = [OLDER_NOTE] if older else []
     if passed:
-        notes.append(f"a reset has passed since its row was written for account {', '.join(passed)}: no session has read it since, so its usage is as before the reset")
+        notes.append(f"a reset has passed since its row was written for {', '.join(label_of(accounts, p) for p in passed)}: no session has read it since, so its usage is as before the reset")
     return "; ".join([written, starts, *notes])
 
 
@@ -480,7 +481,7 @@ def make_folder(data: dict) -> str:
                 pass
             else:
                 with open(os.path.join(path, "README"), "w", encoding="utf-8") as f:
-                    f.write(f"Claude account {number}, kept by the account-rotator mod.\n")
+                    f.write(f"Claude account folder {number}, kept by the account-rotator mod.\n")
                 return path
         number += 1
 
