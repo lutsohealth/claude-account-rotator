@@ -1479,9 +1479,10 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
   }
   if (error === 'authentication_failed') {
     // On an unproven switch the rejection is provisional, as a usage-limit stop there is: its end gives the health back.
+    // Its time makes the write this stop's own, so another session's rejection since never reads as it.
     const keys = [`health:${active.id}`]
     const stood = await stopKeys($, active.id, keys)
-    const before = await saveHealth($, active.id, { kind: 'login-needed', why: 'sign-in rejected' })
+    const before = await saveHealth($, active.id, { kind: 'login-needed', why: 'sign-in rejected', at: await $.clock.now() })
     if (before?.kind !== 'login-needed') await announceLockout($, active, 'sign-in rejected')
     if (since !== undefined && !hasResponseSince) {
       const record = await recordStop($, active.id, since, stood, view.isFableStopped === true, await $.clock.now(), keys)
@@ -1574,6 +1575,7 @@ async function undoProvisionalStop($: Host): Promise<void> {
     fableMarks: drop(v.fableMarks, `fable-mark:${p.id}`),
     readings: drop(v.readings, `usage:${p.id}`) ?? v.readings,
     noFiveHour: drop(v.noFiveHour, `no-five-hour:${p.id}`),
+    health: drop(v.health, `health:${p.id}`) ?? v.health,
   }))
   await mergeStore($)
 }
