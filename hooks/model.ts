@@ -415,6 +415,19 @@ export function withFableMark(r: Reading | undefined, mark: Mark | undefined, no
   return { ...(r ?? { at: mark.at }), fable: { pct: mark.pct, resetsAt, isStop: true } }
 }
 
+/** How long a usage read may lag a Fable stop: a read of the mark's own week this long after it, below 100, outweighs the stop. */
+export const FABLE_MARK_LAG_MS = 30 * 60_000
+
+/**
+ * Whether a usage body read at `readAt` ends a Fable mark: its Fable week is the mark's own (resetting within an hour of
+ * the mark's reset), it reads below 100, and the stop is FABLE_MARK_LAG_MS or more behind it. The stop was then
+ * another login's, as one that went out before a switch landed.
+ */
+export function endsFableMark(read: UsageWindow | undefined, readAt: number, mark: Mark): boolean {
+  if (read?.resetsAt === undefined || read.pct >= 100 || readAt - mark.at < FABLE_MARK_LAG_MS) return false
+  return Math.abs(Date.parse(read.resetsAt) - Date.parse(mark.resetsAt)) <= SAME_WEEK_MS
+}
+
 /**
  * Of two marks, the one that ends later: a write keeps it, as the store has no conditional write. A held mark that
  * stands takes the later time of the two, so the write is the writer's own, never byte-equal to an earlier stop's
@@ -563,13 +576,21 @@ export function credentialFrom(text: string): Credential | undefined {
   }
 }
 
+/** A token that runs out sooner than this is not used for a usage read: the read could outlast it. */
+export const TOKEN_LIVE_MARGIN_MS = 60_000
+
 /** A login's health from its stored credential alone. */
 export function healthOf(cred: Credential | undefined, now: number): Health {
   if (cred === undefined) return { kind: 'login-needed', why: 'not signed in' }
   if (cred.refreshTokenExpiresAt !== undefined && cred.refreshTokenExpiresAt <= now) {
     return { kind: 'login-needed', why: 'sign-in expired' }
   }
-  return { kind: 'ok', ...(cred.refreshTokenExpiresAt ? { refreshExpiresAt: cred.refreshTokenExpiresAt } : {}) }
+  return {
+    kind: 'ok',
+    ...(cred.refreshTokenExpiresAt ? { refreshExpiresAt: cred.refreshTokenExpiresAt } : {}),
+    // Its usage is read only while its token is live, so a session on it refreshes it; the mod refreshes none by itself.
+    ...(cred.expiresAt > now + TOKEN_LIVE_MARGIN_MS ? {} : { isIdle: true as const }),
+  }
 }
 
 /** The percent a glyph or bar fills to and the footer prints: the room left, or what is used. */
@@ -761,7 +782,11 @@ export function restartSteps(view: View): string {
  * "out of usage" would tell the person a false thing.
  */
 export function stuckText(view: View, now: number): string | undefined {
-  if (!view.isSwitchBlocked || !isSpent(view.readings[view.activeId], now, view.weekLeave) || pickTarget(view, now) === undefined) return undefined
+  const r = view.readings[view.activeId]
+  // Stuck on the Fable week only once a turn died on it, as the rotation leaves for it only then.
+  const need: Need | undefined = !isSpent(r, now, view.weekLeave) && view.isFableStopped === true && isFableSpent(r, now) ? 'fable' : undefined
+  const isStuck = isSpent(r, now, view.weekLeave) || need === 'fable'
+  if (!view.isSwitchBlocked || !isStuck || pickTarget(view, now, need) === undefined) return undefined
   const login = isOnNormalLogin(view) ? '/login with your personal (Pro or Max) account. ' : ''
   return `Account ${view.activeId} is near its limit, and this window can't switch accounts. ${login}${restartSteps(view)}`
 }
@@ -1040,8 +1065,8 @@ type Cause = { forms: string[]; hasNext: boolean }
  * The cause in a failure's why, which the writers of `check-error:<id>` word (hooks/register.tsx). The schedule
  * `usage-due:<id>.next` retries the usage read alone, and requestUsage stores its back-off for a usage call that
  * answered a failure or threw, so only those causes name it. The profile call and a check that threw elsewhere are
- * tried again by the 10-minute check (checkAll), a run-out token once a session refreshes it: no stored time says
- * when, so those rows name none. A why no writer words has no cause and no time.
+ * tried again by the 10-minute check (checkAll): no stored time says when, so those rows name none. A why no writer
+ * words has no cause and no time.
  */
 function causeOf(why: string): Cause | undefined {
   const status = (call: RegExp) => call.exec(why)?.[1]
@@ -1050,7 +1075,6 @@ function causeOf(why: string): Cause | undefined {
   if (why.startsWith('the usage call threw')) return { forms: [' (usage call threw)', ' (usage error)', ' (error)'], hasNext: true }
   if (profile !== undefined) return { forms: [` (profile HTTP ${profile})`, ` (profile ${profile})`], hasNext: false }
   if (why.startsWith('the profile answer named no email')) return { forms: [' (profile named no email)', ' (profile no email)', ' (no email)'], hasNext: false }
-  if (why.startsWith('its token has run out')) return { forms: [' (token run out), until a session refreshes its token', ' (waits for a session)', ' (needs a session)'], hasNext: false }
   if (why.startsWith('the check failed')) return { forms: [' (check failed)', ' (check error)', ' (error)'], hasNext: false }
   return undefined
 }
@@ -1071,14 +1095,24 @@ function failedParts(failure: CheckError, nextAt: number | undefined, timeZone: 
 }
 
 /**
- * Line 1's end: a sign-in needed; else a failed check no older than the last good read, at its time, with its cause
- * and next try; else the last good read's time, while a reading stands. With no good read known and no failure,
- * nothing.
+ * Line 1's end: a sign-in needed; else, for an idle login (its token run out, another session's or none's), the last good read's time and `idle`,
+ * as nothing reads it until a session refreshes the token; else a failed check no older than the last good read, at
+ * its time, with its cause and next try; else the last good read's time, while a reading stands. With no good read
+ * known and no failure, nothing.
  */
 function statePart(view: View, a: Account, timeZone: string | undefined): RowPart[] {
-  if (view.health[a.id]?.kind === 'login-needed') return [{ text: '⚠ sign in needed', tone: 'warning' }]
+  const health = view.health[a.id]
+  if (health?.kind === 'login-needed') return [{ text: '⚠ sign in needed', tone: 'warning' }]
   const readAt = view.readAt?.[a.id]
-  const failure = view.checkErrors?.[a.id]
+  const hasReading = readAt !== undefined && view.readings[a.id] !== undefined
+  // The login this session runs on, once the session is bound, is not idle: the session refreshes its token at its
+  // next request, and a failure from before the token ran out is not what that read will meet.
+  const isIdle = health?.kind === 'ok' && health.isIdle === true
+  const isInUse = view.isBound === true && a.id === view.activeId
+  if (isIdle && !isInUse) {
+    return hasReading ? [{ text: `updated ${clockText(readAt, timeZone)} · idle`, runs: ['updated ', { clock: readAt }, ' · idle'] }] : [{ text: 'idle' }]
+  }
+  const failure = isIdle ? undefined : view.checkErrors?.[a.id]
   // A good read clears the failure, so one standing at the good read's own millisecond came after it.
   if (failure !== undefined && (readAt === undefined || failure.at >= readAt)) return failedParts(failure, view.nextAt?.[a.id], timeZone)
   // A time over no reading would name a read the row cannot show.

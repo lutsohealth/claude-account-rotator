@@ -1225,10 +1225,22 @@ test('a check that threw says (check failed), and the error\'s kind stays in the
   expect(rowLines(v)[0]).toBe('andres@lutsohealth.com · Company · Ultra  18:39 Failed to update (check failed)')
 })
 
-test('a login whose token has run out says so, and until a session refreshes it, with no time', () => {
-  const why = 'its token has run out and no session has refreshed it, so its usage is not read until one does'
-  const v = rowView({ checkErrors: { '1': { why, at: FAILED_AT } }, nextAt: { '1': FAILED_AT + 30 * MINUTE } })
-  expect(rowLines(v)[0]).toBe('andres@lutsohealth.com · Company · Ultra  18:39 Failed to update (token run out), until a session refreshes its token')
+test('an idle login, its token run out, says when it was last read and idle, never Failed to update, though a failure stands', () => {
+  // Another login is in use: the session's own login is never drawn idle.
+  const idle = { activeId: '2', health: { '1': { kind: 'ok', isIdle: true } as const }, checkErrors: { '1': HTTP_429 }, nextAt: { '1': NEXT_AT } }
+  expect(rowLines(rowView(idle))[0]).toBe('andres@lutsohealth.com · Company · Ultra  updated 18:34 · idle')
+  expect(rowLines(rowView({ ...idle, readings: {} }))[0]).toBe('andres@lutsohealth.com · Company · Ultra  idle')
+})
+
+// Review of 84bc902, LOW (b): the session's own login, its token run out, drew a failure from before the run-out.
+test('the login this session runs on, its token run out, says when it was last read, neither idle nor Failed to update', () => {
+  const v = rowView({ isBound: true, health: { '1': { kind: 'ok', isIdle: true } }, checkErrors: { '1': HTTP_429 }, nextAt: { '1': NEXT_AT } })
+  expect(rowLines(v)[0]).toBe('andres@lutsohealth.com · Company · Ultra  updated 18:34')
+})
+
+// Review of 84bc902, LOW (c): before the session is bound, the view's activeId is a default, which spares no login its idle row.
+test('before the session is bound, login 1, its token run out, reads idle', () => {
+  expect(rowLines(rowView({ health: { '1': { kind: 'ok', isIdle: true } } }))[0]).toBe('andres@lutsohealth.com · Company · Ultra  updated 18:34 · idle')
 })
 
 test('a failed row names the next try, the time its schedule gives, in the zone\'s clock', () => {
@@ -1433,14 +1445,6 @@ test('a failure no writer words stays a bare Failed to update, with no next try 
   expect(rowLines(v)[0]).toBe('andres@lutsohealth.com · Company · Ultra  18:39 Failed to update')
 })
 
-test('a run-out row keeps its wait when the pane is narrow: only the cause\'s label shortens', () => {
-  const why = 'its token has run out and no session has refreshed it, so its usage is not read until one does'
-  const v = rowView({ checkErrors: { '1': { why, at: FAILED_AT } }, nextAt: { '1': NEXT_AT } })
-  const line = fitted(v, 64).lines[0] ?? ''
-  expect(line).toBe('an…om · C… · Ultra  18:39 Failed to update (waits for a session)')
-  expect([...line].length).toBeLessThanOrEqual(64)
-})
-
 test('a usage call that threw says (usage call threw) and names the next try: its back-off is the schedule', () => {
   const why = 'the usage call threw (Error)'
   const v = rowView({ checkErrors: { '1': { why, at: FAILED_AT } }, nextAt: { '1': NEXT_AT } })
@@ -1453,7 +1457,6 @@ const EVERY_WHY = [
   'the profile call answered HTTP 403, so its usage is not read until it names the sign-in',
   'the profile answer named no email, so its usage is not read until it names the sign-in',
   'the check failed (TypeError); the debug log has the rest',
-  'its token has run out and no session has refreshed it, so its usage is not read until one does',
 ]
 
 test('a failed usage row with its next try fits 56 columns', () => {
@@ -1463,27 +1466,25 @@ test('a failed usage row with its next try fits 56 columns', () => {
   expect([...line].length).toBeLessThanOrEqual(56)
 })
 
-test('every cause, with and without Chrome, fits every width the fit tests use, and keeps its time and the run-out\'s wait', () => {
+test('every cause, with and without Chrome, fits every width the fit tests use, and keeps its time', () => {
   const offenders: string[] = []
   for (const why of EVERY_WHY)
     for (const chromeAccountId of [undefined, '1'])
       for (const columns of [56, 64, 82]) {
         const v = rowView({ checkErrors: { '1': { why, at: FAILED_AT } }, nextAt: { '1': NEXT_AT }, chromeAccountId })
         const line = fitted(v, columns).lines[0] ?? ''
-        const keepsWait = !why.startsWith('its token') || line.includes('session')
-        if ([...line].length > columns || !line.includes('18:39 Failed to update') || !keepsWait) offenders.push(`${why.slice(0, 20)} chrome=${chromeAccountId} ${columns}: ${[...line].length} ${line}`)
+        if ([...line].length > columns || !line.includes('18:39 Failed to update')) offenders.push(`${why.slice(0, 20)} chrome=${chromeAccountId} ${columns}: ${[...line].length} ${line}`)
       }
   expect(EVERY_WHY.length).toBeGreaterThan(0)
   expect(offenders).toEqual([])
 })
 
-test('every cause\'s short form keeps what the row needs: the status, the call, or the wait for a session', () => {
+test('every cause\'s short form keeps what the row needs: the status or the call', () => {
   const whys: [string, string, string][] = [
     ['the usage call answered HTTP 429 (retry after 60 s)', '(429), next try 18:45', 'usage'],
     ['the profile call answered HTTP 403, so its usage is not read until it names the sign-in', '(profile 403)', 'profile status'],
     ['the profile answer named no email, so its usage is not read until it names the sign-in', '(profile no email)', 'profile email'],
     ['the check failed (TypeError); the debug log has the rest', '(check error)', 'thrown check'],
-    ['its token has run out and no session has refreshed it, so its usage is not read until one does', '(waits for a session)', 'run-out token'],
   ]
   const shown = whys.map(([why, , name]) => [name, fitted(rowView({ checkErrors: { '1': { why, at: FAILED_AT } }, nextAt: { '1': NEXT_AT } }), 64).lines[0]?.split('18:39 ')[1]])
   expect(shown).toEqual(whys.map(([, end, name]) => [name, `Failed to update ${end}`]))

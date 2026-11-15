@@ -78,9 +78,9 @@ export type StoredRows = { v: number; at: number; rows: { id: string; lines: Sto
  */
 export type UsageDue = { next: number; fails: number; claim?: string; at?: number; retryAfter?: number; v?: number }
 
-/** Whether a login can serve requests, or why not. */
+/** Whether a login can serve requests, or why not; `isIdle` where its token has run out, its usage unread until a session refreshes it. */
 export type Health =
-  | { kind: 'ok'; refreshExpiresAt?: number }
+  | { kind: 'ok'; refreshExpiresAt?: number; isIdle?: true }
   | { kind: 'login-needed'; why: string }
   | { kind: 'logging-in'; since: number }
 
