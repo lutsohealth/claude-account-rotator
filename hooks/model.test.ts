@@ -1243,6 +1243,21 @@ test('label names an account by its email, with its organization only where that
   expect(label({ id: '1', slot: '' }, all)).toBe("Claude Code's login")
 })
 
+// Review R1 LABEL-PARITY (Codex gpt-6-sol at bcbfb83): the store is JSON another session wrote, so an email can be
+// null; bin/account_rotator_store.py label takes only a string as an email, and so does label here.
+test('a stored null email follows the no-email fallback', () => {
+  const account = { id: '4', slot: '/s/4', email: null } as unknown as View['accounts'][number]
+  expect(label(account, [account])).toBe('account 4 (not signed in yet)')
+})
+
+test('malformed stored emails never become an account name', () => {
+  for (const email of [null, 42, false]) {
+    const account = { id: '4', slot: '/s/4', email } as unknown as View['accounts'][number]
+    expect(label(account, [account])).toBe('account 4 (not signed in yet)')
+    expect(claudeAccount(account, [account])).toBe('account 4 (not signed in yet)')
+  }
+})
+
 // Self-review of 5266c16: "Claude account ${label(...)}" read "Claude account account 4 (not signed in yet)".
 test('a sentence names an account "Claude account <email>", and with no email by label alone, never "Claude account account"', () => {
   const one = { id: '1', slot: '', email: 'one@example.com' }
