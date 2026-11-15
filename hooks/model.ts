@@ -682,7 +682,8 @@ export function untilText(at: number | string | undefined, now: number): string 
  */
 export function label(account: Account | undefined, accounts: readonly Account[]): string {
   if (account === undefined) return '?'
-  if (account.email === undefined) return account.slot === '' ? "Claude Code's login" : `account ${account.id} (not signed in yet)`
+  // The store is JSON another session wrote: only a string is an email, as bin/account_rotator_store.py label reads it.
+  if (typeof account.email !== 'string') return account.slot === '' ? "Claude Code's login" : `account ${account.id} (not signed in yet)`
   const isShared = accounts.filter(a => a.email === account.email).length > 1
   return isShared && account.orgName ? `${account.email} · ${account.orgName}` : account.email
 }
@@ -690,7 +691,7 @@ export function label(account: Account | undefined, accounts: readonly Account[]
 /** An account as a sentence names it: "Claude account <email>", and with no email by label alone. */
 export function claudeAccount(account: Account | undefined, accounts: readonly Account[]): string {
   const name = label(account, accounts)
-  return account?.email === undefined ? name : `Claude account ${name}`
+  return typeof account?.email === 'string' ? `Claude account ${name}` : name
 }
 
 /** The account `id` names, by label; the bare id where `accounts` holds none. */

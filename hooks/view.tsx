@@ -551,7 +551,7 @@ export function Band(ui: Ui, view: View, now: number, act: Actions) {
   const locked = needsSignIn(view)
   if (locked.length > 0) {
     // "Claude account" stands before emails only: a label with no email names itself ("account 4 (not signed in yet)").
-    const names = `${locked.every(a => a.email !== undefined) ? 'Claude account ' : ''}${locked.map(a => label(a, view.accounts)).join(', ')}`
+    const names = `${locked.every(a => typeof a.email === 'string') ? 'Claude account ' : ''}${locked.map(a => label(a, view.accounts)).join(', ')}`
     const why = locked.map(a => view.health[a.id]).find(h => h?.kind === 'login-needed')
     return (
       <Box flexDirection="row" columnGap={2}>
