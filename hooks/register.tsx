@@ -171,9 +171,9 @@ async function proveSwitch($: Host, id: string): Promise<void> {
 /** The keys a stop writes for a login, every session's: its marks, its reading, its `no-five-hour`. */
 const STOP_KEYS = (id: string) => [`mark:${id}`, `week-mark:${id}`, `fable-mark:${id}`, `usage:${id}`, `no-five-hour:${id}`]
 
-async function stopKeys($: Host, id: string): Promise<Record<string, unknown>> {
+async function stopKeys($: Host, id: string, keys = STOP_KEYS(id)): Promise<Record<string, unknown>> {
   const values: Record<string, unknown> = {}
-  for (const key of STOP_KEYS(id)) values[key] = await $.store.get(key)
+  for (const key of keys) values[key] = await $.store.get(key)
   return values
 }
 
@@ -183,12 +183,12 @@ const sameValue = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSO
  * The record of a provisional stop on `id` just marked, from what stood before it (`before`, after its own read).
  * A second stop on the same unproven switch adds what it wrote and keeps what stood before the first.
  */
-async function recordStop($: Host, id: string, since: number, before: Record<string, unknown>, wasFableStopped: boolean, readAt: number): Promise<ProvisionalStop> {
+async function recordStop($: Host, id: string, since: number, before: Record<string, unknown>, wasFableStopped: boolean, readAt: number, keys = STOP_KEYS(id)): Promise<ProvisionalStop> {
   const { provisionalStop: stood } = await getView($)
   const kept = stood?.since === since && stood.id === id ? stood : { id, since, readAt, writes: {}, setFableStop: false }
-  const after = await stopKeys($, id)
+  const after = await stopKeys($, id, keys)
   const writes = { ...kept.writes }
-  for (const key of STOP_KEYS(id)) {
+  for (const key of keys) {
     if (!sameValue(after[key], before[key])) writes[key] = { before: writes[key]?.before ?? before[key], written: after[key] }
   }
   const setsFable = !wasFableStopped && (await getView($)).isFableStopped === true
@@ -1484,8 +1484,16 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
     return
   }
   if (error === 'authentication_failed') {
-    const before = await saveHealth($, active.id, { kind: 'login-needed', why: 'sign-in rejected' })
+    // On an unproven switch the rejection is provisional, as a usage-limit stop there is: its end gives the health back.
+    // Its time makes the write this stop's own, so another session's rejection since never reads as it.
+    const keys = [`health:${active.id}`]
+    const stood = await stopKeys($, active.id, keys)
+    const before = await saveHealth($, active.id, { kind: 'login-needed', why: 'sign-in rejected', at: await $.clock.now() })
     if (before?.kind !== 'login-needed') await announceLockout($, active, 'sign-in rejected')
+    if (since !== undefined && !hasResponseSince) {
+      const record = await recordStop($, active.id, since, stood, view.isFableStopped === true, await $.clock.now(), keys)
+      await setView($, v => ({ ...v, provisionalStop: record }))
+    }
   } else {
     // While a switch is unproven, a response since it began names the stop's login by its week, alone, or none at all
     // (a mark is every session's). With no response since, the switch has landed by now: the stop is the login moved
@@ -1573,6 +1581,7 @@ async function undoProvisionalStop($: Host): Promise<void> {
     fableMarks: drop(v.fableMarks, `fable-mark:${p.id}`),
     readings: drop(v.readings, `usage:${p.id}`) ?? v.readings,
     noFiveHour: drop(v.noFiveHour, `no-five-hour:${p.id}`),
+    health: drop(v.health, `health:${p.id}`) ?? v.health,
   }))
   await mergeStore($)
 }

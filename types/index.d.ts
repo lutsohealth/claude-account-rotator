@@ -81,7 +81,7 @@ export type UsageDue = { next: number; fails: number; claim?: string; at?: numbe
 /** Whether a login can serve requests, or why not; `isIdle` where its token has run out, its usage unread until a session refreshes it. */
 export type Health =
   | { kind: 'ok'; refreshExpiresAt?: number; isIdle?: true }
-  | { kind: 'login-needed'; why: string }
+  | { kind: 'login-needed'; why: string; at?: number }
   | { kind: 'logging-in'; since: number }
 
 /**

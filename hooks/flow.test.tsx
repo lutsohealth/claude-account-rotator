@@ -9268,6 +9268,112 @@ test('a rejected sign-in past the 35 seconds after a switch, before any response
   expect((store.get('health:2') as { kind?: string } | undefined)?.kind).toBe('login-needed')
 })
 
+/**
+ * The session on login 2 after a Fable switch, the switch unproven, with rotation turned off past the minute's merge, so
+ * a rejected sign-in 61 s on comes past the settle and cannot move the session.
+ */
+async function rejectedStaying($: Engine, on: On): Promise<{ store: Map<string, unknown>; clock: MockClock }> {
+  const { w, store, clock } = await fableMoved($, on)
+  store.set('rotate-to', 'off')
+  await clock.advance(61_000)
+  await $.classic.StopFailure({ error: 'authentication_failed' })
+  await clock.settle()
+  expect(slots(w), 'premise: the stop does not move the session').toEqual([SLOT2])
+  expect((store.get('health:2') as { kind?: string } | undefined)?.kind, 'premise: the unproven stop marks login 2').toBe('login-needed')
+  return { store, clock }
+}
+
+// Review codex on #87 [AUTH-UNDO], the instance (puma-9arph.27): a rejected sign-in on an unproven switch that does not
+// move the session is provisional, as a usage-limit stop there is, so the end of that switch gives the health back.
+test('Review codex AUTH-UNDO: an unproven rejected sign-in that does not move the session is given back on process exit', async ($, on) => {
+  const { store, clock } = await rejectedStaying($, on)
+  await $.session.end({ reason: 'prompt_input_exit', sessionId: 'session-1', resume: { id: 'session-1' } } as Parameters<Engine['session']['end']>[0])
+  await clock.settle()
+  expect((store.get('health:2') as { kind?: string } | undefined)?.kind, 'Offender: process exit after an unproven rejected sign-in. Fix: record and undo its health write when the pending switch ends without proof.').not.toBe('login-needed')
+})
+
+// Review codex on #87 [AUTH-UNDO], the class: every process end gives an unproven rejected sign-in back.
+for (const reason of ['prompt_input_exit', 'logout', 'other'] as const) {
+  test(`Review codex AUTH-UNDO class: ${reason} gives back an unproven rejected sign-in that does not move the session`, async ($, on) => {
+    const { store, clock } = await rejectedStaying($, on)
+    await $.session.end({ reason, sessionId: 'session-1', resume: { id: 'session-1' } } as Parameters<Engine['session']['end']>[0])
+    await clock.settle()
+    expect((store.get('health:2') as { kind?: string } | undefined)?.kind, `Offender: ${reason}. Fix: record the rejected sign-in's health write and undo it when this unproven switch ends at ${reason}.`).not.toBe('login-needed')
+  })
+}
+
+// Review codex on #88 [AUTH-OWNERSHIP], the instance: the undo gives back only this stop's own health write; another
+// session's identical rejection since is that session's and stands.
+test('Review codex AUTH-OWNERSHIP: an identical independent rejection survives process exit', async ($, on) => {
+  const { store, clock } = await rejectedStaying($, on)
+  const secondSessionWrite = { kind: 'login-needed', why: 'sign-in rejected' }
+  store.set('health:2', secondSessionWrite)
+  await endSession($, clock)
+  expect(store.get('health:2'), 'Offender: process exit undoes a second session\'s identical rejection. Fix: give provisional health writes unique ownership or a version and compare it before undo.').toEqual(secondSessionWrite)
+})
+
+// Review codex on #88 [AUTH-OWNERSHIP], the class: a replaced switch undoes as process exit does.
+test('Review codex AUTH-OWNERSHIP class: an identical independent rejection survives switch replacement', async ($, on) => {
+  const { store, clock } = await rejectedStaying($, on)
+  const secondSessionWrite = { kind: 'login-needed', why: 'sign-in rejected' }
+  store.set('health:2', secondSessionWrite)
+  await useNow($, clock, '1')
+  expect(store.get('health:2'), 'Offenders: process exit and Use now replacement both call undoProvisionalStop, which erases an identical second-session rejection. Fix: version or tag the health write and undo only the first session\'s own version.').toEqual(secondSessionWrite)
+})
+
+// Review codex on #88 [AUTH-VIEW], the instance: an undo that deletes a health key with no earlier value drops it from the view.
+test('Review codex AUTH-VIEW: undo of a first health key clears the session view', async ($, on) => {
+  const view = watchedView(on)
+  const { store, clock } = await fableMoved($, on)
+  store.set('rotate-to', 'off')
+  await clock.advance(61_000)
+  store.delete('health:2')
+  await $.classic.StopFailure({ error: 'authentication_failed' })
+  await clock.settle()
+  expect(store.get('health:2')).toMatchObject({ kind: 'login-needed' })
+  await endSession($, clock)
+  expect([store.get('health:2'), view()?.health['2']?.kind], 'Offender: process-exit undo deletes the provisional key but mergeStore keeps the stale login-needed view. Fix: clear the matching view health when deleting that key.').toEqual([undefined, undefined])
+})
+
+// Review codex on #88 [AUTH-VIEW], the class: a replaced switch clears it too.
+test('Review codex AUTH-VIEW class: a replaced switch clears a deleted provisional health from the view', async ($, on) => {
+  const view = watchedView(on)
+  const { store, clock } = await fableMoved($, on)
+  store.set('rotate-to', 'off')
+  await clock.advance(61_000)
+  store.delete('health:2')
+  await $.classic.StopFailure({ error: 'authentication_failed' })
+  await clock.settle()
+  await useNow($, clock, '1')
+  expect([store.get('health:2'), view()?.health['2']?.kind], 'Offenders: process exit and Use now replacement delete a first health write, but mergeStore revives the stale view. Fix: drop health from the view when the provisional health key is deleted.').toEqual([undefined, undefined])
+})
+
+// puma-9arph.27: a stop's own move keeps what the stop marked (the mark is why it moves), a rejected sign-in's health too.
+test('a rejected sign-in on an unproven switch that moves the session keeps the account moved to as needing a sign-in after the session ends', async ($, on) => {
+  const { w, store, clock } = await fableMoved($, on)
+  await clock.advance(36_000)
+  await $.classic.StopFailure({ error: 'authentication_failed' })
+  await clock.settle()
+  expect(slots(w), 'premise: the stop moves the session back').toEqual([SLOT2, ''])
+  await $.session.end({ reason: 'prompt_input_exit', sessionId: 'session-1', resume: { id: 'session-1' } } as Parameters<Engine['session']['end']>[0])
+  await clock.settle()
+  expect((store.get('health:2') as { kind?: string } | undefined)?.kind).toBe('login-needed')
+})
+
+// puma-9arph.27, acceptance 3: a response with the moved-to login's week proves the switch, so a rejected sign-in after
+// it is that login's for good: no end of anything gives it back.
+test('a rejected sign-in on a proven switch still stands after the session ends', async ($, on) => {
+  const { w, store, clock } = await fableMoved($, on)
+  await clock.advance(36_000)
+  w.limits = limitsOf(10, 30, OTHER_WEEK)
+  await respond($, clock, w)
+  await $.classic.StopFailure({ error: 'authentication_failed' })
+  await clock.settle()
+  await $.session.end({ reason: 'prompt_input_exit', sessionId: 'session-1', resume: { id: 'session-1' } } as Parameters<Engine['session']['end']>[0])
+  await clock.settle()
+  expect((store.get('health:2') as { kind?: string } | undefined)?.kind).toBe('login-needed')
+})
+
 // Measured on vox (2026-11-12 11:48Z): the turn the mod's own carry-on started, sent as the settle ended, still went
 // out on the login left and died on its Fable week; it marked the login moved to, whose usage read 35% that week.
 for (const isReadOld of [false, true]) test(`a Fable stop answering the mod's own carry-on just past the settle, before any response, marks nothing on the account moved to, whose read ${isReadOld ? 'over' : 'under'} a minute old shows Fable room, and carries on once more`, async ($, on) => {
