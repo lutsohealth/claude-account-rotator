@@ -646,7 +646,7 @@ test('where Claude Code\'s security policy refuses switching, as on a Team seat,
   await clock.settle()
   await clock.advance(36_000)
   expect(w.toasts.filter(notice)).toHaveLength(1)
-  expect(w.toasts.filter(t => /^Account 1 is near its limit, and this window can't switch accounts\. \/login with your personal/.test(t))).toHaveLength(1)
+  expect(w.toasts.filter(t => /^Claude account one@example\.com is near its limit, and this window can't switch accounts\. \/login with your personal/.test(t))).toHaveLength(1)
   expect(w.submitted).toEqual([])
   const footer = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'SessionMode', props: { modes: [] } })
   expect((await footer.find({ type: 'Text', text: '⚠' }))?.props).toMatchObject({ color: 'warning' })
@@ -9606,3 +9606,25 @@ for (const [slot, hasRead] of [['', true], ['', false], [SLOT2, true], [SLOT2, f
     expect(lineOne(store, id), `${where}, ${hasRead ? 'with' : 'without'} a read: the login in use reads idle. Fix: isIdle only for a login no session runs on.`).not.toMatch(/idle$/)
   })
 }
+
+// Review R1 BAND-NUMBER (Codex gpt-6-sol at bcbfb83), class NUMBER-NAME: the signing-in band named the login by number.
+test('signing-in band names the known email', async ($, on) => {
+  const { store, clock } = await rowsWorld($, on)
+  store.set('health:2', { kind: 'logging-in', since: NOW })
+  await clock.advance(61_000)
+  const band = await mountBand($)
+  expect(await band.find({ text: /◌ Account 2:/ })).toBeUndefined()
+  await band.unmount()
+})
+
+test('every signed-in login uses its email while signing in', async ($, on) => {
+  const { store, clock } = await rowsWorld($, on)
+  for (const id of ['1', '2']) {
+    store.set(`health:${id}`, { kind: 'logging-in', since: NOW })
+    await clock.advance(61_000)
+    const band = await mountBand($)
+    expect(await band.find({ text: new RegExp(`◌ Account ${id}:`) })).toBeUndefined()
+    await band.unmount()
+    store.set(`health:${id}`, { kind: 'ok' })
+  }
+})

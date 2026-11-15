@@ -648,9 +648,9 @@ test('a session that can\'t switch says to stop a background session, which /exi
   expect(blockedAdvice(onLogin)).toMatch(/Fix: \/login with your personal \(Pro or Max\) account\. Quit .*claude --resume session-1\.$/)
   // Spent where it can't leave, while another login has room: what to do.
   expect(stuckText(onSeat, NOW)).toBe(
-    "Account 2 is near its limit, and this window can't switch accounts. Quit (in a background session, /stop: /exit only detaches), then run: claude --resume session-1",
+    "The account in use is near its limit, and this window can't switch accounts. Quit (in a background session, /stop: /exit only detaches), then run: claude --resume session-1",
   )
-  expect(stuckText(onLogin, NOW)).toMatch(/^Account 1 is near its limit, and this window can't switch accounts\. \/login with your personal \(Pro or Max\) account\. Quit /)
+  expect(stuckText(onLogin, NOW)).toMatch(/^The account in use is near its limit, and this window can't switch accounts\. \/login with your personal \(Pro or Max\) account\. Quit /)
   // Free to switch, with room, or with nowhere to go: nothing to say.
   expect(stuckText({ ...onSeat, isSwitchBlocked: false }, NOW)).toBeUndefined()
   expect(stuckText({ ...onSeat, activeId: '1' }, NOW)).toBeUndefined()
@@ -659,7 +659,7 @@ test('a session that can\'t switch says to stop a background session, which /exi
 
 test('a session that can\'t switch is told so once its week is down to the Week setting, as the rotation counts it', () => {
   const atLine = { ...view({ '1': [10, 10], '2': [10, 85] }), activeId: '2', sessionId: 'session-1', isSwitchBlocked: true, weekLeave: 20 }
-  expect(stuckText(atLine, NOW)).toMatch(/^Account 2 is near its limit, and this window can't switch accounts\./)
+  expect(stuckText(atLine, NOW)).toMatch(/^The account in use is near its limit, and this window can't switch accounts\./)
   expect(stuckText({ ...atLine, weekLeave: 0 }, NOW)).toBeUndefined()
 })
 
@@ -684,7 +684,7 @@ function stuckOn(five: number, week: number, weekLeave: number): View {
 test('a stuck window whose login has 15% of its week left is told that login is near its limit, not out of usage', () => {
   // 85% of the week used at a Week setting of 20: past the line the rotation leaves at, with room left.
   const text = stuckText(stuckOn(10, 85, 20), NOW)
-  expect(text, 'the line is still said at the Week setting').toMatch(/^Account 2 is near its limit, and this window can't switch accounts\./)
+  expect(text, 'the line is still said at the Week setting').toMatch(/^The account in use is near its limit, and this window can't switch accounts\./)
   expect(text).not.toMatch(/out of usage/)
 })
 

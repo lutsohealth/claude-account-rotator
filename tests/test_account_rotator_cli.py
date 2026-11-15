@@ -1234,5 +1234,29 @@ class Label(unittest.TestCase):
         self.assertEqual(account_rotator_store.label_of(accounts, "9"), "9")
 
 
+class NumberName(StoreCase):
+    """Review R1 CLI-NUMBER and NUMBER-NAME (Codex gpt-6-sol at bcbfb83): text a person reads names an account by its email."""
+
+    def test_remove_names_known_email(self) -> None:
+        done = run(CLI, "account", "rm", "--store", str(self.store), "--account", "1", env=self.env())
+        self.assertNotIn("account 1 is Claude Code", done.stderr)
+
+    def test_no_person_facing_text_names_an_account_by_its_number(self) -> None:
+        # Every spelling the round found: a TypeScript template, JSX text, a Python f-string, README prose. Kept:
+        # debug lines, the --account input (RULING of Master 386 on #23533), label's no-email fallback, claudeAccount.
+        spelled = re.compile(r"\b[Aa]ccounts? \$?\{|\b(?:is|on) account [0-9]")
+        kept = re.compile(r"debug\(|--account \{given\}|\(not signed in yet\)|Claude account \$\{name\}|account folder")
+        sources = [*sorted((ROOT / "hooks").glob("*.ts*")), *sorted((ROOT / "bin").iterdir()), ROOT / "README.md"]
+        sources = [p for p in sources if p.is_file() and ".test." not in p.name]
+        self.assertGreater(len(sources), 5)
+        offenders = [
+            f"{p.relative_to(ROOT)}:{n}: {line.strip()[:100]}"
+            for p in sources
+            for n, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1)
+            if spelled.search(line) and not kept.search(line)
+        ]
+        self.assertEqual(offenders, [], "name the account by label, label_of or claudeAccount, not its number")
+
+
 if __name__ == "__main__":
     unittest.main()
