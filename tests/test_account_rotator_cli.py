@@ -1231,7 +1231,8 @@ class Label(unittest.TestCase):
         self.assertEqual(names, ["one@example.com", "two@example.com · Alpha", "two@example.com · Beta", "account 4 (not signed in yet)"])
         self.assertEqual(account_rotator_store.label({"id": "1", "slot": ""}, accounts), "Claude Code's login")
         self.assertEqual(account_rotator_store.label_of(accounts, "3"), "two@example.com · Beta")
-        self.assertEqual(account_rotator_store.label_of(accounts, "9"), "9")
+        # puma-9arph.28 item 2: an id the store lists no account for is "account <id>", never the bare id.
+        self.assertEqual(account_rotator_store.label_of(accounts, "9"), "account 9")
 
 
 class NumberName(StoreCase):
@@ -1246,7 +1247,7 @@ class NumberName(StoreCase):
         # debug lines, the --account input (RULING of Master 386 on #23533), label's no-email fallback, claudeAccount.
         spelled = re.compile(r"\b[Aa]ccounts? \$?\{|\b(?:is|on) account [0-9]")
         # A TypeScript type (`value is Account {`, `): Account {`) is no text either.
-        kept = re.compile(r"debug\(|--account \{given\}|\(not signed in yet\)|Claude account \$\{name\}|account folder|(?:value is|\):) Account \{")
+        kept = re.compile(r"debug\(|--account \{given\}|\(not signed in yet\)|id fallback|Claude account \$\{name\}|account folder|(?:value is|\):) Account \{")
         sources = [*sorted((ROOT / "hooks").glob("*.ts*")), *sorted((ROOT / "bin").iterdir()), ROOT / "README.md"]
         sources = [p for p in sources if p.is_file() and ".test." not in p.name]
         self.assertGreater(len(sources), 5)

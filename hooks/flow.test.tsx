@@ -787,6 +787,31 @@ test('a switch that does not take, its responses still the old login\'s minutes 
   await pane.unmount()
 })
 
+// puma-9arph.28 item 1: another session removed the account a switch went to while the switch was unproven.
+test('a switch whose account another session removed meanwhile ends with a notice that names no "?"', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [93, 40]
+  w.usage['tok-2'] = [10, 30]
+  w.weekResets = { 'tok-2': OTHER_WEEK }
+  const store = new Map<string, unknown>(Object.entries(TWO_LOGINS))
+  const clock = world(on, w, store)
+  await start($, clock)
+  expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
+  store.set('accounts', TWO_LOGINS.accounts.filter(a => a.id !== '2'))
+  w.limits = [
+    { kind: 'five_hour', percentUsed: 93, resetsAt: '2026-10-12T12:00:00Z' },
+    { kind: 'seven_day', percentUsed: 40, resetsAt: '2026-10-18T03:00:00Z' },
+  ]
+  await clock.advance(5 * 60_000)
+  await $.session.measure({ context: { window: 200_000 }, rateLimits: w.limits, changed: ['rateLimits'] })
+  await clock.settle()
+  const notices = w.toasts.filter(t => /^The switch to /.test(t))
+  expect(notices.length).toBeGreaterThan(0)
+  expect(notices.filter(t => /^The switch to \? /.test(t))).toEqual([])
+})
+
 test('a turn that dies on the usage limit moves to the other login, then asks Claude to carry on', async ($, on) => {
   const w = fresh()
   w.keychain['Claude Code-credentials'] = blob('tok-1')
@@ -8026,7 +8051,7 @@ test('a use of an account not listed, or one the panel offers no Use now for, an
   w.files[`${REQUESTS}/${N1}.json`] = useRequest(N1, '2', store.get('store-id'), clock.now(), ownMark(w))
   await untilTick(clock)
   expect(w.envSets).toEqual([])
-  expect(resultOf(w, 'gone-00001')).toMatchObject({ ok: false, message: '9 names no account listed in this store' })
+  expect(resultOf(w, 'gone-00001')).toMatchObject({ ok: false, message: 'account 9 is not listed in this store' })
   expect(resultOf(w, N1)?.ok).toBe(false)
   expect(resultOf(w, N1)?.message).toMatch(/two@example.com .*cannot take over: its sign-in has run out/)
 })
@@ -9726,11 +9751,13 @@ test('signing-in band names the known email', async ($, on) => {
 
 test('every signed-in login uses its email while signing in', async ($, on) => {
   const { store, clock } = await rowsWorld($, on)
-  for (const id of ['1', '2']) {
+  for (const [id, email] of [['1', 'one@example.com'], ['2', 'two@example.com']]) {
     store.set(`health:${id}`, { kind: 'logging-in', since: NOW })
     await clock.advance(61_000)
     const band = await mountBand($)
     expect(await band.find({ text: new RegExp(`◌ Account ${id}:`) })).toBeUndefined()
+    // puma-9arph.28 item 4: the band names the login by its email, not only no number.
+    expect(await band.find({ text: new RegExp(`approve as ${email}`) })).toBeDefined()
     await band.unmount()
     store.set(`health:${id}`, { kind: 'ok' })
   }

@@ -7,7 +7,7 @@ import { companyOf, identityFromStatus, planName } from './model'
 import { laterMark, spentMark, withFableMark } from './model'
 import { EMPTY_VIEW, USAGE_IDLE_MS, fitRow, hasRoom, rowOf, rowsOf, rowText, storedLine, storedLineText } from './model'
 import ROWS_FIXTURE from '../tests/fixtures/rows'
-import { REQUEST_TTL_MS, holdsLogin, requestFrom, requestsDir, slotNumber } from './model'
+import { REQUEST_TTL_MS, holdsLogin, isLoginOf, sameLogin, requestFrom, requestsDir, slotNumber } from './model'
 import { USAGE_BACKOFF_MAX_MS, USAGE_CLAIM_MS, USAGE_CLAIM_WAIT_MS, USAGE_EARLY_MS, WRITER_VERSION, afterUsage, claimDueReads, gatingDue, isUsageDue, mayForceUsage, mayReadSince, renewClaim, retryAfterFrom, usageDueFrom } from './model'
 import { DEFAULT_FOOTER, availableNow, claudeAccount, blockedAdvice, braille, browsersFrom, chromeNote, continueTextFrom, counted, fiveHourLimitFrom, credentialFrom, credentialsFile, fableMark, fableSpentNotice, fableStay, footerStyleFrom, healthOf, identityFromProfile, isFableSpent, isFableStop, isNoBrowser, isPolicyRefusal, keepFable, keychainItem, label, legacyMark, markFrom, nextReset, pickTarget, pie, readingFromUsage, restartSteps, rotateToFrom, shouldLeave, roomColor, stuckText, windowPct, withMark, withWeekMark } from './model'
 
@@ -150,6 +150,8 @@ test('new sessions start on the login the setting picks among those with room on
   expect(on('account:3')).toMatchObject({ id: '3', why: 'you picked it' })
   expect(on('account:4')).toMatchObject({ id: '2', why: 'account 4 (not signed in yet) has no room, and it is the next with room' })
   expect(on('account:1')?.id).toBe('2')
+  // puma-9arph.28 item 2: a named id the list no longer holds opens its reason as "account <id>", never the bare id.
+  expect(on('account:9')).toMatchObject({ id: '2', why: 'account 9 is not on the list, and it is the first with room' })
   expect(pickLaunch(view({ '1': [100, 10], '2': [10, 100] }), NOW)).toBeUndefined()
   expect(['room', 'nonzero', 'reset', 'account:3', 'account:', 'other', 7].map(launchOnFrom)).toEqual(['room', 'nonzero', 'reset', 'account:3', 'room', 'room', 'room'])
 })
@@ -1217,6 +1219,18 @@ test('the usage line pads each percent to three cells, so Fable and resets stand
   expect(new Set(lines.map(line => line.indexOf('resets'))).size).toBe(1)
 })
 
+// puma-9arph.28 item 3: the lines line up across plans too: a Pro row has no Fable cells, and "5h" is shorter than "Used".
+test('a Pro row, a Max row and a 5-hour line start their bars and "resets" at one column each', () => {
+  const pro = { ...ANDRES, plan: 'pro', tier: undefined }
+  const proLines = rowLines(rowView({ readings: { '1': { sevenDay: { pct: 31, resetsAt: ROW_WEEK_END }, noFiveHour: true, at: READ_AT, by: '1' } } }, pro))
+  const max = { ...ANDRES, tier: 'default_claude_max_5x' }
+  const maxLines = rowLines(
+    rowView({ readings: { '1': { sevenDay: { pct: 31, resetsAt: ROW_WEEK_END }, fable: { pct: 38, resetsAt: ROW_WEEK_END }, fiveHour: { pct: 50, resetsAt: ahead(0, 1, 20) }, at: READ_AT, by: '1' } }, noFiveHour: { '1': false } }, max),
+  )
+  const lines = [proLines[1] ?? '', maxLines[1] ?? '', maxLines[2] ?? '']
+  expect(lines.map(line => [line.search(/[▰▱]/), line.indexOf('resets')])).toEqual([[5, 44], [5, 44], [5, 44]])
+})
+
 test('the 5-hour line pads its percent the same way', () => {
   const max = { ...ANDRES, tier: 'default_claude_max_5x' }
   const five = (pct: number) =>
@@ -1450,6 +1464,10 @@ test('a failed read\'s longer line 1 moves the buttons to the end of line 2 wher
   const pro = { ...ANDRES, plan: 'pro', tier: undefined }
   const short = rowView({ checkErrors: { '1': HTTP_429 }, readings: { '1': { sevenDay: { pct: 31, resetsAt: ROW_WEEK_END }, noFiveHour: true, at: READ_AT, by: '1' } } }, pro)
   expect(fitted(short, 82)).toEqual({ lines: ['andres@lutsohealth.com · Company · Pro  18:39 Failed to update (HTTP 429)', 'Used ▰▰▰▱▱▱▱▱▱▱  31%  resets 2d 3h 14m'], end: 1 })
+  // puma-9arph.28 item 4: a Max failed row whose usage lists no Fable week draws a dash in the Fable cells, and fits at 82.
+  const max = { ...ANDRES, tier: 'default_claude_max_5x' }
+  const dash = rowView({ checkErrors: { '1': HTTP_429 }, readings: { '1': { sevenDay: { pct: 31, resetsAt: ROW_WEEK_END }, at: READ_AT, by: '1' } } }, max)
+  expect(fitted(dash, 82)).toEqual({ lines: ['andres@lutsohealth.com · Company · Max  18:39 Failed to update (HTTP 429)', 'Used ▰▰▰▱▱▱▱▱▱▱  31% Fable –                resets 2d 3h 14m', ''], end: 'own' })
 })
 
 test('a line 1 wider than the pane cuts the cause, then the Company, then the email\'s middle, never the state', () => {
@@ -1687,6 +1705,13 @@ test('an account holds the login a request read: another slot, email or organiza
     ['an organization the store no longer holds', A, { id: '2', slot: A.slot, email: A.email }, false],
   ]
   expect(cases.filter(([, seen, account, expected]) => holdsLogin(seen, account) !== expected).map(([name]) => name)).toEqual([])
+})
+
+// puma-9arph.28 item 5: the store is JSON another session wrote, so an email stored as null is no email, not one shared.
+test('two stored accounts whose email is null are two logins to sameLogin and isLoginOf', () => {
+  const [one, two] = JSON.parse('[{"id":"1","slot":"/slot/1","email":null},{"id":"2","slot":"/slot/2","email":null}]')
+  expect(sameLogin(one, two)).toBe(false)
+  expect(isLoginOf(one, two)).toBe(false)
 })
 
 test('the requests live in the Claude config folder of the session, CLAUDE_CONFIG_DIR or ~/.claude', () => {
