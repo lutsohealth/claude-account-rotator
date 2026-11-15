@@ -1463,10 +1463,14 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
   // Claude Code reads the new login only once the switch lands: a turn that dies before then, on a limit or a rejected
   // sign-in, went out on the login being left, which the switch already leaves. Nothing is marked on the login moved
   // to; the turn carries on there, once a switch however many turns die before it lands; during a Connect visit, once
-  // the visit ends.
+  // the visit ends. A rejected sign-in after a response with the moved-to login's week went out on that login: the
+  // switch has landed.
   const isFable = isFableStop(stop.last_assistant_message)
+  const since = view.pending?.since
+  const hasResponseSince = since !== undefined && lastMeasured !== undefined && lastMeasured.at > since
+  const isProvenRejection = error === 'authentication_failed' && hasResponseSince && provenStopper(view, lastMeasured?.reading)?.id === active.id
   const isSettling = view.pending !== undefined && (await $.clock.now()) - view.pending.since < SETTLE_MS
-  if (isSettling) {
+  if (isSettling && !isProvenRejection) {
     if (isConnectingChrome) isCutByVisit = true
     else if (carriedFor !== view.pending?.since) carryOnAfterSettle($, isFable ? { need: 'fable' } : {})
     carriedFor = view.pending?.since
@@ -1479,8 +1483,6 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
     // While a switch is unproven, a response since it began names the stop's login by its week, alone, or none at all
     // (a mark is every session's). With no response since, the switch has landed by now: the stop is the login moved
     // to, provisionally, and a settle that finds the switch did not take drops what the stop marked there.
-    const since = view.pending?.since
-    const hasResponseSince = since !== undefined && lastMeasured !== undefined && lastMeasured.at > since
     const owner = since === undefined || !hasResponseSince ? active : provenStopper(view, lastMeasured?.reading)
     const isProvisional = since !== undefined && !hasResponseSince
     // The landing can lag the settle: the turn the carry-on starts as the settle ends can still go out on the login
