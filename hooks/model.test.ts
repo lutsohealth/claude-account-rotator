@@ -9,7 +9,7 @@ import { EMPTY_VIEW, USAGE_IDLE_MS, fitRow, hasRoom, rowOf, rowsOf, rowText, sto
 import ROWS_FIXTURE from '../tests/fixtures/rows'
 import { REQUEST_TTL_MS, holdsLogin, requestFrom, requestsDir, slotNumber } from './model'
 import { USAGE_BACKOFF_MAX_MS, USAGE_CLAIM_MS, USAGE_CLAIM_WAIT_MS, USAGE_EARLY_MS, WRITER_VERSION, afterUsage, claimDueReads, gatingDue, isUsageDue, mayForceUsage, mayReadSince, renewClaim, retryAfterFrom, usageDueFrom } from './model'
-import { DEFAULT_FOOTER, availableNow, blockedAdvice, braille, browsersFrom, chromeNote, continueTextFrom, counted, fiveHourLimitFrom, credentialFrom, credentialsFile, fableMark, fableSpentNotice, fableStay, footerStyleFrom, healthOf, identityFromProfile, isFableSpent, isFableStop, isNoBrowser, isPolicyRefusal, keepFable, keychainItem, label, legacyMark, markFrom, nextReset, pickTarget, pie, readingFromUsage, restartSteps, rotateToFrom, shouldLeave, roomColor, stuckText, windowPct, withMark, withWeekMark } from './model'
+import { DEFAULT_FOOTER, availableNow, claudeAccount, blockedAdvice, braille, browsersFrom, chromeNote, continueTextFrom, counted, fiveHourLimitFrom, credentialFrom, credentialsFile, fableMark, fableSpentNotice, fableStay, footerStyleFrom, healthOf, identityFromProfile, isFableSpent, isFableStop, isNoBrowser, isPolicyRefusal, keepFable, keychainItem, label, legacyMark, markFrom, nextReset, pickTarget, pie, readingFromUsage, restartSteps, rotateToFrom, shouldLeave, roomColor, stuckText, windowPct, withMark, withWeekMark } from './model'
 
 const NOW = Date.parse('2026-10-12T10:00:00Z')
 const LATER = '2026-10-12T12:00:00Z'
@@ -1241,6 +1241,15 @@ test('label names an account by its email, with its organization only where that
   const all = [one, twoA, twoB, unread]
   expect(all.map(a => label(a, all))).toEqual(['one@example.com', 'two@example.com · Alpha', 'two@example.com · Beta', 'account 4 (not signed in yet)'])
   expect(label({ id: '1', slot: '' }, all)).toBe("Claude Code's login")
+})
+
+// Self-review of 5266c16: "Claude account ${label(...)}" read "Claude account account 4 (not signed in yet)".
+test('a sentence names an account "Claude account <email>", and with no email by label alone, never "Claude account account"', () => {
+  const one = { id: '1', slot: '', email: 'one@example.com' }
+  const unread = { id: '4', slot: '/s/4' }
+  const login = { id: '5', slot: '' }
+  const all = [one, unread, login]
+  expect(all.map(a => claudeAccount(a, all))).toEqual(['Claude account one@example.com', 'account 4 (not signed in yet)', "Claude Code's login"])
 })
 
 test('a failed read newer than the last good one ends line 1 with its time and status, and dims line 2', () => {
