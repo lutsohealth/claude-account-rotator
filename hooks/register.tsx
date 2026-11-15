@@ -992,8 +992,9 @@ const SELF = `module-${Math.random().toString(36).slice(2, 10)}`
 /**
  * How a check may read a login's usage. `claimed`: the schedule says it is due and this session claimed it.
  * `force`: a stop, a /login or a sign-in asks, so it reads unless a back-off stands, another session's read is under
- * way, or the last good read is under a minute old. `since`: a settling switch, read once unless a good read came
- * after the switch began. `none`: the sign-in only, no usage call.
+ * way, or the last good read is under a minute old. `since`: read unless a back-off stands, another session's read is
+ * under way, or a good read came after `since`: a settling switch passes when it began, the carry-on stop passes now.
+ * `none`: the sign-in only, no usage call.
  */
 type UsageGate = 'claimed' | 'force' | 'none' | { since: number }
 

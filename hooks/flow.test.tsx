@@ -9479,18 +9479,23 @@ test('Review codex-r2 R1: a good target read after switch does not turn a stale 
   expect(callsWith(w, 'tok-2')).toBe(calls + 1)
 })
 
-// Review codex-r2 R1 [POST-SWITCH-READ], the class: whoever made the read after the switch, a finished read leaves no
-// claim; a live claim is the codex-r1 other-claim row, which marks. One switch clears once, so each row is its own session.
-for (const site of ['scheduled read', 'another session read'] as const) {
-  test(`Review codex-r2 R1 class: a ${site} of the target after the switch does not let a stale carry-on stop mark it`, async ($, on) => {
-    const { store, clock } = await fableMoved($, on)
+// Review codex-r2 R1 [POST-SWITCH-READ], the class: a finished read of the target after the switch, by any session,
+// leaves the same keys and no claim (a live claim is the codex-r1 other-claim row, which marks). The stop reads the
+// target again, as a stored body is no proof: it clears while the endpoint reads room, and stands once it reads the
+// week spent. One switch clears once, so each row is its own session.
+for (const [site, fable] of [['the endpoint still reads Fable room', 10], ['the endpoint reads the Fable week spent since', 100]] as const) {
+  test(`Review codex-r2 R1 class: a good read of the target stored after the switch is read again by the carry-on stop: ${site}`, async ($, on) => {
+    const { w, store, clock } = await fableMoved($, on)
     await clock.advance(35_500)
     const { claim: _claim, ...due } = store.get('usage-due:2') as { next: number; fails: number; at?: number; claim?: string }
     store.set('usage:2', { ...(store.get('usage:2') as object), at: NOW + 10_000, src: 'body' })
     store.set('usage-due:2', { ...due, at: NOW + 10_000 })
+    w.usage['tok-2'] = [10, 30, fable]
     await $.classic.StopFailure(FABLE_STOP)
     await clock.settle()
-    expect([site, store.get('fable-mark:2')], `Offender: ${site}. Fix: re-read the target before marking; a stored body is no proof (keepFable).`).toEqual([site, undefined])
+    await clock.advance(36_000)
+    const isCleared = fable < 100
+    expect([site, store.get('fable-mark:2'), w.submitted.length], `Offender: ${site}. Fix: re-read the target before judging the stop; a stored body is no proof (keepFable).`).toEqual([site, undefined, isCleared ? 2 : 1])
   })
 }
 
