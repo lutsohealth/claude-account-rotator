@@ -9268,6 +9268,47 @@ test('a rejected sign-in past the 35 seconds after a switch, before any response
   expect((store.get('health:2') as { kind?: string } | undefined)?.kind).toBe('login-needed')
 })
 
+// Review codex on #87 [AUTH-UNDO], the instance (puma-9arph.27): the rejected sign-in on an unproven switch is
+// provisional, as a usage-limit stop there is, so the end of that switch gives the account its health back.
+test('Review codex AUTH-UNDO: an unproven rejected sign-in is given back on process exit', async ($, on) => {
+  const { store, clock } = await fableMoved($, on)
+  await clock.advance(36_000)
+  await $.classic.StopFailure({ error: 'authentication_failed' })
+  await clock.settle()
+  expect((store.get('health:2') as { kind?: string } | undefined)?.kind, 'premise: the unproven stop marks login 2').toBe('login-needed')
+  await $.session.end({ reason: 'prompt_input_exit', sessionId: 'session-1', resume: { id: 'session-1' } } as Parameters<Engine['session']['end']>[0])
+  await clock.settle()
+  expect((store.get('health:2') as { kind?: string } | undefined)?.kind, 'Offender: process exit after an unproven rejected sign-in. Fix: record and undo its health write when the pending switch ends without proof.').not.toBe('login-needed')
+})
+
+// Review codex on #87 [AUTH-UNDO], the class: every process end gives an unproven rejected sign-in back.
+for (const reason of ['prompt_input_exit', 'logout', 'other'] as const) {
+  test(`Review codex AUTH-UNDO class: ${reason} gives back an unproven rejected sign-in`, async ($, on) => {
+    const { store, clock } = await fableMoved($, on)
+    await clock.advance(36_000)
+    await $.classic.StopFailure({ error: 'authentication_failed' })
+    await clock.settle()
+    expect((store.get('health:2') as { kind?: string } | undefined)?.kind, `premise: ${reason} has an unproven login-needed write`).toBe('login-needed')
+    await $.session.end({ reason, sessionId: 'session-1', resume: { id: 'session-1' } } as Parameters<Engine['session']['end']>[0])
+    await clock.settle()
+    expect((store.get('health:2') as { kind?: string } | undefined)?.kind, `Offender: ${reason}. Fix: record the rejected sign-in's health write and undo it when this unproven switch ends at ${reason}.`).not.toBe('login-needed')
+  })
+}
+
+// puma-9arph.27, acceptance 3: a response with the moved-to login's week proves the switch, so a rejected sign-in after
+// it is that login's for good: no end of anything gives it back.
+test('a rejected sign-in on a proven switch still stands after the session ends', async ($, on) => {
+  const { w, store, clock } = await fableMoved($, on)
+  await clock.advance(36_000)
+  w.limits = limitsOf(10, 30, OTHER_WEEK)
+  await respond($, clock, w)
+  await $.classic.StopFailure({ error: 'authentication_failed' })
+  await clock.settle()
+  await $.session.end({ reason: 'prompt_input_exit', sessionId: 'session-1', resume: { id: 'session-1' } } as Parameters<Engine['session']['end']>[0])
+  await clock.settle()
+  expect((store.get('health:2') as { kind?: string } | undefined)?.kind).toBe('login-needed')
+})
+
 // Measured on vox (2026-11-12 11:48Z): the turn the mod's own carry-on started, sent as the settle ended, still went
 // out on the login left and died on its Fable week; it marked the login moved to, whose usage read 35% that week.
 for (const isReadOld of [false, true]) test(`a Fable stop answering the mod's own carry-on just past the settle, before any response, marks nothing on the account moved to, whose read ${isReadOld ? 'over' : 'under'} a minute old shows Fable room, and carries on once more`, async ($, on) => {
