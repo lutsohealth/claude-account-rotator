@@ -437,10 +437,10 @@ def remove(data: dict, store: str, given: str, wait_s: float, as_json: bool) -> 
     row = next(a for a in data["accounts"] if a["id"] == account)
     slot = row.get("slot")
     if not isinstance(slot, str):
-        print(f"account-rotator: {store}: account {account} has no slot, which the mod never writes, so nothing is asked: fix the store by hand, or see --help", file=sys.stderr)
+        print(f"account-rotator: {store}: {label_of(data['accounts'], account)} has no slot, which the mod never writes, so nothing is asked: fix the store by hand, or see --help", file=sys.stderr)
         return EXIT_NO_STORE
     if slot == "":
-        print(f"account-rotator: account {account} is Claude Code's own login, which the mod does not remove: sign it out with claude auth logout, or see --help", file=sys.stderr)
+        print(f"account-rotator: {label_of(data['accounts'], account)} is Claude Code's own login, which the mod does not remove: sign it out with claude auth logout, or see --help", file=sys.stderr)
         return EXIT_USAGE
 
     def envelope(_account: str, result: dict) -> dict:

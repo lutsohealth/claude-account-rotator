@@ -692,7 +692,7 @@ test('a window that can\'t switch, on a seat that runs out while another login h
   const clock = world(on, w, TWO_LOGINS)
   await start($, clock)
   const stuck =
-    "Account 2 is near its limit, and this window can't switch accounts. Quit (in a background session, /stop: /exit only detaches), then run: claude --resume session-1"
+    "Claude account two@example.com is near its limit, and this window can't switch accounts. Quit (in a background session, /stop: /exit only detaches), then run: claude --resume session-1"
   expect(w.toasts.filter(t => t === stuck)).toHaveLength(1)
   const band = await mountBand($)
   expect((await band.find({ type: 'Text', text: `⚠ ${stuck}` }))?.props).toMatchObject({ color: 'warning' })
@@ -713,7 +713,7 @@ test('a window that can\'t switch, told once it is stuck, is not told again afte
   const clock = world(on, w, TWO_LOGINS)
   on('classic.SessionStart', () => ({}))
   await start($, clock)
-  const stuck = (t: string) => /^Account 2 is near its limit, and this window can't switch accounts\./.test(t)
+  const stuck = (t: string) => /^Claude account two@example\.com is near its limit, and this window can't switch accounts\./.test(t)
   expect(['told before /clear', w.toasts.filter(stuck).length]).toEqual(['told before /clear', 1])
   await clearSession($, clock, s.clear)
   await clock.advance(21 * 60_000)
@@ -725,7 +725,7 @@ test('a window that can\'t switch, told once it is stuck, is not told again afte
 test('no once-only notice of a window that can\'t switch is said again after any reset of the view', async ($, on) => {
   const NOTICES: [string, RegExp][] = [
     ['policy refusal', /^Can't switch accounts in this session\./],
-    ['stuck window', /^Account 2 is near its limit, and this window can't switch accounts\./],
+    ['stuck window', /^Claude account two@example\.com is near its limit, and this window can't switch accounts\./],
   ]
   const w = fresh()
   w.refuseEnv = true
@@ -9420,7 +9420,7 @@ test('a window that can\'t switch, stuck on its Fable week with Fable room on an
   const clock = world(on, w, TWO_LOGINS)
   on('classic.SessionStart', () => ({}))
   await start($, clock)
-  const stuck = (t: string) => /^Account 2 is near its limit, and this window can't switch accounts\./.test(t)
+  const stuck = (t: string) => /^Claude account two@example\.com is near its limit, and this window can't switch accounts\./.test(t)
   expect(w.toasts.filter(stuck)).toHaveLength(0)
   await $.classic.StopFailure(FABLE_STOP)
   await clock.settle()
@@ -9614,6 +9614,7 @@ test('signing-in band names the known email', async ($, on) => {
   await clock.advance(61_000)
   const band = await mountBand($)
   expect(await band.find({ text: /◌ Account 2:/ })).toBeUndefined()
+  expect(await band.find({ text: /^◌ Signing in: in your browser, approve as two@example\.com and pick the organization\./ })).toBeDefined()
   await band.unmount()
 })
 

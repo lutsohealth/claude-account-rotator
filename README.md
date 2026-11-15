@@ -14,7 +14,7 @@ A [Claude Code](https://code.claude.com) mod for people with more than one Claud
 
 **Turn on auto-update**, or you stay on the version you installed: in `/plugin`, open **Marketplaces**, pick **claude-account-rotator** and choose **Enable auto-update**. Claude Code then updates the mod each time it starts. It is off by default for every marketplace but Anthropic's own.
 
-Then click the usage in the footer, press **+ Add an account** and approve the sign-in in your browser. The account you are signed in with now is account 1.
+Then click the usage in the footer, press **+ Add an account** and approve the sign-in in your browser. The account you are signed in with now stays listed as Claude Code's login.
 
 To update by hand instead, pull the marketplace, then the mod, and start a new session:
 
@@ -87,7 +87,7 @@ Not a fix: a session started on a seat this way still can't switch. It only pick
 CLAUDE_SECURESTORAGE_CONFIG_DIR="$HOME/.claude/accounts/2" claude --continue
 ```
 
-`2` is the account's folder number, its `id` in `account-rotator account list --json`; plain `claude` starts on account 1, Claude Code's login. Type the path as here, with no `/` at the end and no `~` in quotes: Claude Code and the mod know the account by its exact text, so any other spelling can start signed out, and shows in the panel as a new account. Set it on the command, not with `export`, or every later `claude` in that shell starts there too. Numbers are reused after **Remove**: check `account list --json` before putting one in an alias.
+`2` is the account's folder number, its `id` in `account-rotator account list --json`; plain `claude` starts on Claude Code's login. Type the path as here, with no `/` at the end and no `~` in quotes: Claude Code and the mod know the account by its exact text, so any other spelling can start signed out, and shows in the panel as a new account. Set it on the command, not with `export`, or every later `claude` in that shell starts there too. Numbers are reused after **Remove**: check `account list --json` before putting one in an alias.
 
 Started this way on a personal account, a session rotates as in 1, with your `/login` left a seat.
 

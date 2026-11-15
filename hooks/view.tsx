@@ -410,9 +410,6 @@ function RotationSettings(ui: Ui, view: View, act: Actions) {
   ])
 }
 
-/** An account as the band names it, by label. */
-const named = (view: View, id: string): string => labelOf(view.accounts, id)
-
 /**
  * What keeps Claude in Chrome from working in this window, in a sentence: no
  * browser answering where it connected, or no move to the extension's account.
@@ -422,9 +419,9 @@ function chromeProblem(view: View): string | undefined {
   const link = view.chrome
   if (own === undefined || view.chromeConnecting !== undefined || link?.isPaired) return undefined
   if (link?.as === own) {
-    return `No Chrome extension answers as ${named(view, own)}. Open Chrome and check its Claude extension is signed in with that email; if it is, restart Chrome.`
+    return `No Chrome extension answers as ${labelOf(view.accounts, own)}. Open Chrome and check its Claude extension is signed in with that email; if it is, restart Chrome.`
   }
-  if (!canConnectChrome(view)) return `This window can't switch to ${named(view, own)}. ${restartSteps(view)}`
+  if (!canConnectChrome(view)) return `This window can't switch to ${labelOf(view.accounts, own)}. ${restartSteps(view)}`
   return undefined
 }
 
@@ -509,7 +506,7 @@ function ChromeSettings(ui: Ui, view: View, act: Actions) {
 function ChromeBand(ui: Ui, view: View, act: Actions) {
   const { Box, Text, Button } = ui
   if (view.chromeConnecting !== undefined) {
-    return <Text color="warning">{`◌ Connecting Chrome as ${named(view, view.chromeConnecting)}…`}</Text>
+    return <Text color="warning">{`◌ Connecting Chrome as ${labelOf(view.accounts, view.chromeConnecting)}…`}</Text>
   }
   if (!view.chrome?.hasFailed) return undefined
   const own = view.chromeAccountId
@@ -523,7 +520,7 @@ function ChromeBand(ui: Ui, view: View, act: Actions) {
   }
   return (
     <Box flexDirection="row" columnGap={2}>
-      <Text color="warning">{`⚠ ${chromeProblem(view) ?? `Chrome isn't connected as ${named(view, own)}.`}`}</Text>
+      <Text color="warning">{`⚠ ${chromeProblem(view) ?? `Chrome isn't connected as ${labelOf(view.accounts, own)}.`}`}</Text>
       {canConnectChrome(view) && (
         <Button key="chrome-connect-band" variant="primary" onPress={act.connectChrome}>
           Connect
@@ -541,7 +538,7 @@ export function Band(ui: Ui, view: View, now: number, act: Actions) {
     return (
       <Box flexDirection="row" columnGap={2}>
         <Text color="warning">
-          ◌ Account {signingIn.id}: in your browser, approve as {signingIn.email ?? 'the account to add'} and pick the
+          ◌ Signing in: in your browser, approve as {signingIn.email ?? 'the account to add'} and pick the
           organization. Wrong account there? Sign out of claude.ai in another tab, then reload the sign-in page.
         </Text>
         <Button key="cancel-sign-in" onPress={act.cancelSignIn}>Cancel</Button>
@@ -699,7 +696,7 @@ function accountRow(ui: Ui, view: View, a: Account, now: number, act: Actions, c
       {view.held?.target.id === a.id && (
         <Box key={`held-${a.id}`}>
           <Text color="warning">
-            switching here once {named(view, view.activeId)}'s token has refreshed, at the next request on it
+            switching here once {labelOf(view.accounts, view.activeId)}'s token has refreshed, at the next request on it
           </Text>
         </Box>
       )}

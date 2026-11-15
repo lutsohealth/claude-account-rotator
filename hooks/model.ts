@@ -806,7 +806,9 @@ export function stuckText(view: View, now: number): string | undefined {
   const isStuck = isSpent(r, now, view.weekLeave) || need === 'fable'
   if (!view.isSwitchBlocked || !isStuck || pickTarget(view, now, need) === undefined) return undefined
   const login = isOnNormalLogin(view) ? '/login with your personal (Pro or Max) account. ' : ''
-  return `Account ${view.activeId} is near its limit, and this window can't switch accounts. ${login}${restartSteps(view)}`
+  const active = view.accounts.find(a => a.id === view.activeId)
+  const name = typeof active?.email === 'string' ? claudeAccount(active, view.accounts) : 'The account in use'
+  return `${name} is near its limit, and this window can't switch accounts. ${login}${restartSteps(view)}`
 }
 
 /** The MCP server Claude Code runs Claude in Chrome as, and the names of its tools. */
