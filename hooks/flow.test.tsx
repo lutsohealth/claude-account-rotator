@@ -9302,6 +9302,52 @@ for (const reason of ['prompt_input_exit', 'logout', 'other'] as const) {
   })
 }
 
+// Review codex on #88 [AUTH-OWNERSHIP], the instance: the undo gives back only this stop's own health write; another
+// session's identical rejection since is that session's and stands.
+test('Review codex AUTH-OWNERSHIP: an identical independent rejection survives process exit', async ($, on) => {
+  const { store, clock } = await rejectedStaying($, on)
+  const secondSessionWrite = { kind: 'login-needed', why: 'sign-in rejected' }
+  store.set('health:2', secondSessionWrite)
+  await endSession($, clock)
+  expect(store.get('health:2'), 'Offender: process exit undoes a second session\'s identical rejection. Fix: give provisional health writes unique ownership or a version and compare it before undo.').toEqual(secondSessionWrite)
+})
+
+// Review codex on #88 [AUTH-OWNERSHIP], the class: a replaced switch undoes as process exit does.
+test('Review codex AUTH-OWNERSHIP class: an identical independent rejection survives switch replacement', async ($, on) => {
+  const { store, clock } = await rejectedStaying($, on)
+  const secondSessionWrite = { kind: 'login-needed', why: 'sign-in rejected' }
+  store.set('health:2', secondSessionWrite)
+  await useNow($, clock, '1')
+  expect(store.get('health:2'), 'Offenders: process exit and Use now replacement both call undoProvisionalStop, which erases an identical second-session rejection. Fix: version or tag the health write and undo only the first session\'s own version.').toEqual(secondSessionWrite)
+})
+
+// Review codex on #88 [AUTH-VIEW], the instance: an undo that deletes a health key with no earlier value drops it from the view.
+test('Review codex AUTH-VIEW: undo of a first health key clears the session view', async ($, on) => {
+  const view = watchedView(on)
+  const { store, clock } = await fableMoved($, on)
+  store.set('rotate-to', 'off')
+  await clock.advance(61_000)
+  store.delete('health:2')
+  await $.classic.StopFailure({ error: 'authentication_failed' })
+  await clock.settle()
+  expect(store.get('health:2')).toMatchObject({ kind: 'login-needed' })
+  await endSession($, clock)
+  expect([store.get('health:2'), view()?.health['2']?.kind], 'Offender: process-exit undo deletes the provisional key but mergeStore keeps the stale login-needed view. Fix: clear the matching view health when deleting that key.').toEqual([undefined, undefined])
+})
+
+// Review codex on #88 [AUTH-VIEW], the class: a replaced switch clears it too.
+test('Review codex AUTH-VIEW class: a replaced switch clears a deleted provisional health from the view', async ($, on) => {
+  const view = watchedView(on)
+  const { store, clock } = await fableMoved($, on)
+  store.set('rotate-to', 'off')
+  await clock.advance(61_000)
+  store.delete('health:2')
+  await $.classic.StopFailure({ error: 'authentication_failed' })
+  await clock.settle()
+  await useNow($, clock, '1')
+  expect([store.get('health:2'), view()?.health['2']?.kind], 'Offenders: process exit and Use now replacement delete a first health write, but mergeStore revives the stale view. Fix: drop health from the view when the provisional health key is deleted.').toEqual([undefined, undefined])
+})
+
 // puma-9arph.27: a stop's own move keeps what the stop marked (the mark is why it moves), a rejected sign-in's health too.
 test('a rejected sign-in on an unproven switch that moves the session keeps the account moved to as needing a sign-in after the session ends', async ($, on) => {
   const { w, store, clock } = await fableMoved($, on)
