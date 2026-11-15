@@ -247,7 +247,7 @@ export function pickLaunch(view: View, now: number): Omit<LaunchPick, 'at'> | un
   if (on.startsWith('account:')) {
     const id = on.slice('account:'.length)
     const at = view.accounts.findIndex(a => a.id === id)
-    if (at === -1) return pick(ready[0], `${id} is not on the list, and it is the first with room`)
+    if (at === -1) return pick(ready[0], `${labelOf(view.accounts, id)} is not on the list, and it is the first with room`)
     const after = [...view.accounts.slice(at), ...view.accounts.slice(0, at)]
     const found = after.find(a => ready.includes(a))
     return pick(found, found?.id === id ? 'you picked it' : `${labelOf(view.accounts, id)} has no room, and it is the next with room`)
@@ -680,8 +680,7 @@ export function untilText(at: number | string | undefined, now: number): string 
  * An account as text names it: its email, with its organization where that email is on more than one of `accounts`;
  * with no email, Claude Code's login or the account's number.
  */
-export function label(account: Account | undefined, accounts: readonly Account[]): string {
-  if (account === undefined) return '?'
+export function label(account: Account, accounts: readonly Account[]): string {
   // The store is JSON another session wrote: only a string is an email, as bin/account_rotator_store.py label reads it.
   if (typeof account.email !== 'string') return account.slot === '' ? "Claude Code's login" : `account ${account.id} (not signed in yet)`
   const isShared = accounts.filter(a => a.email === account.email).length > 1
@@ -689,15 +688,16 @@ export function label(account: Account | undefined, accounts: readonly Account[]
 }
 
 /** An account as a sentence names it: "Claude account <email>", and with no email by label alone. */
-export function claudeAccount(account: Account | undefined, accounts: readonly Account[]): string {
+export function claudeAccount(account: Account, accounts: readonly Account[]): string {
   const name = label(account, accounts)
-  return typeof account?.email === 'string' ? `Claude account ${name}` : name
+  return typeof account.email === 'string' ? `Claude account ${name}` : name
 }
 
-/** The account `id` names, by label; the bare id where `accounts` holds none. */
+/** The account `id` names, by label; "account <id>" where `accounts` holds none, as label names one with no email. */
 export function labelOf(accounts: readonly Account[], id: string | undefined): string {
   const found = accounts.find(a => a.id === id)
-  return found === undefined ? (id ?? '?') : label(found, accounts)
+  if (found !== undefined) return label(found, accounts)
+  return id === undefined ? 'an unlisted account' : `account ${id}` // id fallback
 }
 
 /**
@@ -941,7 +941,8 @@ export function identityFromStatus(stdout: string): Identity | undefined {
 
 /** The same login: one email in one organization. */
 export function sameLogin(a: Identity, b: Identity): boolean {
-  return a.email !== undefined && a.email === b.email && (a.orgId ?? '') === (b.orgId ?? '')
+  // Only a string is an email: two accounts with none (a stored null among them) are two logins.
+  return typeof a.email === 'string' && a.email === b.email && (a.orgId ?? '') === (b.orgId ?? '')
 }
 
 /**
@@ -950,13 +951,13 @@ export function sameLogin(a: Identity, b: Identity): boolean {
  */
 export function holdsLogin(seen: { slot: string; email?: string; orgId?: string }, account: Account): boolean {
   if (seen.slot !== account.slot) return false
-  if (seen.email === undefined) return true
+  if (typeof seen.email !== 'string') return true
   return sameLogin(seen, seen.orgId === undefined ? { email: account.email } : account)
 }
 
 /** A listed login is the account `who` signed in as, as far as it is known: by its email, and its organization once known. */
 export function isLoginOf(a: Identity, who: Identity): boolean {
-  return a.email !== undefined && a.email === who.email && (a.orgId === undefined || a.orgId === who.orgId)
+  return typeof a.email === 'string' && a.email === who.email && (a.orgId === undefined || a.orgId === who.orgId)
 }
 
 /**
@@ -1065,6 +1066,10 @@ function resetsPart(pieces: (string | Reset)[]): RowPart {
 
 /** The cells of a bar and its percent, the percent padded to 3: what follows stands at one column from 0% to 100%. */
 const USED_CELLS = 15
+/** The cells of a usage line's label: "Used", and "5h" padded to it, so each bar starts at one column. */
+const LABEL_CELLS = 'Used'.length
+/** The cells of the Fable part: a plan with none leaves them blank, so "resets" stands at one column on every plan. */
+const FABLE_CELLS = ' Fable '.length + USED_CELLS
 
 /**
  * A window as the row draws it: its label, then a ten-cell bar and the percent used, whatever the footer fills with;
@@ -1155,7 +1160,7 @@ function usageLine(view: View, a: Account, now: number): RowPart[] {
   if (r === undefined) return [{ text: `Used ${longBar(0)} no reading yet`, tone: 'dim' }]
   const plan = planName(a, hasNoFiveHour(view, a.id))
   const isFable = r.fable !== undefined || (plan !== undefined && HAS_FABLE_WEEK.test(plan))
-  const fable = isFable ? usedParts(' Fable', r.fable, now) : []
+  const fable = isFable ? usedParts(' Fable', r.fable, now) : [{ text: ' '.repeat(FABLE_CELLS) }]
   const [week, fableReset] = [resetAhead(r.sevenDay, now), resetAhead(r.fable, now)]
   const resets =
     week === undefined
@@ -1173,7 +1178,10 @@ function fiveHourLine(view: View, a: Account, now: number): RowPart[] | undefine
   const w = view.readings[a.id]?.fiveHour
   if (w === undefined) return [{ text: '5h –', tone: 'dim' }]
   const reset = resetAhead(w, now)
-  return trimEnd([...usedParts('5h', w, now), ...(reset === undefined ? [] : [resetsPart(['  resets ', reset])])])
+  // "5h" is shorter than "Used": the cells between keep each bar at one column; the label part stays "5h ".
+  const [name, ...used] = usedParts('5h', w, now)
+  const parts = name === undefined ? [] : [name, { text: ' '.repeat(LABEL_CELLS - '5h'.length) }, ...used]
+  return trimEnd([...parts, { text: ' '.repeat(FABLE_CELLS) }, ...(reset === undefined ? [] : [resetsPart(['  resets ', reset])])])
 }
 
 /**

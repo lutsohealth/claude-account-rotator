@@ -331,7 +331,7 @@ class ReviewPassedReset(StoreCase):
         line = self.fixture["store"]["rows"]["rows"][1]["lines"][2]
         until = next(r["until"] for r in line if isinstance(r, dict))
         text = load_cli().line_text(line, until + 2 * HOUR_MS, ZoneInfo(self.fixture["zone"]))
-        self.assertEqual(text, "5h ▰▰▰▰▰▱▱▱▱▱  50%  resets passed")
+        self.assertEqual(text, "5h   ▰▰▰▰▰▱▱▱▱▱  50%" + " " * 24 + "resets passed")
 
     def test_no_stored_until_reads_as_due_now_once_it_has_passed(self) -> None:
         cli, zone = load_cli(), ZoneInfo(self.fixture["zone"])

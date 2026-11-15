@@ -809,7 +809,7 @@ test('a switch whose account another session removed meanwhile ends with a notic
   await clock.settle()
   const notices = w.toasts.filter(t => /^The switch to /.test(t))
   expect(notices.length).toBeGreaterThan(0)
-  expect(notices.filter(t => /^The switch to \? /.test(t))).toEqual([])
+  expect(notices.filter(t => /^The switch to \? | leaves [0-9]+ be /.test(t))).toEqual([])
 })
 
 test('a turn that dies on the usage limit moves to the other login, then asks Claude to carry on', async ($, on) => {

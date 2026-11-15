@@ -1201,6 +1201,10 @@ function rowView(change: Partial<View> = {}, account: View['accounts'][number] =
 }
 const rowLines = (v: View, timeZone = TALLINN) => rowText(rowOf(v, v.accounts[0] ?? ANDRES, ROW_NOW, timeZone))
 const OPERATOR_LINE_2 = 'Used ▰▰▰▱▱▱▱▱▱▱  31% Fable ▰▰▰▰▱▱▱▱▱▱  38%  resets 2d 3h 14m'
+/** A line with no Fable part keeps the Fable part's cells blank, so its "resets" stands where OPERATOR_LINE_2's does (puma-9arph.28). */
+const NO_FABLE_GAP = ' '.repeat(24)
+const PRO_LINE_2 = `Used ▰▰▰▱▱▱▱▱▱▱  31%${NO_FABLE_GAP}resets 2d 3h 14m`
+const FIVE_HOUR_50 = `5h   ▰▰▰▰▰▱▱▱▱▱  50%${NO_FABLE_GAP}resets 1h 20m`
 
 test('the row is the operator\'s two lines: who, Company and plan, the last good read\'s time, then the week and Fable used', () => {
   expect(rowLines(rowView())).toEqual(['andres@lutsohealth.com · Company · Ultra  updated 18:34', OPERATOR_LINE_2])
@@ -1235,7 +1239,7 @@ test('the 5-hour line pads its percent the same way', () => {
   const max = { ...ANDRES, tier: 'default_claude_max_5x' }
   const five = (pct: number) =>
     rowLines(rowView({ readings: { '1': { sevenDay: { pct: 31, resetsAt: ROW_WEEK_END }, fiveHour: { pct, resetsAt: ahead(0, 1, 20) }, at: READ_AT, by: '1' } }, noFiveHour: { '1': false } }, max))[2]
-  expect([five(4), five(50), five(100)]).toEqual(['5h ▱▱▱▱▱▱▱▱▱▱   4%  resets 1h 20m', '5h ▰▰▰▰▰▱▱▱▱▱  50%  resets 1h 20m', '5h ▰▰▰▰▰▰▰▰▰▰ 100%  resets 1h 20m'])
+  expect([five(4), five(50), five(100)]).toEqual([`5h   ▱▱▱▱▱▱▱▱▱▱   4%${NO_FABLE_GAP}resets 1h 20m`, FIVE_HOUR_50, `5h   ▰▰▰▰▰▰▰▰▰▰ 100%${NO_FABLE_GAP}resets 1h 20m`])
 })
 
 test('a dash takes the cells of a bar and its percent, so what follows keeps its column, and one that ends a line leaves no blank after it', () => {
@@ -1364,7 +1368,7 @@ test('on Max and Ultra a Fable week no body listed is a dash; on other plans the
   const noFable = { ...v.readings['1'], fable: undefined } as View['readings'][string]
   expect(rowLines({ ...v, readings: { '1': noFable } })[1]).toBe('Used ▰▰▰▱▱▱▱▱▱▱  31% Fable –                resets 2d 3h 14m')
   const pro = { ...ANDRES, plan: 'pro', tier: undefined }
-  expect(rowLines({ ...rowView({}, pro), readings: { '1': noFable }, noFiveHour: {} })).toEqual(['andres@lutsohealth.com · Company · Pro  updated 18:34', 'Used ▰▰▰▱▱▱▱▱▱▱  31%  resets 2d 3h 14m'])
+  expect(rowLines({ ...rowView({}, pro), readings: { '1': noFable }, noFiveHour: {} })).toEqual(['andres@lutsohealth.com · Company · Pro  updated 18:34', PRO_LINE_2])
 })
 
 test('a Fable week that resets at another time than the week says its own reset after the week\'s', () => {
@@ -1390,7 +1394,7 @@ test('a login with a 5-hour window in its counted reading has a third line for i
   const max = { ...ANDRES, tier: 'default_claude_max_5x' }
   const r = { sevenDay: { pct: 31, resetsAt: ROW_WEEK_END }, fable: { pct: 38, resetsAt: ROW_WEEK_END }, fiveHour: { pct: 50, resetsAt: ahead(0, 1, 20) }, at: READ_AT, by: '1' }
   const v = rowView({ readings: { '1': r }, noFiveHour: { '1': false } }, max)
-  expect(rowLines(v)).toEqual(['andres@lutsohealth.com · Company · Max  updated 18:34', OPERATOR_LINE_2, '5h ▰▰▰▰▰▱▱▱▱▱  50%  resets 1h 20m'])
+  expect(rowLines(v)).toEqual(['andres@lutsohealth.com · Company · Max  updated 18:34', OPERATOR_LINE_2, FIVE_HOUR_50])
   expect(rowLines(rowView())).toHaveLength(2)
 })
 
@@ -1460,10 +1464,11 @@ test('with no Company the row is the same but for line 1, at 82 and at 64', () =
 test('a failed read\'s longer line 1 moves the buttons to the end of line 2 where they fit, else to a line of their own', () => {
   const v = rowView({ checkErrors: { '1': HTTP_429 } })
   expect(fitted(v, 82)).toEqual({ lines: [FAILED_L1, OPERATOR_LINE_2, ''], end: 'own' })
-  // A Pro login's line 2 has no Fable part, so it leaves room for the buttons; a dash takes a bar's cells, so it does not.
+  // A Pro login's line 2 keeps the Fable part's cells blank so its resets line up (puma-9arph.28), so at 82 its
+  // buttons take a line of their own, as a Max row's do.
   const pro = { ...ANDRES, plan: 'pro', tier: undefined }
   const short = rowView({ checkErrors: { '1': HTTP_429 }, readings: { '1': { sevenDay: { pct: 31, resetsAt: ROW_WEEK_END }, noFiveHour: true, at: READ_AT, by: '1' } } }, pro)
-  expect(fitted(short, 82)).toEqual({ lines: ['andres@lutsohealth.com · Company · Pro  18:39 Failed to update (HTTP 429)', 'Used ▰▰▰▱▱▱▱▱▱▱  31%  resets 2d 3h 14m'], end: 1 })
+  expect(fitted(short, 82)).toEqual({ lines: ['andres@lutsohealth.com · Company · Pro  18:39 Failed to update (HTTP 429)', PRO_LINE_2, ''], end: 'own' })
   // puma-9arph.28 item 4: a Max failed row whose usage lists no Fable week draws a dash in the Fable cells, and fits at 82.
   const max = { ...ANDRES, tier: 'default_claude_max_5x' }
   const dash = rowView({ checkErrors: { '1': HTTP_429 }, readings: { '1': { sevenDay: { pct: 31, resetsAt: ROW_WEEK_END }, at: READ_AT, by: '1' } } }, max)
@@ -1490,8 +1495,8 @@ test('a login with no reading, no Fable row, a 5-hour window or a sign-in needed
   const max = { ...ANDRES, tier: 'default_claude_max_5x' }
   const five = rowView({ readings: { '1': { sevenDay: { pct: 31, resetsAt: ROW_WEEK_END }, fable: { pct: 38, resetsAt: ROW_WEEK_END }, fiveHour: { pct: 50, resetsAt: ahead(0, 1, 20) }, at: READ_AT, by: '1' } }, noFiveHour: { '1': false } }, max)
   const maxL1 = 'andres@lutsohealth.com · Company · Max  updated 18:34'
-  expect(fitted(five, 82)).toEqual({ lines: [maxL1, OPERATOR_LINE_2, '5h ▰▰▰▰▰▱▱▱▱▱  50%  resets 1h 20m'], end: 0 })
-  expect(fitted(five, 64)).toEqual({ lines: [maxL1, OPERATOR_LINE_2, '', '5h ▰▰▰▰▰▱▱▱▱▱  50%  resets 1h 20m'], end: 'own' })
+  expect(fitted(five, 82)).toEqual({ lines: [maxL1, OPERATOR_LINE_2, FIVE_HOUR_50], end: 0 })
+  expect(fitted(five, 64)).toEqual({ lines: [maxL1, OPERATOR_LINE_2, '', FIVE_HOUR_50], end: 'own' })
   const signIn = rowView({ health: { '1': { kind: 'login-needed', why: 'sign-in expired' } } })
   expect(fitted(signIn, 82)).toEqual({ lines: ['andres@lutsohealth.com · Company · Ultra  ⚠ sign in needed', OPERATOR_LINE_2, ''], end: 'own' })
   expect(fitted(signIn, 64)).toEqual({ lines: ['andres@lutsohealth.com · Company · Ultra  ⚠ sign in needed', OPERATOR_LINE_2, ''], end: 'own' })
@@ -1625,7 +1630,7 @@ test('no stored row changes with the writer\'s clock while no reset passes, at a
 // Review C10-R1 F4 (Opus) [ROW-AT-ANOTHER-NOW]: a stored reset read after it passed says so, as bin/account-rotator does.
 test('a stored reset read after it passed says passed, not 0m', () => {
   const line3 = rowsOf(FIXTURE_VIEW, ROWS_FIXTURE.now).find(r => r.id === '2')?.lines[2] ?? []
-  expect(storedLineText(line3, ROWS_FIXTURE.now + 2 * 3_600_000, TALLINN)).toBe('5h ▰▰▰▰▰▱▱▱▱▱  50%  resets passed')
+  expect(storedLineText(line3, ROWS_FIXTURE.now + 2 * 3_600_000, TALLINN)).toBe(`5h   ▰▰▰▰▰▱▱▱▱▱  50%${NO_FABLE_GAP}resets passed`)
 })
 
 test('a stored line read a minute later counts its resets down, and read in UTC says its times in UTC', () => {

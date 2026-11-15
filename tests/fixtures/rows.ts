@@ -42,7 +42,7 @@ export default {
           "lines": [
             ["two@example.com · Max  ", { "clock": 1794155940000 }, " Failed to update (HTTP 429)"],
             ["Used ▰▰▰▰▰▰▱▱▱▱  60% Fable ▰▱▱▱▱▱▱▱▱▱  10%  resets ", { "until": 1794588000000 }],
-            ["5h ▰▰▰▰▰▱▱▱▱▱  50%  resets ", { "until": 1794160830000 }]
+            ["5h   ▰▰▰▰▰▱▱▱▱▱  50%                        resets ", { "until": 1794160830000 }]
           ]
         }
       ]
@@ -56,7 +56,7 @@ export default {
     "2": [
       "two@example.com · Max  18:39 Failed to update (HTTP 429)",
       "Used ▰▰▰▰▰▰▱▱▱▱  60% Fable ▰▱▱▱▱▱▱▱▱▱  10%  resets 5d 0h 0m",
-      "5h ▰▰▰▰▰▱▱▱▱▱  50%  resets 1h 21m"
+      "5h   ▰▰▰▰▰▱▱▱▱▱  50%                        resets 1h 21m"
     ]
   }
 }
