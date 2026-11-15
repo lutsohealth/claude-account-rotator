@@ -687,6 +687,12 @@ export function label(account: Account | undefined, accounts: readonly Account[]
   return isShared && account.orgName ? `${account.email} · ${account.orgName}` : account.email
 }
 
+/** An account as a sentence names it: "Claude account <email>", and with no email by label alone. */
+export function claudeAccount(account: Account | undefined, accounts: readonly Account[]): string {
+  const name = label(account, accounts)
+  return account?.email === undefined ? name : `Claude account ${name}`
+}
+
 /** The account `id` names, by label; the bare id where `accounts` holds none. */
 export function labelOf(accounts: readonly Account[], id: string | undefined): string {
   const found = accounts.find(a => a.id === id)
@@ -862,7 +868,7 @@ export type ChromeNoteKind = 'held' | 'connecting' | 'no-browser' | 'blocked' | 
 export function chromeNote(view: View, kind: ChromeNoteKind): string {
   const named = (id: string | undefined) => {
     const a = view.accounts.find(x => x.id === id)
-    return a === undefined ? undefined : `Claude account ${label(a, view.accounts)}`
+    return a === undefined ? undefined : claudeAccount(a, view.accounts)
   }
   const own = `${named(view.chromeAccountId) ?? 'one account'}, the account the user's Chrome extension is signed in to`
   const as = named(view.chrome?.as)

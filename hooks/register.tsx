@@ -60,6 +60,7 @@ import {
   isSpent,
   keychainItem,
   keychainUser,
+  claudeAccount,
   label,
   labelOf,
   pickTarget,
@@ -887,7 +888,7 @@ async function checkSwitching($: Host, slot: string): Promise<void> {
 // ---------------------------------------------------------------- checks and switching
 
 async function announceLockout($: Host, account: Account, why: string): Promise<void> {
-  const text = `Claude account ${label(account, (await getView($)).accounts)} needs a sign-in (${why}). Click ⚠${account.id} under the prompt.`
+  const text = `${claudeAccount(account, (await getView($)).accounts)} needs a sign-in (${why}). Click ⚠${account.id} under the prompt.`
   $.ui.toast(text, { timeoutMs: 8000 })
   await $.ui.notify(text, { title: TITLE })
 }
@@ -1092,7 +1093,7 @@ async function checkAccount($: Host, account: Account, gate: UsageGate): Promise
   if (signingIn === account.id) return hasFreshFable
   const stored = await readStored($, account.slot)
   if (stored.state === 'unreadable') {
-    tell($, `Could not read Claude account ${label(account, (await getView($)).accounts)} from the keychain (exit ${stored.code}); is it locked?`)
+    tell($, `Could not read ${claudeAccount(account, (await getView($)).accounts)} from the keychain (exit ${stored.code}); is it locked?`)
     return hasFreshFable
   }
   const credential = stored.state === 'present' ? stored.credential : undefined
@@ -1305,7 +1306,7 @@ async function switchTo($: Host, target: Account, why: string, isQuiet = false, 
     await setView($, v => ({ ...v, held: { target, why, carry: owes, isRotation } }))
     if (!wasHeld) {
       const { accounts } = await getView($)
-      tell($, `Switching to Claude account ${label(target, accounts)} in a few minutes, once ${label(active, accounts)}'s token has refreshed.`)
+      tell($, `Switching to ${claudeAccount(target, accounts)} in a few minutes, once ${label(active, accounts)}'s token has refreshed.`)
     }
     return false
   }
@@ -1334,7 +1335,7 @@ async function switchTo($: Host, target: Account, why: string, isQuiet = false, 
     pending: { id: target.id, from: v.activeId, since: now },
     removing: undefined,
   }))
-  if (!isQuiet) $.ui.toast(`Switched to Claude account ${label(target, (await getView($)).accounts)}: ${why}.`, { timeoutMs: 6000 })
+  if (!isQuiet) $.ui.toast(`Switched to ${claudeAccount(target, (await getView($)).accounts)}: ${why}.`, { timeoutMs: 6000 })
   if (owed !== undefined) {
     carryOnAfterSettle($, owed)
     carriedFor = now
@@ -1388,7 +1389,7 @@ async function settlePending($: Host, isResponse: boolean): Promise<void> {
       // No response proved either login: a stop marked on the one moved to is a guess, and every session reads marks.
       await undoProvisionalStop($)
       await setView($, v => ({ ...v, pending: undefined }))
-      tell($, `The switch to Claude account ${labelOf(accounts, pending.id)} has not shown in responses.`)
+      tell($, `The switch to ${claudeAccount(accounts.find(a => a.id === pending.id), accounts)} has not shown in responses.`)
       return
     }
     untaken.add(pending.id)
@@ -1403,7 +1404,7 @@ async function settlePending($: Host, isResponse: boolean): Promise<void> {
     await setView($, v => ({ ...v, activeId: from.id, pending: undefined }))
     tell(
       $,
-      `The switch to Claude account ${labelOf(accounts, pending.id)} did not take: responses still use ${label(from, accounts)}, so it shows in use again. ` +
+      `The switch to ${claudeAccount(accounts.find(a => a.id === pending.id), accounts)} did not take: responses still use ${label(from, accounts)}, so it shows in use again. ` +
         `The rotation leaves ${labelOf(accounts, pending.id)} be in this session; Use now tries it again.`,
     )
   }
@@ -1674,7 +1675,7 @@ async function askChrome($: Host): Promise<ChromeAnswer> {
 async function learnChrome($: Host, account: Account): Promise<void> {
   if ((await $.store.get('chrome-account')) !== undefined) return
   await setChromeAccount($, account.id)
-  tell($, `Claude in Chrome connects as Claude account ${label(account, (await getView($)).accounts)}: your Chrome extension is signed in to it.`)
+  tell($, `Claude in Chrome connects as ${claudeAccount(account, (await getView($)).accounts)}: your Chrome extension is signed in to it.`)
 }
 
 /**
@@ -1764,7 +1765,7 @@ function connectChrome($: Host, isQuiet = false, tryId?: string): Promise<Chrome
     }
     const isMoved = (await maybeRotate($)) || done?.isVisit === true
     const isConnected = done?.answer === 'paired' && isChromeAwaited
-    const text = isConnected && done !== undefined ? `Claude in Chrome is connected as Claude account ${label(done.target, (await getView($)).accounts)}. Continue where you left off.` : isCutByVisit ? CONTINUE : undefined
+    const text = isConnected && done !== undefined ? `Claude in Chrome is connected as ${claudeAccount(done.target, (await getView($)).accounts)}. Continue where you left off.` : isCutByVisit ? CONTINUE : undefined
     if (isConnected) isChromeAwaited = false
     isCutByVisit = false
     if (text !== undefined) {
@@ -1830,12 +1831,12 @@ async function connectingChrome(
     await proveSwitch($, target.id)
   }
   if (isVisit) await leaveVisit($, from)
-  if (!isQuiet && answer === 'paired') tell($, `Claude in Chrome is connected as Claude account ${label(target, view.accounts)}.`)
+  if (!isQuiet && answer === 'paired') tell($, `Claude in Chrome is connected as ${claudeAccount(target, view.accounts)}.`)
   if (!isQuiet && answer === 'unpaired') {
     const back = isTrial ? view.accounts.find(a => a.id === view.chromeAccountId) : undefined
     tell(
       $,
-      `No Chrome extension answers as Claude account ${label(target, view.accounts)}. Open Chrome and check its Claude extension is signed in with that email; if it is, restart Chrome${isTrial ? ' and try again' : ''}.` +
+      `No Chrome extension answers as ${claudeAccount(target, view.accounts)}. Open Chrome and check its Claude extension is signed in with that email; if it is, restart Chrome${isTrial ? ' and try again' : ''}.` +
         (back === undefined ? '' : ` Claude in Chrome goes back to ${label(back, view.accounts)}.`),
     )
   }
@@ -1927,7 +1928,7 @@ async function signIn($: Host, account: Account): Promise<void> {
   const code = await child.result.then(r => r?.code ?? null, () => null)
   await saveHealth($, account.id, { kind: 'login-needed', why: 'sign-in not finished' })
   if (code !== 0) {
-    tell($, `Sign-in for Claude account ${label(account, (await getView($)).accounts)} did not finish${errors.trim() ? `: ${errors.trim().slice(0, 160)}` : '.'}`)
+    tell($, `Sign-in for ${claudeAccount(account, (await getView($)).accounts)} did not finish${errors.trim() ? `: ${errors.trim().slice(0, 160)}` : '.'}`)
     return
   }
   await adoptSignIn($, account)
@@ -1942,7 +1943,7 @@ async function adoptSignIn($: Host, account: Account): Promise<void> {
     await saveHealth($, account.id, { kind: 'login-needed', why: `that was ${label(twin, accounts)} again` })
     tell(
       $,
-      `Claude account ${label(account, accounts)} signed in as ${label(twin, accounts)}. Sign out of claude.ai in your browser (or pick another organization), then sign in again.`,
+      `${claudeAccount(account, accounts)} signed in as ${label(twin, accounts)}. Sign out of claude.ai in your browser (or pick another organization), then sign in again.`,
     )
     return
   }
@@ -2073,13 +2074,13 @@ async function removeAccount($: Host, id: string, seen?: { slot: string; email?:
   if (view.activeId === id) {
     const other = view.accounts.find(a => a.id !== id && view.health[a.id]?.kind === 'ok')
     if (other === undefined || !(await switchTo($, other, `${name} is being removed`))) {
-      return { ok: false, message: `Claude account ${name} is in use and no other account can take over yet; not removed.` }
+      return { ok: false, message: `${claudeAccount(account, accounts)} is in use and no other account can take over yet; not removed.` }
     }
   }
   const { exitCode, stderr } = await $.process.run(['claude', 'auth', 'logout'], { env: slotEnv(account.slot), timeoutMs: 20_000 })
   if (exitCode !== 0) {
     const [why] = stderr.trim().split('\n')
-    return { ok: false, message: `Claude account ${name} could not be signed out, so it stays listed: ${why || `exit ${String(exitCode)}`}` }
+    return { ok: false, message: `${claudeAccount(account, accounts)} could not be signed out, so it stays listed: ${why || `exit ${String(exitCode)}`}` }
   }
   await saveAccounts($, (await loadAccounts($)).filter(a => a.id !== id))
   if ((await $.store.get('chrome-account')) === id) await setChromeAccount($, undefined)

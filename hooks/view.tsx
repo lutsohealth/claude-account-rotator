@@ -550,12 +550,13 @@ export function Band(ui: Ui, view: View, now: number, act: Actions) {
   }
   const locked = needsSignIn(view)
   if (locked.length > 0) {
-    const names = locked.map(a => label(a, view.accounts)).join(', ')
+    // "Claude account" stands before emails only: a label with no email names itself ("account 4 (not signed in yet)").
+    const names = `${locked.every(a => a.email !== undefined) ? 'Claude account ' : ''}${locked.map(a => label(a, view.accounts)).join(', ')}`
     const why = locked.map(a => view.health[a.id]).find(h => h?.kind === 'login-needed')
     return (
       <Box flexDirection="row" columnGap={2}>
         <Text color="error">
-          ⚠ Claude account {names} needs a sign-in{why?.kind === 'login-needed' ? ` (${why.why})` : ''}.
+          ⚠ {names} needs a sign-in{why?.kind === 'login-needed' ? ` (${why.why})` : ''}.
         </Text>
         <Button key="sign-in-all" variant="primary" hotkey="s" onPress={act.signInAll}>
           {locked.length > 1 ? 'Sign in all' : 'Sign in'}
