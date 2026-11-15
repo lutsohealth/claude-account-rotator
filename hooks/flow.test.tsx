@@ -9416,6 +9416,37 @@ for (const gate of ['backoff', 'other-claim', 'expired-token'] as const) {
   })
 }
 
+// Review codex-r2 R1 [POST-SWITCH-READ], the instance: a good read of the target stored after the switch began made the
+// since gate skip the stop's read, so the stop marked a login whose read shows Fable room.
+test('Review codex-r2 R1: a good target read after switch does not turn a stale carry-on stop into its Fable mark', async ($, on) => {
+  const { w, store, clock } = await fableMoved($, on)
+  await clock.advance(35_500)
+  expect(w.submitted).toHaveLength(1)
+  const due = store.get('usage-due:2') as { next: number; fails: number; at?: number; claim?: string }
+  store.set('usage:2', { ...(store.get('usage:2') as object), at: NOW + 10_000, src: 'body' })
+  store.set('usage-due:2', { ...due, at: NOW + 10_000 })
+  const calls = callsWith(w, 'tok-2')
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  expect(store.get('fable-mark:2'), 'R1: a good target read after switch made the since gate skip; use its own Fable 10% body as evidence, or re-read it before marking').toBeUndefined()
+  expect(callsWith(w, 'tok-2')).toBe(calls + 1)
+})
+
+// Review codex-r2 R1 [POST-SWITCH-READ], the class: whoever made the read after the switch, a finished read leaves no
+// claim; a live claim is the codex-r1 other-claim row, which marks. One switch clears once, so each row is its own session.
+for (const site of ['scheduled read', 'another session read'] as const) {
+  test(`Review codex-r2 R1 class: a ${site} of the target after the switch does not let a stale carry-on stop mark it`, async ($, on) => {
+    const { store, clock } = await fableMoved($, on)
+    await clock.advance(35_500)
+    const { claim: _claim, ...due } = store.get('usage-due:2') as { next: number; fails: number; at?: number; claim?: string }
+    store.set('usage:2', { ...(store.get('usage:2') as object), at: NOW + 10_000, src: 'body' })
+    store.set('usage-due:2', { ...due, at: NOW + 10_000 })
+    await $.classic.StopFailure(FABLE_STOP)
+    await clock.settle()
+    expect([site, store.get('fable-mark:2')], `Offender: ${site}. Fix: re-read the target before marking; a stored body is no proof (keepFable).`).toEqual([site, undefined])
+  })
+}
+
 // Review opus-r1 R1F1 [FABLE-MARK-ANCHOR], the instance: a later Fable stop on a login its mark holds left `at` at the first stop.
 test('Review R1F1: a Fable stop on a login its mark already holds restarts the 30 minutes, so a lower read 5 minutes after it keeps the mark', async ($, on) => {
   const w = fresh()
