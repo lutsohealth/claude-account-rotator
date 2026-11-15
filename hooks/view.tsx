@@ -16,6 +16,8 @@ import {
   glyph,
   hasFiveHour,
   isSpent,
+  label,
+  labelOf,
   nextReset,
   restartSteps,
   rowOf,
@@ -386,14 +388,14 @@ function weekLeaveRow(ui: Ui, view: View, act: Actions) {
   )
 }
 
-/** The login new sessions start on: by a rule over the logins with room, or one account, each listed by number. */
+/** The login new sessions start on: by a rule over the logins with room, or one account, each listed by label. */
 function launchChoices(view: View): readonly (readonly [LaunchOn, string])[] {
   const rules = [
     ['room', 'most room'],
     ['nonzero', 'first with room'],
     ['reset', 'soonest reset'],
   ] as const
-  return [...rules, ...view.accounts.map(a => [`account:${a.id}` as LaunchOn, `account ${a.id}`] as const)]
+  return [...rules, ...view.accounts.map(a => [`account:${a.id}` as LaunchOn, label(a, view.accounts)] as const)]
 }
 
 /** Which login the rotation moves to, whether the 5-hour window counts, at what week left it leaves, and where new sessions start. */
@@ -408,12 +410,6 @@ function RotationSettings(ui: Ui, view: View, act: Actions) {
   ])
 }
 
-/** An account as the band names it: its number, and its email once known. */
-function named(view: View, id: string): string {
-  const email = view.accounts.find(a => a.id === id)?.email
-  return email === undefined ? `account ${id}` : `account ${id} (${email})`
-}
-
 /**
  * What keeps Claude in Chrome from working in this window, in a sentence: no
  * browser answering where it connected, or no move to the extension's account.
@@ -423,9 +419,9 @@ function chromeProblem(view: View): string | undefined {
   const link = view.chrome
   if (own === undefined || view.chromeConnecting !== undefined || link?.isPaired) return undefined
   if (link?.as === own) {
-    return `No Chrome extension answers as ${named(view, own)}. Open Chrome and check its Claude extension is signed in with that email; if it is, restart Chrome.`
+    return `No Chrome extension answers as ${labelOf(view.accounts, own)}. Open Chrome and check its Claude extension is signed in with that email; if it is, restart Chrome.`
   }
-  if (!canConnectChrome(view)) return `This window can't switch to ${named(view, own)}. ${restartSteps(view)}`
+  if (!canConnectChrome(view)) return `This window can't switch to ${labelOf(view.accounts, own)}. ${restartSteps(view)}`
   return undefined
 }
 
@@ -454,10 +450,7 @@ function chromeRow(ui: Ui, view: View, a: Account, act: Actions) {
   return (
     <Box key={`chrome-row-${a.id}`} flexDirection="row" flexWrap="wrap" columnGap={2}>
       <Box flexDirection="row" flexShrink={1}>
-        <Box width={3} flexShrink={0}>
-          <Text bold={isInUse} dimColor={!isInUse}>{a.id}</Text>
-        </Box>
-        <Text bold={isInUse} dimColor={!isInUse}>{a.email ?? `account ${a.id}`}</Text>
+        <Text bold={isInUse} dimColor={!isInUse}>{label(a, view.accounts)}</Text>
       </Box>
       <Box flexDirection="row" flexGrow={1} justifyContent="flex-end">
         {end}
@@ -513,7 +506,7 @@ function ChromeSettings(ui: Ui, view: View, act: Actions) {
 function ChromeBand(ui: Ui, view: View, act: Actions) {
   const { Box, Text, Button } = ui
   if (view.chromeConnecting !== undefined) {
-    return <Text color="warning">{`◌ Connecting Chrome as ${named(view, view.chromeConnecting)}…`}</Text>
+    return <Text color="warning">{`◌ Connecting Chrome as ${labelOf(view.accounts, view.chromeConnecting)}…`}</Text>
   }
   if (!view.chrome?.hasFailed) return undefined
   const own = view.chromeAccountId
@@ -527,7 +520,7 @@ function ChromeBand(ui: Ui, view: View, act: Actions) {
   }
   return (
     <Box flexDirection="row" columnGap={2}>
-      <Text color="warning">{`⚠ ${chromeProblem(view) ?? `Chrome isn't connected as ${named(view, own)}.`}`}</Text>
+      <Text color="warning">{`⚠ ${chromeProblem(view) ?? `Chrome isn't connected as ${labelOf(view.accounts, own)}.`}`}</Text>
       {canConnectChrome(view) && (
         <Button key="chrome-connect-band" variant="primary" onPress={act.connectChrome}>
           Connect
@@ -545,7 +538,7 @@ export function Band(ui: Ui, view: View, now: number, act: Actions) {
     return (
       <Box flexDirection="row" columnGap={2}>
         <Text color="warning">
-          ◌ Account {signingIn.id}: in your browser, approve as {signingIn.email ?? 'the account to add'} and pick the
+          ◌ Signing in: in your browser, approve as {signingIn.email ?? 'the account to add'} and pick the
           organization. Wrong account there? Sign out of claude.ai in another tab, then reload the sign-in page.
         </Text>
         <Button key="cancel-sign-in" onPress={act.cancelSignIn}>Cancel</Button>
@@ -554,12 +547,13 @@ export function Band(ui: Ui, view: View, now: number, act: Actions) {
   }
   const locked = needsSignIn(view)
   if (locked.length > 0) {
-    const names = locked.map(a => (a.email ? `${a.id} (${a.email})` : a.id)).join(', ')
+    // "Claude account" stands before emails only: a label with no email names itself ("account 4 (not signed in yet)").
+    const names = `${locked.every(a => typeof a.email === 'string') ? 'Claude account ' : ''}${locked.map(a => label(a, view.accounts)).join(', ')}`
     const why = locked.map(a => view.health[a.id]).find(h => h?.kind === 'login-needed')
     return (
       <Box flexDirection="row" columnGap={2}>
         <Text color="error">
-          ⚠ Claude account {names} needs a sign-in{why?.kind === 'login-needed' ? ` (${why.why})` : ''}.
+          ⚠ {names} needs a sign-in{why?.kind === 'login-needed' ? ` (${why.why})` : ''}.
         </Text>
         <Button key="sign-in-all" variant="primary" hotkey="s" onPress={act.signInAll}>
           {locked.length > 1 ? 'Sign in all' : 'Sign in'}
@@ -666,12 +660,10 @@ function endWidthOf(view: View, a: Account): number {
   return remove + BUTTON_GAP + slotWidthOf(view, a)
 }
 
-/** How a row part is drawn: its tone, a bar in the color of its room left, and the login in use bright, the rest dim. */
+/** How a row part is drawn: its tone, and the login in use bright, the rest dim; a bar carries no color. */
 function partStyle(p: RowPart, isActive: boolean) {
-  // A failed row's bar stays in its room's color, drawn dim.
-  if (p.tone === 'dim') return p.used === undefined ? { dimColor: true } : { dimColor: true, color: roomColor(100 - p.used) }
+  if (p.tone === 'dim') return { dimColor: true }
   if (p.tone === 'warning') return { color: 'warning' }
-  if (p.used !== undefined) return { color: roomColor(100 - p.used) }
   return { bold: isActive && p.shrink === 'email', dimColor: !isActive }
 }
 
@@ -704,7 +696,7 @@ function accountRow(ui: Ui, view: View, a: Account, now: number, act: Actions, c
       {view.held?.target.id === a.id && (
         <Box key={`held-${a.id}`}>
           <Text color="warning">
-            switching here once account {view.activeId}'s token has refreshed, at the next request on account {view.activeId}
+            switching here once {labelOf(view.accounts, view.activeId)}'s token has refreshed, at the next request on it
           </Text>
         </Box>
       )}

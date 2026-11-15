@@ -129,14 +129,14 @@ class ListText(StoreCase):
         first = out.getvalue().split("\n\n")[0].split("\n")
         self.assertEqual(first, [
             "andres@lutsohealth.com · Company · Ultra  updated 16:34",
-            "Used ▰▰▰▱▱▱▱▱▱▱ 31% Fable ▰▰▰▰▱▱▱▱▱▱ 38%  resets 2d 3h 13m · Fable 1d 3h 13m",
+            "Used ▰▰▰▱▱▱▱▱▱▱  31% Fable ▰▰▰▰▱▱▱▱▱▱  38%  resets 2d 3h 13m · Fable 1d 3h 13m",
         ])
 
     def test_the_last_line_says_when_the_rows_were_written_and_where_new_sessions_start(self) -> None:
         _, out = self.list_in_process()
         last = out.rstrip("\n").split("\n")[-1]
         self.assertIn("rows written 18:40", last)
-        self.assertIn("new sessions start on account 1 (the most room", last)
+        self.assertIn("new sessions start on andres@lutsohealth.com (the most room", last)
 
     def test_a_line_an_older_session_stored_as_text_prints_as_is_and_says_so(self) -> None:
         store = json.loads(json.dumps(self.fixture["store"]))
@@ -212,8 +212,8 @@ class StorePick(StoreCase):
         since = datetime.fromtimestamp(self.fixture["now"] / 1000, ZoneInfo(self.fixture["zone"])).strftime("%H:%M")
         launch = run(LAUNCH, env=env)
         listed = run(CLI, "account", "list", env=env)
-        self.assertEqual(launch.stderr.strip(), f"account-rotator: new session starts on account 1 (the most room, the same pick since {since})")
-        self.assertIn(f"new sessions start on account 1 (the most room, the same pick since {since})", listed.stdout)
+        self.assertEqual(launch.stderr.strip(), f"account-rotator: new session starts on andres@lutsohealth.com (the most room, the same pick since {since})")
+        self.assertIn(f"new sessions start on andres@lutsohealth.com (the most room, the same pick since {since})", listed.stdout)
         self.assertNotIn("picked ", launch.stderr + listed.stdout)
 
     def test_a_pick_with_no_stored_time_says_no_since_on_either_start_line(self) -> None:
@@ -222,8 +222,8 @@ class StorePick(StoreCase):
         self.write(STORE, store, mtime=1_000_000)
         launch = run(LAUNCH, env=self.env())
         listed = run(CLI, "account", "list", env=self.env())
-        self.assertEqual(launch.stderr.strip(), "account-rotator: new session starts on account 1 (the most room)")
-        self.assertIn("new sessions start on account 1 (the most room)", listed.stdout)
+        self.assertEqual(launch.stderr.strip(), "account-rotator: new session starts on andres@lutsohealth.com (the most room)")
+        self.assertIn("new sessions start on andres@lutsohealth.com (the most room)", listed.stdout)
         for text in (launch.stderr, listed.stdout):
             for words in ("the same pick since", "picked ", "unknown time"):
                 self.assertNotIn(words, text)
@@ -331,7 +331,7 @@ class ReviewPassedReset(StoreCase):
         line = self.fixture["store"]["rows"]["rows"][1]["lines"][2]
         until = next(r["until"] for r in line if isinstance(r, dict))
         text = load_cli().line_text(line, until + 2 * HOUR_MS, ZoneInfo(self.fixture["zone"]))
-        self.assertEqual(text, "5h ▰▰▰▰▰▱▱▱▱▱ 50%  resets passed")
+        self.assertEqual(text, "5h ▰▰▰▰▰▱▱▱▱▱  50%  resets passed")
 
     def test_no_stored_until_reads_as_due_now_once_it_has_passed(self) -> None:
         cli, zone = load_cli(), ZoneInfo(self.fixture["zone"])
@@ -347,7 +347,7 @@ class ReviewPassedReset(StoreCase):
         with redirect_stdout(out):
             load_cli().main(["account", "list", "--store", str(self.store)], now=self.fixture["now"] + 2 * HOUR_MS, zone=ZoneInfo("UTC"))
         last = out.getvalue().rstrip("\n").split("\n")[-1]
-        self.assertIn("a reset has passed since its row was written for account 2", last)
+        self.assertIn("a reset has passed since its row was written for two@example.com", last)
 
 
 class RequestCase(StoreCase):
@@ -1211,6 +1211,52 @@ class Add(RequestCase):
         exits = ("1 no store or a damaged one", "2 a usage error", "3 no session", "4 a session refused", "5 the sign-in did not finish", "130 stopped")
         for words in ("browser", "--folder", "twin", "Claude Code's own login", "keeps", *exits):
             self.assertIn(words, said)
+
+
+class Label(unittest.TestCase):
+    """The bins name an account as hooks/model.ts label does: its email, the organization only to tell one email's accounts apart."""
+
+    def test_an_email_names_the_account_with_its_organization_only_where_the_email_is_on_several(self) -> None:
+        # Loaded by its path, so no test after this one finds bin/ on sys.path.
+        spec = importlib.util.spec_from_file_location("account_rotator_store_label", ROOT / "bin" / "account_rotator_store.py")
+        assert spec is not None and spec.loader is not None
+        account_rotator_store = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(account_rotator_store)
+
+        one ={"id": "1", "slot": "", "email": "one@example.com", "orgName": "Org"}
+        two_a = {"id": "2", "slot": "/s/2", "email": "two@example.com", "orgName": "Alpha"}
+        two_b = {"id": "3", "slot": "/s/3", "email": "two@example.com", "orgName": "Beta"}
+        accounts = [one, two_a, two_b, {"id": "4", "slot": "/s/4"}]
+        names = [account_rotator_store.label(a, accounts) for a in accounts]
+        self.assertEqual(names, ["one@example.com", "two@example.com · Alpha", "two@example.com · Beta", "account 4 (not signed in yet)"])
+        self.assertEqual(account_rotator_store.label({"id": "1", "slot": ""}, accounts), "Claude Code's login")
+        self.assertEqual(account_rotator_store.label_of(accounts, "3"), "two@example.com · Beta")
+        self.assertEqual(account_rotator_store.label_of(accounts, "9"), "9")
+
+
+class NumberName(StoreCase):
+    """Review R1 CLI-NUMBER and NUMBER-NAME (Codex gpt-6-sol at bcbfb83): text a person reads names an account by its email."""
+
+    def test_remove_names_known_email(self) -> None:
+        done = run(CLI, "account", "rm", "--store", str(self.store), "--account", "1", env=self.env())
+        self.assertNotIn("account 1 is Claude Code", done.stderr)
+
+    def test_no_person_facing_text_names_an_account_by_its_number(self) -> None:
+        # Every spelling the round found: a TypeScript template, JSX text, a Python f-string, README prose. Kept:
+        # debug lines, the --account input (RULING of Master 386 on #23533), label's no-email fallback, claudeAccount.
+        spelled = re.compile(r"\b[Aa]ccounts? \$?\{|\b(?:is|on) account [0-9]")
+        # A TypeScript type (`value is Account {`, `): Account {`) is no text either.
+        kept = re.compile(r"debug\(|--account \{given\}|\(not signed in yet\)|Claude account \$\{name\}|account folder|(?:value is|\):) Account \{")
+        sources = [*sorted((ROOT / "hooks").glob("*.ts*")), *sorted((ROOT / "bin").iterdir()), ROOT / "README.md"]
+        sources = [p for p in sources if p.is_file() and ".test." not in p.name]
+        self.assertGreater(len(sources), 5)
+        offenders = [
+            f"{p.relative_to(ROOT)}:{n}: {line.strip()[:100]}"
+            for p in sources
+            for n, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1)
+            if spelled.search(line) and not kept.search(line)
+        ]
+        self.assertEqual(offenders, [], "name the account by label, label_of or claudeAccount, not its number")
 
 
 if __name__ == "__main__":

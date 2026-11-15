@@ -28,6 +28,22 @@ def is_instant(value: object) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and 0 <= value <= MAX_INSTANT_MS
 
 
+def label(account: dict, accounts: list) -> str:
+    """An account as text names it, as hooks/model.ts label: its email, its organization only where the email is on several."""
+    email = account.get("email")
+    if not isinstance(email, str):
+        return "Claude Code's login" if account.get("slot") == "" else f"account {account.get('id')} (not signed in yet)"
+    org = account.get("orgName")
+    is_shared = sum(1 for a in accounts if isinstance(a, dict) and a.get("email") == email) > 1
+    return f"{email} · {org}" if is_shared and isinstance(org, str) and org else email
+
+
+def label_of(accounts: list, account_id: object) -> str:
+    """The account `account_id` names, by label; the bare id where `accounts` holds none."""
+    found = next((a for a in accounts if isinstance(a, dict) and a.get("id") == account_id), None)
+    return str(account_id) if found is None else label(found, accounts)
+
+
 def launch_pick(data: dict) -> dict | None:
     """The stored `launch-slot` pick where it has the shape the mod writes (a slot string, "" for Claude Code's own
     login, and an id string), else None: the one reading bin/account-rotator-launch and bin/account-rotator-claude share."""

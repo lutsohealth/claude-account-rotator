@@ -60,7 +60,9 @@ import {
   isSpent,
   keychainItem,
   keychainUser,
+  claudeAccount,
   label,
+  labelOf,
   pickTarget,
   rotateToFrom,
   readingFromLimits,
@@ -590,7 +592,7 @@ async function applyRequest($: Host, request: RotatorRequest): Promise<{ ok: boo
   if (request.kind === 'add') return adoptSlot($, request.slot)
   if (request.kind === 'continue-text') return setContinueText($, request.text)
   const target = (await getView($)).accounts.find(a => a.id === request.id)
-  if (target === undefined) return { ok: false, message: `account ${request.id} is not listed in this store` }
+  if (target === undefined) return { ok: false, message: `${request.id} names no account listed in this store` }
   if (request.kind === 'use') return useAccount($, target)
   await setLaunchOn($, `account:${request.id}`)
   const { text, pickId } = await pickAnswer($)
@@ -618,7 +620,7 @@ async function setContinueText($: Host, text: unknown): Promise<{ ok: boolean; m
 async function pickAnswer($: Host): Promise<{ text: string; pickId?: string }> {
   const pick = (await $.store.get('launch-slot')) as LaunchPick | undefined
   if (pick === undefined) return { text: "no account has room, so new sessions start on Claude Code's login" }
-  return { text: `new sessions start on account ${pick.id} (${pick.why})`, pickId: pick.id }
+  return { text: `new sessions start on ${labelOf((await getView($)).accounts, pick.id)} (${pick.why})`, pickId: pick.id }
 }
 
 /** Why a request waits out Connect: its visit moves the session and back, unsaid. */
@@ -631,18 +633,18 @@ const CONNECTING_TEXT = 'Claude in Chrome is connecting, which moves this sessio
  */
 async function useAccount($: Host, target: Account): Promise<{ ok: boolean; message: string; activeId: string }> {
   const view = await getView($)
-  const name = label(target)
+  const name = label(target, view.accounts)
   if (isConnectingChrome) return { ok: false, message: CONNECTING_TEXT, activeId: view.activeId }
   if (view.activeId === target.id) {
     await setView($, v => ({ ...v, held: undefined }))
-    return { ok: true, message: `this session already uses account ${name}`, activeId: target.id }
+    return { ok: true, message: `this session already uses ${name}`, activeId: target.id }
   }
   const health = view.health[target.id]
-  if (health?.kind !== 'ok') return { ok: false, message: `account ${name} cannot take over: ${health?.kind === 'login-needed' ? health.why : 'it is not signed in yet'}`, activeId: view.activeId }
+  if (health?.kind !== 'ok') return { ok: false, message: `${name} cannot take over: ${health?.kind === 'login-needed' ? health.why : 'it is not signed in yet'}`, activeId: view.activeId }
   const hasMoved = await switchTo($, target, 'a command asked for it')
-  if (hasMoved) return { ok: true, message: `this session now uses account ${name}`, activeId: target.id }
+  if (hasMoved) return { ok: true, message: `this session now uses ${name}`, activeId: target.id }
   // switchTo holds a switch for a token about to refresh, and otherwise declines only on a policy refusal.
-  if ((await getView($)).held !== undefined) return { ok: true, message: `this session moves to account ${name} in a few minutes, once account ${view.activeId}'s token has refreshed`, activeId: view.activeId }
+  if ((await getView($)).held !== undefined) return { ok: true, message: `this session moves to ${name} in a few minutes, once ${labelOf(view.accounts, view.activeId)}'s token has refreshed`, activeId: view.activeId }
   return { ok: false, message: blockedText(view), activeId: view.activeId }
 }
 
@@ -886,7 +888,7 @@ async function checkSwitching($: Host, slot: string): Promise<void> {
 // ---------------------------------------------------------------- checks and switching
 
 async function announceLockout($: Host, account: Account, why: string): Promise<void> {
-  const text = `Claude account ${label(account)} needs a sign-in (${why}). Click ⚠${account.id} under the prompt.`
+  const text = `${claudeAccount(account, (await getView($)).accounts)} needs a sign-in (${why}). Click ⚠${account.id} under the prompt.`
   $.ui.toast(text, { timeoutMs: 8000 })
   await $.ui.notify(text, { title: TITLE })
 }
@@ -975,12 +977,12 @@ async function followSignIn($: Host, account: Account, who: Identity): Promise<A
     await saveAccounts($, accounts.map(a => (a.id === own.id ? followed : a)))
   }
   if (!isSame) {
-    const name = `${followed.email}${followed.orgName ? ` · ${followed.orgName}` : ''}`
+    const name = label(followed, accounts.map(a => (a.id === own.id ? followed : a)))
     tell(
       $,
       own.slot === ''
-        ? `Claude Code's login, account ${own.id}, is ${name} now: new sessions start on it.`
-        : `Claude account ${own.id} is ${name} now: a /login in a session on account ${own.id} signs in there, not Claude Code's login.`,
+        ? `Claude Code's login is ${name} now: new sessions start on it.`
+        : `The Claude account that was ${label(own, accounts)} is ${name} now: a /login in a session on it signs in there, not Claude Code's login.`,
     )
   }
   return undefined
@@ -1091,7 +1093,7 @@ async function checkAccount($: Host, account: Account, gate: UsageGate): Promise
   if (signingIn === account.id) return hasFreshFable
   const stored = await readStored($, account.slot)
   if (stored.state === 'unreadable') {
-    tell($, `Could not read Claude account ${account.id} from the keychain (exit ${stored.code}); is it locked?`)
+    tell($, `Could not read ${claudeAccount(account, (await getView($)).accounts)} from the keychain (exit ${stored.code}); is it locked?`)
     return hasFreshFable
   }
   const credential = stored.state === 'present' ? stored.credential : undefined
@@ -1102,7 +1104,7 @@ async function checkAccount($: Host, account: Account, gate: UsageGate): Promise
     // The tier is the sign-in's own, read at every check: a holder named before it was kept lacks it.
     const who = holder === undefined ? undefined : { ...holder.who, ...(credential.tier === undefined ? {} : { tier: credential.tier }) }
     const twin = who === undefined ? undefined : await followSignIn($, account, who)
-    if (twin !== undefined) health = { kind: 'login-needed', why: `signed in as account ${twin.id} now` }
+    if (twin !== undefined) health = { kind: 'login-needed', why: `signed in as ${label(twin, (await getView($)).accounts)} now` }
     // A token no profile call has named may be another login's: its usage is read and stored once it is named.
     else if (isLive && holder !== undefined) {
       const usage = await requestUsage($, account, credential.accessToken, gate)
@@ -1189,7 +1191,8 @@ async function saveCheckError($: Host, id: string, why: string | undefined): Pro
 
 /** Why the login in use is left, counted the way the footer shows it: room left, or what is used. */
 function whyLeave(view: View, now: number, need?: Need): string {
-  if (view.health[view.activeId]?.kind === 'login-needed') return `account ${view.activeId} needs a sign-in`
+  const name = labelOf(view.accounts, view.activeId)
+  if (view.health[view.activeId]?.kind === 'login-needed') return `${name} needs a sign-in`
   const r = view.readings[view.activeId]
   const five = windowPct(r?.fiveHour, now) ?? 0
   const [window, used] =
@@ -1199,8 +1202,8 @@ function whyLeave(view: View, now: number, need?: Need): string {
         ? ['5-hour window', five]
         : ['week', windowPct(r?.sevenDay, now) ?? 0]
   return view.footer.fill === 'left'
-    ? `account ${view.activeId} has ${Math.round(100 - used)}% of its ${window} left`
-    : `account ${view.activeId} has used ${Math.round(used)}% of its ${window}`
+    ? `${name} has ${Math.round(100 - used)}% of its ${window} left`
+    : `${name} has used ${Math.round(used)}% of its ${window}`
 }
 
 /**
@@ -1301,7 +1304,10 @@ async function switchTo($: Host, target: Account, why: string, isQuiet = false, 
     const owes = carry?.need === 'fable' ? carry : undefined
     const wasHeld = (await getView($)).held !== undefined
     await setView($, v => ({ ...v, held: { target, why, carry: owes, isRotation } }))
-    if (!wasHeld) tell($, `Switching to Claude account ${target.id} in a few minutes, once account ${active.id}'s token has refreshed.`)
+    if (!wasHeld) {
+      const { accounts } = await getView($)
+      tell($, `Switching to ${claudeAccount(target, accounts)} in a few minutes, once ${label(active, accounts)}'s token has refreshed.`)
+    }
     return false
   }
   // A switch carries on with what it was asked to: the retry passes the held switch's own carry-on, a press none.
@@ -1329,7 +1335,7 @@ async function switchTo($: Host, target: Account, why: string, isQuiet = false, 
     pending: { id: target.id, from: v.activeId, since: now },
     removing: undefined,
   }))
-  if (!isQuiet) $.ui.toast(`Switched to Claude account ${label(target)}: ${why}.`, { timeoutMs: 6000 })
+  if (!isQuiet) $.ui.toast(`Switched to ${claudeAccount(target, (await getView($)).accounts)}: ${why}.`, { timeoutMs: 6000 })
   if (owed !== undefined) {
     carryOnAfterSettle($, owed)
     carriedFor = now
@@ -1383,7 +1389,7 @@ async function settlePending($: Host, isResponse: boolean): Promise<void> {
       // No response proved either login: a stop marked on the one moved to is a guess, and every session reads marks.
       await undoProvisionalStop($)
       await setView($, v => ({ ...v, pending: undefined }))
-      tell($, `The switch to Claude account ${pending.id} has not shown in responses.`)
+      tell($, `The switch to ${claudeAccount(accounts.find(a => a.id === pending.id), accounts)} has not shown in responses.`)
       return
     }
     untaken.add(pending.id)
@@ -1398,8 +1404,8 @@ async function settlePending($: Host, isResponse: boolean): Promise<void> {
     await setView($, v => ({ ...v, activeId: from.id, pending: undefined }))
     tell(
       $,
-      `The switch to Claude account ${pending.id} did not take: responses still use account ${label(from)}, so it shows in use again. ` +
-        `The rotation leaves account ${pending.id} be in this session; Use now tries it again.`,
+      `The switch to ${claudeAccount(accounts.find(a => a.id === pending.id), accounts)} did not take: responses still use ${label(from, accounts)}, so it shows in use again. ` +
+        `The rotation leaves ${labelOf(accounts, pending.id)} be in this session; Use now tries it again.`,
     )
   }
 }
@@ -1678,7 +1684,7 @@ async function askChrome($: Host): Promise<ChromeAnswer> {
 async function learnChrome($: Host, account: Account): Promise<void> {
   if ((await $.store.get('chrome-account')) !== undefined) return
   await setChromeAccount($, account.id)
-  tell($, `Claude in Chrome connects as Claude account ${label(account)}: your Chrome extension is signed in to it.`)
+  tell($, `Claude in Chrome connects as ${claudeAccount(account, (await getView($)).accounts)}: your Chrome extension is signed in to it.`)
 }
 
 /**
@@ -1768,7 +1774,7 @@ function connectChrome($: Host, isQuiet = false, tryId?: string): Promise<Chrome
     }
     const isMoved = (await maybeRotate($)) || done?.isVisit === true
     const isConnected = done?.answer === 'paired' && isChromeAwaited
-    const text = isConnected && done !== undefined ? `Claude in Chrome is connected as Claude account ${label(done.target)}. Continue where you left off.` : isCutByVisit ? CONTINUE : undefined
+    const text = isConnected && done !== undefined ? `Claude in Chrome is connected as ${claudeAccount(done.target, (await getView($)).accounts)}. Continue where you left off.` : isCutByVisit ? CONTINUE : undefined
     if (isConnected) isChromeAwaited = false
     isCutByVisit = false
     if (text !== undefined) {
@@ -1807,7 +1813,7 @@ async function connectingChrome(
   const isTrial = target.id !== view.chromeAccountId
   const active = await refreshingSoon($, view, target, await $.clock.now())
   if (active !== undefined) {
-    if (!isQuiet) tell($, `Chrome can connect as account ${target.id} once account ${active.id}'s token has refreshed: try again in a few minutes.`)
+    if (!isQuiet) tell($, `Chrome can connect as ${label(target, view.accounts)} once ${label(active, view.accounts)}'s token has refreshed: try again in a few minutes.`)
     return undefined
   }
   await setView($, v => ({ ...v, chromeConnecting: target.id }))
@@ -1834,13 +1840,13 @@ async function connectingChrome(
     await proveSwitch($, target.id)
   }
   if (isVisit) await leaveVisit($, from)
-  if (!isQuiet && answer === 'paired') tell($, `Claude in Chrome is connected as Claude account ${label(target)}.`)
+  if (!isQuiet && answer === 'paired') tell($, `Claude in Chrome is connected as ${claudeAccount(target, view.accounts)}.`)
   if (!isQuiet && answer === 'unpaired') {
     const back = isTrial ? view.accounts.find(a => a.id === view.chromeAccountId) : undefined
     tell(
       $,
-      `No Chrome extension answers as Claude account ${label(target)}. Open Chrome and check its Claude extension is signed in with that email; if it is, restart Chrome${isTrial ? ' and try again' : ''}.` +
-        (back === undefined ? '' : ` Claude in Chrome goes back to account ${label(back)}.`),
+      `No Chrome extension answers as ${claudeAccount(target, view.accounts)}. Open Chrome and check its Claude extension is signed in with that email; if it is, restart Chrome${isTrial ? ' and try again' : ''}.` +
+        (back === undefined ? '' : ` Claude in Chrome goes back to ${label(back, view.accounts)}.`),
     )
   }
   return { target, answer, isVisit }
@@ -1931,7 +1937,7 @@ async function signIn($: Host, account: Account): Promise<void> {
   const code = await child.result.then(r => r?.code ?? null, () => null)
   await saveHealth($, account.id, { kind: 'login-needed', why: 'sign-in not finished' })
   if (code !== 0) {
-    tell($, `Sign-in for Claude account ${account.id} did not finish${errors.trim() ? `: ${errors.trim().slice(0, 160)}` : '.'}`)
+    tell($, `Sign-in for ${claudeAccount(account, (await getView($)).accounts)} did not finish${errors.trim() ? `: ${errors.trim().slice(0, 160)}` : '.'}`)
     return
   }
   await adoptSignIn($, account)
@@ -1943,10 +1949,10 @@ async function adoptSignIn($: Host, account: Account): Promise<void> {
   const accounts = await loadAccounts($)
   const twin = who === undefined ? undefined : accounts.find(a => a.id !== account.id && isLoginOf(a, who))
   if (twin !== undefined) {
-    await saveHealth($, account.id, { kind: 'login-needed', why: `that was account ${label(twin)} again` })
+    await saveHealth($, account.id, { kind: 'login-needed', why: `that was ${label(twin, accounts)} again` })
     tell(
       $,
-      `Claude account ${account.id} signed in as account ${label(twin)}. Sign out of claude.ai in your browser (or pick another organization), then sign in again.`,
+      `${claudeAccount(account, accounts)} signed in as ${label(twin, accounts)}. Sign out of claude.ai in your browser (or pick another organization), then sign in again.`,
     )
     return
   }
@@ -2004,7 +2010,7 @@ async function addAccount($: Host): Promise<void> {
   const accounts = await loadAccounts($)
   const account = await claimNextSlot($, accounts)
   const { id, slot } = account
-  await $.fs.write(`${slot}/README`, `Claude account ${id}, kept by the account-rotator mod.\n`)
+  await $.fs.write(`${slot}/README`, `Claude account folder ${id}, kept by the account-rotator mod.\n`)
   await dropAccountKeys($, id)
   await saveHealth($, id, { kind: 'login-needed', why: 'not signed in yet' })
   await saveAccounts($, [...accounts, account])
@@ -2022,7 +2028,7 @@ async function addAccount($: Host): Promise<void> {
 async function adoptSlot($: Host, slot: string): Promise<{ ok: boolean; message: string; accountId?: string; pickId?: string }> {
   const number = slotNumber(slot, (await $.env.get('HOME')) ?? '')
   if (number === undefined) return { ok: false, message: `${slot} is no numbered folder under ~/.claude/accounts, so nothing is added` }
-  const already = async (a: Account) => ({ ok: true, message: `already account ${a.id}`, accountId: a.id, pickId: (await pickAnswer($)).pickId })
+  const already = async (a: Account) => ({ ok: true, message: `already ${label(a, await loadAccounts($))}`, accountId: a.id, pickId: (await pickAnswer($)).pickId })
   const listed = (await loadAccounts($)).find(a => a.slot === slot)
   if (listed !== undefined) return already(listed)
   const who = await signedInAs($, slot)
@@ -2034,7 +2040,7 @@ async function adoptSlot($: Host, slot: string): Promise<{ ok: boolean; message:
   if (twin !== undefined) {
     return {
       ok: false,
-      message: `that sign-in is account ${label(twin)} already${twin.orgId === undefined ? ', as far as is known: its organization is not read yet, so ask again once a check has read it' : ''}, so nothing is added. Sign out of claude.ai in your browser (or pick another organization), then run account add again. ${slot} stays signed in with no account on it: sign it out with CLAUDE_SECURESTORAGE_CONFIG_DIR=${slot} CLAUDE_CONFIG_DIR=${slot} claude auth logout`,
+      message: `that sign-in is ${label(twin, accounts)} already${twin.orgId === undefined ? ', as far as is known: its organization is not read yet, so ask again once a check has read it' : ''}, so nothing is added. Sign out of claude.ai in your browser (or pick another organization), then run account add again. ${slot} stays signed in with no account on it: sign it out with CLAUDE_SECURESTORAGE_CONFIG_DIR=${slot} CLAUDE_CONFIG_DIR=${slot} claude auth logout`,
     }
   }
   const account = withSignIn({ id: accounts.some(a => a.id === number) ? freeId(accounts) : number, slot }, who)
@@ -2045,7 +2051,7 @@ async function adoptSlot($: Host, slot: string): Promise<{ ok: boolean; message:
   const stood = (await loadAccounts($)).find(a => a.slot === slot)
   if (stood === undefined || !isLoginOf(stood, who)) return { ok: false, message: `another session's write took the place of the row for ${slot}, so it is not listed as this sign-in` }
   const { text, pickId } = await pickAnswer($)
-  return { ok: true, message: `account ${label(stood)} is added; ${text}`, accountId: stood.id, pickId }
+  return { ok: true, message: `${label(stood, await loadAccounts($))} is added; ${text}`, accountId: stood.id, pickId }
 }
 
 /** Every store key of one account's own, each dropped when an account goes and before a row takes its id. */
@@ -2064,25 +2070,26 @@ async function dropAccountKeys($: Host, id: string): Promise<void> {
 async function removeAccount($: Host, id: string, seen?: { slot: string; email?: string; orgId?: string }): Promise<{ ok: boolean; message: string; pickId?: string }> {
   const accounts = await loadAccounts($)
   const account = accounts.find(a => a.id === id)
-  if (account === undefined) return { ok: true, message: `account ${id} is already gone` }
-  if (account.slot === '') return { ok: false, message: `account ${id} is Claude Code's own login, which the mod does not remove` }
+  if (account === undefined) return { ok: true, message: `the account with id ${id} is already gone` }
+  const name = label(account, accounts)
+  if (account.slot === '') return { ok: false, message: `${name} is Claude Code's own login, which the mod does not remove` }
   if (isConnectingChrome) return { ok: false, message: CONNECTING_TEXT }
   if (seen !== undefined && !holdsLogin(seen, account)) {
-    return { ok: false, message: `account ${id} holds another login than this command read, so nothing is removed: run account list, then rm again if it is the one you mean` }
+    return { ok: false, message: `${name} holds another login than this command read, so nothing is removed: run account list, then rm again if it is the one you mean` }
   }
   const sharing = accounts.find(a => a.id !== id && a.slot === account.slot)
-  if (sharing !== undefined) return { ok: false, message: `account ${id} shares its sign-in with account ${sharing.id}, so signing it out would sign out both: nothing is removed` }
+  if (sharing !== undefined) return { ok: false, message: `${name} shares its sign-in with ${label(sharing, accounts)}, so signing it out would sign out both: nothing is removed` }
   const view = await getView($)
   if (view.activeId === id) {
     const other = view.accounts.find(a => a.id !== id && view.health[a.id]?.kind === 'ok')
-    if (other === undefined || !(await switchTo($, other, `account ${id} is being removed`))) {
-      return { ok: false, message: `Claude account ${id} is in use and no other account can take over yet; not removed.` }
+    if (other === undefined || !(await switchTo($, other, `${name} is being removed`))) {
+      return { ok: false, message: `${claudeAccount(account, accounts)} is in use and no other account can take over yet; not removed.` }
     }
   }
   const { exitCode, stderr } = await $.process.run(['claude', 'auth', 'logout'], { env: slotEnv(account.slot), timeoutMs: 20_000 })
   if (exitCode !== 0) {
     const [why] = stderr.trim().split('\n')
-    return { ok: false, message: `Claude account ${id} could not be signed out, so it stays listed: ${why || `exit ${String(exitCode)}`}` }
+    return { ok: false, message: `${claudeAccount(account, accounts)} could not be signed out, so it stays listed: ${why || `exit ${String(exitCode)}`}` }
   }
   await saveAccounts($, (await loadAccounts($)).filter(a => a.id !== id))
   if ((await $.store.get('chrome-account')) === id) await setChromeAccount($, undefined)
@@ -2104,7 +2111,7 @@ async function removeAccount($: Host, id: string, seen?: { slot: string; email?:
   // A launcher must never start a session on the account just removed.
   await saveLaunchPick($)
   const { text, pickId } = await pickAnswer($)
-  return { ok: true, message: `account ${id} is removed; ${text}`, pickId }
+  return { ok: true, message: `${name} is removed; ${text}`, pickId }
 }
 
 // ---------------------------------------------------------------- wiring

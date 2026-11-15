@@ -247,10 +247,10 @@ export function pickLaunch(view: View, now: number): Omit<LaunchPick, 'at'> | un
   if (on.startsWith('account:')) {
     const id = on.slice('account:'.length)
     const at = view.accounts.findIndex(a => a.id === id)
-    if (at === -1) return pick(ready[0], `account ${id} is not on the list, and it is the first with room`)
+    if (at === -1) return pick(ready[0], `${id} is not on the list, and it is the first with room`)
     const after = [...view.accounts.slice(at), ...view.accounts.slice(0, at)]
     const found = after.find(a => ready.includes(a))
-    return pick(found, found?.id === id ? 'you picked it' : `account ${id} has no room, and it is the next with room`)
+    return pick(found, found?.id === id ? 'you picked it' : `${labelOf(view.accounts, id)} has no room, and it is the next with room`)
   }
   // A rule starts no session on a login the rotation would leave at its first check, while another login stays;
   // with every login past that line, it picks among all with room, so a launch always has a login while one has room.
@@ -303,7 +303,7 @@ const FABLE_WAY_OUT = 'Run /usage-credits to continue or switch models with /mod
  * the accounts a switch did not take.
  */
 export function fableStay(view: View, now: number, isConnecting: boolean, skip: ReadonlySet<string>): { reason: StayReason; text: string } | undefined {
-  const stay = (reason: StayReason, why: string) => ({ reason, text: `Fable limit reached on account ${view.activeId}${why} ${FABLE_WAY_OUT}` })
+  const stay = (reason: StayReason, why: string) => ({ reason, text: `Fable limit reached on ${labelOf(view.accounts, view.activeId)}${why} ${FABLE_WAY_OUT}` })
   if (isConnecting) return stay('chrome', ' while Claude in Chrome connects, so the session stays.')
   if (view.rotateTo === 'off') return stay('off', ', and usage based rotation is disabled, so the session stays. Pick another Move to in the accounts pane.')
   if (view.isSwitchBlocked) return stay('blocked', ", and Claude Code's policy stops this session from switching accounts.")
@@ -676,10 +676,28 @@ export function untilText(at: number | string | undefined, now: number): string 
   return `in ${Math.floor(hours / 24)}d ${hours % 24}h`
 }
 
-export function label(account: Account | undefined): string {
+/**
+ * An account as text names it: its email, with its organization where that email is on more than one of `accounts`;
+ * with no email, Claude Code's login or the account's number.
+ */
+export function label(account: Account | undefined, accounts: readonly Account[]): string {
   if (account === undefined) return '?'
-  if (account.email === undefined) return account.id
-  return `${account.id} (${account.email}${account.orgName ? ` · ${account.orgName}` : ''})`
+  // The store is JSON another session wrote: only a string is an email, as bin/account_rotator_store.py label reads it.
+  if (typeof account.email !== 'string') return account.slot === '' ? "Claude Code's login" : `account ${account.id} (not signed in yet)`
+  const isShared = accounts.filter(a => a.email === account.email).length > 1
+  return isShared && account.orgName ? `${account.email} · ${account.orgName}` : account.email
+}
+
+/** An account as a sentence names it: "Claude account <email>", and with no email by label alone. */
+export function claudeAccount(account: Account | undefined, accounts: readonly Account[]): string {
+  const name = label(account, accounts)
+  return typeof account?.email === 'string' ? `Claude account ${name}` : name
+}
+
+/** The account `id` names, by label; the bare id where `accounts` holds none. */
+export function labelOf(accounts: readonly Account[], id: string | undefined): string {
+  const found = accounts.find(a => a.id === id)
+  return found === undefined ? (id ?? '?') : label(found, accounts)
 }
 
 /**
@@ -788,7 +806,9 @@ export function stuckText(view: View, now: number): string | undefined {
   const isStuck = isSpent(r, now, view.weekLeave) || need === 'fable'
   if (!view.isSwitchBlocked || !isStuck || pickTarget(view, now, need) === undefined) return undefined
   const login = isOnNormalLogin(view) ? '/login with your personal (Pro or Max) account. ' : ''
-  return `Account ${view.activeId} is near its limit, and this window can't switch accounts. ${login}${restartSteps(view)}`
+  const active = view.accounts.find(a => a.id === view.activeId)
+  const name = typeof active?.email === 'string' ? claudeAccount(active, view.accounts) : 'The account in use'
+  return `${name} is near its limit, and this window can't switch accounts. ${login}${restartSteps(view)}`
 }
 
 /** The MCP server Claude Code runs Claude in Chrome as, and the names of its tools. */
@@ -851,7 +871,7 @@ export type ChromeNoteKind = 'held' | 'connecting' | 'no-browser' | 'blocked' | 
 export function chromeNote(view: View, kind: ChromeNoteKind): string {
   const named = (id: string | undefined) => {
     const a = view.accounts.find(x => x.id === id)
-    return a === undefined ? undefined : `Claude account ${a.id}${a.email === undefined ? '' : ` (${a.email})`}`
+    return a === undefined ? undefined : claudeAccount(a, view.accounts)
   }
   const own = `${named(view.chromeAccountId) ?? 'one account'}, the account the user's Chrome extension is signed in to`
   const as = named(view.chrome?.as)
@@ -1043,15 +1063,24 @@ function resetsPart(pieces: (string | Reset)[]): RowPart {
   return { text: pieces.map(p => (typeof p === 'string' ? p : p.text)).join(''), runs: pieces.map(p => (typeof p === 'string' ? p : { until: p.at })) }
 }
 
+/** The cells of a bar and its percent, the percent padded to 3: what follows stands at one column from 0% to 100%. */
+const USED_CELLS = 15
+
 /**
- * A window as the row draws it: its label, then a ten-cell bar and the percent used, whatever the footer fills with,
- * the bar's part carrying that percent for its color; a dash, dim, where none is read.
+ * A window as the row draws it: its label, then a ten-cell bar and the percent used, whatever the footer fills with;
+ * a dash, dim, in the same cells, where none is read.
  */
 function usedParts(label: string, w: UsageWindow | undefined, now: number): RowPart[] {
   const pct = windowPct(w, now)
-  if (pct === undefined) return [{ text: `${label} –`, tone: 'dim' }]
+  if (pct === undefined) return [{ text: `${label} ${'–'.padEnd(USED_CELLS)}`, tone: 'dim' }]
   const used = Math.round(pct)
-  return [{ text: `${label} ` }, { text: `${longBar(used)} ${used}%`, used }]
+  return [{ text: `${label} ` }, { text: `${longBar(used)} ${String(used).padStart(3)}%` }]
+}
+
+/** A line with its last part's trailing pad cut, so a dash that ends the line leaves no blank cells after it. */
+function trimEnd(line: RowPart[]): RowPart[] {
+  const last = line.at(-1)
+  return last === undefined ? line : [...line.slice(0, -1), { ...last, text: last.text.trimEnd() }]
 }
 
 /**
@@ -1132,7 +1161,7 @@ function usageLine(view: View, a: Account, now: number): RowPart[] {
     week === undefined
       ? fableReset === undefined ? undefined : ['  Fable resets ', fableReset]
       : ['  resets ', week, ...(fableReset === undefined || Math.abs(fableReset.at - week.at) < SAME_RESET_MS ? [] : [' · Fable ', fableReset])]
-  return [...usedParts('Used', r.sevenDay, now), ...fable, ...(resets === undefined ? [] : [resetsPart(resets)])]
+  return trimEnd([...usedParts('Used', r.sevenDay, now), ...fable, ...(resets === undefined ? [] : [resetsPart(resets)])])
 }
 
 /**
@@ -1144,7 +1173,7 @@ function fiveHourLine(view: View, a: Account, now: number): RowPart[] | undefine
   const w = view.readings[a.id]?.fiveHour
   if (w === undefined) return [{ text: '5h –', tone: 'dim' }]
   const reset = resetAhead(w, now)
-  return [...usedParts('5h', w, now), ...(reset === undefined ? [] : [resetsPart(['  resets ', reset])])]
+  return trimEnd([...usedParts('5h', w, now), ...(reset === undefined ? [] : [resetsPart(['  resets ', reset])])])
 }
 
 /**
