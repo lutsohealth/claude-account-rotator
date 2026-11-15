@@ -2,6 +2,15 @@
 
 What each version of the account rotator changed. To get each one as Claude Code starts, turn on auto-update: in `/plugin`, open **Marketplaces**, pick **claude-account-rotator** and choose **Enable auto-update**. To update by hand, run `claude plugin marketplace update claude-account-rotator`, then `claude plugin update account-rotator@claude-account-rotator`, and start a new session.
 
+## 0.5.32-lutso.1 - 2026-11-15
+
+- **The panel names each account by its email**, plus its organization only when that email is on more than one account, where it named them by number: the rows, **New on**, the **Chrome** box, toasts, bands, `account-rotator account list` and `account-rotator-launch`.
+- **The usage lines line up, and their bars carry no color**: a percent takes three cells, so Fable and resets stand at one column from 0% to 100%. A failed row stays dim; the footer under the prompt keeps its colors.
+- **A Fable limit hit just after a switch, or while Claude in Chrome connects, no longer marks the account switched to as spent**: the session carries on once the switch lands. A read 30 minutes after a Fable mark that shows the same week below 100% ends the mark, where a wrong mark stood until the reset.
+- **An idle account whose sign-in has run out reads `updated HH:MM · idle`**, where it read Failed to update, and a token refresh keeps a usage back-off that still stands, where the next read went out at once.
+- **A sign-in rejected just after a switch no longer marks the account switched to as needing a sign-in**, unless a response proved the switch; one marked on a switch that does not take is given back when the switch ends.
+- **No window opens on a spent account to connect Claude in Chrome**; **a window that can't switch says what to do** once its account runs out (`/stop`, then `claude --resume <id>`); and **Cancel** ends a sign-in as not finished, not with a TypeError. These come from upstream 0.3.1, 0.3.2 and ivokund#3.
+
 ## 0.5.31-lutso.1 - 2026-11-14
 
 - **A plain `claude` can start on the account New on picks**: `bin/account-rotator-claude`, copied as `claude` into a folder ahead of Claude Code's own on PATH, starts every plain `claude` (a terminal, a script, Orca's background actions) on that pick while a session of the mod wrote the store's rows in the last 60 minutes, else on Claude Code's login. A `CLAUDE_SECURESTORAGE_CONFIG_DIR` already set wins, and an empty one starts on Claude Code's login. Install and undo: README, **Picks where new sessions start**.
