@@ -1245,7 +1245,8 @@ class NumberName(StoreCase):
         # Every spelling the round found: a TypeScript template, JSX text, a Python f-string, README prose. Kept:
         # debug lines, the --account input (RULING of Master 386 on #23533), label's no-email fallback, claudeAccount.
         spelled = re.compile(r"\b[Aa]ccounts? \$?\{|\b(?:is|on) account [0-9]")
-        kept = re.compile(r"debug\(|--account \{given\}|\(not signed in yet\)|Claude account \$\{name\}|account folder")
+        # A TypeScript type (`value is Account {`, `): Account {`) is no text either.
+        kept = re.compile(r"debug\(|--account \{given\}|\(not signed in yet\)|Claude account \$\{name\}|account folder|(?:value is|\):) Account \{")
         sources = [*sorted((ROOT / "hooks").glob("*.ts*")), *sorted((ROOT / "bin").iterdir()), ROOT / "README.md"]
         sources = [p for p in sources if p.is_file() and ".test." not in p.name]
         self.assertGreater(len(sources), 5)
