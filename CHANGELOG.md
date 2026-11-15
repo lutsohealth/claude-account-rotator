@@ -2,6 +2,12 @@
 
 What each version of the account rotator changed. To get each one as Claude Code starts, turn on auto-update: in `/plugin`, open **Marketplaces**, pick **claude-account-rotator** and choose **Enable auto-update**. To update by hand, run `claude plugin marketplace update claude-account-rotator`, then `claude plugin update account-rotator@claude-account-rotator`, and start a new session.
 
+## 0.5.33-lutso.1 - 2026-11-15
+
+- **The usage lines line up whatever the plan**: a plan with no Fable week keeps those cells blank, and **5h** stands as wide as **Used**, so every bar and every `resets` stand at one column on Pro, Max and Ultra rows and on the 5-hour line, a dash for an unread percent included.
+- **No text names an account by a bare number or a "?"**: a switch to an account another session removed meanwhile names it in its notices, and the launch pick and a request answer say `account <id>` for an account not on the list.
+- **Two accounts with no email stored are two logins**, where they read as one, and an account whose stored email is not text reads "not signed in yet", where its row could not be drawn.
+
 ## 0.5.32-lutso.1 - 2026-11-15
 
 - **The panel names each account by its email**, plus its organization only when that email is on more than one account, where it named them by number: the rows, **New on**, the **Chrome** box, toasts, bands, `account-rotator account list` and `account-rotator-launch`.
