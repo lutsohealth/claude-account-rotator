@@ -98,8 +98,8 @@ type World = {
   submitDrop?: string
   /** While set, a submit stays queued until it settles, as under Claude Code's limit modal: it answers once the prompt enters. */
   submitHold?: Promise<void>
-  /** A dialog holds the keys: a fill answers refusal 'dialog' and leaves the draft as it was. */
-  isDialog?: boolean
+  /** A hook keeps the mod's fill out of the box, so the fill answers isFilled false with no cause. */
+  isFillRefused?: boolean
   /** Where it answers true, a debug line fails to write. */
   isLogFailing?: (text: string) => boolean
   /** Whether each line in `submitted` was sent as the person's own words (`asUser`), not under the mod's name. */
@@ -331,8 +331,8 @@ function world(on: On, w: World, store: Record<string, unknown> | Map<string, un
     await w.submitHold
     return { text: e.text }
   })
-  // The kit keeps no cause a test writes on the mod's own fill, so a dialog reads as a refusal with its cause left out.
-  on('prompt.fill', () => ({ isFilled: w.isDialog !== true }))
+  // The kit keeps no cause a test writes on the mod's own fill: a refusal here is a hook's, never the engine's 'dialog'.
+  on('prompt.fill', () => ({ isFilled: w.isFillRefused !== true }))
   on('turn.start', (_$, e) => ({ turnId: e.turnId }))
   on('turn.complete', (_$, e) => ({ text: e.answer }))
   on('session.start', (_$, e) => {
@@ -10061,32 +10061,26 @@ test('a stop-log write that fails, its debug line failing too, leaves the stop-l
 
 // ---------------------------------------------------------------- puma-9arph.34 C: one Escape frees a carry-on held under the limit modal
 
-const PANE_HANDLE = 'term_test-pane'
-const ESCAPE_ARGV = ['orca', 'terminal', 'send', '--terminal', PANE_HANDLE, '--text', '\u001b', '--json']
-const ESCAPE_SENT = "carry-on queued under a dialog: one Escape to this session's pane (exit 0)"
-const GAVE_UP = 'carry-on still queued after the Escape: gave up'
 const noKey = (why: string) => `carry-on queued, no key: ${why}`
 
 /**
- * A world whose carry-on stays queued under Claude Code's limit modal, as the spike read it on vox: a dialog holds
- * the keys, and the session runs in an Orca pane. Answers what lets the queued prompt enter.
+ * A world whose carry-on stays queued, in an Orca pane, its fill refused by a hook. The kit keeps no cause on the
+ * mod's own fill, so no test here draws the engine's own 'dialog' that the Escape needs: model.test.ts holds that row,
+ * and these hold every condition before it. Answers what lets the queued prompt enter.
  */
-function underModal(on: On, w: World): () => void {
+function queuedWorld(on: On, w: World): () => void {
   let enter = () => {}
   w.submitHold = new Promise<void>(resolve => {
     enter = resolve
   })
-  w.isDialog = true
-  w.env.ORCA_TERMINAL_HANDLE = PANE_HANDLE
+  w.isFillRefused = true
+  w.env.ORCA_TERMINAL_HANDLE = 'term_test-pane'
   on('process.spawn', async function* (_$, e) {
     w.spawned.push(e)
     yield* []
     return { value: { code: 0, signal: null } }
   })
-  return () => {
-    w.isDialog = false
-    enter()
-  }
+  return enter
 }
 
 /** The main loop's turn that dies on a stop: it starts, the stop is heard, then it ends on the error, in the order the spike read. */
@@ -10097,45 +10091,9 @@ async function turnStops($: Engine, clock: MockClock, stop: { error: 'rate_limit
   await clock.settle()
 }
 
-test('a carry-on queued under the limit modal gets one Escape, sent to this session\'s own Orca pane, and then enters (puma-9arph.34 C1)', async ($, on) => {
-  const w = fresh()
-  const enter = underModal(on, w)
-  const { store, clock } = await loggedWorld(on, w)
-  await start($, clock)
-  w.usage['tok-1'] = [100, 41]
-  await turnStops($, clock)
-  await clock.advance(36_000)
-  expect(w.submitted).toHaveLength(1)
-  expect(w.spawned).toEqual([])
-  await clock.advance(5_000)
-  expect(w.spawned.map(s => s.argv)).toEqual([ESCAPE_ARGV])
-  enter()
-  await clock.settle()
-  await clock.advance(10_000)
-  expect(w.spawned).toHaveLength(1)
-  expect(w.submitted).toHaveLength(1)
-  expect(whats(stopLogOf(store, w)).slice(-2)).toEqual([ESCAPE_SENT, 'carry-on entered'])
-})
-
-test('a carry-on still queued after its Escape gets no second key, and the stop-log says it gave up (puma-9arph.34 C7)', async ($, on) => {
-  const w = fresh()
-  underModal(on, w)
-  const { store, clock } = await loggedWorld(on, w)
-  await start($, clock)
-  w.usage['tok-1'] = [100, 41]
-  await turnStops($, clock)
-  await clock.advance(41_000)
-  expect(w.spawned).toHaveLength(1)
-  await clock.advance(10_000)
-  expect(whats(stopLogOf(store, w)).slice(-2)).toEqual([ESCAPE_SENT, GAVE_UP])
-  await clock.advance(10 * 60_000)
-  expect(w.spawned).toHaveLength(1)
-  expect(w.submitted).toHaveLength(1)
-})
-
 test('a carry-on that enters within 5 s gets no key (puma-9arph.34 C6)', async ($, on) => {
   const w = fresh()
-  const enter = underModal(on, w)
+  const enter = queuedWorld(on, w)
   enter()
   const { store, clock } = await loggedWorld(on, w)
   await start($, clock)
@@ -10148,12 +10106,13 @@ test('a carry-on that enters within 5 s gets no key (puma-9arph.34 C6)', async (
   expect(whats(stopLogOf(store, w)).at(-1)).toBe('carry-on entered')
 })
 
-// Each row keeps one condition of the Escape false, every other as in the modal case: no key goes, and the stop-log says why.
+// Each row keeps one condition of the Escape false: no key goes, and the stop-log says why.
 for (const [name, arrange, why] of [
   ["an agent's turn is open (C2)", { during: ($: Engine) => $.turn.start({ text: 'look', turnId: 'agent-turn', agentId: 'agent-1' }) }, 'a turn is open'],
   ['the main turn is still open (C3)', { isEnded: false }, 'a turn is open'],
-  ['the session runs in no Orca pane (C4)', { isOutsideOrca: true }, 'no Orca pane'],
-  ['no dialog holds the box (C5)', { isNoDialog: true }, 'no dialog holds it'],
+  ['the box takes the fill (C5)', { isFilled: true }, 'no dialog holds it'],
+  // Review CALL1 [UNPROVEN-DIALOG]: a hook's refusal carries no cause and proves no dialog.
+  ['a hook refused the fill, its cause left out (Review CALL1)', {}, 'no dialog holds it'],
   ['the stop was a rejected sign-in, not a limit (RULING 6008)', { stop: { error: 'authentication_failed' } }, 'no limit stop before it'],
   [
     'a turn ran since the limit stop',
@@ -10168,10 +10127,9 @@ for (const [name, arrange, why] of [
 ] as const) {
   test(`a queued carry-on gets no key where ${name} (puma-9arph.34 C)`, async ($, on) => {
     const w = fresh()
-    const rule: { during?: ($: Engine) => Promise<unknown>; isEnded?: boolean; isOutsideOrca?: boolean; isNoDialog?: boolean; stop?: { error: 'rate_limit' | 'authentication_failed' } } = arrange
-    underModal(on, w)
-    if (rule.isOutsideOrca === true) delete w.env.ORCA_TERMINAL_HANDLE
-    if (rule.isNoDialog === true) w.isDialog = false
+    const rule: { during?: ($: Engine) => Promise<unknown>; isEnded?: boolean; isFilled?: boolean; stop?: { error: 'rate_limit' | 'authentication_failed' } } = arrange
+    queuedWorld(on, w)
+    if (rule.isFilled === true) w.isFillRefused = false
     const { store, clock } = await loggedWorld(on, w)
     await start($, clock)
     w.usage['tok-1'] = [100, 41]
@@ -10186,11 +10144,12 @@ for (const [name, arrange, why] of [
   })
 }
 
-test('the line a stop cut by the Claude in Chrome visit carries on with gets the same one Escape, and the stop sends one line (puma-9arph.34 C8)', async ($, on) => {
+// Review CALL1 [UNPROVEN-DIALOG], its class: the other submit site, connectChrome's, under the same watch.
+test('the line a stop cut by the Claude in Chrome visit carries on with gets the same watch, no key for a hook\'s refusal, and the stop sends one line (puma-9arph.34 C8)', async ($, on) => {
   const w = fresh()
   w.chrome = { extensions: [SLOT2] }
   await spentTwo(w)
-  underModal(on, w)
+  queuedWorld(on, w)
   const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'chrome-account': '2' }))
   const clock = world(on, w, store)
   await start($, clock)
@@ -10200,8 +10159,8 @@ test('the line a stop cut by the Claude in Chrome visit carries on with gets the
   await clock.advance(36_000)
   expect(w.submitted).toHaveLength(1)
   await clock.advance(5_000)
-  expect(w.spawned.map(s => s.argv)).toEqual([ESCAPE_ARGV])
+  expect(whats(stopLogOf(store, w)).at(-1)).toBe(noKey('no dialog holds it'))
   await clock.advance(10 * 60_000)
-  expect(w.spawned).toHaveLength(1)
+  expect(w.spawned).toEqual([])
   expect(w.submitted).toHaveLength(1)
 })

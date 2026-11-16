@@ -1510,6 +1510,23 @@ export function slotNumber(slot: string, home: string): string | undefined {
   return /^[1-9][0-9]*$/.test(name) ? name : undefined
 }
 
+/**
+ * Why a carry-on still queued gets no Escape, else undefined. The key goes only after a usage-limit stop with no
+ * main-loop turn begun since, with no turn open in any loop, while the engine refuses a fill with its own 'dialog'
+ * (a hook's refusal carries no cause, so it proves no dialog), and in an Orca pane. Without `fill`, only what the
+ * session knows without asking.
+ */
+export function escapeHeldBack(s: { isLimitStopLast: boolean; openTurns: number; fill?: { refusal?: string; pane?: string } }): string | undefined {
+  if (!s.isLimitStopLast) return 'no limit stop before it'
+  if (s.openTurns > 0) return 'a turn is open'
+  if (s.fill === undefined) return undefined
+  if (s.fill.refusal !== 'dialog') return 'no dialog holds it'
+  return s.fill.pane ? undefined : 'no Orca pane'
+}
+
+/** One Escape to the Orca pane `pane`, by Orca's CLI: a fixed argv, run with no shell. */
+export const escapeArgv = (pane: string): string[] => ['orca', 'terminal', 'send', '--terminal', pane, '--text', '\u001b', '--json']
+
 /** The requests folder: in the Claude config folder, CLAUDE_CONFIG_DIR or `~/.claude`, as bin/account_rotator_store.py finds it. */
 export function requestsDir(configDir: string | undefined, home: string): string {
   return `${configDir || `${home}/.claude`}/account-rotator-requests`

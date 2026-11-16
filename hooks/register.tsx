@@ -98,6 +98,8 @@ import {
   SwitchHeld,
   requestFrom,
   requestsDir,
+  escapeArgv,
+  escapeHeldBack,
 } from './model'
 import type { Credential, Identity, Need, StayReason } from './model'
 import { Band, Footer, PANE_COLUMNS, Pane } from './view'
@@ -1544,7 +1546,6 @@ async function carryOn($: Host, need?: Need): Promise<void> {
 const MODAL_LOOK_MS = 5_000
 /** How long after its one Escape a carry-on still queued is given up on. */
 const MODAL_GIVE_UP_MS = 10_000
-const ESCAPE = '\u001b'
 
 /**
  * Submits a carry-on and logs its answer, which comes once the prompt enters. After a usage-limit stop Claude Code
@@ -1566,23 +1567,21 @@ async function sendCarryOn($: Host, prompt: { text: string; asUser?: true }): Pr
   }
 }
 
-/** What holds a queued carry-on's Escape back, of what this session knows without asking: a limit stop's modal, and no turn whose dialog the key would answer. */
-const heldBack = (): string | undefined => (limitStopAfter !== mainTurns ? 'no limit stop before it' : openTurns.size > 0 ? 'a turn is open' : undefined)
+/** What this session knows of a queued carry-on's Escape without asking: whether a limit stop's modal can stand, and how many turns are open. */
+const known = () => ({ isLimitStopLast: limitStopAfter === mainTurns, openTurns: openTurns.size })
 
 /**
- * Sends one Escape to this session's Orca pane for a carry-on still queued: only after a usage-limit stop with no
- * turn begun since, no turn open in any loop, a fill that finds a dialog holding the box, and the session in an Orca
- * pane. One a carry-on: still queued 10 s on, it is given up on. Each outcome goes to the stop-log.
+ * Sends one Escape to this session's Orca pane for a carry-on still queued, where escapeHeldBack finds nothing
+ * holding it back. One a carry-on: still queued 10 s on, it is given up on. Each outcome goes to the stop-log.
  */
 async function freeQueued($: Host, isSettled: () => boolean): Promise<void> {
   if (isSettled()) return
-  let why = heldBack()
+  let why = escapeHeldBack(known())
   let pane: string | undefined
   if (why === undefined) {
     const box = await $.prompt.fill({ text: '', mode: 'append' })
     pane = await $.env.get('ORCA_TERMINAL_HANDLE')
-    // The engine answers 'dialog' under the modal; a cause left out is unknown, and only 'no_composer' says no box exists.
-    why = box.isFilled || box.refusal === 'no_composer' ? 'no dialog holds it' : !pane ? 'no Orca pane' : heldBack()
+    why = escapeHeldBack({ ...known(), fill: { refusal: box.refusal, pane } })
   }
   if (isSettled()) return
   if (why !== undefined || !pane) {
@@ -1596,9 +1595,9 @@ async function freeQueued($: Host, isSettled: () => boolean): Promise<void> {
   })
 }
 
-/** One Escape to the Orca pane `pane` by Orca's CLI, its argv fixed and no shell; answers the exit code, null where it did not run. */
+/** Sends escapeArgv's one Escape; answers the exit code, null where it did not run. */
 async function sendEscape($: Host, pane: string): Promise<number | null> {
-  const child = $.process.spawn({ argv: ['orca', 'terminal', 'send', '--terminal', pane, '--text', ESCAPE, '--json'] })
+  const child = $.process.spawn({ argv: escapeArgv(pane) })
   try {
     // Its output goes unread: the exit code says whether the key went.
     for await (const chunk of child) void chunk
