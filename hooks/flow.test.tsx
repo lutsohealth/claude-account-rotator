@@ -9972,8 +9972,11 @@ test('a usage-limit stop with every login spent says so once, a second stop adds
   expect(whats(stopLogOf(store, w)).filter(isWaitLine)).toHaveLength(1)
   expect([w.toasts.filter(isWaitNotice).length, w.notices.filter(isWaitNotice).length]).toEqual([1, 1])
   expect(w.submitted).toEqual([])
-  // To the reset and one tick past it: one carry-on, on login 1, with no switch.
+  // To the reset and one tick past it: nothing yet, as Claude Code may carry on by itself (the grace).
   await clock.advance(Date.parse('2026-10-12T12:00:00Z') - clock.now() + 60_000)
+  expect(w.submitted).toEqual([])
+  // Past the grace, no turn having run: one carry-on, on login 1, with no switch.
+  await clock.advance(3 * 60_000)
   expect(w.submitted).toHaveLength(1)
   expect(w.envSets).toEqual([])
   // No switch happened, so the carry-on says the limit reset, never that Claude Code switched.
@@ -9984,6 +9987,23 @@ test('a usage-limit stop with every login spent says so once, a second stop adds
   await clock.advance(10 * 60_000)
   expect(w.submitted).toHaveLength(1)
   expect([w.toasts.filter(isWaitNotice).length, w.notices.filter(isWaitNotice).length]).toEqual([1, 1])
+})
+
+test('with every login spent, where a main turn starts after the login in use resets (Claude Code carrying on by itself), the mod sends no carry-on of its own (puma-9arph.35)', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await loggedWorld(on, w)
+  w.usage['tok-2'] = [100, 30]
+  await start($, clock)
+  w.usage['tok-1'] = [100, 41]
+  await $.classic.StopFailure(PLAIN)
+  await clock.settle()
+  expect(whats(stopLogOf(store, w)).filter(isWaitLine)).toHaveLength(1)
+  // Claude Code v2.1.325 continued a 5-hour stop by itself at the reset (puma-9arph.35 d5): a main turn starts.
+  await clock.advance(Date.parse('2026-10-12T12:00:00Z') - clock.now() + 30_000)
+  await $.turn.start({ text: 'go on', turnId: 'turn-own-continue' })
+  await clock.advance(10 * 60_000)
+  expect(w.submitted).toEqual([])
+  expect(whats(stopLogOf(store, w))).toContain('a turn ran since the stop: no carry-on')
 })
 
 test('with every login spent, a login whose usage read fails since the stop is still moved to at its reset, and one carry-on goes there (puma-9arph.35)', async ($, on) => {
