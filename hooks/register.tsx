@@ -58,6 +58,7 @@ import {
   isPolicyRefusal,
   keepFable,
   isSpent,
+  isUnread,
   keychainItem,
   keychainUser,
   claudeAccount,
@@ -518,6 +519,45 @@ async function setSessionMark($: Host): Promise<void> {
     await setView($, v => ({ ...v, sessionMark: mark }))
   } catch (error) {
     await debug($, `session mark refused: ${String(error)}`)
+  }
+}
+
+/** What the stop-log keeps per session, and how long a session's log outlives its last entry. */
+const STOP_LOG_KEEP = 20
+const STOP_LOG_MAX_AGE_MS = 7 * 24 * 3600_000
+type StopLogEntry = { at: number; what: string }
+
+const stopLogFrom = (value: unknown): StopLogEntry[] =>
+  (Array.isArray(value) ? value : []).filter((e): e is StopLogEntry => typeof e?.at === 'number' && typeof e?.what === 'string')
+
+/**
+ * Says what a stop did, under `stop-log:<session mark>`: one key a session, so sessions never overwrite each other's lines.
+ * An entry names logins by their id, and holds no token, no email and no prompt text beyond 'entered' and 'drop'.
+ * Never fails its caller. The writes go one at a time, in call order, so a caller need not await one: two at once
+ * would each read the old list and one entry would be lost.
+ */
+let stopLogChain: Promise<void> = Promise.resolve()
+function logStop($: Host, what: string): Promise<void> {
+  stopLogChain = stopLogChain.then(async () => {
+    try {
+      const mark = (await getView($)).sessionMark ?? kept.mark
+      if (mark === undefined) return
+      const key = `stop-log:${mark}`
+      const entries = stopLogFrom(await $.store.get(key))
+      await $.store.set(key, [...entries, { at: await $.clock.now(), what }].slice(-STOP_LOG_KEEP))
+    } catch (error) {
+      await debug($, `stop-log failed: ${String(error)}`)
+    }
+  })
+  return stopLogChain
+}
+
+/** Deletes the stop-logs of sessions whose last entry is over a week old, with those that hold none. */
+async function pruneStopLogs($: Host): Promise<void> {
+  const now = await $.clock.now()
+  for (const key of (await $.store.keys()).filter(k => k.startsWith('stop-log:'))) {
+    const last = stopLogFrom(await $.store.get(key)).at(-1)
+    if (last === undefined || now - last.at > STOP_LOG_MAX_AGE_MS) await $.store.delete(key)
   }
 }
 
@@ -1239,6 +1279,11 @@ async function maybeRotate($: Host, need?: Need, carry?: CarryOn): Promise<boole
   await saveLaunchPick($).catch(error => debug($, `launch pick failed: ${String(error)}`))
   const now = await $.clock.now()
   const view = await getView($)
+  // A stop that stays says why in the stop-log; a tick or a response is no stop.
+  const stays = async (why: string): Promise<false> => {
+    if (carry !== undefined) void logStop($, `stayed: ${why}`)
+    return false
+  }
   if (view.isSwitchBlocked) {
     // Said once a session: `kept` carries it through /clear, /resume and /branch, as it does isSwitchBlocked.
     const stuck = view.isStuckTold ? undefined : stuckText(view, now)
@@ -1248,16 +1293,25 @@ async function maybeRotate($: Host, need?: Need, carry?: CarryOn): Promise<boole
       $.ui.toast(stuck, { timeoutMs: 15_000 })
       await $.ui.notify(stuck, { title: TITLE })
     }
-    return false
+    return stays('switching blocked')
   }
   // A tick or a response is no stop: it leaves a held Fable recovery where it is going, to a login with Fable room.
   if (need === undefined && carry === undefined && view.held?.carry !== undefined) return false
   // A settling switch holds every tick and response; a stop (it carries on) may move the session on from it.
   const isSettling = view.pending !== undefined && carry === undefined
-  if (isConnectingChrome || view.rotateTo === 'off' || isSettling || !shouldLeave(view, now, need)) return false
+  if (isConnectingChrome) return stays('Claude in Chrome is connecting')
+  if (view.rotateTo === 'off') return stays('rotation off')
+  if (isSettling) return stays('a switch is settling')
+  if (!shouldLeave(view, now, need)) return stays('the login in use need not be left')
   // With none to move to, the band above the prompt says when the next login frees up.
   const target = pickTarget({ ...view, accounts: view.accounts.filter(a => !untaken.has(a.id)) }, now, need)
-  return target === undefined ? false : switchTo($, target, whyLeave(view, now, need), false, carry, true)
+  if (target === undefined) return stays('no login to move to')
+  const isMoved = await switchTo($, target, whyLeave(view, now, need), false, carry, true)
+  // A tick or a response may move to a login whose usage read failed and that has no reading; no carry-on follows it.
+  if (isMoved && carry === undefined && isUnread(view, target)) {
+    void logStop($, `moved to ${target.id} by the tick or a response, its usage read failed, no carry-on`)
+  }
+  return isMoved
 }
 
 /** The login in use, when its token refreshes too soon for the refresh guard to let the session leave it for `target`. */
@@ -1304,22 +1358,25 @@ function carryOnAfterSettle($: Host, owed: CarryOn): void {
   const mark = moves
   $.clock.after(SETTLE_MS, () => {
     if (moves === mark) void carryOn($, owed.need).catch(error => debug($, `carry-on failed: ${String(error)}`))
+    else void logStop($, 'carry-on skipped: another switch since')
   })
+  // Not awaited: a caller sets carriedFor in the same tick, so a second stop cannot arm a second carry-on meanwhile.
+  void logStop($, 'carry-on armed')
 }
 
 /**
  * Points this session at `target`; false while the refresh guard holds it back, or Claude Code's policy refuses it. Quiet: no toast.
- * `carry`: the carry-on the switch owes, sent once it lands. Held back, a Fable stop's carry-on waits for the switch; a plain stop's does not.
+ * `carry`: the carry-on the switch owes, sent once it lands. Held back, any stop's carry-on waits for the switch.
  */
 async function switchTo($: Host, target: Account, why: string, isQuiet = false, carry?: CarryOn, isRotation = false): Promise<boolean> {
   const active = await refreshingSoon($, await getView($), target, await $.clock.now())
   if (active !== undefined) {
     // Where the held switch goes, what it carries on with and who asked for it are one intent, replaced together:
-    // a later stop or press brings its own (a plain stop's, a press's, carries on with nothing); the retry brings the held one's.
-    const owes = carry?.need === 'fable' ? carry : undefined
+    // a later stop or press brings its own (a press's carries on with nothing); the retry brings the held one's.
     const wasHeld = (await getView($)).held !== undefined
-    await setView($, v => ({ ...v, held: { target, why, carry: owes, isRotation } }))
+    await setView($, v => ({ ...v, held: { target, why, carry, isRotation } }))
     if (!wasHeld) {
+      if (carry !== undefined) void logStop($, `held for ${target.id}: the token in use refreshes soon`)
       const { accounts } = await getView($)
       tell($, `Switching to ${claudeAccount(target, accounts)} in a few minutes, once ${label(active, accounts)}'s token has refreshed.`)
     }
@@ -1335,6 +1392,7 @@ async function switchTo($: Host, target: Account, why: string, isQuiet = false, 
     if (!isPolicyRefusal(error)) throw error
     // A press of Use now or Rotate now gets an answer, even once the notice has shown.
     if (!(await blocked($))) tell($, blockedText(await getView($)))
+    if (carry !== undefined) void logStop($, 'stayed: switching blocked')
     return false
   }
   // A switch that replaces an unproven one ends it unproven. A stop's own move (it carries on) keeps what the stop
@@ -1350,11 +1408,14 @@ async function switchTo($: Host, target: Account, why: string, isQuiet = false, 
     pending: { id: target.id, from: v.activeId, since: now },
     removing: undefined,
   }))
-  if (!isQuiet) $.ui.toast(`Switched to ${claudeAccount(target, (await getView($)).accounts)}: ${why}.`, { timeoutMs: 6000 })
+  // The carry-on is armed and carriedFor set straight after pending's write, with no await between, so a second stop
+  // cannot arm a second carry-on; the toast reads the view after them.
+  if (carry !== undefined) void logStop($, `moved to ${target.id}`)
   if (owed !== undefined) {
     carryOnAfterSettle($, owed)
     carriedFor = now
   }
+  if (!isQuiet) $.ui.toast(`Switched to ${claudeAccount(target, (await getView($)).accounts)}: ${why}.`, { timeoutMs: 6000 })
   return true
 }
 
@@ -1469,7 +1530,10 @@ async function carryOn($: Host, need?: Need): Promise<void> {
   const view = await getView($)
   const kept = need === 'fable' ? view.fableContinueText : undefined
   carriedOn = { since: view.pending?.since, at: await $.clock.now() }
-  await $.prompt.submit(kept === undefined ? { text: CONTINUE } : { text: kept, asUser: true })
+  const answer = await $.prompt.submit(kept === undefined ? { text: CONTINUE } : { text: kept, asUser: true })
+  // The engine's own refusal (a Stop stands, a host's limit): said in debug, with its reason, and not tried again.
+  if (answer.drop !== undefined) await debug($, `carry-on dropped: ${answer.drop}`)
+  void logStop($, answer.drop === undefined ? 'carry-on entered' : 'carry-on drop')
 }
 
 /**
@@ -1491,6 +1555,8 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
   // the visit ends. A rejected sign-in after a response with the moved-to login's week went out on that login: the
   // switch has landed.
   const isFable = isFableStop(stop.last_assistant_message)
+  // Not awaited, as no stop-log line is: an await here would let a second stop act on a view read before this one's switch.
+  void logStop($, `stop heard: ${error}${isFable ? ' (Fable week)' : ''}, login ${active.id} in use`)
   const since = view.pending?.since
   const hasResponseSince = since !== undefined && lastMeasured !== undefined && lastMeasured.at > since
   const isProvenRejection = error === 'authentication_failed' && hasResponseSince && provenStopper(view, lastMeasured?.reading)?.id === active.id
@@ -2294,6 +2360,7 @@ async function boot($: Host, isInteractive: boolean): Promise<void> {
   const slot = (await $.env.get('CLAUDE_SECURESTORAGE_CONFIG_DIR')) ?? ''
   kept = { ...kept, slot }
   await bindSession($, slot)
+  await pruneStopLogs($).catch(error => debug($, `stop-log prune failed: ${String(error)}`))
   await checkSwitching($, slot)
   // First, while the session can still move: the rotation waits for it.
   if (isInteractive && shouldConnectAtOpen(await getView($), await $.clock.now())) {

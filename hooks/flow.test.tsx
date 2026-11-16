@@ -94,6 +94,8 @@ type World = {
   readGate?: Promise<void>
   spawned: { argv: readonly string[]; env?: Record<string, string> }[]
   submitted: string[]
+  /** The engine refuses every submit with this reason, as a Stop that stands or a host's limit does. */
+  submitDrop?: string
   /** Whether each line in `submitted` was sent as the person's own words (`asUser`), not under the mod's name. */
   asUser: boolean[]
   /** What the session's last response reported, as `$.session.usage()` answers it. */
@@ -319,6 +321,7 @@ function world(on: On, w: World, store: Record<string, unknown> | Map<string, un
   on('prompt.submit', (_$, e) => {
     w.submitted.push(e.text)
     w.asUser.push(e.origin.kind === 'plugin' && e.origin.asUser === true)
+    if (w.submitDrop !== undefined) return { drop: w.submitDrop }
     return { text: e.text }
   })
   on('session.start', (_$, e) => {
@@ -4075,7 +4078,7 @@ test('a second Fable stop while the first is held back adds no second carry-on',
 const NOT_FABLE_STOPS = [...PLAIN_STOPS.map(last_assistant_message => ({ error: 'rate_limit', last_assistant_message })), { error: 'authentication_failed' }]
 
 for (const stop of NOT_FABLE_STOPS) {
-  test(`${stop.error === 'rate_limit' ? `a plain usage-limit stop ("${stop.last_assistant_message}")` : 'a rejected sign-in'} held back for a token about to refresh moves when the refresh lands and, as before, carries on with nothing`, async ($, on) => {
+  test(`${stop.error === 'rate_limit' ? `a plain usage-limit stop ("${stop.last_assistant_message}")` : 'a rejected sign-in'} held back for a token about to refresh moves when the refresh lands and carries on once, with the mod's own line (puma-9arph.34 B1)`, async ($, on) => {
     const w = fresh()
     const clock = await guarded(on, w, {}, [100, 41])
     await start($, clock)
@@ -4083,11 +4086,18 @@ for (const stop of NOT_FABLE_STOPS) {
     await clock.settle()
     await clock.advance(2 * 60_000)
     expect(w.envSets).toEqual([])
+    expect(w.submitted).toEqual([])
     refresh(w)
     await clock.advance(60_000)
     expect(slots(w)).toEqual([SLOT2])
-    await clock.advance(5 * 60_000)
+    // The carry-on waits for the switch to land, 35 s on, as for a switch made at once.
     expect(w.submitted).toEqual([])
+    await clock.advance(36_000)
+    expect(w.submitted).toHaveLength(1)
+    expect(w.submitted[0]).toMatch(/Continue where you left off/)
+    expect(w.asUser).toEqual([false])
+    await clock.advance(5 * 60_000)
+    expect(w.submitted).toHaveLength(1)
   })
 }
 
@@ -4097,7 +4107,7 @@ for (const stop of NOT_FABLE_STOPS) {
  * is no stop, leaves a held Fable recovery as it is.
  */
 for (const stop of NOT_FABLE_STOPS) {
-  test(`${stop.error === 'rate_limit' ? `a plain usage-limit stop ("${stop.last_assistant_message}")` : 'a rejected sign-in'} after a Fable stop held back for a token about to refresh takes its place: the switch lands, and no Fable carry-on goes`, async ($, on) => {
+  test(`${stop.error === 'rate_limit' ? `a plain usage-limit stop ("${stop.last_assistant_message}")` : 'a rejected sign-in'} after a Fable stop held back for a token about to refresh takes its place: the switch lands, and the carry-on is the mod's own line, never the Fable one (puma-9arph.34 B1)`, async ($, on) => {
     const w = fresh()
     const clock = await guarded(on, w, { 'fable-continue-text': 'Go on on Fable-free ground.' }, [20, 30, 100])
     await start($, clock)
@@ -4109,7 +4119,9 @@ for (const stop of NOT_FABLE_STOPS) {
     await clock.advance(60_000)
     await clock.advance(36_000)
     expect(slots(w)).toEqual([SLOT2])
-    expect(w.submitted).toEqual([])
+    expect(w.submitted).toHaveLength(1)
+    expect(w.submitted[0]).toMatch(/Continue where you left off/)
+    expect(w.asUser).toEqual([false])
   })
 }
 
@@ -9827,4 +9839,193 @@ test('every signed-in login uses its email while signing in', async ($, on) => {
     await band.unmount()
     store.set(`health:${id}`, { kind: 'ok' })
   }
+})
+
+// ---------------------------------------------------------------- puma-9arph.34 B: the stop-log
+
+type StopLogEntry = { at: number; what: string }
+const DAY = 24 * HOUR
+const STOP_RATE_LIMIT = 'stop heard: rate_limit, login 1 in use'
+
+/** This session's stop-log: what the store holds under the session's mark. */
+const stopLogOf = (store: Map<string, unknown>, w: World): StopLogEntry[] => (store.get(`stop-log:${w.otherEnv.ACCOUNT_ROTATOR_SESSION}`) ?? []) as StopLogEntry[]
+const whats = (entries: readonly StopLogEntry[]) => entries.map(e => e.what)
+
+/** Two logins on a store the test reads, login 1 in use with room; `extra` seeds the store. */
+async function loggedWorld(on: On, w: World, extra: Record<string, unknown> = {}) {
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [60, 40]
+  w.usage['tok-2'] = [10, 30]
+  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, ...extra }))
+  return { store, clock: world(on, w, store) }
+}
+
+const PLAIN = { error: 'rate_limit', last_assistant_message: PLAIN_STOPS[0] }
+
+test('a stop, its switch and its carry-on write their entries in order under this session\'s key (puma-9arph.34 B3)', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await loggedWorld(on, w)
+  await start($, clock)
+  w.usage['tok-1'] = [100, 41]
+  await $.classic.StopFailure({ error: 'rate_limit' })
+  await clock.settle()
+  await clock.advance(36_000)
+  expect(w.submitted).toHaveLength(1)
+  expect(whats(stopLogOf(store, w))).toEqual([STOP_RATE_LIMIT, 'moved to 2', 'carry-on armed', 'carry-on entered'])
+  expect(stopLogOf(store, w).every(e => typeof e.at === 'number' && e.at >= NOW)).toBe(true)
+})
+
+test('a stop held back for a token about to refresh logs the hold, then the move and the carry-on once it lands (puma-9arph.34 B3)', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1', NOW + 5 * 60_000)
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [20, 30]
+  w.usage['tok-2'] = [10, 30]
+  const store = new Map<string, unknown>(Object.entries(TWO_LOGINS))
+  const clock = world(on, w, store)
+  await start($, clock)
+  // Spent only now: a login spent at the start would be held by the tick, which carries nothing.
+  w.usage['tok-1'] = [100, 41]
+  await $.classic.StopFailure(PLAIN)
+  await clock.settle()
+  expect(whats(stopLogOf(store, w))).toEqual([STOP_RATE_LIMIT, 'held for 2: the token in use refreshes soon'])
+  refresh(w)
+  await clock.advance(60_000)
+  await clock.advance(36_000)
+  expect(whats(stopLogOf(store, w))).toEqual([STOP_RATE_LIMIT, 'held for 2: the token in use refreshes soon', 'moved to 2', 'carry-on armed', 'carry-on entered'])
+})
+
+test('a switch made after the carry-on was armed logs that the carry-on was skipped (puma-9arph.34 B3)', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await loggedWorld(on, w)
+  await start($, clock)
+  w.usage['tok-1'] = [100, 41]
+  await $.classic.StopFailure({ error: 'rate_limit' })
+  await clock.settle()
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  await pane.press({ key: 'use-1' })
+  await clock.settle()
+  await pane.unmount()
+  await clock.advance(36_000)
+  expect(w.submitted).toEqual([])
+  expect(whats(stopLogOf(store, w))).toEqual([STOP_RATE_LIMIT, 'moved to 2', 'carry-on armed', 'carry-on skipped: another switch since'])
+})
+
+for (const [name, setup, reason] of [
+  ['rotation is off', { 'rotate-to': 'off' }, 'stayed: rotation off'],
+  ['no other login has room', {}, 'stayed: no login to move to'],
+] as const) {
+  test(`a stop that stays because ${name} logs the reason (puma-9arph.34 B4)`, async ($, on) => {
+    const w = fresh()
+    const { store, clock } = await loggedWorld(on, w, setup)
+    if (name !== 'rotation is off') w.usage['tok-2'] = [100, 100]
+    await start($, clock)
+    w.usage['tok-1'] = [100, 41]
+    await $.classic.StopFailure({ error: 'rate_limit' })
+    await clock.settle()
+    expect(w.envSets).toEqual([])
+    expect(whats(stopLogOf(store, w))).toEqual([STOP_RATE_LIMIT, reason])
+  })
+}
+
+test('a stop where Claude Code\'s policy refuses switching logs that it stayed for that (puma-9arph.34 B4)', async ($, on) => {
+  const w = fresh()
+  w.refuseEnv = true
+  const { store, clock } = await loggedWorld(on, w)
+  await start($, clock)
+  w.usage['tok-1'] = [100, 41]
+  await $.classic.StopFailure({ error: 'rate_limit' })
+  await clock.settle()
+  expect(whats(stopLogOf(store, w))).toEqual([STOP_RATE_LIMIT, 'stayed: switching blocked'])
+})
+
+test('a carry-on the engine refuses is logged in debug and in the stop-log as a drop, and is not submitted again (puma-9arph.34 B2)', async ($, on) => {
+  const w = fresh()
+  w.submitDrop = 'a Stop stands'
+  const { store, clock } = await loggedWorld(on, w)
+  await start($, clock)
+  w.usage['tok-1'] = [100, 41]
+  await $.classic.StopFailure({ error: 'rate_limit' })
+  await clock.settle()
+  await clock.advance(36_000)
+  await clock.advance(10 * 60_000)
+  expect(w.submitted).toHaveLength(1)
+  expect(debugLines(w, 'carry-on dropped: a Stop stands')).toHaveLength(1)
+  expect(whats(stopLogOf(store, w)).at(-1)).toBe('carry-on drop')
+})
+
+test('two sessions\' logs land under two keys, each untouched by the other (puma-9arph.34 B5)', async ($, on) => {
+  const w = fresh()
+  const other = [{ at: NOW - HOUR, what: 'stop heard: rate_limit, login 2 in use' }]
+  const { store, clock } = await loggedWorld(on, w, { 'stop-log:session-other': other })
+  await start($, clock)
+  w.usage['tok-1'] = [100, 41]
+  await $.classic.StopFailure({ error: 'rate_limit' })
+  await clock.settle()
+  const mine = w.otherEnv.ACCOUNT_ROTATOR_SESSION
+  expect(mine).toBeDefined()
+  expect(mine).not.toBe('session-other')
+  expect(store.get('stop-log:session-other')).toEqual(other)
+  expect(whats(stopLogOf(store, w))[0]).toBe(STOP_RATE_LIMIT)
+})
+
+test('a boot drops a stop-log whose last entry is over 7 days old and keeps a fresher one (puma-9arph.34 B6)', async ($, on) => {
+  const w = fresh()
+  const stale = [{ at: NOW - 9 * DAY, what: 'a' }, { at: NOW - 8 * DAY, what: 'b' }]
+  const fresh6 = [{ at: NOW - 9 * DAY, what: 'a' }, { at: NOW - 1 * DAY, what: 'b' }]
+  const { store, clock } = await loggedWorld(on, w, { 'stop-log:stale': stale, 'stop-log:fresh': fresh6 })
+  await start($, clock)
+  expect(store.has('stop-log:stale')).toBe(false)
+  expect(store.get('stop-log:fresh')).toEqual(fresh6)
+})
+
+test('a stop-log keeps only its last 20 entries (puma-9arph.34 B6)', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await loggedWorld(on, w, { 'rotate-to': 'off' })
+  await start($, clock)
+  for (let i = 0; i < 12; i++) {
+    await $.classic.StopFailure({ error: 'rate_limit' })
+    await clock.settle()
+  }
+  const entries = whats(stopLogOf(store, w))
+  expect(entries).toHaveLength(20)
+  expect(entries.slice(-2)).toEqual([STOP_RATE_LIMIT, 'stayed: rotation off'])
+})
+
+// RULING 6007: the stop-log holds what happened, never a secret.
+test('a stop-log holds no token, no email, no carry-on text and no engine reason (RULING 6007)', async ($, on) => {
+  const w = fresh()
+  w.submitDrop = 'queued for one@example.com with tok-2'
+  const { store, clock } = await loggedWorld(on, w, { 'fable-continue-text': 'Go on on Fable-free ground.' })
+  w.usage['tok-1'] = [20, 30, 100]
+  w.usage['tok-2'] = [10, 30, 10]
+  await start($, clock)
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  await clock.advance(36_000)
+  const entries = stopLogOf(store, w)
+  // The sweep must have looked at something: the stop, its move, the arming and the answer.
+  expect(entries.length).toBeGreaterThanOrEqual(4)
+  const text = JSON.stringify(entries)
+  for (const secret of [...Object.values(w.keychain), 'tok-1', 'tok-2', 'refresh-tok', '@', 'Go on on Fable-free ground.', 'Continue where you left off', 'queued for', FABLE_STOP.last_assistant_message]) {
+    expect(text).not.toContain(secret)
+  }
+  expect(entries.at(-1)?.what).toBe('carry-on drop')
+})
+
+// RULING 6014: a tick or a response may move to a login whose usage read failed; the stop-log names it.
+test('a tick that moves to a login whose usage read failed, with no reading, logs it and sends no carry-on (RULING 6014)', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [92, 40]
+  const failed = { 'check-error:2': { why: 'the usage call answered HTTP 429', at: NOW, isUsageRead: true }, 'usage-due:2': { next: NOW + HOUR, fails: 1, v: 1 } }
+  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, ...failed }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  await clock.advance(36_000)
+  expect(slots(w)).toEqual([SLOT2])
+  expect(w.submitted).toEqual([])
+  expect(whats(stopLogOf(store, w))).toEqual(['moved to 2 by the tick or a response, its usage read failed, no carry-on'])
 })
