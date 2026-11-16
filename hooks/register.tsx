@@ -887,7 +887,11 @@ async function fetchUsage($: Host, accessToken: string): Promise<UsageAnswer> {
   }
 }
 
-/** Who a token signs in, as Claude Code asks at a sign-in: email, organization and plan; undefined when the call fails. */
+/**
+ * Who a token signs in, as Claude Code asks at a sign-in: email, organization and plan; `who` undefined when the profile
+ * answers with no account it can read. Throws when the call gets no answer (a dropped connection, a refused tunnel): the
+ * caller's catch decides, as a throw here is no answer about who.
+ */
 async function fetchIdentity($: Host, accessToken: string): Promise<{ who?: Identity; status: number }> {
   const res = await $.http.fetch(PROFILE_URL, { headers: oauthHeaders(accessToken) })
   if (!res.ok) return { status: res.status }
@@ -1663,7 +1667,7 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
     // proof (it can carry an older Fable row). A check its gate skipped proves nothing: the stop then goes the way any other does.
     const isOnCarryOn = carriedOn !== undefined && carriedOn.since === since && (await $.clock.now()) - carriedOn.at < SETTLE_MS
     if (isProvisional && isFable && isOnCarryOn && clearedFor !== since) {
-      const hasFreshFable = await checkAccount($, active, { since: await $.clock.now() })
+      const hasFreshFable = await stopRead($, active, { since: await $.clock.now() })
       if (hasFreshFable && !isFableSpent((await getView($)).readings[active.id], await $.clock.now())) {
         clearedFor = since
         if (isConnectingChrome) isCutByVisit = true
@@ -1747,11 +1751,34 @@ function provenStopper(view: View, last: Reading | undefined): Account | undefin
   return owners.length === 1 ? view.accounts.find(a => a.id === owners[0]) : undefined
 }
 
+/** An error's name, the one part of it the stop-log keeps: its message can hold a URL or a path. */
+const errorName = (error: unknown): string => (error instanceof Error && /^\w+$/.test(error.name) ? error.name : 'unknown')
+
+/**
+ * A stop's own read of a login. Any failure inside it never ends the stop's recovery: a call that gets no answer (the
+ * profile call, a forced or since usage read) and a fault of the host's store or view during the read alike. It goes to
+ * the stop-log and the debug log, and the stop goes on as with no fresh reading (answering false), so the session moves
+ * and carries on with no person.
+ */
+async function stopRead($: Host, account: Account, gate: UsageGate): Promise<boolean> {
+  try {
+    return await checkAccount($, account, gate)
+  } catch (error) {
+    void logStop($, `stop read failed: ${errorName(error)}, login ${account.id}`)
+    try {
+      await debug($, `the stop's read of account ${account.id} failed: ${String(error)}`)
+    } catch {
+      // The stop-log line above says it already.
+    }
+    return false
+  }
+}
+
 /** Marks what a usage-limit stop on `active` spent, after reading its usage when the gate lets it; answers the need it names. */
 async function markStop($: Host, active: Account, said: string | undefined, afterRead?: () => Promise<void>): Promise<Need | undefined> {
   let need: Need | undefined
   {
-    await checkAccount($, active, 'force')
+    await stopRead($, active, 'force')
     // What stands once the stop's own read is in: the stop's writes are judged against it.
     await afterRead?.()
     const now = await $.clock.now()
@@ -2499,7 +2526,12 @@ export const register: Register = on => {
   on('classic.StopFailure', async ($, e, next) => {
     // A usage-limit stop raises Claude Code's modal; a rejected sign-in's screen nobody has read, so it gets no key.
     if (e.error === 'rate_limit') limitStopAfter = mainTurns
-    void onStopFailure($, e).catch(error => debug($, `stop failure handling failed: ${String(error)}`))
+    void onStopFailure($, e).catch(error => {
+      // A fault of the host itself (its store, its view) outside the stop's own read: the recovery ends here, and the
+      // stop-log says so.
+      void logStop($, `stop handling failed: ${errorName(error)}`)
+      return debug($, `stop failure handling failed: ${String(error)}`)
+    })
     return next(e)
   }).catch(($, e, next) => next(e))
 
