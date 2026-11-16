@@ -26,7 +26,8 @@ export type ReadingSource = 'body' | 'response' | 'stop'
 export type Mark = { pct: number; resetsAt: string; at: number }
 
 /** A usage check that failed: what failed (a stage and an HTTP status, or the error), and when, in epoch milliseconds. */
-export type CheckError = { why: string; at: number }
+/** `isUsageRead`: the usage read itself failed, which runs only once a profile call has named the sign-in. */
+export type CheckError = { why: string; at: number; isUsageRead?: true }
 
 /**
  * A run of a row's text, and how it is drawn: dim, or as a warning; plain where no tone is named. `shrink` marks what

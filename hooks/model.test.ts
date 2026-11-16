@@ -54,13 +54,39 @@ function view(
 /** A login that reports no 5-hour window: its week alone, used `week` percent, resetting at `resetsAt`. */
 const weekOnly = (week: number, resetsAt: string) => ({ sevenDay: { pct: week, resetsAt }, at: NOW })
 
-/** `view` with login 2 unread: its usage check failed and it has no reading of its own. */
+/** `view` with login 2 unread: its usage read failed and it has no reading of its own. */
 function unread2(readings: Parameters<typeof view>[0], rotateTo: RotateTo): View {
   const v = view(readings, {}, rotateTo)
   delete v.readings['2']
-  v.checkErrors = { '2': { why: 'the usage call answered HTTP 429', at: NOW } }
+  v.checkErrors = { '2': { why: 'the usage call answered HTTP 429', at: NOW, isUsageRead: true } }
   return v
 }
+
+const PROFILE_FAILED = { why: 'the profile call answered HTTP 503, so its usage is not read until it names the sign-in', at: NOW }
+
+test('Review PROFILE-1 instance: a login whose profile call named no sign-in is never a rotation target', () => {
+  const v = unread2({ '1': [100, 50], '2': [0, 0] }, 'room')
+  v.checkErrors = { '2': PROFILE_FAILED }
+  expect(pickTarget(v, NOW)).toBeUndefined()
+})
+
+test('Review PROFILE-1 class: a check that failed before the sign-in was named, or failed generically, admits the login to no pick, in every rotation and caller', () => {
+  const wrong: string[] = []
+  const generic = { why: 'the check failed (TypeError); the debug log has the rest', at: NOW }
+  for (const rotateTo of ROTATE_TOS) {
+    for (const [what, failure] of [['profile', PROFILE_FAILED], ['generic', generic]] as const) {
+      const v = unread2({ '1': [100, 50], '2': [0, 0] }, rotateTo)
+      v.checkErrors = { '2': failure }
+      const fable = unread2({ '1': [10, 50, 100], '2': [0, 0] }, rotateTo)
+      fable.checkErrors = { '2': failure }
+      if (pickTarget(v, NOW) !== undefined) wrong.push(`pickTarget ${rotateTo} ${what}`)
+      if (pickTarget(fable, NOW, 'fable') !== undefined) wrong.push(`pickTarget fable ${rotateTo} ${what}`)
+      if (fableStay(fable, NOW, false, new Set())?.reason !== (rotateTo === 'off' ? 'off' : 'no-room')) wrong.push(`fableStay ${rotateTo} ${what}`)
+      if (stuckText({ ...v, isSwitchBlocked: true }, NOW) !== undefined) wrong.push(`stuckText ${rotateTo} ${what}`)
+    }
+  }
+  expect(wrong).toEqual([])
+})
 
 const ROTATE_TOS: RotateTo[] = ['room', 'off', 'reset', 'order']
 
