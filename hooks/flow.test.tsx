@@ -623,6 +623,25 @@ test('with rotation disabled, a spent login or a turn that dies on the usage lim
   await pane.unmount()
 })
 
+test('a turn that dies on the usage limit moves to a login whose usage check failed with no reading, when no read login has room, and carries on (puma-9arph.34)', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [60, 40]
+  // Login 2's check failed and it has no reading; its next read is not due within the test.
+  const failed = { 'check-error:2': { why: 'the usage call answered HTTP 429', at: NOW, isUsageRead: true }, 'usage-due:2': { next: NOW + HOUR, fails: 1, v: 1 } }
+  const clock = world(on, w, { ...TWO_LOGINS, ...failed })
+  await start($, clock)
+  expect(w.envSets).toEqual([])
+  w.usage['tok-1'] = [100, 41]
+  await $.classic.StopFailure({ error: 'rate_limit' })
+  await clock.settle()
+  expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
+  await clock.advance(36_000)
+  expect(w.submitted).toHaveLength(1)
+  expect(w.submitted[0]).toMatch(/Continue where you left off/)
+})
+
 test('where Claude Code\'s security policy refuses switching, as on a Team seat, the session says so at its start and once, then stops trying; a press still answers', async ($, on) => {
   const w = fresh()
   w.refuseEnv = true
@@ -2336,7 +2355,8 @@ test('a usage check that fails shows its HTTP status on the login\'s line and in
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
   const failedTexts = (await pane.findAll({ type: 'Text', text: /^(\d\d:\d\d Failed to update| \(HTTP 429\)|, next try \d\d:\d\d)$/ })).map(t => t.text?.replace(/\d\d:\d\d/g, 'HH:MM'))
   expect(failedTexts).toEqual(['HH:MM Failed to update', ' (HTTP 429)', ', next try HH:MM'])
-  expect(store.get('check-error:2')).toEqual({ why: 'the usage call answered HTTP 429', at: NOW + USAGE_CLAIM_WAIT_MS })
+  // A failed usage read is marked as one (Review PROFILE-1): the rotation may still try the login, its sign-in named.
+  expect(store.get('check-error:2')).toEqual({ why: 'the usage call answered HTTP 429', at: NOW + USAGE_CLAIM_WAIT_MS, isUsageRead: true })
   w.failing = {}
   await clock.advance(10 * 60_000)
   await pane.redraw()
@@ -7114,8 +7134,9 @@ test('a failure another session stores for login 2 shows on this session\'s row,
   expect(lineOne(store, '2')).toMatch(new RegExp(`  updated ${localTime(readAt)}$`))
 })
 
-// The pick treats a login with a failure and no reading as unread (isUnread). A stop's forced read stored no failure
-// for a usage call that threw, so it must not now: the pick stays as it was.
+// The launch pick passes over a login with a failure and no reading (isUnread), and the rotation takes one only
+// after every read login with room. A stop's forced read stored no failure for a usage call that threw, so it
+// must not now: the pick stays as it was.
 test('a forced read whose usage call throws stores no failure, so a login with no reading stays in the pick', async ($, on) => {
   const w = fresh()
   w.keychain['Claude Code-credentials'] = blob('tok-1')

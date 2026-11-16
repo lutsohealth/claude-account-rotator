@@ -1062,7 +1062,7 @@ async function requestUsage($: Host, account: Account, accessToken: string, gate
     // The row says so in the usage call's own words: that back-off is the next try of what failed, which the check's
     // generic failure would not say. Only the error's kind is stored, as the check's own failure stores.
     const kind = error instanceof Error ? error.name : 'an error'
-    await saveCheckError($, account.id, `the usage call threw (${kind})`).catch(() => undefined)
+    await saveCheckError($, account.id, `the usage call threw (${kind})`, true).catch(() => undefined)
     throw new UsageCallThrew(String(error))
   }
   const at = await $.clock.now()
@@ -1121,7 +1121,7 @@ async function checkAccount($: Host, account: Account, gate: UsageGate): Promise
     else if (isLive && holder !== undefined) {
       const usage = await requestUsage($, account, credential.accessToken, gate)
       if (usage?.kind === 'rejected') health = { kind: 'login-needed', why: 'sign-in rejected' }
-      if (usage?.kind === 'failed') await saveCheckError($, account.id, failedWhy(usage))
+      if (usage?.kind === 'failed') await saveCheckError($, account.id, failedWhy(usage), true)
       if (usage?.kind === 'ok') {
         await saveCheckError($, account.id, undefined)
         const read = readingFromUsage(usage.body, now)
@@ -1183,8 +1183,11 @@ async function checkAll($: Host, isEvery = true): Promise<void> {
 /** The longest failure the pane and the store keep, in characters. */
 const CHECK_ERROR_MAX = 200
 
-/** Records, for every session, that a login's usage check failed and why; undefined clears it once a check succeeds. */
-async function saveCheckError($: Host, id: string, why: string | undefined): Promise<void> {
+/**
+ * Records, for every session, that a login's usage check failed and why; undefined clears it once a check succeeds.
+ * `isUsageRead`: the usage read itself failed, so the sign-in was named and the rotation may still try the login.
+ */
+async function saveCheckError($: Host, id: string, why: string | undefined, isUsageRead = false): Promise<void> {
   if (why === undefined) {
     // Another session's failure counts too: the store, not this session's view, says whether one stands.
     if ((await getView($)).checkErrors?.[id] === undefined && (await $.store.get(`check-error:${id}`)) === undefined) return
@@ -1196,7 +1199,7 @@ async function saveCheckError($: Host, id: string, why: string | undefined): Pro
     return
   }
   await debug($, `account ${id}: ${why}`)
-  const failure: CheckError = { why: why.slice(0, CHECK_ERROR_MAX), at: await $.clock.now() }
+  const failure: CheckError = { why: why.slice(0, CHECK_ERROR_MAX), at: await $.clock.now(), ...(isUsageRead ? { isUsageRead: true as const } : {}) }
   await $.store.set(`check-error:${id}`, failure)
   await setView($, v => ({ ...v, checkErrors: { ...v.checkErrors, [id]: failure } }))
 }
