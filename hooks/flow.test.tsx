@@ -10248,6 +10248,31 @@ test('a switch in flight that throws frees the next one: a later tick switches n
   expect(slots(w)).toEqual([SLOT2])
 })
 
+// Review r1 WAITERS-RACE: callers released from one wait each went on to switch, so two presses gave three switches.
+for (const [name, keys] of [
+  ['two Use now presses', ['use-2', 'use-2']],
+  ['Use now and Rotate now', ['use-2', 'rotate']],
+] as const) {
+  test(`Review r1 WAITERS-RACE: ${name} waiting on one switch in flight start no second switch (puma-9arph.38)`, async ($, on) => {
+    const w = fresh()
+    const { clock } = await loggedWorld(on, w)
+    let open: () => void = () => undefined
+    const gate = new Promise<void>(resolve => { open = resolve })
+    let writes = 0
+    w.beforeEnv = () => (writes++ === 0 ? gate : Promise.resolve())
+    w.usage['tok-1'] = [100, 41]
+    await start($, clock)
+    await settleReal(clock)
+    const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+    for (const key of keys) void pane.press({ key })
+    await settleReal(clock)
+    open()
+    await settleReal(clock)
+    await pane.unmount()
+    expect([name, w.toasts.filter(isSwitchedToast).length]).toEqual([name, 1])
+  })
+}
+
 test('a stop where Claude Code\'s policy refuses switching logs that it stayed for that (puma-9arph.34 B4)', async ($, on) => {
   const w = fresh()
   w.refuseEnv = true
