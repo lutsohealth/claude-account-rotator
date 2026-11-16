@@ -11030,3 +11030,73 @@ test('a stop\'s rotation that moves the session while a late switch\'s put-back 
   const id = view()?.activeId ?? ''
   expect([id, slots(w).at(-1)]).toEqual([id, SLOT_OF[id]])
 })
+
+// Review r1 PB_PRESS_VIEW (Codex, #107): a press that asks during the point-back's own slot write publishes first.
+async function pbPressView($: Engine, on: On) {
+  const w = fresh()
+  const { clock } = await loggedWorld(on, w, THREE_LOGINS)
+  w.keychain[await keychainItem(SLOT3)] = blob('tok-3')
+  w.usage['tok-3'] = [10, 30]
+  w.weekResets = { 'tok-2': OTHER_WEEK }
+  const view = watchedView(on)
+  await start($, clock)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  await pane.press({ key: 'use-2' })
+  await clock.advance(5 * 60_000)
+  w.limits = LOGIN_ONE_RESPONSE
+  let open: () => void = () => undefined
+  const gate = new Promise<void>(resolve => { open = resolve })
+  let writes = 0
+  w.beforeEnv = () => (writes++ === 0 ? gate : Promise.resolve())
+  void $.session.measure({ context: { window: 200_000 }, rateLimits: w.limits, changed: ['rateLimits'] })
+  await settleReal(clock)
+  expect(writes).toBe(1)
+  await pane.press({ key: 'use-3' })
+  open()
+  await settleReal(clock)
+  await pane.unmount()
+  return { w, view }
+}
+
+test('Review r1 PB_PRESS_VIEW: a press made while the point-back writes its slot stands, in the slot and the view (puma-9arph.41)', async ($, on) => {
+  const { w, view } = await pbPressView($, on)
+  expect([view()?.activeId, slots(w).at(-1)]).toEqual(['3', SLOT3])
+})
+
+test('Review r1 PB_PRESS_VIEW class: after a press during the point-back, the slot is the login the view names (puma-9arph.41)', async ($, on) => {
+  const { w, view } = await pbPressView($, on)
+  const id = view()?.activeId ?? ''
+  expect([id, slots(w).at(-1)]).toEqual([id, SLOT_OF[id]])
+})
+
+// Review r1 REFUSED_INTENT (Codex, #107): a press whose slot write is refused leaves the point-back of the switch before it free.
+async function refusedIntent($: Engine, on: On) {
+  const w = fresh()
+  const { clock } = await loggedWorld(on, w, THREE_LOGINS)
+  w.keychain[await keychainItem(SLOT3)] = blob('tok-3')
+  w.usage['tok-3'] = [10, 30]
+  w.weekResets = { 'tok-2': OTHER_WEEK }
+  const view = watchedView(on)
+  await start($, clock)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  await pane.press({ key: 'use-2' })
+  w.refuseEnv = true
+  await pane.press({ key: 'use-3' })
+  w.refuseEnv = false
+  await clock.advance(5 * 60_000)
+  w.limits = LOGIN_ONE_RESPONSE
+  await $.session.measure({ context: { window: 200_000 }, rateLimits: w.limits, changed: ['rateLimits'] })
+  await settleReal(clock)
+  await pane.unmount()
+  return { w, view }
+}
+
+test('Review r1 REFUSED_INTENT: a refused press leaves the point-back free to point the session back (puma-9arph.41)', async ($, on) => {
+  const { w, view } = await refusedIntent($, on)
+  expect([view()?.activeId, slots(w).at(-1)]).toEqual(['1', ''])
+})
+
+test('Review r1 REFUSED_INTENT class: a refused ask strands no pending switch (puma-9arph.41)', async ($, on) => {
+  const { view } = await refusedIntent($, on)
+  expect(view()?.pending).toBeUndefined()
+})

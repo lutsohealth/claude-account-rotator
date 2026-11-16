@@ -1578,10 +1578,13 @@ async function switchNow($: Host, target: Account, why: string, isQuiet: boolean
   if (isGivenUp()) return givenUp()
   await setView($, v => ({ ...v, held: undefined }))
   await keepChrome($)
+  const asked = slotIntent
   try {
     mine = claimSlot(target.slot)
     await useSlot($, target.slot)
   } catch (error) {
+    // The slot did not move: the ask goes back to the one before, unless a newer one came, so a point-back is not held.
+    if (slotIntent?.seq === mine) slotIntent = asked
     if (!isPolicyRefusal(error)) throw error
     // A press of Use now or Rotate now gets an answer, even once the notice has shown.
     if (!(await blocked($))) tell($, blockedText(await getView($)))
@@ -1674,15 +1677,16 @@ async function settlePending($: Host, isResponse: boolean): Promise<void> {
     // It asks only while the switch it undoes still owns the slot, checked with no await before the ask: a switch
     // that asked since (a press between its slot write and its view write) owns the slot and the view.
     if (slotIntent !== undefined && slotIntent.seq !== pendingSeq) return
-    claimSlot(from.slot)
+    const back = claimSlot(from.slot)
     try {
-      // A press that asks during this write publishes its own login after it: the slot follows that ask.
       await settleSlot($)
       movedAt = now
       moves += 1
     } catch (error) {
       await debug($, `switch back failed: ${String(error)}`)
     }
+    // A press that asked during this write owns the slot, which followed it, and the view, which it may have published.
+    if (slotIntent?.seq !== back) return
     await setView($, v => ({ ...v, activeId: from.id, pending: undefined }))
     tell(
       $,
