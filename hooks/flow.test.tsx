@@ -10091,6 +10091,45 @@ test('with every login spent, a login a usage read frees before the time owed is
   expect([w.toasts.filter(isWaitNotice).length, w.notices.filter(isWaitNotice).length]).toEqual([1, 1])
 })
 
+test('with every login spent and no stop, the tick owes no carry-on: no notice, no line, nothing sent once a login frees up (puma-9arph.35)', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await loggedWorld(on, w)
+  // Both logins read spent before any turn: the tick's own rotation finds none to move to, with no stop to carry on.
+  w.usage['tok-1'] = [100, 41]
+  w.usage['tok-2'] = [100, 30]
+  await start($, clock)
+  await clock.advance(Date.parse('2026-10-12T12:00:00Z') - clock.now() + 10 * 60_000)
+  expect([w.toasts.filter(isWaitNotice).length, w.notices.filter(isWaitNotice).length]).toEqual([0, 0])
+  expect(whats(stopLogOf(store, w)).filter(isWaitLine)).toEqual([])
+  expect(w.submitted).toEqual([])
+})
+
+test('a rejected sign-in with every other login spent owes no carry-on: it waits for a person, as the README says (puma-9arph.35)', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await loggedWorld(on, w)
+  w.usage['tok-2'] = [100, 30]
+  await start($, clock)
+  await $.classic.StopFailure({ error: 'authentication_failed' })
+  await clock.settle()
+  await clock.advance(Date.parse('2026-10-12T12:00:00Z') - clock.now() + 10 * 60_000)
+  expect([w.toasts.filter(isWaitNotice).length, w.notices.filter(isWaitNotice).length]).toEqual([0, 0])
+  expect(whats(stopLogOf(store, w)).filter(isWaitLine)).toEqual([])
+})
+
+test('a carry-on owed once a login frees up survives a hot reload, then /clear: the rebound view holds it again (puma-9arph.35)', async ($, on) => {
+  const owed = { at: Date.parse('2026-10-12T12:00:00Z'), from: '1' }
+  expect((await reloadThenClear($, on, { carryDue: owed }))?.carryDue).toEqual(owed)
+})
+
+test('with every login spent, the band says when the first login frees up (puma-9arph.35)', async ($, on) => {
+  const w = fresh()
+  const { clock } = await loggedWorld(on, w)
+  w.usage['tok-1'] = [100, 41]
+  w.usage['tok-2'] = [100, 30]
+  await start($, clock)
+  expect(await bandText($)).toMatch(/^Every Claude account is near its limit; the next frees up /)
+})
+
 test('a stop where Claude Code\'s policy refuses switching logs that it stayed for that (puma-9arph.34 B4)', async ($, on) => {
   const w = fresh()
   w.refuseEnv = true
