@@ -133,17 +133,22 @@ def note(why: str) -> None:
 def own_login_reads_not_signed_in() -> bool:
     """True only when `claude auth status` on Claude Code's own login exits 1 with authMethod "none".
 
-    Runs the next claude on PATH that is not this file, `auth status` only, so no session starts. Whatever else
+    Runs the first claude on PATH that is not this file and can run, `auth status` only, so no session starts. Whatever else
     happens (exit 0, a timeout, no JSON, another authMethod, no claude to run) is unknown and reads False. The
     output is parsed here and never leaves this function: only the exit code and authMethod are read.
     """
-    targets = claude_candidates()
-    if not targets:
+    status = None
+    for target in claude_candidates():  # a claude that cannot run is passed over, as the start passes it over
+        try:
+            status = subprocess.Popen(
+                [target, "auth", "status"], env={**os.environ, SLOT_VAR: ""}, stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True)
+            break
+        except OSError:
+            continue
+    if status is None:
         return False
     try:
-        status = subprocess.Popen(
-            [targets[0], "auth", "status"], env={**os.environ, SLOT_VAR: ""}, stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True)
         try:
             answer, _ = status.communicate(timeout=AUTH_STATUS_TIMEOUT_SECONDS)
         except subprocess.TimeoutExpired:
