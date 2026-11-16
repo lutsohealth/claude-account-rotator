@@ -205,6 +205,8 @@ export type View = {
   activeId: string
   /** Set after a switch until a response shows the new login's usage. */
   pending?: { id: string; from: string; since: number }
+  /** This session only: the switch or point-back running now, by its token; absent while none runs (hooks/model.ts mayWrite). */
+  owner?: { token: number }
   /** Account id whose removal waits for a second press. */
   removing?: string
   footer: FooterStyle
