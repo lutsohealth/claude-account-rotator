@@ -98,6 +98,8 @@ import {
   SwitchHeld,
   requestFrom,
   requestsDir,
+  escapeArgv,
+  escapeHeldBack,
 } from './model'
 import type { Credential, Identity, Need, StayReason } from './model'
 import { Band, Footer, PANE_COLUMNS, Pane } from './view'
@@ -208,6 +210,11 @@ let carriedFor: number | undefined
 let carriedOn: { since: number | undefined; at: number } | undefined
 /** When the switch began whose one Fable stop on its carry-on the login moved to's usage read cleared. */
 let clearedFor: number | undefined
+/** The turns open now, the main loop's and every agent's or teammate's, by id: a key sent while one runs would answer its dialog. */
+const openTurns = new Set<string>()
+/** The main loop's turns started this session, and how many had started at the last usage-limit stop: equal while its modal can stand. */
+let mainTurns = 0
+let limitStopAfter: number | undefined
 /** How many switches this session has made: a carry-on goes out only if no switch came after the one it follows. */
 let moves = 0
 /** Logins a switch to did not take this session: the rotation leaves them be; Use now still tries. */
@@ -549,6 +556,8 @@ function logStop($: Host, what: string): Promise<void> {
       await debug($, `stop-log failed: ${String(error)}`)
     }
   })
+  // Its own catch: whatever the debug line does, the next entry still writes.
+  stopLogChain = stopLogChain.catch(() => undefined)
   return stopLogChain
 }
 
@@ -1530,10 +1539,72 @@ async function carryOn($: Host, need?: Need): Promise<void> {
   const view = await getView($)
   const kept = need === 'fable' ? view.fableContinueText : undefined
   carriedOn = { since: view.pending?.since, at: await $.clock.now() }
-  const answer = await $.prompt.submit(kept === undefined ? { text: CONTINUE } : { text: kept, asUser: true })
-  // The engine's own refusal (a Stop stands, a host's limit): said in debug, with its reason, and not tried again.
-  if (answer.drop !== undefined) await debug($, `carry-on dropped: ${answer.drop}`)
-  void logStop($, answer.drop === undefined ? 'carry-on entered' : 'carry-on drop')
+  await sendCarryOn($, kept === undefined ? { text: CONTINUE } : { text: kept, asUser: true })
+}
+
+/** How long after a carry-on goes out the mod looks whether Claude Code's limit modal holds it queued. */
+const MODAL_LOOK_MS = 5_000
+/** How long after its one Escape a carry-on still queued is given up on. */
+const MODAL_GIVE_UP_MS = 10_000
+
+/**
+ * Submits a carry-on and logs its answer, which comes once the prompt enters. After a usage-limit stop Claude Code
+ * shows a modal that holds a submitted prompt queued, and no mod call closes it: 5 s on, a carry-on not entered yet
+ * gets one Escape to the session's own pane (freeQueued), which closes the modal and lets it enter.
+ */
+async function sendCarryOn($: Host, prompt: { text: string; asUser?: true }): Promise<void> {
+  let isSettled = false
+  $.clock.after(MODAL_LOOK_MS, () => {
+    void freeQueued($, () => isSettled).catch(error => debug($, `carry-on watch failed: ${String(error)}`))
+  })
+  try {
+    const answer = await $.prompt.submit(prompt)
+    // The engine's own refusal (a Stop stands, a host's limit): said in debug, with its reason, and not tried again.
+    if (answer.drop !== undefined) await debug($, `carry-on dropped: ${answer.drop}`)
+    void logStop($, answer.drop === undefined ? 'carry-on entered' : 'carry-on drop')
+  } finally {
+    isSettled = true
+  }
+}
+
+/** What this session knows of a queued carry-on's Escape without asking: whether a limit stop's modal can stand, and how many turns are open. */
+const known = () => ({ isLimitStopLast: limitStopAfter === mainTurns, openTurns: openTurns.size })
+
+/**
+ * Sends one Escape to this session's Orca pane for a carry-on still queued, where escapeHeldBack finds nothing
+ * holding it back. One a carry-on: still queued 10 s on, it is given up on. Each outcome goes to the stop-log.
+ */
+async function freeQueued($: Host, isSettled: () => boolean): Promise<void> {
+  if (isSettled()) return
+  let why = escapeHeldBack(known())
+  let pane: string | undefined
+  if (why === undefined) {
+    const box = await $.prompt.fill({ text: '', mode: 'append' })
+    pane = await $.env.get('ORCA_TERMINAL_HANDLE')
+    why = escapeHeldBack({ ...known(), fill: { refusal: box.refusal, pane } })
+  }
+  if (isSettled()) return
+  if (why !== undefined || !pane) {
+    void logStop($, `carry-on queued, no key: ${why ?? 'no Orca pane'}`)
+    return
+  }
+  const code = await sendEscape($, pane)
+  void logStop($, `carry-on queued under a dialog: one Escape to this session's pane (exit ${code ?? 'none'})`)
+  $.clock.after(MODAL_GIVE_UP_MS, () => {
+    if (!isSettled()) void logStop($, 'carry-on still queued after the Escape: gave up')
+  })
+}
+
+/** Sends escapeArgv's one Escape; answers the exit code, null where it did not run. */
+async function sendEscape($: Host, pane: string): Promise<number | null> {
+  const child = $.process.spawn({ argv: escapeArgv(pane) })
+  try {
+    // Its output goes unread: the exit code says whether the key went.
+    for await (const chunk of child) void chunk
+  } catch (error) {
+    await debug($, `Escape failed: ${String(error)}`)
+  }
+  return child.result.then(r => r?.code ?? null, () => null)
 }
 
 /**
@@ -1862,9 +1933,10 @@ function connectChrome($: Host, isQuiet = false, tryId?: string): Promise<Chrome
     if (isConnected) isChromeAwaited = false
     isCutByVisit = false
     if (text !== undefined) {
+      const send = () => void sendCarryOn($, { text }).catch(error => debug($, `carry-on failed: ${String(error)}`))
       // Once the move back lands: until then the turn's requests may go out as the extension's account.
-      if (isMoved) $.clock.after(SETTLE_MS, () => void $.prompt.submit({ text }))
-      else void $.prompt.submit({ text })
+      if (isMoved) $.clock.after(SETTLE_MS, send)
+      else send()
     }
     return done?.answer
   })()
@@ -2425,9 +2497,23 @@ export const register: Register = on => {
   })
 
   on('classic.StopFailure', async ($, e, next) => {
+    // A usage-limit stop raises Claude Code's modal; a rejected sign-in's screen nobody has read, so it gets no key.
+    if (e.error === 'rate_limit') limitStopAfter = mainTurns
     void onStopFailure($, e).catch(error => debug($, `stop failure handling failed: ${String(error)}`))
     return next(e)
   }).catch(($, e, next) => next(e))
+
+  // The turns open now, any loop's, and how many the main loop began: what a queued carry-on's Escape waits on.
+  on('turn.start', async ($, e, next) => {
+    openTurns.add(e.turnId)
+    if (e.agentId === undefined) mainTurns += 1
+    return next(e)
+  })
+
+  on('turn.complete', async ($, e, next) => {
+    openTurns.delete(e.turnId)
+    return next(e)
+  })
 
   // The start and a compaction keep $.state; these three reset it, and session.start does not fire after them.
   on('classic.SessionStart', { source: ['clear', 'resume', 'fork'] }, async ($, e, next) => {
