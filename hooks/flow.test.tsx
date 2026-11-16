@@ -10851,3 +10851,181 @@ test('a carry-on whose turn dies on the usage limit again moves to the next logi
     noKey('no dialog holds it'),
   ])
 })
+
+// ---------------------------------------------------------------- puma-9arph.41: the slot and the view name one login
+
+/** Three logins by order, login 1 spent: the start's rotation to login 2 writes its slot through `gates[0]`, the next through `gates[1]`. */
+async function hungStart($: Engine, on: On, gates: (() => Promise<void>)[]) {
+  const w = fresh()
+  const { store, clock } = await loggedWorld(on, w, { ...THREE_LOGINS, 'rotate-to': 'order' })
+  w.keychain[await keychainItem(SLOT3)] = blob('tok-3')
+  w.usage['tok-3'] = [10, 30]
+  let writes = 0
+  w.beforeEnv = () => (gates[writes++] ?? (() => Promise.resolve()))()
+  w.usage['tok-1'] = [100, 41]
+  await start($, clock)
+  await settleReal(clock)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  return { w, store, clock, pane }
+}
+
+test('F104-2 a late switch landing between the press\'s slot write and its view write leaves the slot on the login pressed for', async ($, on) => {
+  let openLate: () => void = () => undefined
+  const late = new Promise<void>(resolve => { openLate = resolve })
+  // The press's own slot write lets the given-up switch land at the same moment.
+  const { w, clock, pane } = await hungStart($, on, [() => late, () => { openLate(); return Promise.resolve() }])
+  void pane.press({ key: 'use-3' })
+  await settleReal(clock)
+  await clock.advance(30_000)
+  await settleReal(clock)
+  await settleReal(clock)
+  await pane.unmount()
+  expect([slots(w).at(-1), w.toasts.filter(t => /^Switched to Claude account three@/.test(String(t))).length]).toEqual([SLOT3, 1])
+})
+
+/** The slot of each login of THREE_LOGINS, by id. */
+const SLOT_OF: Record<string, string> = { '1': '', '2': SLOT2, '3': SLOT3 }
+
+/**
+ * Three logins by order, login 1 spent, the world only: the test registers its hooks, then starts. The start's rotation to
+ * login 2 writes its slot through `gates[0]`, the next through `gates[1]`.
+ */
+async function hungWorld(on: On, gates: (() => Promise<void>)[]) {
+  const w = fresh()
+  const { clock } = await loggedWorld(on, w, { ...THREE_LOGINS, 'rotate-to': 'order' })
+  w.keychain[await keychainItem(SLOT3)] = blob('tok-3')
+  w.usage['tok-3'] = [10, 30]
+  let writes = 0
+  w.beforeEnv = () => (gates[writes++] ?? (() => Promise.resolve()))()
+  w.usage['tok-1'] = [100, 41]
+  return { w, clock }
+}
+
+/**
+ * Holds the first read of the view that the test's `arm`ed condition meets, until `open()`: the window of an engine call
+ * a function makes between two writes. `isAfterRead` holds it once the read is taken, so its caller goes on with what
+ * was read. Registered before the session starts, as a hook is; the condition is armed once the test has the world.
+ */
+function holdViewRead(on: On, isAfterRead = false) {
+  let open: () => void = () => undefined
+  const gate = new Promise<void>(resolve => { open = resolve })
+  let when: () => boolean = () => false
+  let isHeld = false
+  on('state.get', async (_$, e, next) => {
+    if (e.key !== 'view' || isHeld || !when()) return next(e)
+    isHeld = true
+    if (isAfterRead) {
+      const read = await next(e)
+      await gate
+      return read
+    }
+    await gate
+    return next(e)
+  })
+  return { arm: (condition: () => boolean) => { when = condition }, open, isHeld: () => isHeld }
+}
+
+/** A response of the session's last turn that names login 1, by its week. */
+const LOGIN_ONE_RESPONSE: SessionRateLimit[] = [
+  { kind: 'five_hour', percentUsed: 93, resetsAt: '2026-10-12T12:00:00Z' },
+  { kind: 'seven_day', percentUsed: 40, resetsAt: '2026-10-18T03:00:00Z' },
+]
+
+test('a point-back whose slot write is landed and its view write not yet, with a given-up switch landing then, leaves the slot on the login the view names', async ($, on) => {
+  let openLate: () => void = () => undefined
+  const late = new Promise<void>(resolve => { openLate = resolve })
+  const { w, clock } = await hungWorld(on, [() => late])
+  const view = watchedView(on)
+  const held = holdViewRead(on)
+  w.weekResets = { 'tok-3': OTHER_WEEK }
+  await start($, clock)
+  await settleReal(clock)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  // The press gives up on the hung switch to login 2 and lands on login 3.
+  void pane.press({ key: 'use-3' })
+  await settleReal(clock)
+  await clock.advance(30_000)
+  await settleReal(clock)
+  expect(slots(w)).toEqual([SLOT3])
+  // Minutes on, responses still use login 1: the point-back writes login 1's slot, then waits on its next read of the view.
+  w.limits = LOGIN_ONE_RESPONSE
+  await clock.advance(5 * 60_000)
+  await settleReal(clock)
+  held.arm(() => w.envSets.length === 2)
+  void $.session.measure({ context: { window: 200_000 }, rateLimits: w.limits, changed: ['rateLimits'] })
+  await settleReal(clock)
+  expect(held.isHeld()).toBe(true)
+  openLate()
+  await settleReal(clock)
+  held.open()
+  await settleReal(clock)
+  await settleReal(clock)
+  await pane.unmount()
+  const id = view()?.activeId ?? ''
+  expect([id, slots(w).at(-1)]).toEqual([id, SLOT_OF[id]])
+})
+
+test('a point-back that runs while a press sits between its slot write and its view write leaves the slot and the view on the login pressed for', async ($, on) => {
+  const w = fresh()
+  const { clock } = await loggedWorld(on, w, THREE_LOGINS)
+  w.keychain[await keychainItem(SLOT3)] = blob('tok-3')
+  w.usage['tok-3'] = [10, 30]
+  w.weekResets = { 'tok-2': OTHER_WEEK }
+  const view = watchedView(on)
+  const held = holdViewRead(on)
+  await start($, clock)
+  await settleReal(clock)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  await pane.press({ key: 'use-2' })
+  await settleReal(clock)
+  expect(slots(w)).toEqual([SLOT2])
+  // Minutes on, responses still use login 1: the switch to login 2 is due its point-back.
+  w.limits = LOGIN_ONE_RESPONSE
+  await clock.advance(5 * 60_000)
+  await settleReal(clock)
+  // The press for login 3 writes its slot and waits on its next read of the view, before it publishes.
+  held.arm(() => w.envSets.length === 2)
+  void pane.press({ key: 'use-3' })
+  await settleReal(clock)
+  expect(held.isHeld()).toBe(true)
+  void $.session.measure({ context: { window: 200_000 }, rateLimits: w.limits, changed: ['rateLimits'] })
+  await settleReal(clock)
+  held.open()
+  await settleReal(clock)
+  await settleReal(clock)
+  await pane.unmount()
+  expect([view()?.activeId, slots(w).at(-1)]).toEqual(['3', SLOT3])
+})
+
+test('a stop\'s rotation that moves the session while a late switch\'s put-back holds the view it read leaves the slot on the login the view names', async ($, on) => {
+  let openLate: () => void = () => undefined
+  const late = new Promise<void>(resolve => { openLate = resolve })
+  const { w, clock } = await hungWorld(on, [() => late])
+  const view = watchedView(on)
+  const held = holdViewRead(on, true)
+  await start($, clock)
+  await settleReal(clock)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  void pane.press({ key: 'use-3' })
+  await settleReal(clock)
+  await clock.advance(30_000)
+  await settleReal(clock)
+  expect(slots(w)).toEqual([SLOT3])
+  // The press's switch has settled by the stop: the stop rotates, it does not ride the settle.
+  await clock.advance(40_000)
+  await settleReal(clock)
+  // The given-up switch lands: its put-back reads the view (login 3) and waits there.
+  held.arm(() => w.envSets.length === 2)
+  openLate()
+  await settleReal(clock)
+  expect(held.isHeld()).toBe(true)
+  w.usage['tok-3'] = [100, 41]
+  void $.classic.StopFailure({ error: 'rate_limit' })
+  await settleReal(clock)
+  held.open()
+  await settleReal(clock)
+  await settleReal(clock)
+  await pane.unmount()
+  const id = view()?.activeId ?? ''
+  expect([id, slots(w).at(-1)]).toEqual([id, SLOT_OF[id]])
+})
