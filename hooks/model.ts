@@ -193,13 +193,14 @@ export function pickTarget(view: View, now: number, need?: Need): Account | unde
     a =>
       a.id !== view.activeId &&
       view.health[a.id]?.kind === 'ok' &&
-      !isUnread(view, a) &&
       !isSpent(view.readings[a.id], now, view.weekLeave) &&
       !(isFable && isFableSpent(view.readings[a.id], now)),
   )
-  // A login never read for the Fable week may have none: it is taken only when no read one has room.
-  const read = open.filter(a => view.readings[a.id]?.fable !== undefined)
-  const ready = isFable && read.length > 0 ? read : open
+  // The first tier with a login in it: for the Fable week, a login read for it; then a login whose usage
+  // was read; then one whose check failed with no reading, still tried, as it may have room no one can show.
+  // A tier, not a sort: an unread login reads as all room, and `order` walks the list, not a ranking.
+  const fableRead = isFable ? open.filter(a => view.readings[a.id]?.fable !== undefined) : []
+  const ready = [fableRead, open.filter(a => !isUnread(view, a)), open].find(tier => tier.length > 0) ?? []
   // A login with no 5-hour window serves what its week has left.
   const available = (a: Account) => availableNow(view.readings[a.id], now, view.weekLeave) ?? roomLeft(view.readings[a.id]?.sevenDay, now) ?? 100
   const fableRoom = (a: Account) => 100 - (windowPct(view.readings[a.id]?.fable, now) ?? 0)
