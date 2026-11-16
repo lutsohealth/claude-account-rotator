@@ -102,6 +102,7 @@ import {
   requestsDir,
   escapeArgv,
   escapeHeldBack,
+  raisesLimitModal,
 } from './model'
 import type { Credential, Identity, Need, StayReason } from './model'
 import { Band, Footer, PANE_COLUMNS, Pane } from './view'
@@ -2678,8 +2679,8 @@ export const register: Register = on => {
   })
 
   on('classic.StopFailure', async ($, e, next) => {
-    // A usage-limit stop raises Claude Code's modal; a rejected sign-in's screen nobody has read, so it gets no key.
-    if (e.error === 'rate_limit') limitStopAfter = mainTurns
+    // Only a stop that raises the limit modal arms the Escape; onStopFailure's wider list says which stops switch at all.
+    if (raisesLimitModal(e.error)) limitStopAfter = mainTurns
     void onStopFailure($, e).catch(error => {
       // A fault of the host itself (its store, its view) outside the stop's own read: the recovery ends here, and the
       // stop-log says so.
