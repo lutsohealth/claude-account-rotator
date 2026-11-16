@@ -10273,6 +10273,93 @@ for (const [name, keys] of [
   })
 }
 
+test('a stop that gives up on a hung switch after a press gave up on it leaves the press\'s own switch standing (puma-9arph.39)', async ($, on) => {
+  const w = fresh()
+  const { clock } = await loggedWorld(on, w, { ...THREE_LOGINS, 'rotate-to': 'order' })
+  w.keychain[await keychainItem(SLOT3)] = blob('tok-3')
+  w.usage['tok-3'] = [10, 30]
+  // The start's rotation to login 2 hangs for ever; the press's own switch to login 3 hangs until opened.
+  const hung = new Promise<void>(() => undefined)
+  let open: () => void = () => undefined
+  const gate = new Promise<void>(resolve => { open = resolve })
+  let writes = 0
+  w.beforeEnv = () => { const n = writes++; return n === 0 ? hung : n === 1 ? gate : Promise.resolve() }
+  w.usage['tok-1'] = [100, 41]
+  await start($, clock)
+  await settleReal(clock)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  void pane.press({ key: 'use-3' })
+  await settleReal(clock)
+  await clock.advance(10_000)
+  void $.classic.StopFailure({ error: 'rate_limit' })
+  await settleReal(clock)
+  // The press gives up on the hung switch: its own switch to login 3 starts and its slot write waits on the gate.
+  await clock.advance(20_000)
+  await settleReal(clock)
+  // The stop gives up on the same hung switch while the press's switch is under way.
+  await clock.advance(10_000)
+  await settleReal(clock)
+  open()
+  await settleReal(clock)
+  await settleReal(clock)
+  await pane.unmount()
+  expect(slots(w)).toEqual([SLOT3])
+})
+
+/** A session whose view survived a hot reload as `surviving`, on two logins both spent, the store a shared one. */
+async function reloadedWorld($: Engine, on: On, surviving: Partial<View>) {
+  const w = fresh()
+  const { store, clock } = await loggedWorld(on, w)
+  w.usage['tok-1'] = [100, 41]
+  w.usage['tok-2'] = [100, 30]
+  let isReloaded = true
+  on('state.get', async (_$, e, next) => {
+    const read = await next(e)
+    if (e.plugin !== 'account-rotator' || e.key !== 'view' || !isReloaded) return read
+    return { value: { value: { ...EMPTY_VIEW, ...TWO_LOGINS, activeId: '1', isBound: true, ...surviving }, version: read.value?.version ?? 0 } }
+  })
+  on('state.set', async (_$, e, next) => {
+    if ((e as unknown as { key: string }).key === 'view') isReloaded = false
+    return next(e)
+  })
+  await start($, clock)
+  return { w, store, clock }
+}
+
+test('a carry-on owed across a hot reload sends nothing where a main turn ran after the reload (puma-9arph.35)', async ($, on) => {
+  const { w, clock } = await reloadedWorld($, on, { carryDue: { at: Date.parse('2026-10-12T12:00:00Z'), from: '1' } })
+  await clock.advance(Date.parse('2026-10-12T12:00:00Z') - clock.now() + 30_000)
+  await $.turn.start({ text: 'go on', turnId: 'turn-own-continue' })
+  await clock.advance(10 * 60_000)
+  expect(w.submitted).toEqual([])
+})
+
+test('a stop\'s switch given up on by a press says so in the stop-log when it lands late (puma-9arph.39)', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await loggedWorld(on, w, { ...THREE_LOGINS, 'rotate-to': 'order' })
+  w.keychain[await keychainItem(SLOT3)] = blob('tok-3')
+  w.usage['tok-3'] = [10, 30]
+  let openLate: () => void = () => undefined
+  const late = new Promise<void>(resolve => { openLate = resolve })
+  let writes = 0
+  w.beforeEnv = () => (writes++ === 0 ? late : Promise.resolve())
+  await start($, clock)
+  await settleReal(clock)
+  w.usage['tok-1'] = [100, 41]
+  void $.classic.StopFailure({ error: 'rate_limit' })
+  await settleReal(clock)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  void pane.press({ key: 'use-3' })
+  await settleReal(clock)
+  await clock.advance(30_000)
+  await settleReal(clock)
+  openLate()
+  await settleReal(clock)
+  await settleReal(clock)
+  await pane.unmount()
+  expect([slots(w).at(-1), whats(stopLogOf(store, w))]).toEqual([SLOT3, [STOP_RATE_LIMIT, 'stop switch given up on: landed late, no carry-on']])
+})
+
 test('a switch given up on after SWITCH_WAIT_MS that lands late leaves the session on the login a person pressed for since (puma-9arph.39)', async ($, on) => {
   const w = fresh()
   // Rotation by order: the start's rotation leaves the spent login 1 for login 2; its slot write hangs on a gate.
