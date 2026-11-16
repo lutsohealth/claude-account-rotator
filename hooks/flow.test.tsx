@@ -88,6 +88,8 @@ type World = {
   statusFails?: 'refused' | 'exit' | 'garbage' | 'timeout' | 'other'
   /** The slots whose sign-in Claude Code does not count: `claude auth status` there exits 1, authMethod none. */
   signedOut?: string[]
+  /** The timeout of each `claude auth status` run without `--json` (a check's sign-in read). */
+  statusTimeouts?: (number | undefined)[]
   /** The slot of each `claude auth logout` the mod ran. */
   logouts?: string[]
   /** What a `claude auth logout` answers, where it fails. */
@@ -249,6 +251,7 @@ function world(on: On, w: World, store: Record<string, unknown> | Map<string, un
     }
     if (cmd === 'claude' && sub === 'auth' && verb === 'status') {
       w.statusAsked = [...(w.statusAsked ?? []), e.init?.env?.CLAUDE_SECURESTORAGE_CONFIG_DIR ?? '']
+      if (!e.argv.includes('--json')) w.statusTimeouts = [...(w.statusTimeouts ?? []), e.init?.timeoutMs]
       w.onStatus?.()
       if (w.statusFails === 'refused') return { deny: 'process (managed): claude is not for plugins to run' }
       if (w.statusFails === 'exit') return { value: ran(1, '') }
@@ -11227,6 +11230,14 @@ for (const twoUsed of [30, 100]) {
 test('puma-9arph.48: a login Claude Code reads as logged in, its token run out, stays ok and the pick', async ($, on) => {
   const { store } = await storedOnOne($, on, false)
   expect([healthOfStored(store, '1')?.kind, pickOf(store)]).toEqual(['ok', '1'])
+})
+
+// RULING 6244: a check reads every login in turn, so each sign-in read waits 5 s at most.
+test('puma-9arph.48: every sign-in read of a check waits 5 seconds at most', async ($, on) => {
+  const { w } = await storedOnOne($, on, false)
+  const timeouts = w.statusTimeouts ?? []
+  expect(timeouts.length, 'premise: a check read a sign-in').toBeGreaterThan(0)
+  expect(timeouts.filter(t => t !== 5_000)).toEqual([])
 })
 
 for (const way of ['timeout', 'exit', 'other', 'refused'] as const) {
