@@ -1230,10 +1230,7 @@ async function checkAccount($: Host, account: Account, gate: UsageGate): Promise
   }
   // The rejection is left as stored, `at` and all: undoProvisionalStop gives it back only while it holds what the stop wrote.
   const isRejectionKept = health.kind === 'ok' && !isSignInProven && stood?.kind === 'login-needed' && stood.why === SIGN_IN_REJECTED
-  if (isRejectionKept) {
-    await setView($, v => ({ ...v, health: { ...v.health, [account.id]: stood } }))
-    return hasFreshFable
-  }
+  if (isRejectionKept) return hasFreshFable
   const before = await saveHealth($, account.id, health)
   if (health.kind === 'login-needed' && before?.kind !== 'login-needed') {
     await announceLockout($, account, health.why)
