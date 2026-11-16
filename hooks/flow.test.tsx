@@ -10164,3 +10164,56 @@ test('the line a stop cut by the Claude in Chrome visit carries on with gets the
   expect(w.spawned).toEqual([])
   expect(w.submitted).toHaveLength(1)
 })
+
+// puma-9arph.34 acceptance 3(c): a carry-on whose turn dies on the limit again, on the login moved to, moves on and carries on once more.
+test('a carry-on whose turn dies on the usage limit again moves to the next login and carries on once more, the watch judging each stop (puma-9arph.34 3(c))', async ($, on) => {
+  const w = fresh()
+  const SLOT3 = `${HOME}/.claude/accounts/3`
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.keychain[await keychainItem(SLOT3)] = blob('tok-3')
+  w.usage['tok-1'] = [60, 40]
+  w.usage['tok-2'] = [10, 30]
+  w.usage['tok-3'] = [20, 50]
+  w.env.ORCA_TERMINAL_HANDLE = 'term_test-pane'
+  on('process.spawn', async function* (_$, e) {
+    w.spawned.push(e)
+    yield* []
+    return { value: { code: 0, signal: null } }
+  })
+  const three = { accounts: [...TWO_LOGINS.accounts, { id: '3', slot: SLOT3, email: 'three@example.com' }], 'rotate-to': 'room' }
+  const store = new Map<string, unknown>(Object.entries(three))
+  const clock = world(on, w, store)
+  await start($, clock)
+  // The first stop, on login 1: the move to login 2 and its carry-on, which enters.
+  w.usage['tok-1'] = [100, 41]
+  await turnStops($, clock)
+  expect(slots(w)).toEqual([SLOT2])
+  await clock.advance(36_000)
+  expect(w.submitted).toHaveLength(1)
+  // The carry-on's own turn dies on the limit on login 2: the move to login 3, and one carry-on more, which stays queued.
+  w.usage['tok-2'] = [100, 31]
+  w.submitHold = new Promise<void>(() => {})
+  await $.turn.start({ text: w.submitted[0] ?? '', turnId: 'turn-carry-1' })
+  await $.classic.StopFailure({ error: 'rate_limit' })
+  await $.turn.complete({ turnId: 'turn-carry-1', reason: 'error', answer: '', durationMs: 1, isAborted: false })
+  await clock.settle()
+  expect(slots(w)).toEqual([SLOT2, SLOT3])
+  await clock.advance(36_000)
+  expect(w.submitted).toHaveLength(2)
+  await clock.advance(10 * 60_000)
+  expect(w.submitted).toHaveLength(2)
+  // The second stop is a limit stop with no turn begun since and none open, so the watch reaches the fill: the kit's box
+  // takes it, so no key goes (the engine's own 'dialog' is model.test.ts's row).
+  expect(w.spawned).toEqual([])
+  expect(whats(stopLogOf(store, w))).toEqual([
+    STOP_RATE_LIMIT,
+    'moved to 2',
+    'carry-on armed',
+    'carry-on entered',
+    'stop heard: rate_limit, login 2 in use',
+    'moved to 3',
+    'carry-on armed',
+    noKey('no dialog holds it'),
+  ])
+})
