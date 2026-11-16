@@ -42,6 +42,8 @@ type World = {
   weekResets?: Record<string, string>
   /** access token -> the HTTP status the profile endpoint fails with, where it fails */
   profileFailing?: Record<string, number>
+  /** Access tokens whose profile call throws, as a dropped connection or a refused tunnel does. */
+  profileThrowing?: string[]
   /** access token -> the email of the account it signs in, as the profile endpoint answers */
   owners: Record<string, string>
   /** access token -> the organization name its profile answers, where not 'Org' (a named owner's) */
@@ -253,6 +255,7 @@ function world(on: On, w: World, store: Record<string, unknown> | Map<string, un
     await w.beforeFetch?.()
     const token = (e.init?.headers?.Authorization ?? '').replace('Bearer ', '')
     if (e.url === 'https://api.anthropic.com/api/oauth/profile') {
+      if (w.profileThrowing?.includes(token)) throw new Error('socket hang up')
       const profileFailing = w.profileFailing?.[token]
       if (profileFailing !== undefined) return { value: { status: profileFailing, ok: false, headers: {}, text: '' } }
       // A token the test names no owner for signs in the login its number says: tok-2 is two@example.com's.
@@ -9950,6 +9953,68 @@ test('a stop where Claude Code\'s policy refuses switching logs that it stayed f
   await $.classic.StopFailure({ error: 'rate_limit' })
   await clock.settle()
   expect(whats(stopLogOf(store, w))).toEqual([STOP_RATE_LIMIT, 'stayed: switching blocked'])
+})
+
+// ---------------------------------------------------------------- puma-9arph.37: a stop whose own read throws
+
+const isReadFailed = (id: string) => (what: string) => new RegExp(`^stop read failed: \\w+, login ${id}$`).test(what)
+
+test('a usage-limit stop whose own forced usage read throws still marks the login, moves and carries on once, and says so in the stop-log (puma-9arph.37)', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await loggedWorld(on, w)
+  await start($, clock)
+  await pastLastRead(clock)
+  w.throwing = ['tok-1']
+  await $.classic.StopFailure(PLAIN)
+  await clock.settle()
+  await clock.advance(36_000)
+  const lines = whats(stopLogOf(store, w))
+  expect(lines[0]).toBe(STOP_RATE_LIMIT)
+  expect(lines.filter(isReadFailed('1'))).toHaveLength(1)
+  expect(lines.filter(l => !isReadFailed('1')(l))).toEqual([STOP_RATE_LIMIT, 'moved to 2', 'carry-on armed', 'carry-on entered'])
+  expect(store.get('mark:1')).toBeDefined()
+  expect(w.submitted).toHaveLength(1)
+})
+
+test('a usage-limit stop whose profile call throws, its sign-in new since the last check, still marks, moves and carries on once (puma-9arph.37)', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await loggedWorld(on, w)
+  await start($, clock)
+  await pastLastRead(clock)
+  // A sign-in no holder names yet: the stop's read asks the profile first, and that call throws.
+  w.keychain['Claude Code-credentials'] = blob('tok-9')
+  w.profileThrowing = ['tok-9']
+  await $.classic.StopFailure(PLAIN)
+  await clock.settle()
+  await clock.advance(36_000)
+  const lines = whats(stopLogOf(store, w))
+  expect(lines.filter(isReadFailed('1'))).toHaveLength(1)
+  expect(lines.filter(l => !isReadFailed('1')(l))).toEqual([STOP_RATE_LIMIT, 'moved to 2', 'carry-on armed', 'carry-on entered'])
+  expect(store.get('mark:1')).toBeDefined()
+  expect(w.submitted).toHaveLength(1)
+})
+
+test('a Fable stop on the carry-on whose own read of the login moved to throws marks it as a stop with no read does (puma-9arph.37)', async ($, on) => {
+  const { w, store, clock } = await fableMoved($, on, false)
+  await clock.advance(35_500)
+  expect(w.submitted).toHaveLength(1)
+  w.throwing = ['tok-2']
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  expect(whats(stopLogOf(store, w)).filter(isReadFailed('2'))).toHaveLength(1)
+  expect(markOf(store.get('fable-mark:2'))).toEqual([100, FABLE_RESET])
+})
+
+test('a stop whose handling throws in a local step says so in the stop-log, by the error name alone (puma-9arph.37)', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await loggedWorld(on, w)
+  w.onStoreSet = key => {
+    if (key === 'mark:1') throw new Error('disk full at /secret/path')
+  }
+  await start($, clock)
+  await $.classic.StopFailure(PLAIN)
+  await clock.settle()
+  expect(whats(stopLogOf(store, w))).toEqual([STOP_RATE_LIMIT, 'stop handling failed: Error'])
 })
 
 test('a carry-on the engine refuses is logged in debug and in the stop-log as a drop, and is not submitted again (puma-9arph.34 B2)', async ($, on) => {
