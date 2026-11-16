@@ -10148,6 +10148,58 @@ test('with every login spent, the band says when the first login frees up (puma-
   expect(await bandText($)).toMatch(/^Every Claude account is near its limit; the next frees up /)
 })
 
+// Codex round 1 [STALE_CARRY_DECISION]: the carry-on's decision is made again after the write that clears what is owed.
+test('with every login spent, a main turn that starts during the write clearing the carry-on owed stops it from going (puma-9arph.35)', async ($, on) => {
+  const w = fresh()
+  const { clock } = await loggedWorld(on, w)
+  w.usage['tok-1'] = [100, 41]
+  w.usage['tok-2'] = [100, 100]
+  let isArmed = false
+  on('state.set', async (_$, e, next) => {
+    const { key, value } = e as unknown as { key: string; value: View }
+    const isClearing = isArmed && key === 'view' && value.carryDue === undefined
+    if (isClearing) isArmed = false
+    const result = await next(e)
+    if (isClearing) await $.turn.start({ text: 'continue', turnId: 'own-turn' })
+    return result
+  })
+  await start($, clock)
+  await $.classic.StopFailure(PLAIN)
+  await clock.settle()
+  isArmed = true
+  await clock.advance(Date.parse('2026-10-12T12:04:00Z') - clock.now())
+  expect(w.submitted).toEqual([])
+})
+
+test('with every login spent, a switch to a spent login during the write clearing the carry-on owed sends nothing there (puma-9arph.35)', async ($, on) => {
+  const w = fresh()
+  const { clock } = await loggedWorld(on, w)
+  w.usage['tok-1'] = [100, 41]
+  w.usage['tok-2'] = [100, 100]
+  let isArmed = false
+  let switchToTwo = async () => {}
+  on('state.set', async (_$, e, next) => {
+    const { key, value } = e as unknown as { key: string; value: View }
+    const isClearing = isArmed && key === 'view' && value.carryDue === undefined
+    if (isClearing) isArmed = false
+    const result = await next(e)
+    if (isClearing) await switchToTwo()
+    return result
+  })
+  await start($, clock)
+  await $.classic.StopFailure(PLAIN)
+  await clock.settle()
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  switchToTwo = async () => {
+    await pane.press({ key: 'use-2' })
+  }
+  isArmed = true
+  await clock.advance(Date.parse('2026-10-12T12:04:00Z') - clock.now())
+  expect(w.envSets.at(-1)?.value).toBe(SLOT2)
+  expect(w.submitted).toEqual([])
+  await pane.unmount()
+})
+
 test('a stop where Claude Code\'s policy refuses switching logs that it stayed for that (puma-9arph.34 B4)', async ($, on) => {
   const w = fresh()
   w.refuseEnv = true
