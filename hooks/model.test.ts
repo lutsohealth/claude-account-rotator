@@ -10,6 +10,7 @@ import ROWS_FIXTURE from '../tests/fixtures/rows'
 import { REQUEST_TTL_MS, holdsLogin, isLoginOf, sameLogin, requestFrom, requestsDir, slotNumber } from './model'
 import { escapeArgv, escapeHeldBack, raisesLimitModal } from './model'
 import { mayWrite } from './model'
+import { freesAt, limitNotice } from './model'
 import { USAGE_BACKOFF_MAX_MS, USAGE_CLAIM_MS, USAGE_CLAIM_WAIT_MS, USAGE_EARLY_MS, WRITER_VERSION, afterUsage, claimDueReads, gatingDue, isUsageDue, mayForceUsage, mayReadSince, renewClaim, retryAfterFrom, usageDueFrom } from './model'
 import { DEFAULT_FOOTER, availableNow, claudeAccount, blockedAdvice, braille, browsersFrom, chromeNote, continueTextFrom, counted, fiveHourLimitFrom, credentialFrom, credentialsFile, fableMark, fableSpentNotice, fableStay, footerStyleFrom, healthOf, identityFromProfile, isFableSpent, isFableStop, isNoBrowser, isPolicyRefusal, keepFable, keychainItem, label, legacyMark, markFrom, nextReset, pickTarget, pie, readingFromUsage, restartSteps, rotateToFrom, shouldLeave, roomColor, stuckText, windowPct, withMark, withWeekMark } from './model'
 
@@ -604,6 +605,35 @@ test('the next reset counts the Fable week, which alone can be what is spent', (
   mixed.readings['1'] = { ...mixed.readings['1'], fable: { pct: 20, resetsAt: '2026-10-14T03:00:00Z' }, at: NOW }
   expect(nextReset(mixed, NOW)).toBe(Date.parse(LATER))
   expect(nextReset(mixed, NOW, 'fable')).toBe(Date.parse(FABLE_END))
+})
+
+// puma-9arph.35: when the session can carry on after every login is spent.
+test('a login frees up at the latest reset of its own spent windows, the soonest such login answering, never at a reset that frees no login', () => {
+  // One spent window a login: the soonest reset of any window is the answer (the bead's letter and this rule agree).
+  expect(freesAt(view({ '1': [100, 30], '2': [100, 40] }), NOW)).toBe(Date.parse(LATER))
+  // Login 1's 5-hour window resets soonest, but its week stays spent; login 2's week resets before login 1's.
+  const both = view({ '1': [100, 100], '2': [20, 100] })
+  both.readings['2'] = { ...both.readings['2'], sevenDay: { pct: 100, resetsAt: '2026-10-15T03:00:00Z' }, at: NOW }
+  expect(nextReset(both, NOW)).toBe(Date.parse(LATER))
+  expect(freesAt(both, NOW)).toBe(Date.parse('2026-10-15T03:00:00Z'))
+  // A login that needs a sign-in, or one the session passes over, never frees up by a reset.
+  const locked = view({ '1': [20, 100], '2': [100, 30] }, { '2': { kind: 'login-needed', why: 'sign-in rejected' } })
+  expect(freesAt(locked, NOW)).toBe(Date.parse(WEEK_END))
+  expect(freesAt(view({ '1': [20, 100], '2': [100, 30] }), NOW, new Set(['2']))).toBe(Date.parse(WEEK_END))
+  // A spent window with no reset time known frees nothing.
+  const unknown = view({ '1': [100, 30] })
+  unknown.readings['1'] = { fiveHour: { pct: 100 }, sevenDay: { pct: 30 }, at: NOW }
+  expect(freesAt(unknown, NOW)).toBeUndefined()
+  // A stale row, its reset passed with no read since, is spent no more: no time in the past is ever answered.
+  expect(freesAt(view({ '1': [100, 30], '2': [100, 40] }), Date.parse(LATER))).toBeUndefined()
+  expect(freesAt(view({ '1': [100, 30], '2': [100, 40] }), Date.parse(LATER) + 1)).toBeUndefined()
+})
+
+test('the words for every login near its limit name when the first one frees up, and no time where none is known', () => {
+  expect(limitNotice(view({ '1': [100, 30], '2': [100, 40] }), NOW)).toBe('Every Claude account is near its limit; the next frees up in 2h 0m.')
+  const unknown = view({ '1': [100, 30] })
+  unknown.readings['1'] = { fiveHour: { pct: 100 }, sevenDay: { pct: 30 }, at: NOW }
+  expect(limitNotice(unknown, NOW)).toBe('Every Claude account is near its limit.')
 })
 
 test('the line sent to carry on is kept when it is text of at most 500 characters, trimmed; anything else is ignored', () => {

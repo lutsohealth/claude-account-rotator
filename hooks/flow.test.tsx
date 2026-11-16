@@ -9939,9 +9939,10 @@ test('a switch made after the carry-on was armed logs that the carry-on was skip
   expect(whats(stopLogOf(store, w))).toEqual([STOP_RATE_LIMIT, 'moved to 2', 'carry-on armed', 'carry-on skipped: another switch since'])
 })
 
-for (const [name, setup, reason] of [
-  ['rotation is off', { 'rotate-to': 'off' }, 'stayed: rotation off'],
-  ['no other login has room', {}, 'stayed: no login to move to'],
+for (const [name, setup, reasons] of [
+  ['rotation is off', { 'rotate-to': 'off' }, ['stayed: rotation off']],
+  // puma-9arph.35: the first login to free up is login 1, its 5-hour window marked spent by the stop until 12:00.
+  ['no other login has room', {}, ['no login left: one carry-on at 2026-10-12T12:00:00.000Z', 'stayed: no login to move to']],
 ] as const) {
   test(`a stop that stays because ${name} logs the reason (puma-9arph.34 B4)`, async ($, on) => {
     const w = fresh()
@@ -9952,9 +9953,199 @@ for (const [name, setup, reason] of [
     await $.classic.StopFailure({ error: 'rate_limit' })
     await clock.settle()
     expect(w.envSets).toEqual([])
-    expect(whats(stopLogOf(store, w))).toEqual([STOP_RATE_LIMIT, reason])
+    expect(whats(stopLogOf(store, w))).toEqual([STOP_RATE_LIMIT, ...reasons])
   })
 }
+
+// ---------------------------------------------------------------- puma-9arph.35: no login left
+
+/** The once-notice of a stop with no login left, and the stop-log's line for it. */
+const isWaitNotice = (t: unknown) => /^Every Claude account is near its limit; the next frees up .*\. This session carries on by itself once one frees up\.$/.test(String(t))
+const isWaitLine = (what: string) => what.startsWith('no login left: ')
+
+test('a usage-limit stop with every login spent says so once, a second stop adds nothing, and one carry-on goes on the login in use once its window resets (puma-9arph.35)', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await loggedWorld(on, w)
+  w.usage['tok-2'] = [100, 30]
+  await start($, clock)
+  w.usage['tok-1'] = [100, 41]
+  await $.classic.StopFailure(PLAIN)
+  await clock.settle()
+  // Both logins' 5-hour windows reset at 12:00: one spent window a login, where the bead's letter and freesAt agree.
+  expect(whats(stopLogOf(store, w)).filter(isWaitLine)).toEqual(['no login left: one carry-on at 2026-10-12T12:00:00.000Z'])
+  expect([w.toasts.filter(isWaitNotice).length, w.notices.filter(isWaitNotice).length]).toEqual([1, 1])
+  // A second stop before the reset: no notice, no line, no second carry-on.
+  await clock.advance(30 * 60_000)
+  await $.classic.StopFailure(PLAIN)
+  await clock.settle()
+  expect(whats(stopLogOf(store, w)).filter(isWaitLine)).toHaveLength(1)
+  expect([w.toasts.filter(isWaitNotice).length, w.notices.filter(isWaitNotice).length]).toEqual([1, 1])
+  expect(w.submitted).toEqual([])
+  // To the reset and one tick past it: nothing yet, as Claude Code may carry on by itself (the grace).
+  await clock.advance(Date.parse('2026-10-12T12:00:00Z') - clock.now() + 60_000)
+  expect(w.submitted).toEqual([])
+  // Past the grace, no turn having run: one carry-on, on login 1, with no switch.
+  await clock.advance(3 * 60_000)
+  expect(w.submitted).toHaveLength(1)
+  expect(w.envSets).toEqual([])
+  // No switch happened, so the carry-on says the limit reset, never that Claude Code switched.
+  expect(w.submitted[0]).toMatch(/usage limit has reset\. Continue where you left off\.$/)
+  expect(w.submitted[0]).not.toMatch(/switched/)
+  expect(whats(stopLogOf(store, w))).toContain('a login is free: carry-on on 1')
+  // Ten minutes on, still one carry-on and one notice.
+  await clock.advance(10 * 60_000)
+  expect(w.submitted).toHaveLength(1)
+  expect([w.toasts.filter(isWaitNotice).length, w.notices.filter(isWaitNotice).length]).toEqual([1, 1])
+})
+
+test('with every login spent, where a main turn starts after the login in use resets (Claude Code carrying on by itself), the mod sends no carry-on of its own (puma-9arph.35)', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await loggedWorld(on, w)
+  w.usage['tok-2'] = [100, 30]
+  await start($, clock)
+  w.usage['tok-1'] = [100, 41]
+  await $.classic.StopFailure(PLAIN)
+  await clock.settle()
+  expect(whats(stopLogOf(store, w)).filter(isWaitLine)).toHaveLength(1)
+  // Claude Code v2.1.325 continued a 5-hour stop by itself at the reset (puma-9arph.35 d5): a main turn starts.
+  await clock.advance(Date.parse('2026-10-12T12:00:00Z') - clock.now() + 30_000)
+  await $.turn.start({ text: 'go on', turnId: 'turn-own-continue' })
+  await clock.advance(10 * 60_000)
+  expect(w.submitted).toEqual([])
+  expect(whats(stopLogOf(store, w))).toContain('a turn ran since the stop: no carry-on')
+})
+
+test('with every login spent, a login whose usage read fails since the stop is still moved to at its reset, and one carry-on goes there (puma-9arph.35)', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await loggedWorld(on, w)
+  // Login 1's week is spent until 2026-10-18; login 2's 5-hour window frees it at 12:00.
+  w.usage['tok-1'] = [40, 100]
+  w.usage['tok-2'] = [100, 30]
+  await start($, clock)
+  await $.classic.StopFailure(PLAIN)
+  await clock.settle()
+  expect(whats(stopLogOf(store, w)).filter(isWaitLine)).toEqual(['no login left: one carry-on at 2026-10-12T12:00:00.000Z'])
+  // Every read of login 2 fails from now: at 12:00 the store still holds its 100%, read before its reset.
+  w.failing = { 'tok-2': 429 }
+  await clock.advance(Date.parse('2026-10-12T12:00:00Z') - clock.now() + 60_000)
+  expect(w.envSets.at(-1)?.value).toBe(SLOT2)
+  await clock.advance(36_000)
+  expect(w.submitted).toHaveLength(1)
+  // The tick's own rotation moved there; the carry-on owed went on login 2, and says it switched.
+  expect(w.submitted[0]).toMatch(/switched to another of your Claude accounts/)
+  expect(whats(stopLogOf(store, w))).toContain('a login is free: carry-on on 2')
+  // No second notice and no second carry-on on later ticks.
+  await clock.advance(10 * 60_000)
+  expect(w.submitted).toHaveLength(1)
+  expect([w.toasts.filter(isWaitNotice).length, w.notices.filter(isWaitNotice).length]).toEqual([1, 1])
+})
+
+test('with every login spent, the tick at the reset switches to the freed login once, though the keychain answers late, and its carry-on goes (puma-9arph.35)', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await loggedWorld(on, w)
+  w.usage['tok-1'] = [40, 100]
+  w.usage['tok-2'] = [100, 30]
+  await start($, clock)
+  await $.classic.StopFailure(PLAIN)
+  await clock.settle()
+  expect(whats(stopLogOf(store, w)).filter(isWaitLine)).toEqual(['no login left: one carry-on at 2026-10-12T12:00:00.000Z'])
+  w.failing = { 'tok-2': 429 }
+  const isSwitched = (t: unknown) => String(t).startsWith('Switched to ')
+  const settleReal = async () => {
+    await new Promise(resolve => setTimeout(resolve, 100))
+    await clock.settle()
+  }
+  await clock.advance(Date.parse('2026-10-12T11:59:30Z') - clock.now())
+  await settleReal()
+  // On a Mac the keychain read before a switch takes milliseconds, long enough for a second job of the same tick to
+  // reach the switch too: two switches, and the second ends the first one's carry-on.
+  w.beforeKeychain = () => new Promise<void>(resolve => setTimeout(resolve, 5))
+  // One tick at a time, each let finish in real time, as ticks a minute apart do: only a race inside one tick can make
+  // a second switch.
+  for (let i = 0; i < 3 && w.toasts.filter(isSwitched).length === 0; i += 1) {
+    await clock.advance(60_000)
+    await settleReal()
+  }
+  expect([w.envSets.at(-1)?.value, w.toasts.filter(isSwitched).length]).toEqual([SLOT2, 1])
+  // The carry-on goes once that one tick's switch lands, not a tick later.
+  await clock.advance(36_000)
+  await settleReal()
+  expect([whats(stopLogOf(store, w)).filter(x => x.startsWith('carry-on skipped')), w.submitted.length]).toEqual([[], 1])
+  // Two more ticks: no second switch, no second carry-on.
+  for (let i = 0; i < 2; i += 1) {
+    await clock.advance(60_000)
+    await settleReal()
+  }
+  expect([w.toasts.filter(isSwitched).length, w.submitted.length]).toEqual([1, 1])
+})
+
+test('with every login spent, a login a usage read frees before the time owed is moved to by the tick, and one carry-on still goes there, once (puma-9arph.35)', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await loggedWorld(on, w)
+  w.usage['tok-1'] = [40, 100]
+  w.usage['tok-2'] = [100, 30]
+  await start($, clock)
+  await $.classic.StopFailure(PLAIN)
+  await clock.settle()
+  expect(whats(stopLogOf(store, w)).filter(isWaitLine)).toEqual(['no login left: one carry-on at 2026-10-12T12:00:00.000Z'])
+  // Login 2 reads 10% at its next read: the tick's own rotation moves there with no carry-on of its own, and no response follows.
+  w.usage['tok-2'] = [10, 30]
+  await clock.advance(Date.parse('2026-10-12T11:45:00Z') - clock.now())
+  expect(w.envSets.at(-1)?.value).toBe(SLOT2)
+  expect(w.submitted).toHaveLength(1)
+  expect(whats(stopLogOf(store, w))).toContain('a login is free: carry-on on 2')
+  // The time owed passes: nothing more.
+  await clock.advance(Date.parse('2026-10-12T12:10:00Z') - clock.now())
+  expect(w.submitted).toHaveLength(1)
+  expect([w.toasts.filter(isWaitNotice).length, w.notices.filter(isWaitNotice).length]).toEqual([1, 1])
+})
+
+test('with every login spent and no stop, the tick owes no carry-on: no notice, no line, nothing sent once a login frees up (puma-9arph.35)', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await loggedWorld(on, w)
+  // Both logins read spent before any turn: the tick's own rotation finds none to move to, with no stop to carry on.
+  w.usage['tok-1'] = [100, 41]
+  w.usage['tok-2'] = [100, 30]
+  await start($, clock)
+  await clock.advance(Date.parse('2026-10-12T12:00:00Z') - clock.now() + 10 * 60_000)
+  expect([w.toasts.filter(isWaitNotice).length, w.notices.filter(isWaitNotice).length]).toEqual([0, 0])
+  expect(whats(stopLogOf(store, w)).filter(isWaitLine)).toEqual([])
+  expect(w.submitted).toEqual([])
+})
+
+test('a rejected sign-in with every other login spent owes no carry-on: it waits for a person, as the README says (puma-9arph.35)', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await loggedWorld(on, w)
+  w.usage['tok-2'] = [100, 30]
+  await start($, clock)
+  await $.classic.StopFailure({ error: 'authentication_failed' })
+  await clock.settle()
+  await clock.advance(Date.parse('2026-10-12T12:00:00Z') - clock.now() + 10 * 60_000)
+  expect([w.toasts.filter(isWaitNotice).length, w.notices.filter(isWaitNotice).length]).toEqual([0, 0])
+  expect(whats(stopLogOf(store, w)).filter(isWaitLine)).toEqual([])
+})
+
+test('a carry-on owed once a login frees up survives a hot reload, then /clear: the rebound view holds it again (puma-9arph.35)', async ($, on) => {
+  const owed = { at: Date.parse('2026-10-12T12:00:00Z'), from: '1' }
+  expect((await reloadThenClear($, on, { carryDue: owed }))?.carryDue).toEqual(owed)
+})
+
+test('a carry-on owed across a hot reload sends nothing where a main turn ran after the reload (puma-9arph.35)', async ($, on) => {
+  const { w, clock } = await reloadedWorld($, on, { carryDue: { at: Date.parse('2026-10-12T12:00:00Z'), from: '1' } })
+  await clock.advance(Date.parse('2026-10-12T12:00:00Z') - clock.now() + 30_000)
+  await $.turn.start({ text: 'go on', turnId: 'turn-own-continue' })
+  await clock.advance(10 * 60_000)
+  expect(w.submitted).toEqual([])
+})
+
+test('with every login spent, the band says when the first login frees up (puma-9arph.35)', async ($, on) => {
+  const w = fresh()
+  const { clock } = await loggedWorld(on, w)
+  w.usage['tok-1'] = [100, 41]
+  w.usage['tok-2'] = [100, 30]
+  await start($, clock)
+  expect(await bandText($)).toMatch(/^Every Claude account is near its limit; the next frees up /)
+})
 
 test('a stop where Claude Code\'s policy refuses switching logs that it stayed for that (puma-9arph.34 B4)', async ($, on) => {
   const w = fresh()
