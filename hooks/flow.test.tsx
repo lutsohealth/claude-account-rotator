@@ -10915,41 +10915,45 @@ test('Review r1 REFUSED_INTENT class: a refused ask strands no pending switch (p
 /** The owner record the coordinator keeps in the view while a switch runs; absent once none runs. */
 const ownerOf = (v: View | undefined): unknown => (v as { owner?: unknown } | undefined)?.owner
 
-// Race (a): the point-back reads the switch it points back, then a press moves the session before the point-back writes.
-// The hold lands on the n-th view read after the point-back read login 1's usage, so every await of the point-back is met.
-for (const n of [1, 2, 3, 4, 5]) {
-  test(`a press made while the point-back waits at its view read ${n} after reading the login left stands, in the slot and the view (race a)`, async ($, on) => {
-    const w = fresh()
-    const { clock } = await loggedWorld(on, w, THREE_LOGINS)
-    w.keychain[await keychainItem(SLOT3)] = blob('tok-3')
-    w.usage['tok-3'] = [10, 30]
-    w.weekResets = { 'tok-2': OTHER_WEEK }
-    const view = watchedView(on)
-    const held = holdViewRead(on)
-    let reads = 0
-    let isSourceRead = false
-    const usage = w.usage
-    w.usage = new Proxy(usage, { get: (t, k) => { if (k === 'tok-1' && reads === 0) isSourceRead = true; return Reflect.get(t, k) } })
-    await start($, clock)
-    const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
-    await pane.press({ key: 'use-2' })
-    await clock.advance(5 * 60_000)
-    w.limits = LOGIN_ONE_RESPONSE
-    isSourceRead = false
-    held.arm(() => isSourceRead && ++reads === n)
-    void $.session.measure({ context: { window: 200_000 }, rateLimits: w.limits, changed: ['rateLimits'] })
-    await settleReal(clock)
-    if (held.isHeld()) {
-      void pane.press({ key: 'use-3' })
-      await settleReal(clock)
-      held.open()
+// Race (a) (RACE_A, Codex round of #108): the point-back examined its switch, and a press publishes before the
+// point-back claims. The hold sits on the claim's own view read: the 4th after the source login's health is stored
+// (saveHealth's write, isStill, `after`, then the claim), so the claim meets the press's switch, not the one examined.
+test('RACE_A a press published before the point-back claims stands, in the slot and the view (race a)', async ($, on) => {
+  const w = fresh()
+  const { clock } = await loggedWorld(on, w, THREE_LOGINS)
+  w.keychain[await keychainItem(SLOT3)] = blob('tok-3')
+  w.usage['tok-3'] = [10, 30]
+  w.weekResets = { 'tok-2': OTHER_WEEK }
+  const view = watchedView(on)
+  const held = holdViewRead(on)
+  let isArmed = false
+  let isSourceStored = false
+  let reads = 0
+  w.onStoreSet = key => {
+    if (isArmed && key === 'health:1') {
+      isSourceStored = true
+      reads = 0
     }
-    await settleReal(clock)
-    await settleReal(clock)
-    await pane.unmount()
-    expect([n, held.isHeld(), view()?.activeId, slots(w).at(-1)]).toEqual([n, true, '3', SLOT3])
-  })
-}
+  }
+  await start($, clock)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  await pane.press({ key: 'use-2' })
+  await clock.advance(5 * 60_000)
+  w.limits = LOGIN_ONE_RESPONSE
+  isArmed = true
+  held.arm(() => isSourceStored && ++reads === 4)
+  void $.session.measure({ context: { window: 200_000 }, rateLimits: w.limits, changed: ['rateLimits'] })
+  await settleReal(clock)
+  const isHeld = held.isHeld()
+  void pane.press({ key: 'use-3' })
+  await settleReal(clock)
+  const published = [view()?.activeId, slots(w).at(-1)]
+  held.open()
+  await settleReal(clock)
+  await settleReal(clock)
+  await pane.unmount()
+  expect([isHeld, published, view()?.activeId, view()?.pending?.id, slots(w).at(-1)]).toEqual([true, ['3', SLOT3], '3', '3', SLOT3])
+})
 
 // Race (b): a switch whose view write read the view before it was given up on, and writes after a newer switch published.
 test('a given-up switch whose publication read the view before the give-up writes nothing over the press that gave it up (race b)', async ($, on) => {
