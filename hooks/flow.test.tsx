@@ -10273,6 +10273,32 @@ for (const [name, keys] of [
   })
 }
 
+test('a switch given up on after SWITCH_WAIT_MS that lands late leaves the session on the login a person pressed for since (puma-9arph.39)', async ($, on) => {
+  const w = fresh()
+  // Rotation by order: the start's rotation leaves the spent login 1 for login 2; its slot write hangs on a gate.
+  const { clock } = await loggedWorld(on, w, { ...THREE_LOGINS, 'rotate-to': 'order' })
+  w.keychain[await keychainItem(SLOT3)] = blob('tok-3')
+  w.usage['tok-3'] = [10, 30]
+  let open: () => void = () => undefined
+  const gate = new Promise<void>(resolve => { open = resolve })
+  let writes = 0
+  w.beforeEnv = () => (writes++ === 0 ? gate : Promise.resolve())
+  w.usage['tok-1'] = [100, 41]
+  await start($, clock)
+  await settleReal(clock)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  void pane.press({ key: 'use-3' })
+  await settleReal(clock)
+  await clock.advance(30_000)
+  await settleReal(clock)
+  expect(slots(w)).toEqual([SLOT3])
+  // The given-up switch to login 2 lands now: the session stays on login 3, its slot written last and no switch shown.
+  open()
+  await settleReal(clock)
+  await pane.unmount()
+  expect([slots(w).at(-1), w.toasts.filter(t => /^Switched to Claude account two@/.test(String(t))).length]).toEqual([SLOT3, 0])
+})
+
 test('a stop where Claude Code\'s policy refuses switching logs that it stayed for that (puma-9arph.34 B4)', async ($, on) => {
   const w = fresh()
   w.refuseEnv = true
