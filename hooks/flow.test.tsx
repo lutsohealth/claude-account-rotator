@@ -9976,6 +9976,9 @@ test('a usage-limit stop with every login spent says so once, a second stop adds
   await clock.advance(Date.parse('2026-10-12T12:00:00Z') - clock.now() + 60_000)
   expect(w.submitted).toHaveLength(1)
   expect(w.envSets).toEqual([])
+  // No switch happened, so the carry-on says the limit reset, never that Claude Code switched.
+  expect(w.submitted[0]).toMatch(/usage limit has reset\. Continue where you left off\.$/)
+  expect(w.submitted[0]).not.toMatch(/switched/)
   expect(whats(stopLogOf(store, w))).toContain('a login is free: carry-on on 1')
   // Ten minutes on, still one carry-on and one notice.
   await clock.advance(10 * 60_000)
@@ -9999,7 +10002,8 @@ test('with every login spent, a login whose usage read fails since the stop is s
   expect(w.envSets.at(-1)?.value).toBe(SLOT2)
   await clock.advance(36_000)
   expect(w.submitted).toHaveLength(1)
-  // The tick's own rotation moved there; the carry-on owed went on login 2.
+  // The tick's own rotation moved there; the carry-on owed went on login 2, and says it switched.
+  expect(w.submitted[0]).toMatch(/switched to another of your Claude accounts/)
   expect(whats(stopLogOf(store, w))).toContain('a login is free: carry-on on 2')
   // No second notice and no second carry-on on later ticks.
   await clock.advance(10 * 60_000)
