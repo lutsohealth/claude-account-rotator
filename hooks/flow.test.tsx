@@ -10989,6 +10989,46 @@ test('a start\'s check of its slot that lands after a press moved the session le
   expect([pressed, landed]).toEqual([[true, '3', [SLOT3]], ['3', SLOT3]])
 })
 
+// BOOT_REPAIR_RACE (Codex round of #109): reconcile is a slot writer that owns no switch. The start's check lands late,
+// boot's repair to login 3 is held, a later press completes, then the repair lands over it. The minute's tick sets the
+// slot right: it is the backstop for a repair that lands late.
+for (const [name, healths, key, want] of [
+  ['a later press to login 2', ['1', '2', '3'], 'use-2', ['2', SLOT2]],
+  ['a later press back to login 1', ['1', '3'], 'use-1', ['1', '']],
+] as const) {
+  test(`BOOT_REPAIR_RACE boot's repair landing after ${name} leaves the slot on the login the view names after the minute's tick (puma-9arph.41, the tick)`, async ($, on) => {
+    const w = fresh()
+    const extra: Record<string, unknown> = { ...THREE_LOGINS }
+    for (const id of healths) extra[`health:${id}`] = { kind: 'ok' }
+    const { clock } = await loggedWorld(on, w, extra)
+    w.keychain[await keychainItem(SLOT3)] = blob('tok-3')
+    w.usage['tok-3'] = [10, 30]
+    const view = watchedView(on)
+    let openCheck: () => void = () => undefined
+    const check = new Promise<void>(resolve => { openCheck = resolve })
+    w.beforeSameEnv = () => check
+    await start($, clock)
+    await settleReal(clock)
+    const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+    await pane.press({ key: 'use-3' })
+    // Write 1 is the late check, write 2 boot's repair, held until the later press has finished.
+    let openRepair: () => void = () => undefined
+    const repair = new Promise<void>(resolve => { openRepair = resolve })
+    let writes = 0
+    w.beforeEnv = () => (++writes === 2 ? repair : Promise.resolve())
+    openCheck()
+    await settleReal(clock)
+    const isRepairHeld = writes === 2
+    await pane.press({ key })
+    openRepair()
+    await settleReal(clock)
+    await clock.advance(60_000)
+    await settleReal(clock)
+    await pane.unmount()
+    expect([isRepairHeld, view()?.activeId, slots(w).at(-1)]).toEqual([true, ...want])
+  })
+}
+
 // Race (b): a switch whose view write read the view before it was given up on, and writes after a newer switch published.
 test('a given-up switch whose publication read the view before the give-up writes nothing over the press that gave it up (race b)', async ($, on) => {
   const w = fresh()
