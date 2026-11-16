@@ -1492,17 +1492,17 @@ test('a line 1 wider than the pane cuts the cause, then the Company, then the em
   expect(fitted(v, 56).lines[0]).toBe('andres…th.com · C… · Ultra  18:39 Failed to update (429)')
 })
 
-test('a login with no reading, no Fable row, a 5-hour window or a sign-in needed fits as the operator drew each, at 82 and 64', () => {
+test('a login with no reading, no Fable row, a 5-hour window or a sign-in needed holds its buttons on a line of their own, at 82 and 64', () => {
   const noReading = rowView({ readings: {}, readAt: {} })
-  expect(fitted(noReading, 82)).toEqual({ lines: ['andres@lutsohealth.com · Company · Ultra', 'Used ▱▱▱▱▱▱▱▱▱▱ no reading yet'], end: 0 })
-  expect(fitted(noReading, 64)).toEqual({ lines: ['andres@lutsohealth.com · Company · Ultra', 'Used ▱▱▱▱▱▱▱▱▱▱ no reading yet'], end: 1 })
+  expect(fitted(noReading, 82)).toEqual({ lines: ['andres@lutsohealth.com · Company · Ultra', 'Used ▱▱▱▱▱▱▱▱▱▱ no reading yet', ''], end: 'own' })
+  expect(fitted(noReading, 64)).toEqual({ lines: ['andres@lutsohealth.com · Company · Ultra', 'Used ▱▱▱▱▱▱▱▱▱▱ no reading yet', ''], end: 'own' })
   const noFable = rowView({ readings: { '1': { sevenDay: { pct: 31, resetsAt: ROW_WEEK_END }, noFiveHour: true, at: READ_AT, by: '1' } } })
-  expect(fitted(noFable, 82)).toEqual({ lines: [L1, 'Used ▰▰▰▱▱▱▱▱▱▱  31% Fable –                resets 2d 3h 14m'], end: 0 })
+  expect(fitted(noFable, 82)).toEqual({ lines: [L1, 'Used ▰▰▰▱▱▱▱▱▱▱  31% Fable –                resets 2d 3h 14m', ''], end: 'own' })
   expect(fitted(noFable, 64)).toEqual({ lines: [L1, 'Used ▰▰▰▱▱▱▱▱▱▱  31% Fable –                resets 2d 3h 14m', ''], end: 'own' })
   const max = { ...ANDRES, tier: 'default_claude_max_5x' }
   const five = rowView({ readings: { '1': { sevenDay: { pct: 31, resetsAt: ROW_WEEK_END }, fable: { pct: 38, resetsAt: ROW_WEEK_END }, fiveHour: { pct: 50, resetsAt: ahead(0, 1, 20) }, at: READ_AT, by: '1' } }, noFiveHour: { '1': false } }, max)
   const maxL1 = 'andres@lutsohealth.com · Company · Max  updated 18:34'
-  expect(fitted(five, 82)).toEqual({ lines: [maxL1, OPERATOR_LINE_2, FIVE_HOUR_50], end: 0 })
+  expect(fitted(five, 82)).toEqual({ lines: [maxL1, OPERATOR_LINE_2, '', FIVE_HOUR_50], end: 'own' })
   expect(fitted(five, 64)).toEqual({ lines: [maxL1, OPERATOR_LINE_2, '', FIVE_HOUR_50], end: 'own' })
   const signIn = rowView({ health: { '1': { kind: 'login-needed', why: 'sign-in expired' } } })
   expect(fitted(signIn, 82)).toEqual({ lines: ['andres@lutsohealth.com · Company · Ultra  ⚠ sign in needed', OPERATOR_LINE_2, ''], end: 'own' })

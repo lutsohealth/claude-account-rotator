@@ -7340,7 +7340,7 @@ async function drawnLines($: Engine, bodyColumns: number): Promise<Record<string
   return out
 }
 
-test('at 82 columns the pane draws each account\'s two row lines as the rows key holds them, the buttons ending line 1', async ($, on) => {
+test('at 82 columns the pane draws each account\'s two row lines as the rows key holds them, the buttons on a line of their own', async ($, on) => {
   const { store, clock } = await rowsWorld($, on)
   const lines = await drawnLines($, 82)
   const stored = rowsText(store, clock.now()) ?? []
@@ -7349,9 +7349,9 @@ test('at 82 columns the pane draws each account\'s two row lines as the rows key
   for (const r of stored) {
     expect([r.id, [lines[`line-${r.id}-0`]?.text, lines[`line-${r.id}-1`]?.text]]).toEqual([r.id, r.lines])
   }
-  // Login 2, not in use, ends line 1 with Remove and Use now.
-  expect(lines['line-2-0']?.buttons).toEqual(['ask-remove-2', 'use-2'])
-  expect(Object.keys(lines).filter(k => k.startsWith('line-2-'))).toEqual(['line-2-0', 'line-2-1'])
+  // Login 2, not in use, holds Remove and Use now on a line of their own after line 2 (puma-9arph.33).
+  expect([lines['line-2-0']?.buttons, lines['line-2-1']?.buttons, lines['line-2-2']?.buttons]).toEqual([[], [], ['ask-remove-2', 'use-2']])
+  expect(Object.keys(lines).filter(k => k.startsWith('line-2-'))).toEqual(['line-2-0', 'line-2-1', 'line-2-2'])
 })
 
 test('a pane too narrow for any row line and its buttons gives the buttons a line of their own after line 2', async ($, on) => {
@@ -7362,13 +7362,14 @@ test('a pane too narrow for any row line and its buttons gives the buttons a lin
   expect(lines['line-2-1']?.text).toBe(rowsText(store, clock.now())?.find(r => r.id === '2')?.lines[1])
 })
 
-// Mutations V1 and V2 survived: the buttons' place is decided by the row's width less the accounts box's frame (4) and
-// by Remove's width beside the slot (23 in all, after a gap of 2).
-test('login 2\'s buttons end line 1 only where the pane, less its frame, holds line 1, the gap and Remove with Use now', async ($, on) => {
+// puma-9arph.33: the buttons' place no longer follows the pane's width (puma-eslxj.10's rule moved them to line 1 where
+// it fit): a pane wide enough for line 1 and its buttons still draws them on a line of their own.
+test('login 2\'s buttons stand on a line of their own however wide the pane', async ($, on) => {
   const { store } = await rowsWorld($, on)
-  const width = [...lineOne(store, '2')].length + 2 + 23 + 4
-  expect((await drawnLines($, width))['line-2-0']?.buttons).toEqual(['ask-remove-2', 'use-2'])
-  expect((await drawnLines($, width - 1))['line-2-0']?.buttons).toEqual([])
+  for (const width of [[...lineOne(store, '2')].length + 2 + 23 + 4, 120]) {
+    const lines = await drawnLines($, width)
+    expect([width, lines['line-2-0']?.buttons, lines['line-2-2']?.buttons]).toEqual([width, [], ['ask-remove-2', 'use-2']])
+  }
 })
 
 // Mutation V4 survived: the pane asks for the operator's 82-cell row and the accounts box's frame around it.

@@ -1296,17 +1296,13 @@ function fitLine1(line: RowPart[], columns: number): RowPart[] {
 }
 
 /**
- * A row fitted to a pane `columns` wide, its buttons `endWidth` cells: line 1 cut to the width, and the buttons at
- * line 1's end where they fit beside it, else at line 2's end, else on a line of their own after line 2. Without
- * buttons they end line 1.
+ * A row fitted to a pane `columns` wide: line 1 cut to the width, and the buttons on a line of their own after line 2,
+ * so they stand in one place on every row whatever its length. Without buttons they end line 1.
  */
 export function fitRow(row: Row, columns: number, endWidth: number): FittedRow {
   const [first = [], second, ...rest] = row.lines
-  const line1 = fitLine1(first, columns)
-  const fits = (line: RowPart[] | undefined) => line !== undefined && cellsOf(line) + END_GAP + endWidth <= columns
-  if (endWidth === 0 || fits(line1)) return { lines: [line1, ...(second === undefined ? [] : [second]), ...rest], endLine: 0 }
-  if (fits(second)) return { lines: [line1, second as RowPart[], ...rest], endLine: 1 }
-  const before = [line1, ...(second === undefined ? [] : [second])]
+  const before = [fitLine1(first, columns), ...(second === undefined ? [] : [second])]
+  if (endWidth === 0) return { lines: [...before, ...rest], endLine: 0 }
   return { lines: [...before, [], ...rest], endLine: before.length }
 }
 
