@@ -9880,11 +9880,13 @@ test('a stop held back for a token about to refresh logs the hold, then the move
   const w = fresh()
   w.keychain['Claude Code-credentials'] = blob('tok-1', NOW + 5 * 60_000)
   w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
-  w.usage['tok-1'] = [100, 41]
+  w.usage['tok-1'] = [20, 30]
   w.usage['tok-2'] = [10, 30]
   const store = new Map<string, unknown>(Object.entries(TWO_LOGINS))
   const clock = world(on, w, store)
   await start($, clock)
+  // Spent only now: a login spent at the start would be held by the tick, which carries nothing.
+  w.usage['tok-1'] = [100, 41]
   await $.classic.StopFailure(PLAIN)
   await clock.settle()
   expect(whats(stopLogOf(store, w))).toEqual([STOP_RATE_LIMIT, 'held for 2: the token in use refreshes soon'])
