@@ -1446,10 +1446,56 @@ function carryOnAfterSettle($: Host, owed: CarryOn): void {
 }
 
 /**
+ * How long a switch waits on the one in flight before it gives up on it. It is longer than the 10 s of the keychain read
+ * and the CHROME_WAIT_MS of Claude in Chrome, the limits a switch's own steps carry; the engine's env set and the store
+ * have none, so a switch that never ends must not hold every later press for ever.
+ */
+const SWITCH_WAIT_MS = 30_000
+/** The switch under way in this session, set and read with no await between, so two never start in one tick. */
+let switchInFlight: Promise<boolean> | undefined
+
+/**
  * Points this session at `target`; false while the refresh guard holds it back, or Claude Code's policy refuses it. Quiet: no toast.
  * `carry`: the carry-on the switch owes, sent once it lands. Held back, any stop's carry-on waits for the switch.
+ * With a switch in flight: a rotation that carries nothing starts none, as the next tick decides again; a stop's
+ * rotation rides the one in flight where it moves, its carry-on armed on it once, else switches itself; a press or a
+ * Claude in Chrome visit waits for it, then switches. Each wait ends at SWITCH_WAIT_MS.
  */
 async function switchTo($: Host, target: Account, why: string, isQuiet = false, carry?: CarryOn, isRotation = false): Promise<boolean> {
+  const before = switchInFlight
+  if (before !== undefined) {
+    if (isRotation && carry === undefined) return false
+    const hasMoved = await waitInFlight($, before)
+    if (isRotation && hasMoved) {
+      const since = (await getView($)).pending?.since
+      // The check and the write go with no await between, as in switchNow: the switch in flight may carry on itself.
+      if (since !== undefined && carriedFor !== since && carry !== undefined) {
+        carryOnAfterSettle($, carry)
+        carriedFor = since
+      }
+      return true
+    }
+  }
+  const run = switchNow($, target, why, isQuiet, carry, isRotation)
+  switchInFlight = run
+  try {
+    return await run
+  } finally {
+    if (switchInFlight === run) switchInFlight = undefined
+  }
+}
+
+/** Whether the switch in flight moved the session; false where it held, threw or outlasted SWITCH_WAIT_MS, when it is given up on. */
+async function waitInFlight($: Host, before: Promise<boolean>): Promise<boolean> {
+  const late = $.clock.sleep(SWITCH_WAIT_MS).then(() => 'late' as const)
+  const result = await Promise.race([before.catch(() => false), late])
+  if (result !== 'late') return result
+  await debug($, `gave up waiting on the switch in flight after ${SWITCH_WAIT_MS / 1000} s`)
+  if (switchInFlight === before) switchInFlight = undefined
+  return false
+}
+
+async function switchNow($: Host, target: Account, why: string, isQuiet: boolean, carry: CarryOn | undefined, isRotation: boolean): Promise<boolean> {
   const active = await refreshingSoon($, await getView($), target, await $.clock.now())
   if (active !== undefined) {
     // Where the held switch goes, what it carries on with and who asked for it are one intent, replaced together:
