@@ -2548,15 +2548,12 @@ export const register: Register = on => {
     $.clock.every(60_000, () => {
       // Armed again by a reload, which keeps the view and cancels every wait. Its own catch: a failing merge skips no retry.
       void retryHeld($).catch(error => debug($, `held switch retry failed: ${String(error)}`))
+      void carryOnWhenFree($).catch(error => debug($, `carry-on once a login is free failed: ${String(error)}`))
       void mergeStore($)
         .then(() => applyRequests($).catch(error => debug($, `requests failed: ${String(error)}`)))
         .then(() => settlePending($, false))
         .then(() => checkAll($, false))
         .catch(error => debug($, `sync failed: ${String(error)}`))
-        // After checkAll's own move, never beside it: two moves in one tick, each past the settle guard before either
-        // writes pending, make two switches, and the second ends the first's carry-on. Run whether the sync failed or not.
-        .then(() => carryOnWhenFree($))
-        .catch(error => debug($, `carry-on once a login is free failed: ${String(error)}`))
     })
     $.clock.every(10 * 60_000, () => {
       void checkAll($).catch(error => debug($, `check failed: ${String(error)}`))
