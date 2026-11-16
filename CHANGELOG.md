@@ -2,6 +2,12 @@
 
 What each version of the account rotator changed. To get each one as Claude Code starts, turn on auto-update: in `/plugin`, open **Marketplaces**, pick **claude-account-rotator** and choose **Enable auto-update**. To update by hand, run `claude plugin marketplace update claude-account-rotator`, then `claude plugin update account-rotator@claude-account-rotator`, and start a new session.
 
+## 0.5.34-lutso.1 - 2026-11-16
+
+- **After a usage-limit stop, the carry-on Claude Code's menu holds gets one Escape** in the session's own Orca pane, so the session carries on by itself: once, 5 seconds after the carry-on went, only while no turn runs and a dialog holds the prompt box, never after a rejected sign-in. Outside Orca the carry-on waits for your own Esc.
+- **A stop whose switch waits for a token refresh carries on once the switch lands**, whatever the stop, where only a Fable stop did. **Each session writes a stop-log** to the mod's store under `stop-log:<session mark>`: what each stop did, with logins by id and no token, email or prompt text.
+- **An account whose usage read failed is still moved to**, after every account that shows room, where it was passed over; one whose sign-in no check has named yet is still passed over.
+
 ## 0.5.33-lutso.1 - 2026-11-15
 
 - **The usage lines line up whatever the plan**: a plan with no Fable week keeps those cells blank, and **5h** stands as wide as **Used**, so every bar and every `resets` stand at one column on Pro, Max and Ultra rows and on the 5-hour line, a dash for an unread percent included.
