@@ -122,6 +122,8 @@ type World = {
   breakEnv?: boolean
   /** Awaited before each answer, so a press can finish during a usage read. */
   beforeFetch?: () => Promise<void>
+  /** Awaited before each keychain answer, so a read can come back late, as on a real Mac. */
+  beforeKeychain?: () => Promise<void>
   /**
    * Claude in Chrome, where the session has it: the slots of the accounts a
    * Chrome extension is signed in to, one per Chrome profile, and the slot its
@@ -221,9 +223,10 @@ function world(on: On, w: World, store: Record<string, unknown> | Map<string, un
     w.envSets.push(e)
     return { value: {} }
   })
-  on('process.run', (_$, e) => {
+  on('process.run', async (_$, e) => {
     const [cmd, sub, verb] = e.argv
     if (cmd === 'security') {
+      await w.beforeKeychain?.()
       const stored = w.keychain[e.argv[e.argv.length - 1] ?? '']
       return { value: stored === undefined ? ran(44, '') : ran(0, stored) }
     }
@@ -10001,6 +10004,32 @@ test('with every login spent, a login whose usage read fails since the stop is s
   await clock.advance(10 * 60_000)
   expect(w.submitted).toHaveLength(1)
   expect([w.toasts.filter(isWaitNotice).length, w.notices.filter(isWaitNotice).length]).toEqual([1, 1])
+})
+
+test('with every login spent, the tick at the reset switches to the freed login once, though the keychain answers late, and its carry-on goes (puma-9arph.35)', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await loggedWorld(on, w)
+  w.usage['tok-1'] = [40, 100]
+  w.usage['tok-2'] = [100, 30]
+  await start($, clock)
+  await $.classic.StopFailure(PLAIN)
+  await clock.settle()
+  expect(whats(stopLogOf(store, w)).filter(isWaitLine)).toEqual(['no login left: one carry-on at 2026-10-12T12:00:00.000Z'])
+  w.failing = { 'tok-2': 429 }
+  // On a Mac the keychain read before a switch takes milliseconds, long enough for a second job of the same tick to
+  // reach the switch too: two switches, and the second ends the first one's carry-on.
+  w.beforeKeychain = () => new Promise<void>(resolve => setTimeout(resolve, 5))
+  const isSwitched = (t: unknown) => String(t).startsWith('Switched to ')
+  const settleReal = async () => {
+    await new Promise(resolve => setTimeout(resolve, 100))
+    await clock.settle()
+  }
+  await clock.advance(Date.parse('2026-10-12T12:00:00Z') - clock.now() + 60_000)
+  await settleReal()
+  expect([w.envSets.at(-1)?.value, w.toasts.filter(isSwitched).length]).toEqual([SLOT2, 1])
+  await clock.advance(36_000)
+  await settleReal()
+  expect([whats(stopLogOf(store, w)).filter(x => x.startsWith('carry-on skipped')), w.submitted.length]).toEqual([[], 1])
 })
 
 test('with every login spent, a login a usage read frees before the time owed is moved to by the tick, and one carry-on still goes there, once (puma-9arph.35)', async ($, on) => {
