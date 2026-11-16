@@ -10000,6 +10000,27 @@ test('with every login spent, a login whose usage read fails since the stop is s
   expect([w.toasts.filter(isWaitNotice).length, w.notices.filter(isWaitNotice).length]).toEqual([1, 1])
 })
 
+test('with every login spent, a login a usage read frees before the time owed is moved to by the tick, and one carry-on still goes there, once (puma-9arph.35)', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await loggedWorld(on, w)
+  w.usage['tok-1'] = [40, 100]
+  w.usage['tok-2'] = [100, 30]
+  await start($, clock)
+  await $.classic.StopFailure(PLAIN)
+  await clock.settle()
+  expect(whats(stopLogOf(store, w)).filter(isWaitLine)).toEqual(['no login left: one carry-on at 2026-10-12T12:00:00.000Z'])
+  // Login 2 reads 10% at its next read: the tick's own rotation moves there with no carry-on of its own, and no response follows.
+  w.usage['tok-2'] = [10, 30]
+  await clock.advance(Date.parse('2026-10-12T11:45:00Z') - clock.now())
+  expect(w.envSets.at(-1)?.value).toBe(SLOT2)
+  expect(w.submitted).toHaveLength(1)
+  expect(whats(stopLogOf(store, w))).toContain('a login is free: carry-on on 2')
+  // The time owed passes: nothing more.
+  await clock.advance(Date.parse('2026-10-12T12:10:00Z') - clock.now())
+  expect(w.submitted).toHaveLength(1)
+  expect([w.toasts.filter(isWaitNotice).length, w.notices.filter(isWaitNotice).length]).toEqual([1, 1])
+})
+
 test('a stop where Claude Code\'s policy refuses switching logs that it stayed for that (puma-9arph.34 B4)', async ($, on) => {
   const w = fresh()
   w.refuseEnv = true

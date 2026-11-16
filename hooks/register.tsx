@@ -1354,26 +1354,34 @@ function awaitFreeLogin($: Host, view: View, now: number): void {
 }
 
 /**
- * Sends the carry-on awaitFreeLogin owes, once: at its time, or sooner once the login in use is not spent. On the login in
- * use where it is not spent; else the rotation moves to a freed login and carries on once that switch lands. A switch
- * still settling waits for the next tick.
+ * Sends the carry-on awaitFreeLogin owes, once: at its time, or sooner once the login in use is not spent. From a spent
+ * login the rotation moves to a freed one, and that switch carries on once it lands. On a login not spent it carries on
+ * there; where a switch without a carry-on (the tick's own) is still settling, once that switch lands, armed once.
  */
 async function carryOnWhenFree($: Host): Promise<void> {
   if (due === undefined) return
   const view = await getView($)
   const now = await $.clock.now()
   const isTime = due?.at !== undefined && now >= due.at
-  if (view.pending !== undefined || (!isTime && shouldLeave(view, now))) return
+  if (!isTime && shouldLeave(view, now)) return
   // Another tick may have taken it during the reads: the check and the clear go with no await between.
   if (due === undefined) return
   due = undefined
   await setView($, v => ({ ...v, carryDue: undefined }))
-  if (shouldLeave(view, now)) {
-    await maybeRotate($, undefined, {})
+  if (shouldLeave(view, now) && (await maybeRotate($, undefined, {}))) return
+  // Still spent: a switch held for a refresh carries on when it lands, and a stop with no login left owes one anew.
+  const after = await getView($)
+  const at = await $.clock.now()
+  if (shouldLeave(after, at)) return
+  void logStop($, `a login is free: carry-on on ${after.activeId}`)
+  const since = after.pending?.since
+  if (since === undefined || at - since >= SETTLE_MS) {
+    await carryOn($)
     return
   }
-  void logStop($, `a login is free: carry-on on ${view.activeId}`)
-  await carryOn($)
+  if (carriedFor === since) return
+  carryOnAfterSettle($, {})
+  carriedFor = since
 }
 
 /** The login in use, when its token refreshes too soon for the refresh guard to let the session leave it for `target`. */
