@@ -133,6 +133,8 @@ const CONTINUE =
   'Claude Code switched to another of your Claude accounts because the previous one hit its usage limit or lost its sign-in. Continue where you left off.'
 /** The carry-on after a stop with no login left, where the login in use freed up itself: nothing switched. */
 const CONTINUE_RESET = "This Claude account's usage limit has reset. Continue where you left off."
+/** How long past the time owed a carry-on with no switch waits: Claude Code v2.1.325 continued a 5-hour stop by itself 98 s after its reset (puma-9arph.35 d5), and one carry-on goes, not two. */
+const CARRY_ON_GRACE_MS = 3 * 60_000
 
 const viewAtom = atom({ plugin: 'account-rotator', key: 'view' } as const, EMPTY_VIEW)
 
@@ -218,7 +220,7 @@ let clearedFor: number | undefined
  * The one carry-on owed after a usage-limit stop found no login to move to, as the view's `carryDue` holds it: set once,
  * by the first such stop, with no await between its read and its write, so a second stop adds no notice and no retry.
  */
-let due: { at?: number; from?: string } | undefined
+let due: { at?: number; from?: string; turns?: number } | undefined
 /** The turns open now, the main loop's and every agent's or teammate's, by id: a key sent while one runs would answer its dialog. */
 const openTurns = new Set<string>()
 /** The main loop's turns started this session, and how many had started at the last usage-limit stop: equal while its modal can stand. */
@@ -1349,7 +1351,8 @@ function awaitFreeLogin($: Host, view: View, now: number): void {
   if (due !== undefined) return
   const at = freesAt(view, now, untaken)
   const owed = at === undefined ? { from: view.activeId } : { at, from: view.activeId }
-  due = owed
+  // The main turns so far, held in this module only: a reload drops it, and the carry-on then goes after the grace.
+  due = { ...owed, turns: mainTurns }
   void logStop($, `no login left: one carry-on ${at === undefined ? 'once a login frees up' : `at ${new Date(at).toISOString()}`}`)
   const text = `${limitNotice(view, now, untaken)} This session carries on by itself once one frees up.`
   void (async () => {
@@ -1363,19 +1366,24 @@ function awaitFreeLogin($: Host, view: View, now: number): void {
  * Sends the carry-on awaitFreeLogin owes, once, at the first tick that finds the login in use not spent: its own window
  * reset, or the tick's own rotation, which runs just before this, moved to a login that freed up. It never switches
  * itself: a second move in the same tick would end the first one's carry-on. Where that switch is still settling, it
- * carries on once the switch lands, armed once.
+ * carries on once the switch lands, armed once. On the login the stop found spent (no switch) it waits CARRY_ON_GRACE_MS
+ * past the time owed, and sends nothing where a main turn ran since the stop, as Claude Code may carry on by itself.
  */
 async function carryOnWhenFree($: Host): Promise<void> {
   if (due === undefined) return
   const view = await getView($)
   const now = await $.clock.now()
   if (shouldLeave(view, now)) return
+  const isSameLogin = view.activeId === due?.from
+  if (isSameLogin && due?.at !== undefined && now < due.at + CARRY_ON_GRACE_MS) return
   // Another tick may have taken it during the reads: the check and the clear go with no await between.
   if (due === undefined) return
   const owed = due
   due = undefined
-  void logStop($, `a login is free: carry-on on ${view.activeId}`)
+  const hasTurnRun = isSameLogin && owed.turns !== undefined && mainTurns > owed.turns
+  void logStop($, hasTurnRun ? 'a turn ran since the stop: no carry-on' : `a login is free: carry-on on ${view.activeId}`)
   await setView($, v => ({ ...v, carryDue: undefined }))
+  if (hasTurnRun) return
   const since = view.pending?.since
   if (since === undefined || now - since >= SETTLE_MS) {
     // Still on the login the stop found spent: nothing switched, so the line says its limit reset.
