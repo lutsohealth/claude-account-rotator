@@ -10028,14 +10028,19 @@ test('with every login spent, the tick at the reset switches to the freed login 
   // One tick at a time, each let finish in real time: only a race inside one tick can make a second switch.
   await clock.advance(Date.parse('2026-10-12T12:00:00Z') - clock.now())
   await settleReal()
+  await clock.advance(60_000)
+  await settleReal()
+  expect([w.envSets.at(-1)?.value, w.toasts.filter(isSwitched).length]).toEqual([SLOT2, 1])
+  // The carry-on goes once that one tick's switch lands, not a tick later.
+  await clock.advance(36_000)
+  await settleReal()
+  expect([whats(stopLogOf(store, w)).filter(x => x.startsWith('carry-on skipped')), w.submitted.length]).toEqual([[], 1])
+  // Two more ticks: no second switch, no second carry-on.
   for (let i = 0; i < 2; i += 1) {
     await clock.advance(60_000)
     await settleReal()
   }
-  expect([w.envSets.at(-1)?.value, w.toasts.filter(isSwitched).length]).toEqual([SLOT2, 1])
-  await clock.advance(36_000)
-  await settleReal()
-  expect([whats(stopLogOf(store, w)).filter(x => x.startsWith('carry-on skipped')), w.submitted.length]).toEqual([[], 1])
+  expect([w.toasts.filter(isSwitched).length, w.submitted.length]).toEqual([1, 1])
 })
 
 test('with every login spent, a login a usage read frees before the time owed is moved to by the tick, and one carry-on still goes there, once (puma-9arph.35)', async ($, on) => {
