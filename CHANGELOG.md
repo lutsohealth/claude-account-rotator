@@ -2,6 +2,10 @@
 
 What each version of the account rotator changed. To get each one as Claude Code starts, turn on auto-update: in `/plugin`, open **Marketplaces**, pick **claude-account-rotator** and choose **Enable auto-update**. To update by hand, run `claude plugin marketplace update claude-account-rotator`, then `claude plugin update account-rotator@claude-account-rotator`, and start a new session.
 
+## 0.5.37-lutso.1 - 2026-11-16
+
+- **A login Claude Code does not count as signed in says ⚠ sign in needed, and New on passes it over**: each check asks Claude Code (`claude auth status`) whether the login is signed in, so `account-rotator-launch` and the launcher no longer start new sessions on a login whose sign-in Claude Code no longer counts, until it is signed in again (#114, puma-9arph.48).
+
 ## 0.5.36-lutso.1 - 2026-11-16
 
 - **A login whose sign-in Claude Code rejected stays passed over by New on** until a new sign-in or a usage read that works, so `account-rotator-launch` and the launcher no longer start new sessions on it (#110, puma-9arph.42).
