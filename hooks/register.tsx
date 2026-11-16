@@ -1281,7 +1281,7 @@ async function maybeRotate($: Host, need?: Need, carry?: CarryOn): Promise<boole
   const view = await getView($)
   // A stop that stays says why in the stop-log; a tick or a response is no stop.
   const stays = async (why: string): Promise<false> => {
-    if (carry !== undefined) await logStop($, `stayed: ${why}`)
+    if (carry !== undefined) void logStop($, `stayed: ${why}`)
     return false
   }
   if (view.isSwitchBlocked) {
@@ -1309,7 +1309,7 @@ async function maybeRotate($: Host, need?: Need, carry?: CarryOn): Promise<boole
   const isMoved = await switchTo($, target, whyLeave(view, now, need), false, carry, true)
   // A tick or a response may move to a login whose usage read failed and that has no reading; no carry-on follows it.
   if (isMoved && carry === undefined && isUnread(view, target)) {
-    await logStop($, `moved to ${target.id} by the tick or a response, its usage read failed, no carry-on`)
+    void logStop($, `moved to ${target.id} by the tick or a response, its usage read failed, no carry-on`)
   }
   return isMoved
 }
@@ -1376,7 +1376,7 @@ async function switchTo($: Host, target: Account, why: string, isQuiet = false, 
     const wasHeld = (await getView($)).held !== undefined
     await setView($, v => ({ ...v, held: { target, why, carry, isRotation } }))
     if (!wasHeld) {
-      if (carry !== undefined) await logStop($, `held for ${target.id}: the token in use refreshes soon`)
+      if (carry !== undefined) void logStop($, `held for ${target.id}: the token in use refreshes soon`)
       const { accounts } = await getView($)
       tell($, `Switching to ${claudeAccount(target, accounts)} in a few minutes, once ${label(active, accounts)}'s token has refreshed.`)
     }
@@ -1392,7 +1392,7 @@ async function switchTo($: Host, target: Account, why: string, isQuiet = false, 
     if (!isPolicyRefusal(error)) throw error
     // A press of Use now or Rotate now gets an answer, even once the notice has shown.
     if (!(await blocked($))) tell($, blockedText(await getView($)))
-    if (carry !== undefined) await logStop($, 'stayed: switching blocked')
+    if (carry !== undefined) void logStop($, 'stayed: switching blocked')
     return false
   }
   // A switch that replaces an unproven one ends it unproven. A stop's own move (it carries on) keeps what the stop
@@ -1408,13 +1408,14 @@ async function switchTo($: Host, target: Account, why: string, isQuiet = false, 
     pending: { id: target.id, from: v.activeId, since: now },
     removing: undefined,
   }))
-  if (!isQuiet) $.ui.toast(`Switched to ${claudeAccount(target, (await getView($)).accounts)}: ${why}.`, { timeoutMs: 6000 })
-  // Not awaited: from pending's write to carriedFor there is no await, so a second stop cannot arm a second carry-on.
+  // The carry-on is armed and carriedFor set straight after pending's write, with no await between, so a second stop
+  // cannot arm a second carry-on; the toast reads the view after them.
   if (carry !== undefined) void logStop($, `moved to ${target.id}`)
   if (owed !== undefined) {
     carryOnAfterSettle($, owed)
     carriedFor = now
   }
+  if (!isQuiet) $.ui.toast(`Switched to ${claudeAccount(target, (await getView($)).accounts)}: ${why}.`, { timeoutMs: 6000 })
   return true
 }
 
@@ -1532,7 +1533,7 @@ async function carryOn($: Host, need?: Need): Promise<void> {
   const answer = await $.prompt.submit(kept === undefined ? { text: CONTINUE } : { text: kept, asUser: true })
   // The engine's own refusal (a Stop stands, a host's limit): said in debug, with its reason, and not tried again.
   if (answer.drop !== undefined) await debug($, `carry-on dropped: ${answer.drop}`)
-  await logStop($, answer.drop === undefined ? 'carry-on entered' : 'carry-on drop')
+  void logStop($, answer.drop === undefined ? 'carry-on entered' : 'carry-on drop')
 }
 
 /**
@@ -1554,7 +1555,8 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
   // the visit ends. A rejected sign-in after a response with the moved-to login's week went out on that login: the
   // switch has landed.
   const isFable = isFableStop(stop.last_assistant_message)
-  await logStop($, `stop heard: ${error}${isFable ? ' (Fable week)' : ''}, login ${active.id} in use`)
+  // Not awaited, as no stop-log line is: an await here would let a second stop act on a view read before this one's switch.
+  void logStop($, `stop heard: ${error}${isFable ? ' (Fable week)' : ''}, login ${active.id} in use`)
   const since = view.pending?.since
   const hasResponseSince = since !== undefined && lastMeasured !== undefined && lastMeasured.at > since
   const isProvenRejection = error === 'authentication_failed' && hasResponseSince && provenStopper(view, lastMeasured?.reading)?.id === active.id
