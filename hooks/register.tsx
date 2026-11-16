@@ -1420,11 +1420,21 @@ async function carryOnWhenFree($: Host): Promise<void> {
   if (due === undefined) return
   const owed = due
   due = undefined
+  await setView($, v => ({ ...v, carryDue: undefined }))
+  // A turn or a switch can come during that write: the decision is made from what stands after it.
+  const after = await getView($)
+  if (after.activeId !== view.activeId || shouldLeave(after, now)) {
+    // The login moved meanwhile: the carry-on stays owed, decided again at the next tick.
+    if (due === undefined) due = owed
+    const held = due
+    void logStop($, 'carry-on held: the login moved')
+    await setView($, v => ({ ...v, carryDue: held }))
+    return
+  }
   const hasTurnRun = isSameLogin && owed.turns !== undefined && mainTurns > owed.turns
   void logStop($, hasTurnRun ? 'a turn ran since the stop: no carry-on' : `a login is free: carry-on on ${view.activeId}`)
-  await setView($, v => ({ ...v, carryDue: undefined }))
   if (hasTurnRun) return
-  const since = view.pending?.since
+  const since = after.pending?.since
   if (since === undefined || now - since >= SETTLE_MS) {
     // Still on the login the stop found spent: nothing switched, so the line says its limit reset.
     await carryOn($, undefined, view.activeId === owed.from ? CONTINUE_RESET : undefined)
