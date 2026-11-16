@@ -1453,6 +1453,8 @@ function carryOnAfterSettle($: Host, owed: CarryOn): void {
 const SWITCH_WAIT_MS = 30_000
 /** The switch under way in this session, set and read with no await between, so two never start in one tick. */
 let switchInFlight: Promise<boolean> | undefined
+/** Moves on each give-up: a switch that sees it moved during its slot write lands too late and writes nothing. */
+let switchGeneration = 0
 
 /**
  * Points this session at `target`; false while the refresh guard holds it back, or Claude Code's policy refuses it. Quiet: no toast.
@@ -1495,11 +1497,13 @@ async function waitInFlight($: Host, before: Promise<boolean>): Promise<boolean>
   const result = await Promise.race([before.catch(() => false), late])
   if (result !== 'late') return result
   await debug($, `gave up waiting on the switch in flight after ${SWITCH_WAIT_MS / 1000} s`)
+  switchGeneration += 1
   if (switchInFlight === before) switchInFlight = undefined
   return false
 }
 
 async function switchNow($: Host, target: Account, why: string, isQuiet: boolean, carry: CarryOn | undefined, isRotation: boolean): Promise<boolean> {
+  const generation = switchGeneration
   const active = await refreshingSoon($, await getView($), target, await $.clock.now())
   if (active !== undefined) {
     // Where the held switch goes, what it carries on with and who asked for it are one intent, replaced together:
@@ -1524,6 +1528,13 @@ async function switchNow($: Host, target: Account, why: string, isQuiet: boolean
     // A press of Use now or Rotate now gets an answer, even once the notice has shown.
     if (!(await blocked($))) tell($, blockedText(await getView($)))
     if (carry !== undefined) void logStop($, 'stayed: switching blocked')
+    return false
+  }
+  if (generation !== switchGeneration) {
+    // Given up on while its slot write hung: the slot goes back to the login the session moved to since, and nothing more.
+    const { accounts, activeId } = await getView($)
+    const back = accounts.find(a => a.id === activeId)
+    if (back !== undefined) await useSlot($, back.slot).catch(error => debug($, `putting the slot back after a late switch failed: ${String(error)}`))
     return false
   }
   // A switch that replaces an unproven one ends it unproven. A stop's own move (it carries on) keeps what the stop
