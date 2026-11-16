@@ -2,6 +2,10 @@
 
 What each version of the account rotator changed. To get each one as Claude Code starts, turn on auto-update: in `/plugin`, open **Marketplaces**, pick **claude-account-rotator** and choose **Enable auto-update**. To update by hand, run `claude plugin marketplace update claude-account-rotator`, then `claude plugin update account-rotator@claude-account-rotator`, and start a new session.
 
+## 0.5.35-lutso.1 - 2026-11-16
+
+- **A usage-limit stop whose own read of the account fails still moves the session and carries on**: a usage or profile call left unanswered, or a store write refused, no longer drops the stop. The account is marked, the session moves and carries on, and the stop-log says `stop read failed`. A fault in Claude Code's own store or hooks outside that read still ends the recovery, and the stop-log says `stop handling failed`.
+
 ## 0.5.34-lutso.1 - 2026-11-16
 
 - **After a usage-limit stop, the carry-on Claude Code's menu holds gets one Escape** in the session's own Orca pane, so the session carries on by itself: once, 5 seconds after the carry-on went, only while no turn runs and a dialog holds the prompt box, never after a rejected sign-in. Outside Orca the carry-on waits for your own Esc.
