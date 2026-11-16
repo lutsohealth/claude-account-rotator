@@ -124,6 +124,8 @@ type World = {
   beforeFetch?: () => Promise<void>
   /** Awaited before each keychain answer, so a read can come back late, as on a real Mac. */
   beforeKeychain?: () => Promise<void>
+  /** Awaited before each switch's slot write (never the start's), so a switch can hang where the engine sets no limit. */
+  beforeEnv?: () => Promise<void>
   /**
    * Claude in Chrome, where the session has it: the slots of the accounts a
    * Chrome extension is signed in to, one per Chrome profile, and the slot its
@@ -209,7 +211,7 @@ function world(on: On, w: World, store: Record<string, unknown> | Map<string, un
   else mock.store(on, store)
   mock.env(on, { USER: 'tester', HOME, ...w.env })
   let slot = w.env.CLAUDE_SECURESTORAGE_CONFIG_DIR ?? ''
-  on('env.set', (_$, e) => {
+  on('env.set', async (_$, e) => {
     if (e.name !== 'CLAUDE_SECURESTORAGE_CONFIG_DIR') {
       if (w.refuseMark) return { deny: `env (managed): ${e.name} is not for plugins outside policy to change` }
       w.otherEnv[e.name] = e.value
@@ -219,6 +221,7 @@ function world(on: On, w: World, store: Record<string, unknown> | Map<string, un
     if (w.breakEnv) return { deny: 'no policy said this' }
     // The mod sets the slot in use at its start, to learn whether it may switch: not a switch.
     if ((e.value ?? '') === slot) return { value: {} }
+    await w.beforeEnv?.()
     slot = e.value ?? ''
     w.envSets.push(e)
     return { value: {} }
@@ -10128,6 +10131,121 @@ test('with every login spent, the band says when the first login frees up (puma-
   w.usage['tok-2'] = [100, 30]
   await start($, clock)
   expect(await bandText($)).toMatch(/^Every Claude account is near its limit; the next frees up /)
+})
+
+// ---------------------------------------------------------------- puma-9arph.38: one switch in flight
+
+const isSwitchedToast = (t: unknown) => String(t).startsWith('Switched to ')
+/**
+ * Another session's read of login 1, spent, in the shared store as saveReading writes it: the minute's merge brings it
+ * into the view, so both checks of the next tick find the login in use spent. This session's own read of it is due
+ * only USAGE_IDLE_MS after the start's, a time no 10-minute mark meets.
+ */
+const spentElsewhere = (store: Map<string, unknown>, at: number) =>
+  store.set('usage:1', { fiveHour: { pct: 100, resetsAt: '2026-10-12T12:00:00Z' }, sevenDay: { pct: 41, resetsAt: '2026-10-18T00:00:00Z' }, at, by: '1', v: 1, src: 'body' })
+/** Lets the jobs of one tick finish in real time, as ticks a minute apart do, a late keychain answer included. */
+async function settleReal(clock: MockClock): Promise<void> {
+  await new Promise(resolve => setTimeout(resolve, 100))
+  await clock.settle()
+}
+
+test('a held rotation retried in the tick where the tick\'s own rotation also leaves switches once, though the keychain answers late (puma-9arph.38)', async ($, on) => {
+  const w = fresh()
+  const { clock } = await loggedWorld(on, w)
+  // Login 1 spent from the start, its token about to refresh: the start's rotation is held for login 2.
+  w.keychain['Claude Code-credentials'] = blob('tok-1', NOW + 5 * 60_000)
+  w.usage['tok-1'] = [100, 41]
+  await start($, clock)
+  await settleReal(clock)
+  expect(w.toasts.filter(isSwitchedToast)).toHaveLength(0)
+  refresh(w)
+  w.beforeKeychain = () => new Promise<void>(resolve => setTimeout(resolve, 5))
+  for (let i = 0; i < 3 && w.toasts.filter(isSwitchedToast).length === 0; i += 1) {
+    await clock.advance(60_000)
+    await settleReal(clock)
+  }
+  await clock.advance(60_000)
+  await settleReal(clock)
+  expect([slots(w), w.toasts.filter(isSwitchedToast).length]).toEqual([[SLOT2], 1])
+})
+
+test('the 10-minute check beside the minute\'s check, both finding the login in use spent, switches once, though the keychain answers late (puma-9arph.38)', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await loggedWorld(on, w)
+  await start($, clock)
+  await settleReal(clock)
+  w.usage['tok-1'] = [100, 41]
+  await clock.advance(10 * 60_000 - 1000)
+  await settleReal(clock)
+  // Both timers fire at the tenth minute, each check ending in the rotation.
+  spentElsewhere(store, clock.now())
+  w.beforeKeychain = () => new Promise<void>(resolve => setTimeout(resolve, 5))
+  await clock.advance(1000)
+  await settleReal(clock)
+  // Each check waits USAGE_CLAIM_WAIT_MS for its claim to stand, then reads and rotates: both in this one tick.
+  await clock.advance(USAGE_CLAIM_WAIT_MS)
+  await settleReal(clock)
+  await clock.advance(1000)
+  await settleReal(clock)
+  expect([slots(w), w.toasts.filter(isSwitchedToast).length]).toEqual([[SLOT2], 1])
+})
+
+test('a usage-limit stop while a rotation\'s switch is in flight rides it: one switch, its carry-on entered, none skipped (puma-9arph.38)', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await loggedWorld(on, w)
+  // The start's rotation leaves the spent login 1; its slot write waits on a gate the test opens, so it has written no
+  // `pending` when the stop comes: the stop meets a switch in flight, not one settling.
+  let open: () => void = () => undefined
+  const gate = new Promise<void>(resolve => { open = resolve })
+  let writes = 0
+  w.beforeEnv = () => (writes++ === 0 ? gate : Promise.resolve())
+  w.usage['tok-1'] = [100, 41]
+  await start($, clock)
+  await settleReal(clock)
+  expect(slots(w)).toEqual([])
+  await $.classic.StopFailure(PLAIN)
+  await settleReal(clock)
+  open()
+  await settleReal(clock)
+  await clock.advance(36_000)
+  await settleReal(clock)
+  expect([slots(w), w.toasts.filter(isSwitchedToast).length, w.submitted.length]).toEqual([[SLOT2], 1, 1])
+  expect(whats(stopLogOf(store, w)).filter(x => x.startsWith('carry-on skipped'))).toEqual([])
+})
+
+test('a press while a switch in flight hangs still lands once SWITCH_WAIT_MS has passed (puma-9arph.38)', async ($, on) => {
+  const w = fresh()
+  const { clock } = await loggedWorld(on, w)
+  // The start's rotation leaves login 1 and its slot write never answers, as an engine call with no limit of its own may.
+  let writes = 0
+  w.beforeEnv = () => (writes++ === 0 ? new Promise<void>(() => undefined) : Promise.resolve())
+  w.usage['tok-1'] = [100, 41]
+  await start($, clock)
+  await settleReal(clock)
+  expect(slots(w)).toEqual([])
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  void pane.press({ key: 'use-2' })
+  await settleReal(clock)
+  expect(slots(w)).toEqual([])
+  await clock.advance(30_000)
+  await settleReal(clock)
+  await pane.unmount()
+  expect(slots(w)).toEqual([SLOT2])
+})
+
+test('a switch in flight that throws frees the next one: a later tick switches normally (puma-9arph.38)', async ($, on) => {
+  const w = fresh()
+  const { clock } = await loggedWorld(on, w)
+  // The start's rotation meets a slot write that fails with no policy named: the switch throws.
+  w.breakEnv = true
+  w.usage['tok-1'] = [100, 41]
+  await start($, clock)
+  await settleReal(clock)
+  expect(slots(w)).toEqual([])
+  w.breakEnv = false
+  await clock.advance(60_000)
+  await settleReal(clock)
+  expect(slots(w)).toEqual([SLOT2])
 })
 
 test('a stop where Claude Code\'s policy refuses switching logs that it stayed for that (puma-9arph.34 B4)', async ($, on) => {
