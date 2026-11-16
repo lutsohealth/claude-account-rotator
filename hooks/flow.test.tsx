@@ -10908,3 +10908,116 @@ test('Review r1 REFUSED_INTENT class: a refused ask strands no pending switch (p
   const { view } = await refusedIntent($, on)
   expect(view()?.pending).toBeUndefined()
 })
+
+// ---------------------------------------------------------------- puma-9arph.41: one switch coordinator
+/** The owner record the coordinator keeps in the view while a switch runs; absent once none runs. */
+const ownerOf = (v: View | undefined): unknown => (v as { owner?: unknown } | undefined)?.owner
+
+// Race (a): the point-back reads the switch it points back, then a press moves the session before the point-back writes.
+// The hold lands on the n-th view read after the point-back read login 1's usage, so every await of the point-back is met.
+for (const n of [1, 2, 3, 4, 5]) {
+  test(`a press made while the point-back waits at its view read ${n} after reading the login left stands, in the slot and the view (race a)`, async ($, on) => {
+    const w = fresh()
+    const { clock } = await loggedWorld(on, w, THREE_LOGINS)
+    w.keychain[await keychainItem(SLOT3)] = blob('tok-3')
+    w.usage['tok-3'] = [10, 30]
+    w.weekResets = { 'tok-2': OTHER_WEEK }
+    const view = watchedView(on)
+    const held = holdViewRead(on)
+    let reads = 0
+    let isSourceRead = false
+    const usage = w.usage
+    w.usage = new Proxy(usage, { get: (t, k) => { if (k === 'tok-1' && reads === 0) isSourceRead = true; return Reflect.get(t, k) } })
+    await start($, clock)
+    const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+    await pane.press({ key: 'use-2' })
+    await clock.advance(5 * 60_000)
+    w.limits = LOGIN_ONE_RESPONSE
+    isSourceRead = false
+    held.arm(() => isSourceRead && ++reads === n)
+    void $.session.measure({ context: { window: 200_000 }, rateLimits: w.limits, changed: ['rateLimits'] })
+    await settleReal(clock)
+    if (held.isHeld()) {
+      void pane.press({ key: 'use-3' })
+      await settleReal(clock)
+      held.open()
+    }
+    await settleReal(clock)
+    await settleReal(clock)
+    await pane.unmount()
+    expect([n, held.isHeld(), view()?.activeId, slots(w).at(-1)]).toEqual([n, true, '3', SLOT3])
+  })
+}
+
+// Race (b): a switch whose view write read the view before it was given up on, and writes after a newer switch published.
+test('a given-up switch whose publication read the view before the give-up writes nothing over the press that gave it up (race b)', async ($, on) => {
+  const w = fresh()
+  const { clock } = await loggedWorld(on, w, { ...THREE_LOGINS, 'rotate-to': 'order' })
+  w.keychain[await keychainItem(SLOT3)] = blob('tok-3')
+  w.usage['tok-3'] = [10, 30]
+  w.usage['tok-1'] = [100, 41]
+  const view = watchedView(on)
+  // The start's rotation to login 2 writes its slot, then its next view read is taken and held before its write.
+  const held = holdViewRead(on, true)
+  held.arm(() => w.envSets.length === 1)
+  await start($, clock)
+  await settleReal(clock)
+  expect(held.isHeld()).toBe(true)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  void pane.press({ key: 'use-3' })
+  await settleReal(clock)
+  await clock.advance(30_000)
+  await settleReal(clock)
+  held.open()
+  await settleReal(clock)
+  await settleReal(clock)
+  await pane.unmount()
+  expect([view()?.activeId, slots(w).at(-1), ownerOf(view())]).toEqual(['3', SLOT3, undefined])
+})
+
+// Race (c): a given-up switch's late slot write lands after a newer switch published, and the write that repairs it fails.
+test('a late slot write whose repair fails leaves the view naming the login whose slot is in use (race c)', async ($, on) => {
+  let openLate: () => void = () => undefined
+  const late = new Promise<void>(resolve => { openLate = resolve })
+  const { w, clock } = await hungWorld(on, [() => late])
+  const view = watchedView(on)
+  await start($, clock)
+  await settleReal(clock)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  void pane.press({ key: 'use-3' })
+  await settleReal(clock)
+  await clock.advance(30_000)
+  await settleReal(clock)
+  expect(slots(w)).toEqual([SLOT3])
+  // The given-up switch's write to login 2's slot lands; every write after it is refused.
+  w.breakEnv = true
+  openLate()
+  await settleReal(clock)
+  await clock.advance(60_000)
+  await settleReal(clock)
+  const id = view()?.activeId ?? ''
+  expect([id, slots(w).at(-1), ownerOf(view())]).toEqual([id, SLOT_OF[id], undefined])
+  // Once writes are allowed again, the next tick writes nothing: the view and the slot already agree.
+  w.breakEnv = false
+  const before = slots(w).length
+  await clock.advance(60_000)
+  await settleReal(clock)
+  await pane.unmount()
+  expect(slots(w).length).toBe(before)
+})
+
+// A /clear while a switch waits on its slot write: the reset drops the view's owner, and the switch still publishes.
+test('a /clear while a switch waits on its slot write ends with the view on the login whose slot is in use and no owner left', async ($, on) => {
+  let openLate: () => void = () => undefined
+  const late = new Promise<void>(resolve => { openLate = resolve })
+  const { w, clock } = await hungWorld(on, [() => late])
+  const s = clearable(on)
+  on('classic.SessionStart', () => ({}))
+  await start($, clock)
+  await settleReal(clock)
+  await clearSession($, clock, s.clear)
+  openLate()
+  await settleReal(clock)
+  await settleReal(clock)
+  expect([s.view()?.activeId, slots(w).at(-1), s.view()?.pending?.id, ownerOf(s.view())]).toEqual(['2', SLOT2, '2', undefined])
+})
