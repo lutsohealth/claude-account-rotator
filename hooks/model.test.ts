@@ -8,7 +8,7 @@ import { laterMark, spentMark, withFableMark } from './model'
 import { EMPTY_VIEW, USAGE_IDLE_MS, fitRow, hasRoom, rowOf, rowsOf, rowText, storedLine, storedLineText } from './model'
 import ROWS_FIXTURE from '../tests/fixtures/rows'
 import { REQUEST_TTL_MS, holdsLogin, isLoginOf, sameLogin, requestFrom, requestsDir, slotNumber } from './model'
-import { escapeArgv, escapeHeldBack } from './model'
+import { escapeArgv, escapeHeldBack, raisesLimitModal } from './model'
 import { mayWrite } from './model'
 import { USAGE_BACKOFF_MAX_MS, USAGE_CLAIM_MS, USAGE_CLAIM_WAIT_MS, USAGE_EARLY_MS, WRITER_VERSION, afterUsage, claimDueReads, gatingDue, isUsageDue, mayForceUsage, mayReadSince, renewClaim, retryAfterFrom, usageDueFrom } from './model'
 import { DEFAULT_FOOTER, availableNow, claudeAccount, blockedAdvice, braille, browsersFrom, chromeNote, continueTextFrom, counted, fiveHourLimitFrom, credentialFrom, credentialsFile, fableMark, fableSpentNotice, fableStay, footerStyleFrom, healthOf, identityFromProfile, isFableSpent, isFableStop, isNoBrowser, isPolicyRefusal, keepFable, keychainItem, label, legacyMark, markFrom, nextReset, pickTarget, pie, readingFromUsage, restartSteps, rotateToFrom, shouldLeave, roomColor, stuckText, windowPct, withMark, withWeekMark } from './model'
@@ -1819,12 +1819,14 @@ test('a slot has a number only as a folder directly under the accounts folder, i
 
 // puma-9arph.34 C (RULINGS 6008, 6034): the one Escape a queued carry-on gets goes only when nothing below holds it back.
 test('a queued carry-on gets its Escape only after a limit stop, with no turn open, under the engine\'s own dialog, in an Orca pane', () => {
-  const modal = { isLimitStopLast: true, openTurns: 0, fill: { refusal: 'dialog', pane: 'term_a' } }
+  const modal = { isLimitStopLast: raisesLimitModal('rate_limit'), openTurns: 0, fill: { refusal: 'dialog', pane: 'term_a' } }
   expect(escapeHeldBack(modal)).toBeUndefined()
   // Before the fill is asked, only what the session knows without asking.
   expect(escapeHeldBack({ isLimitStopLast: true, openTurns: 0 })).toBeUndefined()
   const rows: [string, Parameters<typeof escapeHeldBack>[0], string][] = [
     ['no limit stop since the last turn began', { ...modal, isLimitStopLast: false }, 'no limit stop before it'],
+    // puma-9arph.36: a rejected sign-in raises no modal, so even under the engine's own dialog it gets no key.
+    ['a rejected sign-in before it', { ...modal, isLimitStopLast: raisesLimitModal('authentication_failed') }, 'no limit stop before it'],
     ['a turn open in some loop', { ...modal, openTurns: 1 }, 'a turn is open'],
     // Review CALL1 [UNPROVEN-DIALOG]: a hook's refusal carries no cause and proves no dialog.
     ['a refusal with its cause left out', { ...modal, fill: { pane: 'term_a' } }, 'no dialog holds it'],
