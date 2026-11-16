@@ -10090,7 +10090,7 @@ function underModal(on: On, w: World): () => void {
 }
 
 /** The main loop's turn that dies on a stop: it starts, the stop is heard, then it ends on the error, in the order the spike read. */
-async function turnStops($: Engine, clock: MockClock, stop: { error: string } = { error: 'rate_limit' }, isEnded = true): Promise<void> {
+async function turnStops($: Engine, clock: MockClock, stop: { error: 'rate_limit' | 'authentication_failed' } = { error: 'rate_limit' }, isEnded = true): Promise<void> {
   await $.turn.start({ text: 'go on', turnId: 'turn-1' })
   await $.classic.StopFailure(stop)
   if (isEnded) await $.turn.complete({ turnId: 'turn-1', reason: 'error', answer: '', durationMs: 1, isAborted: false })
@@ -10168,7 +10168,7 @@ for (const [name, arrange, why] of [
 ] as const) {
   test(`a queued carry-on gets no key where ${name} (puma-9arph.34 C)`, async ($, on) => {
     const w = fresh()
-    const rule: { during?: ($: Engine) => Promise<unknown>; isEnded?: boolean; isOutsideOrca?: boolean; isNoDialog?: boolean; stop?: { error: string } } = arrange
+    const rule: { during?: ($: Engine) => Promise<unknown>; isEnded?: boolean; isOutsideOrca?: boolean; isNoDialog?: boolean; stop?: { error: 'rate_limit' | 'authentication_failed' } } = arrange
     underModal(on, w)
     if (rule.isOutsideOrca === true) delete w.env.ORCA_TERMINAL_HANDLE
     if (rule.isNoDialog === true) w.isDialog = false
