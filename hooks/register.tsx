@@ -1508,12 +1508,29 @@ async function waitInFlight($: Host, before: Promise<boolean>): Promise<boolean>
 
 async function switchNow($: Host, target: Account, why: string, isQuiet: boolean, carry: CarryOn | undefined, isRotation: boolean): Promise<boolean> {
   const generation = switchGeneration
+  // Given up on while it waited at an await: each write below checks it with no await between, and one given up on
+  // writes nothing more, its slot put back once written, a stop's switch saying so in the stop-log.
+  const isGivenUp = () => generation !== switchGeneration
+  const givenUp = (): false => {
+    if (carry !== undefined) void logStop($, 'stop switch given up on: landed late, no carry-on')
+    return false
+  }
+  const putBack = async (): Promise<false> => {
+    const { accounts, activeId } = await getView($)
+    const back = accounts.find(a => a.id === activeId)
+    if (back !== undefined) await useSlot($, back.slot).catch(error => debug($, `putting the slot back after a late switch failed: ${String(error)}`))
+    return givenUp()
+  }
   const active = await refreshingSoon($, await getView($), target, await $.clock.now())
   if (active !== undefined) {
     // Where the held switch goes, what it carries on with and who asked for it are one intent, replaced together:
     // a later stop or press brings its own (a press's carries on with nothing); the retry brings the held one's.
-    const wasHeld = (await getView($)).held !== undefined
-    await setView($, v => ({ ...v, held: { target, why, carry, isRotation } }))
+    if (isGivenUp()) return givenUp()
+    let wasHeld = false
+    await setView($, v => {
+      wasHeld = v.held !== undefined
+      return { ...v, held: { target, why, carry, isRotation } }
+    })
     if (!wasHeld) {
       if (carry !== undefined) void logStop($, `held for ${target.id}: the token in use refreshes soon`)
       const { accounts } = await getView($)
@@ -1523,6 +1540,7 @@ async function switchNow($: Host, target: Account, why: string, isQuiet: boolean
   }
   // A switch carries on with what it was asked to: the retry passes the held switch's own carry-on, a press none.
   const owed = carry
+  if (isGivenUp()) return givenUp()
   await setView($, v => ({ ...v, held: undefined }))
   await keepChrome($)
   try {
@@ -1534,19 +1552,15 @@ async function switchNow($: Host, target: Account, why: string, isQuiet: boolean
     if (carry !== undefined) void logStop($, 'stayed: switching blocked')
     return false
   }
-  if (generation !== switchGeneration) {
-    // Given up on while its slot write hung: the slot goes back to the login the session moved to since, and nothing more.
-    const { accounts, activeId } = await getView($)
-    const back = accounts.find(a => a.id === activeId)
-    if (back !== undefined) await useSlot($, back.slot).catch(error => debug($, `putting the slot back after a late switch failed: ${String(error)}`))
-    if (carry !== undefined) void logStop($, 'stop switch given up on: landed late, no carry-on')
-    return false
-  }
+  // Given up on while its slot write hung: the slot goes back to the login the session moved to since.
+  if (isGivenUp()) return putBack()
   // A switch that replaces an unproven one ends it unproven. A stop's own move (it carries on) keeps what the stop
   // marked: the mark is why it moves. Any other drops it.
   if (carry !== undefined) await setView($, v => ({ ...v, provisionalStop: undefined }))
   else await undoProvisionalStop($)
   const now = await $.clock.now()
+  // Given up on while the stop record above was undone: nothing of this switch is published.
+  if (isGivenUp()) return putBack()
   movedAt = now
   moves += 1
   await setView($, v => ({
