@@ -1475,6 +1475,10 @@ async function switchTo($: Host, target: Account, why: string, isQuiet = false, 
       }
       return true
     }
+    // A waiter passes the guard again, so two released by one switch start one after the other, and one whose target
+    // the switch in flight reached starts none.
+    if ((await getView($)).activeId === target.id) return true
+    return switchTo($, target, why, isQuiet, carry, isRotation)
   }
   const run = switchNow($, target, why, isQuiet, carry, isRotation)
   switchInFlight = run
