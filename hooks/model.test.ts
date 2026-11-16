@@ -1454,21 +1454,23 @@ function fitted(v: View, columns: number, account = v.accounts[0] ?? ANDRES) {
 const L1 = 'andres@lutsohealth.com · Company · Ultra  updated 18:34'
 const FAILED_L1 = 'andres@lutsohealth.com · Company · Ultra  18:39 Failed to update (HTTP 429)'
 
-test('at 82 columns the operator\'s row holds its buttons on line 1; at 64 they take a line of their own after line 2', () => {
-  expect(fitted(rowView(), 82)).toEqual({ lines: [L1, OPERATOR_LINE_2], end: 0 })
-  expect(fitted(rowView(), 64)).toEqual({ lines: [L1, OPERATOR_LINE_2, ''], end: 'own' })
-})
-
-test('with no Company the row is the same but for line 1, at 82 and at 64', () => {
+// puma-9arph.33 (the operator's order of 2026-11-14 about 20:17Z: every line under each account lines up): the buttons
+// stand in one place on every row, a line of their own after line 2, whatever line 1's length or the pane's width.
+test('every row, short, with no Company, or failed, holds its buttons on a line of their own after line 2, at 82 and at 64', () => {
   const own = { ...ANDRES, orgName: "andres@lutsohealth.com's Organization" }
-  const l1 = 'andres@lutsohealth.com · Ultra  updated 18:34'
-  expect(fitted(rowView({}, own), 82)).toEqual({ lines: [l1, OPERATOR_LINE_2], end: 0 })
-  expect(fitted(rowView({}, own), 64)).toEqual({ lines: [l1, OPERATOR_LINE_2, ''], end: 'own' })
+  const rows = [
+    ['short', rowView(), L1],
+    ['no Company', rowView({}, own), 'andres@lutsohealth.com · Ultra  updated 18:34'],
+    ['failed', rowView({ checkErrors: { '1': HTTP_429 } }), FAILED_L1],
+  ] as const
+  for (const [what, v, l1] of rows) {
+    expect([what, fitted(v, 82)]).toEqual([what, { lines: [l1, OPERATOR_LINE_2, ''], end: 'own' }])
+    const at64 = fitted(v, 64)
+    expect([what, at64.lines.slice(1), at64.end]).toEqual([what, [OPERATOR_LINE_2, ''], 'own'])
+  }
 })
 
-test('a failed read\'s longer line 1 moves the buttons to the end of line 2 where they fit, else to a line of their own', () => {
-  const v = rowView({ checkErrors: { '1': HTTP_429 } })
-  expect(fitted(v, 82)).toEqual({ lines: [FAILED_L1, OPERATOR_LINE_2, ''], end: 'own' })
+test('a Pro or a Max failed row holds its buttons on a line of their own too', () => {
   // A Pro login's line 2 keeps the Fable part's cells blank so its resets line up (puma-9arph.28), so at 82 its
   // buttons take a line of their own, as a Max row's do.
   const pro = { ...ANDRES, plan: 'pro', tier: undefined }
