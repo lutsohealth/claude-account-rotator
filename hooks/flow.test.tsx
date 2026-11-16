@@ -10014,7 +10014,8 @@ test('a stop whose handling throws in a local step says so in the stop-log, by t
   await start($, clock)
   await $.classic.StopFailure(PLAIN)
   await clock.settle()
-  expect(whats(stopLogOf(store, w))).toEqual([STOP_RATE_LIMIT, 'stop handling failed: Error'])
+  // The host hands the mod its own error kind for a hook's throw; the message, with its path, stays out.
+  expect(whats(stopLogOf(store, w))).toEqual([STOP_RATE_LIMIT, 'stop handling failed: HooksError'])
 })
 
 test('a carry-on the engine refuses is logged in debug and in the stop-log as a drop, and is not submitted again (puma-9arph.34 B2)', async ($, on) => {
