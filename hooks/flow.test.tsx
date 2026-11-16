@@ -126,6 +126,8 @@ type World = {
   beforeKeychain?: () => Promise<void>
   /** Awaited before each switch's slot write (never the start's), so a switch can hang where the engine sets no limit. */
   beforeEnv?: () => Promise<void>
+  /** Awaited before a write of the slot already in use (the start's check), so it can land after a switch moved the slot. */
+  beforeSameEnv?: () => Promise<void>
   /**
    * Claude in Chrome, where the session has it: the slots of the accounts a
    * Chrome extension is signed in to, one per Chrome profile, and the slot its
@@ -219,7 +221,9 @@ function world(on: On, w: World, store: Record<string, unknown> | Map<string, un
     }
     if (w.refuseEnv) return { deny: `env (managed): ${e.name} is not for plugins outside policy to change` }
     if (w.breakEnv) return { deny: 'no policy said this' }
-    // The mod sets the slot in use at its start, to learn whether it may switch: not a switch.
+    // The mod sets the slot in use at its start, to learn whether it may switch: not a switch. Held, it can land after
+    // a switch moved the slot, and then it moves the slot back, as the engine would.
+    if ((e.value ?? '') === slot && w.beforeSameEnv !== undefined) await w.beforeSameEnv()
     if ((e.value ?? '') === slot) return { value: {} }
     await w.beforeEnv?.()
     slot = e.value ?? ''
@@ -10953,6 +10957,36 @@ test('RACE_A a press published before the point-back claims stands, in the slot 
   await settleReal(clock)
   await pane.unmount()
   expect([isHeld, published, view()?.activeId, view()?.pending?.id, slots(w).at(-1)]).toEqual([true, ['3', SLOT3], '3', '3', SLOT3])
+})
+
+// The start's check of its slot (checkSwitching) is held until a press has moved the session to login 3, then lands:
+// it writes login 1's slot again. Another session named login 3 signed in, so the press can come before the start's checks.
+test('a start\'s check of its slot that lands after a press moved the session leaves the slot on the login pressed for at once (puma-9arph.41, the start)', async ($, on) => {
+  const w = fresh()
+  const { clock } = await loggedWorld(on, w, { ...THREE_LOGINS, 'health:1': { kind: 'ok' }, 'health:3': { kind: 'ok' } })
+  w.keychain[await keychainItem(SLOT3)] = blob('tok-3')
+  w.usage['tok-3'] = [10, 30]
+  const view = watchedView(on)
+  let open: () => void = () => undefined
+  const gate = new Promise<void>(resolve => { open = resolve })
+  let isHeld = false
+  w.beforeSameEnv = () => {
+    if (isHeld) return Promise.resolve()
+    isHeld = true
+    return gate
+  }
+  await start($, clock)
+  await settleReal(clock)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  void pane.press({ key: 'use-3' })
+  await settleReal(clock)
+  const pressed = [isHeld, view()?.activeId, slots(w).slice()]
+  open()
+  await settleReal(clock)
+  await settleReal(clock)
+  const landed = [view()?.activeId, slots(w).at(-1)]
+  await pane.unmount()
+  expect([pressed, landed]).toEqual([[true, '3', [SLOT3]], ['3', SLOT3]])
 })
 
 // Race (b): a switch whose view write read the view before it was given up on, and writes after a newer switch published.

@@ -2615,6 +2615,8 @@ async function boot($: Host, isInteractive: boolean): Promise<void> {
   await bindSession($, slot)
   await pruneStopLogs($).catch(error => debug($, `stop-log prune failed: ${String(error)}`))
   await checkSwitching($, slot)
+  // A check that lands after a switch moved the session wrote the slot it started on back: set the slot right at once.
+  await reconcile($).catch(error => debug($, `slot repair failed: ${errorName(error)}`))
   // First, while the session can still move: the rotation waits for it.
   if (isInteractive && shouldConnectAtOpen(await getView($), await $.clock.now())) {
     void connectChrome($, true).catch(error => debug($, `Chrome connect failed: ${String(error)}`))
