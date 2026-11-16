@@ -84,8 +84,10 @@ type World = {
   statusAsked?: string[]
   /** Runs inside a `claude auth status`: what another session writes while this one waits on it. */
   onStatus?: () => void
-  /** How a `claude auth status` fails, where it does. */
-  statusFails?: 'refused' | 'exit' | 'garbage'
+  /** How a `claude auth status` fails, where it does: `exit` is exit 1 with no JSON, `other` exit 1 with another authMethod. */
+  statusFails?: 'refused' | 'exit' | 'garbage' | 'timeout' | 'other'
+  /** The slots whose sign-in Claude Code does not count: `claude auth status` there exits 1, authMethod none. */
+  signedOut?: string[]
   /** The slot of each `claude auth logout` the mod ran. */
   logouts?: string[]
   /** What a `claude auth logout` answers, where it fails. */
@@ -251,9 +253,14 @@ function world(on: On, w: World, store: Record<string, unknown> | Map<string, un
       if (w.statusFails === 'refused') return { deny: 'process (managed): claude is not for plugins to run' }
       if (w.statusFails === 'exit') return { value: ran(1, '') }
       if (w.statusFails === 'garbage') return { value: ran(0, 'not json') }
-      const email = w.emails[e.init?.env?.CLAUDE_SECURESTORAGE_CONFIG_DIR ?? '']
-      const status = email ? { loggedIn: true, email, orgId: `org-${email}`, orgName: 'Org', subscriptionType: 'max' } : { loggedIn: false }
-      return { value: ran(0, JSON.stringify(status)) }
+      if (w.statusFails === 'timeout') return { value: { ...ran(0, ''), exitCode: null } }
+      if (w.statusFails === 'other') return { value: ran(1, JSON.stringify({ loggedIn: false, authMethod: 'api_key' })) }
+      // The documented shape (https://code.claude.com/docs/en/cli-reference): exit 0 if logged in, 1 if not; authMethod.
+      const asked = e.init?.env?.CLAUDE_SECURESTORAGE_CONFIG_DIR ?? ''
+      if ((w.signedOut ?? []).includes(asked)) return { value: ran(1, JSON.stringify({ loggedIn: false, authMethod: 'none' })) }
+      const email = w.emails[asked]
+      const named = email ? { email, orgId: `org-${email}`, orgName: 'Org', subscriptionType: 'max' } : {}
+      return { value: ran(0, JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', ...named })) }
     }
     if (cmd === 'claude' && sub === 'auth' && verb === 'logout') {
       w.logouts = [...(w.logouts ?? []), e.init?.env?.CLAUDE_SECURESTORAGE_CONFIG_DIR ?? '']
@@ -11186,4 +11193,62 @@ test('puma-9arph.42 C: a usage read of a rejected login that works ends the reje
   store.delete('usage-due:1')
   await clock.advance(TEN_MINUTE_CHECK)
   expect([healthOfStored(store, '1')?.kind, pickOf(store)]).toEqual(['ok', '1'])
+})
+
+// puma-9arph.48: a login whose keychain holds a record (its refresh token unexpired, its token run out) that Claude Code
+// does not count as logged in needs a sign-in after one check, so a launch never starts on it. SOURCE of the signal:
+// https://code.claude.com/docs/en/cli-reference, `claude auth status` "Exits with code 0 if logged in, 1 if not", and its
+// authMethod field. Login 1 is the one picked for new sessions ('launch-on': 'account:1'), so only its health keeps it out.
+
+/** Two logins, login 1's stored sign-in as `rejectedOnOne` has it, the session started; `isSignedOut`: Claude Code reads login 1 as not logged in. */
+async function storedOnOne($: Engine, on: On, isSignedOut: boolean, twoUsed = 30) {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1', NOW - HOUR)
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-2'] = [null, twoUsed]
+  if (isSignedOut) w.signedOut = ['']
+  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'launch-on': 'account:1' }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  return { w, store, clock }
+}
+
+for (const twoUsed of [30, 100]) {
+  const expected = twoUsed === 100 ? undefined : '2'
+  test(`puma-9arph.48: a login Claude Code reads as not logged in needs a sign-in after one check, and its row says so; the pick is ${expected ?? 'none'}`, async ($, on) => {
+    const { store } = await storedOnOne($, on, true, twoUsed)
+    expect([healthOfStored(store, '1')?.kind, healthOfStored(store, '1')?.why, pickOf(store)]).toEqual(['login-needed', 'not signed in', expected])
+    const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+    expect(await pane.find({ text: /^⚠ sign in needed$/ })).toBeDefined()
+    await pane.unmount()
+  })
+}
+
+test('puma-9arph.48: a login Claude Code reads as logged in, its token run out, stays ok and the pick', async ($, on) => {
+  const { store } = await storedOnOne($, on, false)
+  expect([healthOfStored(store, '1')?.kind, pickOf(store)]).toEqual(['ok', '1'])
+})
+
+for (const way of ['timeout', 'exit', 'other', 'refused'] as const) {
+  test(`puma-9arph.48 UNKNOWN: a status read that ends ${way} leaves the health as it was, and the pick is 1`, async ($, on) => {
+    const w = fresh()
+    w.statusFails = way
+    w.signedOut = ['']
+    w.keychain['Claude Code-credentials'] = blob('tok-1', NOW - HOUR)
+    w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+    w.usage['tok-2'] = [null, 30]
+    const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'launch-on': 'account:1' }))
+    await start($, world(on, w, store))
+    expect([healthOfStored(store, '1')?.kind, pickOf(store)]).toEqual(['ok', '1'])
+  })
+}
+
+// The RECORD's writer: a session on a mod older than 0.5.36 writes 'ok' over the mark and names login 1 the pick.
+test('puma-9arph.48: an ok another session writes over the mark is marked again at the next check, and the pick leaves login 1', async ($, on) => {
+  const { store, clock } = await storedOnOne($, on, true)
+  expect(healthOfStored(store, '1')?.why, 'premise: the check marks login 1').toBe('not signed in')
+  store.set('health:1', { kind: 'ok' })
+  store.set('launch-slot', { id: '1', slot: '', why: 'you picked it', at: NOW })
+  await clock.advance(TEN_MINUTE_CHECK)
+  expect([healthOfStored(store, '1')?.kind, healthOfStored(store, '1')?.why, pickOf(store)]).toEqual(['login-needed', 'not signed in', '2'])
 })
