@@ -9924,9 +9924,10 @@ test('a switch made after the carry-on was armed logs that the carry-on was skip
   expect(whats(stopLogOf(store, w))).toEqual([STOP_RATE_LIMIT, 'moved to 2', 'carry-on armed', 'carry-on skipped: another switch since'])
 })
 
-for (const [name, setup, reason] of [
-  ['rotation is off', { 'rotate-to': 'off' }, 'stayed: rotation off'],
-  ['no other login has room', {}, 'stayed: no login to move to'],
+for (const [name, setup, reasons] of [
+  ['rotation is off', { 'rotate-to': 'off' }, ['stayed: rotation off']],
+  // puma-9arph.35: the first login to free up is login 1, its 5-hour window marked spent by the stop until 12:00.
+  ['no other login has room', {}, ['no login left: one carry-on at 2026-10-12T12:00:00.000Z', 'stayed: no login to move to']],
 ] as const) {
   test(`a stop that stays because ${name} logs the reason (puma-9arph.34 B4)`, async ($, on) => {
     const w = fresh()
@@ -9937,9 +9938,67 @@ for (const [name, setup, reason] of [
     await $.classic.StopFailure({ error: 'rate_limit' })
     await clock.settle()
     expect(w.envSets).toEqual([])
-    expect(whats(stopLogOf(store, w))).toEqual([STOP_RATE_LIMIT, reason])
+    expect(whats(stopLogOf(store, w))).toEqual([STOP_RATE_LIMIT, ...reasons])
   })
 }
+
+// ---------------------------------------------------------------- puma-9arph.35: no login left
+
+/** The once-notice of a stop with no login left, and the stop-log's line for it. */
+const isWaitNotice = (t: unknown) => /^Every Claude account is near its limit; the next frees up .*\. This session carries on by itself once one frees up\.$/.test(String(t))
+const isWaitLine = (what: string) => what.startsWith('no login left: ')
+
+test('a usage-limit stop with every login spent says so once, a second stop adds nothing, and one carry-on goes on the login in use once its window resets (puma-9arph.35)', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await loggedWorld(on, w)
+  w.usage['tok-2'] = [100, 30]
+  await start($, clock)
+  w.usage['tok-1'] = [100, 41]
+  await $.classic.StopFailure(PLAIN)
+  await clock.settle()
+  // Both logins' 5-hour windows reset at 12:00: one spent window a login, where the bead's letter and freesAt agree.
+  expect(whats(stopLogOf(store, w)).filter(isWaitLine)).toEqual(['no login left: one carry-on at 2026-10-12T12:00:00.000Z'])
+  expect([w.toasts.filter(isWaitNotice).length, w.notices.filter(isWaitNotice).length]).toEqual([1, 1])
+  // A second stop before the reset: no notice, no line, no second carry-on.
+  await clock.advance(30 * 60_000)
+  await $.classic.StopFailure(PLAIN)
+  await clock.settle()
+  expect(whats(stopLogOf(store, w)).filter(isWaitLine)).toHaveLength(1)
+  expect([w.toasts.filter(isWaitNotice).length, w.notices.filter(isWaitNotice).length]).toEqual([1, 1])
+  expect(w.submitted).toEqual([])
+  // To the reset and one tick past it: one carry-on, on login 1, with no switch.
+  await clock.advance(Date.parse('2026-10-12T12:00:00Z') - clock.now() + 60_000)
+  expect(w.submitted).toHaveLength(1)
+  expect(w.envSets).toEqual([])
+  expect(whats(stopLogOf(store, w))).toContain('a login is free: carry-on on 1')
+  // Ten minutes on, still one carry-on and one notice.
+  await clock.advance(10 * 60_000)
+  expect(w.submitted).toHaveLength(1)
+  expect([w.toasts.filter(isWaitNotice).length, w.notices.filter(isWaitNotice).length]).toEqual([1, 1])
+})
+
+test('with every login spent, a login whose usage read fails since the stop is still moved to at its reset, and one carry-on goes there (puma-9arph.35)', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await loggedWorld(on, w)
+  // Login 1's week is spent until 2026-10-18; login 2's 5-hour window frees it at 12:00.
+  w.usage['tok-1'] = [40, 100]
+  w.usage['tok-2'] = [100, 30]
+  await start($, clock)
+  await $.classic.StopFailure(PLAIN)
+  await clock.settle()
+  expect(whats(stopLogOf(store, w)).filter(isWaitLine)).toEqual(['no login left: one carry-on at 2026-10-12T12:00:00.000Z'])
+  // Every read of login 2 fails from now: at 12:00 the store still holds its 100%, read before its reset.
+  w.failing = { 'tok-2': 429 }
+  await clock.advance(Date.parse('2026-10-12T12:00:00Z') - clock.now() + 60_000)
+  expect(w.envSets.at(-1)?.value).toBe(SLOT2)
+  await clock.advance(36_000)
+  expect(w.submitted).toHaveLength(1)
+  expect(whats(stopLogOf(store, w))).toContain('moved to 2')
+  // No second notice and no second carry-on on later ticks.
+  await clock.advance(10 * 60_000)
+  expect(w.submitted).toHaveLength(1)
+  expect([w.toasts.filter(isWaitNotice).length, w.notices.filter(isWaitNotice).length]).toEqual([1, 1])
+})
 
 test('a stop where Claude Code\'s policy refuses switching logs that it stayed for that (puma-9arph.34 B4)', async ($, on) => {
   const w = fresh()

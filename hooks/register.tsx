@@ -43,6 +43,8 @@ import {
   fingerprint,
   footerStyleFrom,
   freeId,
+  freesAt,
+  limitNotice,
   healthOf,
   identityFromProfile,
   identityFromStatus,
@@ -210,6 +212,11 @@ let carriedFor: number | undefined
 let carriedOn: { since: number | undefined; at: number } | undefined
 /** When the switch began whose one Fable stop on its carry-on the login moved to's usage read cleared. */
 let clearedFor: number | undefined
+/**
+ * The one carry-on owed after a usage-limit stop found no login to move to, as the view's `carryDue` holds it: set once,
+ * by the first such stop, with no await between its read and its write, so a second stop adds no notice and no retry.
+ */
+let due: { at?: number } | undefined
 /** The turns open now, the main loop's and every agent's or teammate's, by id: a key sent while one runs would answer its dialog. */
 const openTurns = new Set<string>()
 /** The main loop's turns started this session, and how many had started at the last usage-limit stop: equal while its modal can stand. */
@@ -1314,13 +1321,59 @@ async function maybeRotate($: Host, need?: Need, carry?: CarryOn): Promise<boole
   if (!shouldLeave(view, now, need)) return stays('the login in use need not be left')
   // With none to move to, the band above the prompt says when the next login frees up.
   const target = pickTarget({ ...view, accounts: view.accounts.filter(a => !untaken.has(a.id)) }, now, need)
-  if (target === undefined) return stays('no login to move to')
+  if (target === undefined) {
+    // A plain usage-limit stop (not the Fable week, not a rejected sign-in) owes one carry-on once a login frees up.
+    if (carry !== undefined && need === undefined && view.health[view.activeId]?.kind !== 'login-needed') awaitFreeLogin($, view, now)
+    return stays('no login to move to')
+  }
   const isMoved = await switchTo($, target, whyLeave(view, now, need), false, carry, true)
   // A tick or a response may move to a login whose usage read failed and that has no reading; no carry-on follows it.
   if (isMoved && carry === undefined && isUnread(view, target)) {
     void logStop($, `moved to ${target.id} by the tick or a response, its usage read failed, no carry-on`)
   }
   return isMoved
+}
+
+/**
+ * Owes one carry-on once the first login frees up, and says so once: a toast, a notification and a stop-log line, the
+ * line being what a reader of the store (a fleet watchdog) finds. A second stop before then finds `due` set and adds
+ * nothing. `due` is read and set with no await between, as carriedFor is.
+ */
+function awaitFreeLogin($: Host, view: View, now: number): void {
+  if (due !== undefined) return
+  const at = freesAt(view, now, untaken)
+  const owed = at === undefined ? {} : { at }
+  due = owed
+  void logStop($, `no login left: one carry-on ${at === undefined ? 'once a login frees up' : `at ${new Date(at).toISOString()}`}`)
+  const text = `${limitNotice(view, now, untaken)} This session carries on by itself once one frees up.`
+  void (async () => {
+    await setView($, v => ({ ...v, carryDue: owed }))
+    $.ui.toast(text, { timeoutMs: 15_000 })
+    await $.ui.notify(text, { title: TITLE })
+  })().catch(error => debug($, `no-login notice failed: ${String(error)}`))
+}
+
+/**
+ * Sends the carry-on awaitFreeLogin owes, once: at its time, or sooner once the login in use is not spent. On the login in
+ * use where it is not spent; else the rotation moves to a freed login and carries on once that switch lands. A switch
+ * still settling waits for the next tick.
+ */
+async function carryOnWhenFree($: Host): Promise<void> {
+  if (due === undefined) return
+  const view = await getView($)
+  const now = await $.clock.now()
+  const isTime = due?.at !== undefined && now >= due.at
+  if (view.pending !== undefined || (!isTime && shouldLeave(view, now))) return
+  // Another tick may have taken it during the reads: the check and the clear go with no await between.
+  if (due === undefined) return
+  due = undefined
+  await setView($, v => ({ ...v, carryDue: undefined }))
+  if (shouldLeave(view, now)) {
+    await maybeRotate($, undefined, {})
+    return
+  }
+  void logStop($, `a login is free: carry-on on ${view.activeId}`)
+  await carryOn($)
 }
 
 /** The login in use, when its token refreshes too soon for the refresh guard to let the session leave it for `target`. */
@@ -2397,6 +2450,7 @@ async function rebindSession($: Host): Promise<void> {
     ...(isSwitchBlocked === undefined ? {} : { isSwitchBlocked }),
     ...(isFableStopped === undefined ? {} : { isFableStopped }),
     ...(isStuckTold === undefined ? {} : { isStuckTold }),
+    ...(due === undefined ? {} : { carryDue: due }),
     ...(mark === undefined ? {} : { sessionMark: mark }),
     ...(hasChrome === undefined || v.hasChrome !== undefined ? {} : { hasChrome }),
     ...(link === undefined || v.chrome !== undefined ? {} : { chrome: link }),
@@ -2424,6 +2478,8 @@ async function boot($: Host, isInteractive: boolean): Promise<void> {
   const survived = await getView($)
   if (survived.isBound === true && survived.isFableStopped !== undefined) kept = { ...kept, isFableStopped: survived.isFableStopped }
   if (survived.isBound === true && survived.isStuckTold !== undefined) kept = { ...kept, isStuckTold: survived.isStuckTold }
+  // So does a carry-on owed once a login frees up: the tick, armed again by the reload, sends it.
+  if (survived.isBound === true && survived.carryDue !== undefined && due === undefined) due = survived.carryDue
   // Terminal.app is the terminal that names itself so and draws block characters from its font.
   const hasFontBlocks = (await $.env.get('TERM_PROGRAM')) === 'Apple_Terminal'
   kept = { ...kept, hasFontBlocks }
@@ -2462,6 +2518,7 @@ export const register: Register = on => {
     $.clock.every(60_000, () => {
       // Armed again by a reload, which keeps the view and cancels every wait. Its own catch: a failing merge skips no retry.
       void retryHeld($).catch(error => debug($, `held switch retry failed: ${String(error)}`))
+      void carryOnWhenFree($).catch(error => debug($, `carry-on once a login is free failed: ${String(error)}`))
       void mergeStore($)
         .then(() => applyRequests($).catch(error => debug($, `requests failed: ${String(error)}`)))
         .then(() => settlePending($, false))
