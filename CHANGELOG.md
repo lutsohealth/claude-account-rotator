@@ -2,6 +2,13 @@
 
 What each version of the account rotator changed. To get each one as Claude Code starts, turn on auto-update: in `/plugin`, open **Marketplaces**, pick **claude-account-rotator** and choose **Enable auto-update**. To update by hand, run `claude plugin marketplace update claude-account-rotator`, then `claude plugin update account-rotator@claude-account-rotator`, and start a new session.
 
+## 0.5.36-lutso.1 - 2026-11-16
+
+- **A login whose sign-in Claude Code rejected stays passed over by New on** until a new sign-in or a usage read that works, so `account-rotator-launch` and the launcher no longer start new sessions on it (#110, puma-9arph.42).
+- **Two switches never run at once.** While one runs, a rotation that carries nothing starts none, a stop's move rides it and carries on once, and a press or a Claude in Chrome visit waits for it, at most 30 seconds, then takes the switch over. The session's login follows the footer again within a minute, and where that write fails, the footer names the account the session is on (#108, puma-9arph.38, .39 and .41).
+- **A switch made as a session starts keeps the session on the account the footer shows**: the start's own check, landing after the switch, no longer puts the session back on the account it started on (#109, puma-9arph.41).
+- **After a rejected sign-in the mod presses no Escape**: only a usage-limit stop, which raises Claude Code's limit menu, arms it (#111, puma-9arph.36).
+
 ## 0.5.35-lutso.1 - 2026-11-16
 
 - **A usage-limit stop whose own read of the account fails still moves the session and carries on**: a usage or profile call left unanswered, or a store write refused, no longer drops the stop. The account is marked, the session moves and carries on, and the stop-log says `stop read failed`. A fault in Claude Code's own store or hooks outside that read still ends the recovery, and the stop-log says `stop handling failed`.
