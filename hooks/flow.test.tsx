@@ -359,6 +359,8 @@ function world(on: On, w: World, store: Record<string, unknown> | Map<string, un
     return { value: undefined }
   })
   on('ui.log', (_$, e) => {
+    // puma-9arph.41: a field that names the switch changes only through writeSwitch; any other writer fails the run.
+    if (e.text.includes('switch field written outside writeSwitch')) throw new Error(`a stray switch write: ${e.text}`)
     if (w.isLogFailing?.(e.text) === true) throw new Error('log refused')
     w.logged = [...(w.logged ?? []), e.text]
     return { value: undefined }

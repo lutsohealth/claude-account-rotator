@@ -9,6 +9,7 @@ import { EMPTY_VIEW, USAGE_IDLE_MS, fitRow, hasRoom, rowOf, rowsOf, rowText, sto
 import ROWS_FIXTURE from '../tests/fixtures/rows'
 import { REQUEST_TTL_MS, holdsLogin, isLoginOf, sameLogin, requestFrom, requestsDir, slotNumber } from './model'
 import { escapeArgv, escapeHeldBack } from './model'
+import { mayWrite } from './model'
 import { USAGE_BACKOFF_MAX_MS, USAGE_CLAIM_MS, USAGE_CLAIM_WAIT_MS, USAGE_EARLY_MS, WRITER_VERSION, afterUsage, claimDueReads, gatingDue, isUsageDue, mayForceUsage, mayReadSince, renewClaim, retryAfterFrom, usageDueFrom } from './model'
 import { DEFAULT_FOOTER, availableNow, claudeAccount, blockedAdvice, braille, browsersFrom, chromeNote, continueTextFrom, counted, fiveHourLimitFrom, credentialFrom, credentialsFile, fableMark, fableSpentNotice, fableStay, footerStyleFrom, healthOf, identityFromProfile, isFableSpent, isFableStop, isNoBrowser, isPolicyRefusal, keepFable, keychainItem, label, legacyMark, markFrom, nextReset, pickTarget, pie, readingFromUsage, restartSteps, rotateToFrom, shouldLeave, roomColor, stuckText, windowPct, withMark, withWeekMark } from './model'
 
@@ -1837,3 +1838,23 @@ test('a queued carry-on gets its Escape only after a limit stop, with no turn op
 test('the Escape goes to the one pane named, by a fixed argv with no shell (puma-9arph.34 C1)', () => {
   expect(escapeArgv('term_a')).toEqual(['orca', 'terminal', 'send', '--terminal', 'term_a', '--text', '\u001b', '--json'])
 })
+
+// puma-9arph.41: the one place that decides who may write the fields that name the switch.
+const settling = { id: '2', from: '1', since: 1000 }
+for (const [name, view, by, isAllowed] of [
+  ['the switch running writes by its own token', { owner: { token: 7 } }, { owner: 7 }, true],
+  ['a switch taken over writes nothing', { owner: { token: 8 } }, { owner: 7 }, false],
+  ['a claim with none running applies', {}, { claim: undefined }, true],
+  ['a claim made while a switch runs does not', { owner: { token: 7 } }, { claim: undefined }, false],
+  ['a take-over applies over the token it waited on', { owner: { token: 7 } }, { claim: 7 }, true],
+  ['a second take-over over the same token does not', { owner: { token: 9 } }, { claim: 7 }, false],
+  ['a proof of the settling switch it examined applies', { pending: settling }, { pending: 1000 }, true],
+  ['a proof of an older switch does not', { pending: { ...settling, since: 2000 } }, { pending: 1000 }, false],
+  ['a proof while a switch runs does not', { pending: settling, owner: { token: 7 } }, { pending: 1000 }, false],
+  ['an idle writer with none running applies', {}, { idle: true }, true],
+  ['an idle writer while a switch runs does not', { owner: { token: 7 } }, { idle: true }, false],
+] as const) {
+  test(`mayWrite: ${name} (puma-9arph.41)`, () => {
+    expect(mayWrite({ ...EMPTY_VIEW, ...view } as View, by)).toBe(isAllowed)
+  })
+}

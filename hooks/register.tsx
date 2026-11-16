@@ -100,8 +100,10 @@ import {
   requestsDir,
   escapeArgv,
   escapeHeldBack,
+  mayWrite,
+  switchFields,
 } from './model'
-import type { Credential, Identity, Need, StayReason } from './model'
+import type { Credential, Identity, Need, StayReason, SwitchWriter } from './model'
 import { Band, Footer, PANE_COLUMNS, Pane } from './view'
 import type { Actions } from './view'
 
@@ -162,9 +164,9 @@ const PROCESS_ENDS: ReadonlySet<string> = new Set(['prompt_input_exit', 'logout'
  * The one way a switch to `id` ends proven, by a response's week or a browser answering as the account: it settles,
  * and a stop marked on it provisionally is kept, so no later end of anything reverts it.
  */
-async function proveSwitch($: Host, id: string): Promise<void> {
+async function proveSwitch($: Host, id: string, since: number): Promise<void> {
   untaken.delete(id)
-  await setView($, v => ({
+  await writeSwitch($, { pending: since }, v => ({
     ...v,
     provisionalStop: v.provisionalStop?.id === id ? undefined : v.provisionalStop,
     pending: v.pending?.id === id ? undefined : v.pending,
@@ -239,12 +241,37 @@ const inFlight = (v: View): InFlight => ({ pending: v.pending, provisionalStop: 
 /** How Claude in Chrome stands in this session: whether it has it, as which login it connected, and a Connect under way. */
 type ChromeLink = Pick<View, 'hasChrome' | 'chrome' | 'chromeConnecting'>
 const chromeLink = (v: View): ChromeLink => ({ hasChrome: v.hasChrome, chrome: v.chrome, chromeConnecting: v.chromeConnecting })
-const setView = async ($: Host, fn: (v: View) => View): Promise<View> => {
+const viewWrite = async ($: Host, fn: (v: View) => View): Promise<View> => {
   const written = await update($, viewAtom, v => fn(current(v)))
   // A cleared record is copied too, so a finished switch comes back as finished. A view not bound is the reset's
   // default, before rebindSession: copied, it would wipe the switch the reset took.
   if (written.isBound === true) kept = { ...kept, ...inFlight(written), ...chromeLink(written) }
   return written
+}
+/** Writes every field of the view but those that name the switch: those change only through writeSwitch. */
+const setView = async ($: Host, fn: (v: View) => View): Promise<View> => {
+  let isStray = false
+  const written = await viewWrite($, v => {
+    const next = fn(v)
+    isStray = JSON.stringify(switchFields(next)) !== JSON.stringify(switchFields(v))
+    return isStray ? { ...next, ...switchFields(v) } : next
+  })
+  if (isStray) void debug($, STRAY_SWITCH_WRITE)
+  return written
+}
+/** What the debug log says of a switch field written outside writeSwitch; the flow tests fail on it. */
+const STRAY_SWITCH_WRITE = 'switch field written outside writeSwitch: kept as it was'
+/**
+ * The one way to change the fields that name the switch: `fn` applies only where mayWrite lets `by` write the view as
+ * the update reads it. True when it applied.
+ */
+async function writeSwitch($: Host, by: SwitchWriter, fn: (v: View) => View): Promise<boolean> {
+  let isApplied = false
+  await viewWrite($, v => {
+    isApplied = mayWrite(v, by)
+    return isApplied ? fn(v) : v
+  })
+  return isApplied
 }
 /** Something the person should know that nothing on screen says: a toast, on screen for a while. */
 const tell = ($: Host, text: string) => $.ui.toast(text, { timeoutMs: 8000 })
@@ -697,7 +724,7 @@ async function useAccount($: Host, target: Account): Promise<{ ok: boolean; mess
   const name = label(target, view.accounts)
   if (isConnectingChrome) return { ok: false, message: CONNECTING_TEXT, activeId: view.activeId }
   if (view.activeId === target.id) {
-    await setView($, v => ({ ...v, held: undefined }))
+    await writeSwitch($, { idle: true }, v => ({ ...v, held: undefined }))
     return { ok: true, message: `this session already uses ${name}`, activeId: target.id }
   }
   const health = view.health[target.id]
@@ -1354,7 +1381,7 @@ async function retryHeld($: Host): Promise<void> {
   if (h === undefined) return
   if (h.isRotation) {
     if (view.rotateTo === 'off' || view.isSwitchBlocked) {
-      await setView($, v => ({ ...v, held: undefined }))
+      await writeSwitch($, { idle: true }, v => ({ ...v, held: undefined }))
       return
     }
     if (isConnectingChrome) return
@@ -1378,16 +1405,113 @@ function carryOnAfterSettle($: Host, owed: CarryOn): void {
 }
 
 /**
+ * How long a switch waits on the one running before it takes the switch over. It is longer than the 10 s of the keychain
+ * read and the CHROME_WAIT_MS of Claude in Chrome, the limits a switch's own steps carry; the engine's env set and the
+ * store have none, so a switch that never ends must not hold every later press for ever.
+ */
+const SWITCH_WAIT_MS = 30_000
+/** The run of the switch or point-back this module started and still owns, awaited by a switch that waits on it. */
+let switchRun: Promise<boolean> | undefined
+/** The token of that run, while it runs: a /clear's reset drops the view's owner, and rebindSession puts this one back. */
+let live: number | undefined
+let lastToken = 0
+
+/**
+ * Runs `run` as the switch that owns the session, by `token`, already claimed in the view. Once it ends, held,
+ * refused, given up or done, it owns nothing: no claim it made stands, and the slot follows the view again.
+ */
+async function runOwned($: Host, token: number, run: () => Promise<boolean>): Promise<boolean> {
+  const p = run()
+  switchRun = p
+  live = token
+  try {
+    return await p
+  } finally {
+    if (switchRun === p) switchRun = undefined
+    if (live === token) live = undefined
+    await writeSwitch($, { owner: token }, v => ({ ...v, owner: undefined })).catch(error => debug($, `switch release failed: ${errorName(error)}`))
+    await reconcile($).catch(error => debug($, `slot repair failed: ${errorName(error)}`))
+  }
+}
+
+/**
+ * While no switch runs: writes the slot of the login the view names where the slot in use is another, as after a switch
+ * taken over whose slot write landed late. Where that write fails, the view names the login whose slot is in use.
+ */
+async function reconcile($: Host): Promise<void> {
+  const view = await getView($)
+  if (view.owner !== undefined || kept.slot === undefined) return
+  const want = view.accounts.find(a => a.id === view.activeId)?.slot
+  if (want === undefined || want === kept.slot) return
+  try {
+    await useSlot($, want)
+  } catch (error) {
+    await debug($, `slot repair failed: ${errorName(error)}`)
+    const inUse = view.accounts.find(a => a.slot === kept.slot)
+    if (inUse !== undefined) await writeSwitch($, { idle: true }, v => ({ ...v, activeId: inUse.id, pending: undefined }))
+  }
+}
+
+/**
  * Points this session at `target`; false while the refresh guard holds it back, or Claude Code's policy refuses it. Quiet: no toast.
  * `carry`: the carry-on the switch owes, sent once it lands. Held back, any stop's carry-on waits for the switch.
+ * With a switch running: a rotation that carries nothing starts none, as the next tick decides again; a stop's rotation
+ * rides the one running where it moves, its carry-on armed on it once; a press or a Claude in Chrome visit waits for it,
+ * then claims the switch, and after SWITCH_WAIT_MS takes it over: the one taken over writes nothing more.
  */
 async function switchTo($: Host, target: Account, why: string, isQuiet = false, carry?: CarryOn, isRotation = false): Promise<boolean> {
+  for (;;) {
+    const seen = (await getView($)).owner?.token
+    if (seen === undefined) {
+      const token = ++lastToken
+      if (await writeSwitch($, { claim: undefined }, v => ({ ...v, owner: { token } }))) {
+        return runOwned($, token, () => switchNow($, token, target, why, isQuiet, carry, isRotation))
+      }
+      continue
+    }
+    if (isRotation && carry === undefined) return false
+    const before = switchRun
+    const late = $.clock.sleep(SWITCH_WAIT_MS).then(() => 'late' as const)
+    const result = await Promise.race([before === undefined ? late : before.catch(() => false), late])
+    if (result === 'late') {
+      // Only the waiter whose claim applies takes the switch over; another waits on the switch that waiter starts.
+      const token = ++lastToken
+      if (!(await writeSwitch($, { claim: seen }, v => ({ ...v, owner: { token } })))) continue
+      await debug($, `took over the switch running after ${SWITCH_WAIT_MS / 1000} s`)
+      return runOwned($, token, () => switchNow($, token, target, why, isQuiet, carry, isRotation))
+    }
+    if (isRotation && result) {
+      const since = (await getView($)).pending?.since
+      // The check and the write go with no await between, as in switchNow: the switch that ran may carry on itself.
+      if (since !== undefined && carriedFor !== since && carry !== undefined) {
+        carryOnAfterSettle($, carry)
+        carriedFor = since
+      }
+      return true
+    }
+    // A waiter claims again, so two released by one switch start one after the other, and one whose target the switch
+    // that ran reached starts none.
+    if ((await getView($)).activeId === target.id) return true
+  }
+}
+
+/** The switch that owns the session by `token`: every write that names the switch applies only while it still owns it. */
+async function switchNow($: Host, token: number, target: Account, why: string, isQuiet: boolean, carry: CarryOn | undefined, isRotation: boolean): Promise<boolean> {
+  const mine: SwitchWriter = { owner: token }
+  // Taken over while it waited at an await: it writes nothing more, a stop's switch saying so in the stop-log.
+  const givenUp = (): false => {
+    if (carry !== undefined) void logStop($, 'stop switch given up on: landed late, no carry-on')
+    return false
+  }
   const active = await refreshingSoon($, await getView($), target, await $.clock.now())
   if (active !== undefined) {
     // Where the held switch goes, what it carries on with and who asked for it are one intent, replaced together:
     // a later stop or press brings its own (a press's carries on with nothing); the retry brings the held one's.
-    const wasHeld = (await getView($)).held !== undefined
-    await setView($, v => ({ ...v, held: { target, why, carry, isRotation } }))
+    let wasHeld = false
+    if (!(await writeSwitch($, mine, v => {
+      wasHeld = v.held !== undefined
+      return { ...v, held: { target, why, carry, isRotation } }
+    }))) return givenUp()
     if (!wasHeld) {
       if (carry !== undefined) void logStop($, `held for ${target.id}: the token in use refreshes soon`)
       const { accounts } = await getView($)
@@ -1397,7 +1521,7 @@ async function switchTo($: Host, target: Account, why: string, isQuiet = false, 
   }
   // A switch carries on with what it was asked to: the retry passes the held switch's own carry-on, a press none.
   const owed = carry
-  await setView($, v => ({ ...v, held: undefined }))
+  if (!(await writeSwitch($, mine, v => ({ ...v, held: undefined })))) return givenUp()
   await keepChrome($)
   try {
     await useSlot($, target.slot)
@@ -1409,18 +1533,21 @@ async function switchTo($: Host, target: Account, why: string, isQuiet = false, 
     return false
   }
   // A switch that replaces an unproven one ends it unproven. A stop's own move (it carries on) keeps what the stop
-  // marked: the mark is why it moves. Any other drops it.
-  if (carry !== undefined) await setView($, v => ({ ...v, provisionalStop: undefined }))
-  else await undoProvisionalStop($)
+  // marked: the mark is why it moves. Any other drops it. Taken over during its slot write, it writes nothing, and
+  // the release puts the slot back on the login the view names.
+  if (carry !== undefined) {
+    if (!(await writeSwitch($, mine, v => ({ ...v, provisionalStop: undefined })))) return givenUp()
+  } else if (!(await undoProvisionalStop($, mine))) return givenUp()
   const now = await $.clock.now()
-  movedAt = now
-  moves += 1
-  await setView($, v => ({
+  // Published only after the slot write landed, and only while it still owns the switch.
+  if (!(await writeSwitch($, mine, v => ({
     ...v,
     activeId: target.id,
     pending: { id: target.id, from: v.activeId, since: now },
     removing: undefined,
-  }))
+  })))) return givenUp()
+  movedAt = now
+  moves += 1
   // The carry-on is armed and carriedFor set straight after pending's write, with no await between, so a second stop
   // cannot arm a second carry-on; the toast reads the view after them.
   if (carry !== undefined) void logStop($, `moved to ${target.id}`)
@@ -1463,7 +1590,7 @@ async function settlePending($: Host, isResponse: boolean): Promise<void> {
   // A response whose week the login left shares tells nothing: confirmed on it, the old login's next responses
   // would be stored as the new one's.
   if (isTarget(await getView($)) && !isSource(await getView($))) {
-    await proveSwitch($, pending.id)
+    await proveSwitch($, pending.id, pending.since)
   } else if (isResponse && now - pending.since > CONFIRM_GIVE_UP_MS) {
     const from = accounts.find(a => a.id === pending.from)
     if (from !== undefined) await checkAccount($, from, { since: pending.since })
@@ -1474,26 +1601,37 @@ async function settlePending($: Host, isResponse: boolean): Promise<void> {
     const named = movedTo === undefined ? labelOf(accounts, pending.id) : claudeAccount(movedTo, accounts)
     // Minutes on, a switch has landed if it ever will: only a response that is the old login's alone points back.
     if (isTarget(after) && isSource(after)) {
-      await proveSwitch($, pending.id)
+      await proveSwitch($, pending.id, pending.since)
       return
     }
+    // Each write below acts on this settling switch alone, while no switch runs: a press since owns the session.
+    const examined: SwitchWriter = { pending: pending.since }
     if (from === undefined || !isSource(after)) {
       // No response proved either login: a stop marked on the one moved to is a guess, and every session reads marks.
-      await undoProvisionalStop($)
-      await setView($, v => ({ ...v, pending: undefined }))
+      if (!(await undoProvisionalStop($, examined))) return
+      if (!(await writeSwitch($, examined, v => ({ ...v, pending: undefined })))) return
       tell($, `The switch to ${named} has not shown in responses.`)
       return
     }
-    untaken.add(pending.id)
-    await undoProvisionalStop($)
-    try {
-      await useSlot($, from.slot)
+    // The point-back claims the switch in the one write that finds this switch still settling and none running, so a
+    // press waits for it, and a press made before it claims stands.
+    const token = ++lastToken
+    if (!(await writeSwitch($, examined, v => ({ ...v, owner: { token } })))) return
+    const isBack = await runOwned($, token, async () => {
+      untaken.add(pending.id)
+      if (!(await undoProvisionalStop($, { owner: token }))) return false
+      try {
+        await useSlot($, from.slot)
+      } catch (error) {
+        await debug($, `switch back failed: ${errorName(error)}`)
+        return false
+      }
+      if (!(await writeSwitch($, { owner: token }, v => ({ ...v, activeId: from.id, pending: undefined })))) return false
       movedAt = now
       moves += 1
-    } catch (error) {
-      await debug($, `switch back failed: ${String(error)}`)
-    }
-    await setView($, v => ({ ...v, activeId: from.id, pending: undefined }))
+      return true
+    })
+    if (!isBack) return
     tell(
       $,
       `The switch to ${named} did not take: responses still use ${label(from, accounts)}, so it shows in use again. ` +
@@ -1708,10 +1846,16 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
  * `no-five-hour` only while no usage read came after the stop's own; this session's Fable stop, only where the stop
  * set it and no proven stop has since.
  */
-async function undoProvisionalStop($: Host): Promise<void> {
+async function undoProvisionalStop($: Host, by: SwitchWriter): Promise<boolean> {
   const { provisionalStop: p } = await getView($)
-  if (p === undefined) return
-  await setView($, v => ({ ...v, provisionalStop: undefined }))
+  if (p === undefined) return true
+  // Only the writer that may write the switch undoes its record, so two undos never give one record back twice.
+  let isSame = false
+  if (!(await writeSwitch($, by, v => {
+    isSame = v.provisionalStop?.since === p.since && v.provisionalStop.id === p.id
+    return isSame ? { ...v, provisionalStop: undefined } : v
+  }))) return false
+  if (!isSame) return true
   const read = await storedReading($, p.id)
   const isReadSince = read?.src === 'body' && read.at > p.readAt
   const gone: string[] = []
@@ -1743,6 +1887,7 @@ async function undoProvisionalStop($: Host): Promise<void> {
     health: drop(v.health, `health:${p.id}`) ?? v.health,
   }))
   await mergeStore($)
+  return true
 }
 
 /** The login a stop during an unproven switch belongs to: the one whose week the last response carries, alone. */
@@ -2020,7 +2165,8 @@ async function connectingChrome(
   if (!isTrial || answer === 'paired') hasChromeMissed = answer === 'unpaired'
   if (answer === 'paired') {
     // A browser answering as the account shows the switch took: the rotation need not wait for a response to say so.
-    await proveSwitch($, target.id)
+    const settling = (await getView($)).pending
+    if (settling?.id === target.id) await proveSwitch($, target.id, settling.since)
   }
   if (isVisit) await leaveVisit($, from)
   if (!isQuiet && answer === 'paired') tell($, `Claude in Chrome is connected as ${claudeAccount(target, view.accounts)}.`)
@@ -2404,7 +2550,9 @@ async function bindSession($: Host, slot: string): Promise<void> {
   const activeId = active.id
   const sessionId = await $.session.id().catch(() => undefined)
   await mergeStore($)
-  await setView($, v => ({ ...v, activeId, isBound: true, ...(sessionId === undefined ? {} : { sessionId }) }))
+  const bound = (v: View): View => ({ ...v, isBound: true, ...(sessionId === undefined ? {} : { sessionId }) })
+  // The login of the slot in use, written by the switch running in this module, or while none runs.
+  if (!(await writeSwitch($, live === undefined ? { idle: true } : { owner: live }, v => ({ ...bound(v), activeId })))) await setView($, bound)
 }
 
 /**
@@ -2415,11 +2563,17 @@ async function bindSession($: Host, slot: string): Promise<void> {
  */
 async function rebindSession($: Host): Promise<void> {
   const { slot, mark, hasFontBlocks, isSwitchBlocked, isFableStopped, isStuckTold, pending, provisionalStop, held, hasChrome, chrome: link, chromeConnecting } = kept
-  await setView($, v => ({
+  // The switch's own records come back only into the reset's view, which names no switch running; with this module's
+  // switch still running, its owner comes back with them, so the switch's later writes still apply.
+  await writeSwitch($, { claim: undefined }, v => ({
     ...v,
     ...(pending === undefined ? {} : { pending }),
-    ...(provisionalStop === undefined ? {} : { provisionalStop }),
     ...(held === undefined ? {} : { held }),
+    ...(live === undefined ? {} : { owner: { token: live } }),
+  }))
+  await setView($, v => ({
+    ...v,
+    ...(provisionalStop === undefined ? {} : { provisionalStop }),
     ...(hasFontBlocks === undefined ? {} : { hasFontBlocks }),
     ...(isSwitchBlocked === undefined ? {} : { isSwitchBlocked }),
     ...(isFableStopped === undefined ? {} : { isFableStopped }),
@@ -2489,6 +2643,8 @@ export const register: Register = on => {
     $.clock.every(60_000, () => {
       // Armed again by a reload, which keeps the view and cancels every wait. Its own catch: a failing merge skips no retry.
       void retryHeld($).catch(error => debug($, `held switch retry failed: ${String(error)}`))
+      // A slot write that landed after the view moved on, or a repair that failed, is set right here.
+      void reconcile($).catch(error => debug($, `slot repair failed: ${errorName(error)}`))
       void mergeStore($)
         .then(() => applyRequests($).catch(error => debug($, `requests failed: ${String(error)}`)))
         .then(() => settlePending($, false))
@@ -2519,7 +2675,7 @@ export const register: Register = on => {
   // budget. A /clear or a resume ends the conversation, not the process: the switch, and its proof, go on, as `kept`
   // carries the switch's records across the reset.
   on('session.end', async ($, e, next) => {
-    if (PROCESS_ENDS.has(e.reason)) await undoProvisionalStop($).catch(error => debug($, `undo at session end failed: ${String(error)}`))
+    if (PROCESS_ENDS.has(e.reason)) await undoProvisionalStop($, live === undefined ? { idle: true } : { owner: live }).catch(error => debug($, `undo at session end failed: ${String(error)}`))
     return next(e)
   })
 

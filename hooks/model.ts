@@ -1527,6 +1527,24 @@ export function escapeHeldBack(s: { isLimitStopLast: boolean; openTurns: number;
 /** One Escape to the Orca pane `pane`, by Orca's CLI: a fixed argv, run with no shell. */
 export const escapeArgv = (pane: string): string[] => ['orca', 'terminal', 'send', '--terminal', pane, '--text', '\u001b', '--json']
 
+/**
+ * Who writes a field of the view that names the switch (`activeId`, `pending`, `held`, `owner`): the switch or
+ * point-back running by its token; a claim over the token it saw running (undefined: none ran); a writer that acts on
+ * the settling switch it examined, by its `since`, while none runs; or a writer that acts only while none runs.
+ */
+export type SwitchWriter = { owner: number } | { claim: number | undefined } | { pending: number } | { idle: true }
+
+/** The fields of the view that only `mayWrite` lets change. */
+export const switchFields = (v: View): Pick<View, 'activeId' | 'pending' | 'held' | 'owner'> => ({ activeId: v.activeId, pending: v.pending, held: v.held, owner: v.owner })
+
+/** Whether `by` may write the switch fields of `v`: the one place that decides who owns the switch. */
+export function mayWrite(v: View, by: SwitchWriter): boolean {
+  if ('owner' in by) return v.owner?.token === by.owner
+  if ('claim' in by) return v.owner?.token === by.claim
+  if ('pending' in by) return v.owner === undefined && v.pending?.since === by.pending
+  return v.owner === undefined
+}
+
 /** The requests folder: in the Claude config folder, CLAUDE_CONFIG_DIR or `~/.claude`, as bin/account_rotator_store.py finds it. */
 export function requestsDir(configDir: string | undefined, home: string): string {
   return `${configDir || `${home}/.claude`}/account-rotator-requests`
