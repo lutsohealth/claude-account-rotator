@@ -1349,13 +1349,14 @@ async function retryHeld($: Host): Promise<void> {
  * is still on its account then: no other change of account came since, every
  * one (a Use now, a Rotate now, a switch pointed back) counting in `moves`.
  */
-async function carryOnAfterSettle($: Host, owed: CarryOn): Promise<void> {
+function carryOnAfterSettle($: Host, owed: CarryOn): void {
   const mark = moves
   $.clock.after(SETTLE_MS, () => {
     if (moves === mark) void carryOn($, owed.need).catch(error => debug($, `carry-on failed: ${String(error)}`))
     else void logStop($, 'carry-on skipped: another switch since')
   })
-  await logStop($, 'carry-on armed')
+  // Not awaited: a caller sets carriedFor in the same tick, so a second stop cannot arm a second carry-on meanwhile.
+  void logStop($, 'carry-on armed')
 }
 
 /**
@@ -1405,7 +1406,7 @@ async function switchTo($: Host, target: Account, why: string, isQuiet = false, 
   if (!isQuiet) $.ui.toast(`Switched to ${claudeAccount(target, (await getView($)).accounts)}: ${why}.`, { timeoutMs: 6000 })
   if (carry !== undefined) await logStop($, `moved to ${target.id}`)
   if (owed !== undefined) {
-    await carryOnAfterSettle($, owed)
+    carryOnAfterSettle($, owed)
     carriedFor = now
   }
   return true
@@ -1554,7 +1555,7 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
   const isSettling = view.pending !== undefined && (await $.clock.now()) - view.pending.since < SETTLE_MS
   if (isSettling && !isProvenRejection) {
     if (isConnectingChrome) isCutByVisit = true
-    else if (carriedFor !== view.pending?.since) await carryOnAfterSettle($, isFable ? { need: 'fable' } : {})
+    else if (carriedFor !== view.pending?.since) carryOnAfterSettle($, isFable ? { need: 'fable' } : {})
     carriedFor = view.pending?.since
     return
   }
@@ -1587,7 +1588,7 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
       if (hasFreshFable && !isFableSpent((await getView($)).readings[active.id], await $.clock.now())) {
         clearedFor = since
         if (isConnectingChrome) isCutByVisit = true
-        else await carryOnAfterSettle($, { need: 'fable' })
+        else carryOnAfterSettle($, { need: 'fable' })
         return
       }
     }
