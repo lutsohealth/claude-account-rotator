@@ -10,6 +10,7 @@ import ROWS_FIXTURE from '../tests/fixtures/rows'
 import { REQUEST_TTL_MS, holdsLogin, isLoginOf, sameLogin, requestFrom, requestsDir, slotNumber } from './model'
 import { escapeArgv, escapeHeldBack, raisesLimitModal } from './model'
 import { mayWrite } from './model'
+import { signInFromStatus } from './model'
 import { USAGE_BACKOFF_MAX_MS, USAGE_CLAIM_MS, USAGE_CLAIM_WAIT_MS, USAGE_EARLY_MS, WRITER_VERSION, afterUsage, claimDueReads, gatingDue, isUsageDue, mayForceUsage, mayReadSince, renewClaim, retryAfterFrom, usageDueFrom } from './model'
 import { DEFAULT_FOOTER, availableNow, claudeAccount, blockedAdvice, braille, browsersFrom, chromeNote, continueTextFrom, counted, fiveHourLimitFrom, credentialFrom, credentialsFile, fableMark, fableSpentNotice, fableStay, footerStyleFrom, healthOf, identityFromProfile, isFableSpent, isFableStop, isNoBrowser, isPolicyRefusal, keepFable, keychainItem, label, legacyMark, markFrom, nextReset, pickTarget, pie, readingFromUsage, restartSteps, rotateToFrom, shouldLeave, roomColor, stuckText, windowPct, withMark, withWeekMark } from './model'
 
@@ -1858,5 +1859,22 @@ for (const [name, view, by, isAllowed] of [
 ] as const) {
   test(`mayWrite: ${name} (puma-9arph.41)`, () => {
     expect(mayWrite({ ...EMPTY_VIEW, ...view } as View, by)).toBe(isAllowed)
+  })
+}
+
+// puma-9arph.48: exit 0 is logged in, exit 1 with authMethod 'none' is not, and nothing else says either
+// (https://code.claude.com/docs/en/cli-reference: 'Exits with code 0 if logged in, 1 if not').
+for (const [name, exitCode, stdout, read] of [
+  ['exit 1, authMethod none', 1, '{"loggedIn":false,"authMethod":"none"}', 'out'],
+  ['exit 0, authMethod claude.ai', 0, '{"loggedIn":true,"authMethod":"claude.ai"}', 'in'],
+  ['exit 0 with authMethod none', 0, '{"authMethod":"none"}', 'in'],
+  ['exit 1, another authMethod', 1, '{"authMethod":"api_key"}', 'unknown'],
+  ['exit 1 with no JSON', 1, '', 'unknown'],
+  ['exit 1 with JSON that is no object', 1, 'null', 'unknown'],
+  ['exit 2', 2, '{"authMethod":"none"}', 'unknown'],
+  ['no exit code, as a timeout gives', null, '{"authMethod":"none"}', 'unknown'],
+] as const) {
+  test(`signInFromStatus: ${name} (puma-9arph.48)`, () => {
+    expect(signInFromStatus(exitCode, stdout)).toBe(read)
   })
 }

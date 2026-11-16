@@ -586,9 +586,32 @@ export const TOKEN_LIVE_MARGIN_MS = 60_000
 /** Why a login needs a sign-in once Claude Code rejected it, at a stop or at a usage read. */
 export const SIGN_IN_REJECTED = 'sign-in rejected'
 
+/** Why a login needs a sign-in when it holds none: nothing stored, or nothing Claude Code counts as logged in. */
+export const NOT_SIGNED_IN = 'not signed in'
+
+/** What `claude auth status` said of a slot: logged in, not logged in, or nothing a check may act on. */
+export type SignInRead = 'in' | 'out' | 'unknown'
+
+/**
+ * What `claude auth status` said of a slot, by its documented exit code and authMethod
+ * (https://code.claude.com/docs/en/cli-reference): exit 0 is logged in; exit 1 with authMethod 'none' is not. Any
+ * other answer, a timeout's or one that is not JSON, says nothing.
+ */
+export function signInFromStatus(exitCode: number | null, stdout: string): SignInRead {
+  if (exitCode === 0) return 'in'
+  if (exitCode !== 1) return 'unknown'
+  try {
+    const parsed: unknown = JSON.parse(stdout)
+    const isNone = typeof parsed === 'object' && parsed !== null && (parsed as { authMethod?: unknown }).authMethod === 'none'
+    return isNone ? 'out' : 'unknown'
+  } catch {
+    return 'unknown'
+  }
+}
+
 /** A login's health from its stored credential alone. */
 export function healthOf(cred: Credential | undefined, now: number): Health {
-  if (cred === undefined) return { kind: 'login-needed', why: 'not signed in' }
+  if (cred === undefined) return { kind: 'login-needed', why: NOT_SIGNED_IN }
   if (cred.refreshTokenExpiresAt !== undefined && cred.refreshTokenExpiresAt <= now) {
     return { kind: 'login-needed', why: 'sign-in expired' }
   }
