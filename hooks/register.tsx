@@ -533,18 +533,23 @@ const stopLogFrom = (value: unknown): StopLogEntry[] =>
 /**
  * Says what a stop did, under `stop-log:<session mark>`: one key a session, so sessions never overwrite each other's lines.
  * An entry names logins by their id, and holds no token, no email and no prompt text beyond 'entered' and 'drop'.
- * Never fails its caller.
+ * Never fails its caller. The writes go one at a time, in call order, so a caller need not await one: two at once
+ * would each read the old list and one entry would be lost.
  */
-async function logStop($: Host, what: string): Promise<void> {
-  try {
-    const mark = (await getView($)).sessionMark ?? kept.mark
-    if (mark === undefined) return
-    const key = `stop-log:${mark}`
-    const entries = stopLogFrom(await $.store.get(key))
-    await $.store.set(key, [...entries, { at: await $.clock.now(), what }].slice(-STOP_LOG_KEEP))
-  } catch (error) {
-    await debug($, `stop-log failed: ${String(error)}`)
-  }
+let stopLogChain: Promise<void> = Promise.resolve()
+function logStop($: Host, what: string): Promise<void> {
+  stopLogChain = stopLogChain.then(async () => {
+    try {
+      const mark = (await getView($)).sessionMark ?? kept.mark
+      if (mark === undefined) return
+      const key = `stop-log:${mark}`
+      const entries = stopLogFrom(await $.store.get(key))
+      await $.store.set(key, [...entries, { at: await $.clock.now(), what }].slice(-STOP_LOG_KEEP))
+    } catch (error) {
+      await debug($, `stop-log failed: ${String(error)}`)
+    }
+  })
+  return stopLogChain
 }
 
 /** Deletes the stop-logs of sessions whose last entry is over a week old, with those that hold none. */
@@ -1404,7 +1409,8 @@ async function switchTo($: Host, target: Account, why: string, isQuiet = false, 
     removing: undefined,
   }))
   if (!isQuiet) $.ui.toast(`Switched to ${claudeAccount(target, (await getView($)).accounts)}: ${why}.`, { timeoutMs: 6000 })
-  if (carry !== undefined) await logStop($, `moved to ${target.id}`)
+  // Not awaited: from pending's write to carriedFor there is no await, so a second stop cannot arm a second carry-on.
+  if (carry !== undefined) void logStop($, `moved to ${target.id}`)
   if (owed !== undefined) {
     carryOnAfterSettle($, owed)
     carriedFor = now
