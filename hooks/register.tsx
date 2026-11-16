@@ -45,9 +45,11 @@ import {
   freeId,
   healthOf,
   SIGN_IN_REJECTED,
+  NOT_SIGNED_IN,
   identityFromProfile,
   identityFromStatus,
   isFableSpent,
+  isSignedOutStatus,
   isFableStop,
   isWeeklyStop,
   withWeekMark,
@@ -119,6 +121,8 @@ const ACCOUNTS_COMMAND = 'accounts'
 const SETTLE_MS = 35_000
 /** A switch no response has shown after this long is reported as not taken. */
 const CONFIRM_GIVE_UP_MS = 4 * 60_000
+/** How long a check waits on `claude auth status`: a check reads every login in turn, so a hung one holds each this long. */
+const STATUS_TIMEOUT_MS = 5_000
 /**
  * Claude Code refreshes a token 5 minutes before it expires. A refresh that
  * runs while the old login's read is still cached is saved under the new
@@ -941,6 +945,20 @@ async function signedInAs($: Host, slot: string): Promise<Identity | undefined> 
   return exitCode === 0 ? identityFromStatus(stdout) : undefined
 }
 
+/**
+ * Whether Claude Code counts no login in a slot, though its keychain may hold a record. Only its exit code and
+ * authMethod are read, and its output (it names the account) goes nowhere. A run refused, timed out or answering
+ * anything else says nothing.
+ */
+async function isSignedOut($: Host, slot: string): Promise<boolean> {
+  try {
+    const { exitCode, stdout } = await $.process.run(['claude', 'auth', 'status'], { env: slotEnv(slot), timeoutMs: STATUS_TIMEOUT_MS })
+    return isSignedOutStatus(exitCode, stdout)
+  } catch {
+    return false
+  }
+}
+
 /** Points this session's requests, and every child it starts after, at a slot's login. */
 async function useSlot($: Host, slot: string): Promise<void> {
   const set = slot === '' ? await $.env.set('CLAUDE_SECURESTORAGE_CONFIG_DIR', undefined) : await $.env.set('CLAUDE_SECURESTORAGE_CONFIG_DIR', slot)
@@ -1192,6 +1210,9 @@ async function checkAccount($: Host, account: Account, gate: UsageGate): Promise
   }
   const credential = stored.state === 'present' ? stored.credential : undefined
   let health = healthOf(credential, now)
+  // A record Claude Code does not count as a login is no sign-in, whatever its own expiry says; read at every check, so a
+  // new sign-in ends it at the next.
+  if (health.kind === 'ok' && (await isSignedOut($, account.slot))) health = { kind: 'login-needed', why: NOT_SIGNED_IN }
   // A rejected sign-in stands until a usage read works or a profile call names a sign-in no check had named: a check
   // that reads nothing (its token run out, or another session's turn to read) never gives it back to the picks.
   const known = holderFrom(await $.store.get(`holder:${account.id}`))

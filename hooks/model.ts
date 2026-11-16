@@ -586,9 +586,26 @@ export const TOKEN_LIVE_MARGIN_MS = 60_000
 /** Why a login needs a sign-in once Claude Code rejected it, at a stop or at a usage read. */
 export const SIGN_IN_REJECTED = 'sign-in rejected'
 
+/** Why a login needs a sign-in when it holds none: nothing stored, or nothing Claude Code counts as logged in. */
+export const NOT_SIGNED_IN = 'not signed in'
+
+/**
+ * Whether `claude auth status` said the slot is not logged in: exit 1 with authMethod 'none', both documented
+ * (https://code.claude.com/docs/en/cli-reference). Any other answer, a timeout's or one that is not JSON, says nothing.
+ */
+export function isSignedOutStatus(exitCode: number | null, stdout: string): boolean {
+  if (exitCode !== 1) return false
+  try {
+    const parsed: unknown = JSON.parse(stdout)
+    return typeof parsed === 'object' && parsed !== null && (parsed as { authMethod?: unknown }).authMethod === 'none'
+  } catch {
+    return false
+  }
+}
+
 /** A login's health from its stored credential alone. */
 export function healthOf(cred: Credential | undefined, now: number): Health {
-  if (cred === undefined) return { kind: 'login-needed', why: 'not signed in' }
+  if (cred === undefined) return { kind: 'login-needed', why: NOT_SIGNED_IN }
   if (cred.refreshTokenExpiresAt !== undefined && cred.refreshTokenExpiresAt <= now) {
     return { kind: 'login-needed', why: 'sign-in expired' }
   }
