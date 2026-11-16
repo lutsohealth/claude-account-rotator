@@ -18,7 +18,7 @@ import {
   isSpent,
   label,
   labelOf,
-  nextReset,
+  limitNotice,
   restartSteps,
   rowOf,
   roomColor,
@@ -566,14 +566,7 @@ export function Band(ui: Ui, view: View, now: number, act: Actions) {
   const stuck = stuckText(view, now)
   if (stuck !== undefined) return <Text color="warning">{`⚠ ${stuck}`}</Text>
   const spent = view.accounts.every(a => isSpent(view.readings[a.id], now, view.weekLeave))
-  if (view.accounts.length > 0 && spent) {
-    const at = nextReset(view, now)
-    return (
-      <Text color="warning">
-        Every Claude account is near its limit{at === undefined ? '' : `; the next frees up ${untilText(at, now)}`}.
-      </Text>
-    )
-  }
+  if (view.accounts.length > 0 && spent) return <Text color="warning">{limitNotice(view, now)}</Text>
   // Only a session that hit the Fable week says so: Claude with another model works on these accounts.
   const fableSpent = view.isFableStopped ? fableSpentNotice(view, now) : undefined
   if (fableSpent !== undefined) return <Text color="warning">{fableSpent}</Text>

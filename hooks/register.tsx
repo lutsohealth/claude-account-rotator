@@ -43,6 +43,8 @@ import {
   fingerprint,
   footerStyleFrom,
   freeId,
+  freesAt,
+  limitNotice,
   healthOf,
   SIGN_IN_REJECTED,
   identityFromProfile,
@@ -133,6 +135,10 @@ const USAGE_URL = 'https://api.anthropic.com/api/oauth/usage'
 const PROFILE_URL = 'https://api.anthropic.com/api/oauth/profile'
 const CONTINUE =
   'Claude Code switched to another of your Claude accounts because the previous one hit its usage limit or lost its sign-in. Continue where you left off.'
+/** The carry-on after a stop with no login left, where the login in use freed up itself: nothing switched. */
+const CONTINUE_RESET = "This Claude account's usage limit has reset. Continue where you left off."
+/** How long past the time owed a carry-on with no switch waits: Claude Code can carry on a 5-hour stop by itself after its reset (puma-9arph.35 d5), and one carry-on goes, not two. */
+const CARRY_ON_GRACE_MS = 3 * 60_000
 
 const viewAtom = atom({ plugin: 'account-rotator', key: 'view' } as const, EMPTY_VIEW)
 
@@ -214,6 +220,11 @@ let carriedFor: number | undefined
 let carriedOn: { since: number | undefined; at: number } | undefined
 /** When the switch began whose one Fable stop on its carry-on the login moved to's usage read cleared. */
 let clearedFor: number | undefined
+/**
+ * The one carry-on owed after a usage-limit stop found no login to move to, as the view's `carryDue` holds it: set once,
+ * by the first such stop, with no await between its read and its write, so a second stop adds no notice and no retry.
+ */
+let due: { at?: number; from?: string; turns?: number } | undefined
 /** The turns open now, the main loop's and every agent's or teammate's, by id: a key sent while one runs would answer its dialog. */
 const openTurns = new Set<string>()
 /** The main loop's turns started this session, and how many had started at the last usage-limit stop: equal while its modal can stand. */
@@ -1358,13 +1369,70 @@ async function maybeRotate($: Host, need?: Need, carry?: CarryOn): Promise<boole
   if (!shouldLeave(view, now, need)) return stays('the login in use need not be left')
   // With none to move to, the band above the prompt says when the next login frees up.
   const target = pickTarget({ ...view, accounts: view.accounts.filter(a => !untaken.has(a.id)) }, now, need)
-  if (target === undefined) return stays('no login to move to')
+  if (target === undefined) {
+    // A plain usage-limit stop (not the Fable week, not a rejected sign-in) owes one carry-on once a login frees up.
+    if (carry !== undefined && need === undefined && view.health[view.activeId]?.kind !== 'login-needed') awaitFreeLogin($, view, now)
+    return stays('no login to move to')
+  }
   const isMoved = await switchTo($, target, whyLeave(view, now, need), false, carry, true)
   // A tick or a response may move to a login whose usage read failed and that has no reading; no carry-on follows it.
   if (isMoved && carry === undefined && isUnread(view, target)) {
     void logStop($, `moved to ${target.id} by the tick or a response, its usage read failed, no carry-on`)
   }
   return isMoved
+}
+
+/**
+ * Owes one carry-on once the first login frees up, and says so once: a toast, a notification and a stop-log line, the
+ * line being what a reader of the store (a fleet watchdog) finds. A second stop before then finds `due` set and adds
+ * nothing. `due` is read and set with no await between, as carriedFor is.
+ */
+function awaitFreeLogin($: Host, view: View, now: number): void {
+  if (due !== undefined) return
+  const at = freesAt(view, now, untaken)
+  const owed = at === undefined ? { from: view.activeId } : { at, from: view.activeId }
+  // The main turns so far, held in this module only: a reload drops it, and the carry-on then goes after the grace.
+  due = { ...owed, turns: mainTurns }
+  void logStop($, `no login left: one carry-on ${at === undefined ? 'once a login frees up' : `at ${new Date(at).toISOString()}`}`)
+  const text = `${limitNotice(view, now, untaken)} This session carries on by itself once one frees up.`
+  void (async () => {
+    await setView($, v => ({ ...v, carryDue: owed }))
+    $.ui.toast(text, { timeoutMs: 15_000 })
+    await $.ui.notify(text, { title: TITLE })
+  })().catch(error => debug($, `no-login notice failed: ${String(error)}`))
+}
+
+/**
+ * Sends the carry-on awaitFreeLogin owes, once, at the first tick that finds the login in use not spent: its own window
+ * reset, or the tick's own rotation, which runs just before this, moved to a login that freed up. It never switches
+ * itself: a second move in the same tick would end the first one's carry-on. Where that switch is still settling, it
+ * carries on once the switch lands, armed once. On the login the stop found spent (no switch) it waits CARRY_ON_GRACE_MS
+ * past the time owed, and sends nothing where a main turn ran since the stop, as Claude Code may carry on by itself.
+ */
+async function carryOnWhenFree($: Host): Promise<void> {
+  if (due === undefined) return
+  const view = await getView($)
+  const now = await $.clock.now()
+  if (shouldLeave(view, now)) return
+  const isSameLogin = view.activeId === due?.from
+  if (isSameLogin && due?.at !== undefined && now < due.at + CARRY_ON_GRACE_MS) return
+  // Another tick may have taken it during the reads: the check and the clear go with no await between.
+  if (due === undefined) return
+  const owed = due
+  due = undefined
+  const hasTurnRun = isSameLogin && owed.turns !== undefined && mainTurns > owed.turns
+  void logStop($, hasTurnRun ? 'a turn ran since the stop: no carry-on' : `a login is free: carry-on on ${view.activeId}`)
+  await setView($, v => ({ ...v, carryDue: undefined }))
+  if (hasTurnRun) return
+  const since = view.pending?.since
+  if (since === undefined || now - since >= SETTLE_MS) {
+    // Still on the login the stop found spent: nothing switched, so the line says its limit reset.
+    await carryOn($, undefined, view.activeId === owed.from ? CONTINUE_RESET : undefined)
+    return
+  }
+  if (carriedFor === since) return
+  carryOnAfterSettle($, {})
+  carriedFor = since
 }
 
 /** The login in use, when its token refreshes too soon for the refresh guard to let the session leave it for `target`. */
@@ -1688,13 +1756,14 @@ async function onMeasure($: Host, limits: readonly SessionRateLimit[]): Promise<
 /**
  * Asks Claude to carry on after a switch. After a switch for the Fable week the
  * line kept in the store goes as the person's own words; every other switch,
- * and a Fable one with no line kept, sends the mod's own line under its name.
+ * and a Fable one with no line kept, sends the mod's own line under its name:
+ * `own` where the caller names it (a carry-on with no switch), else CONTINUE.
  */
-async function carryOn($: Host, need?: Need): Promise<void> {
+async function carryOn($: Host, need?: Need, own?: string): Promise<void> {
   const view = await getView($)
   const kept = need === 'fable' ? view.fableContinueText : undefined
   carriedOn = { since: view.pending?.since, at: await $.clock.now() }
-  await sendCarryOn($, kept === undefined ? { text: CONTINUE } : { text: kept, asUser: true })
+  await sendCarryOn($, kept === undefined ? { text: own ?? CONTINUE } : { text: kept, asUser: true })
 }
 
 /** How long after a carry-on goes out the mod looks whether Claude Code's limit modal holds it queued. */
@@ -2591,6 +2660,7 @@ async function rebindSession($: Host): Promise<void> {
     ...(isSwitchBlocked === undefined ? {} : { isSwitchBlocked }),
     ...(isFableStopped === undefined ? {} : { isFableStopped }),
     ...(isStuckTold === undefined ? {} : { isStuckTold }),
+    ...(due === undefined ? {} : { carryDue: due }),
     ...(mark === undefined ? {} : { sessionMark: mark }),
     ...(hasChrome === undefined || v.hasChrome !== undefined ? {} : { hasChrome }),
     ...(link === undefined || v.chrome !== undefined ? {} : { chrome: link }),
@@ -2618,6 +2688,9 @@ async function boot($: Host, isInteractive: boolean): Promise<void> {
   const survived = await getView($)
   if (survived.isBound === true && survived.isFableStopped !== undefined) kept = { ...kept, isFableStopped: survived.isFableStopped }
   if (survived.isBound === true && survived.isStuckTold !== undefined) kept = { ...kept, isStuckTold: survived.isStuckTold }
+  // So does a carry-on owed once a login frees up: the tick, armed again by the reload, sends it. The reload zeroed the
+  // count of main turns, so the grace counts from here: a turn after the reload shows Claude Code carried on by itself.
+  if (survived.isBound === true && survived.carryDue !== undefined && due === undefined) due = { ...survived.carryDue, turns: mainTurns }
   // Terminal.app is the terminal that names itself so and draws block characters from its font.
   const hasFontBlocks = (await $.env.get('TERM_PROGRAM')) === 'Apple_Terminal'
   kept = { ...kept, hasFontBlocks }
@@ -2660,6 +2733,7 @@ export const register: Register = on => {
       void retryHeld($).catch(error => debug($, `held switch retry failed: ${String(error)}`))
       // A slot write that landed after the view moved on, or a repair that failed, is set right here.
       void reconcile($).catch(error => debug($, `slot repair failed: ${errorName(error)}`))
+      void carryOnWhenFree($).catch(error => debug($, `carry-on once a login is free failed: ${String(error)}`))
       void mergeStore($)
         .then(() => applyRequests($).catch(error => debug($, `requests failed: ${String(error)}`)))
         .then(() => settlePending($, false))
