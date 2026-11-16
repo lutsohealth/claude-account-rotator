@@ -282,7 +282,7 @@ class OwnLoginNotSignedIn(AuthStubs, LauncherCase):
     def test_a_status_that_hangs_is_cut_off_and_claude_still_starts(self) -> None:
         began = time.monotonic()
         seen = self.launch("-p", "hi", **self.auth_env(SIGNED_OUT, hang=True))
-        self.assertLess(time.monotonic() - began, 10, "the launcher waited out a hung status read")
+        self.assertLess(time.monotonic() - began, 4, "the launcher waited past the status read's bound")
         self.assertEqual(lines_naming_the_login(seen["stderr"]), [], seen["stderr"])
         self.assertIn("starting on Claude Code's own login: no pick stored", seen["stderr"])
         self.assertEqual((seen["slot"], words(seen["args"])), (UNSET, ["-p", "hi"]))
@@ -385,6 +385,18 @@ class OwnLoginNotSignedInOnPath(AuthStubs, InstalledCopy):
         self.assertEqual(self.auth_runs(), ["auth status|"])
         self.assertEqual(len(lines_naming_the_login(seen["stderr"])), 1, seen["stderr"])
         self.assertEqual((seen["path"], words(seen["args"])), (path, ["--model", "haiku"]))
+
+    def test_a_claude_that_cannot_run_is_passed_over_for_the_read_as_for_the_start(self) -> None:
+        """Codex round 1, F1: the read asks the next claude that starts, as the start itself does."""
+        bad = self.home / "broken"
+        bad.mkdir()
+        (bad / "claude").write_text("#!/no/such/interpreter\n", encoding="utf-8")
+        (bad / "claude").chmod(0o755)
+        self.write_store(pick=None, rows_age_minutes=1)
+        path = f"{self.own}:{bad}:{self.stub_bin}:/usr/bin:/bin"
+        seen = self.launch(launcher=self.copy, path=path, **self.auth_env(SIGNED_OUT))
+        self.assertEqual(self.auth_runs(), ["auth status|"])
+        self.assertEqual(len(lines_naming_the_login(seen["stderr"])), 1, seen["stderr"])
 
 
 if __name__ == "__main__":
