@@ -10005,6 +10005,38 @@ test('a Fable stop on the carry-on whose own read of the login moved to throws m
   expect(markOf(store.get('fable-mark:2'))).toEqual([100, FABLE_RESET])
 })
 
+// Review HOST-FAULT-MISCLASSIFIED (Codex round 1 on #100): a host fault INSIDE the stop's own read is a failed read, not
+// the end of the recovery (RULING 6072): the stop goes on, and the line names the error. The class: both read sites.
+test('Review HOST-FAULT-MISCLASSIFIED: a store write refused inside the stop\'s forced read still marks, moves and carries on, its line naming the error (puma-9arph.37)', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await loggedWorld(on, w)
+  await start($, clock)
+  await pastLastRead(clock)
+  w.onStoreSet = key => {
+    if (key === 'usage-due:1') throw new Error('store write refused at /secret/path')
+  }
+  await $.classic.StopFailure(PLAIN)
+  await clock.settle()
+  await clock.advance(36_000)
+  expect(whats(stopLogOf(store, w))).toEqual([STOP_RATE_LIMIT, 'stop read failed: HooksError, login 1', 'moved to 2', 'carry-on armed', 'carry-on entered'])
+  expect(store.get('mark:1')).toBeDefined()
+  expect(w.submitted).toHaveLength(1)
+})
+
+test('Review HOST-FAULT-MISCLASSIFIED class: a store write refused inside the Fable carry-on stop\'s since-read marks it as a stop with no read does (puma-9arph.37)', async ($, on) => {
+  const { w, store, clock } = await fableMoved($, on, false)
+  await clock.advance(35_500)
+  expect(w.submitted).toHaveLength(1)
+  w.onStoreSet = key => {
+    if (key === 'usage-due:2') throw new Error('store write refused at /secret/path')
+  }
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  expect(whats(stopLogOf(store, w))).toContain('stop read failed: HooksError, login 2')
+  expect(whats(stopLogOf(store, w)).filter(l => l.startsWith('stop handling failed'))).toEqual([])
+  expect(markOf(store.get('fable-mark:2'))).toEqual([100, FABLE_RESET])
+})
+
 test('a stop whose handling throws in a local step says so in the stop-log, by the error name alone (puma-9arph.37)', async ($, on) => {
   const w = fresh()
   const { store, clock } = await loggedWorld(on, w)

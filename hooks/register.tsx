@@ -1755,9 +1755,10 @@ function provenStopper(view: View, last: Reading | undefined): Account | undefin
 const errorName = (error: unknown): string => (error instanceof Error && /^\w+$/.test(error.name) ? error.name : 'unknown')
 
 /**
- * A stop's own read of a login. checkAccount reaches the network (the profile call, a forced or since usage read) and
- * throws when a call gets no answer: here a throw never ends the stop's recovery. It goes to the stop-log and the debug
- * log, and the stop goes on as with no fresh reading (answering false).
+ * A stop's own read of a login. Any failure inside it never ends the stop's recovery: a call that gets no answer (the
+ * profile call, a forced or since usage read) and a fault of the host's store or view during the read alike. It goes to
+ * the stop-log and the debug log, and the stop goes on as with no fresh reading (answering false), so the session moves
+ * and carries on with no person.
  */
 async function stopRead($: Host, account: Account, gate: UsageGate): Promise<boolean> {
   try {
@@ -2526,7 +2527,8 @@ export const register: Register = on => {
     // A usage-limit stop raises Claude Code's modal; a rejected sign-in's screen nobody has read, so it gets no key.
     if (e.error === 'rate_limit') limitStopAfter = mainTurns
     void onStopFailure($, e).catch(error => {
-      // A fault of the host itself (its store, its view): the recovery ends here, and the stop-log says so.
+      // A fault of the host itself (its store, its view) outside the stop's own read: the recovery ends here, and the
+      // stop-log says so.
       void logStop($, `stop handling failed: ${errorName(error)}`)
       return debug($, `stop failure handling failed: ${String(error)}`)
     })
