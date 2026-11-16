@@ -96,6 +96,12 @@ type World = {
   submitted: string[]
   /** The engine refuses every submit with this reason, as a Stop that stands or a host's limit does. */
   submitDrop?: string
+  /** While set, a submit stays queued until it settles, as under Claude Code's limit modal: it answers once the prompt enters. */
+  submitHold?: Promise<void>
+  /** A dialog holds the keys: a fill answers refusal 'dialog' and leaves the draft as it was. */
+  isDialog?: boolean
+  /** Where it answers true, a debug line fails to write. */
+  isLogFailing?: (text: string) => boolean
   /** Whether each line in `submitted` was sent as the person's own words (`asUser`), not under the mod's name. */
   asUser: boolean[]
   /** What the session's last response reported, as `$.session.usage()` answers it. */
@@ -318,12 +324,17 @@ function world(on: On, w: World, store: Record<string, unknown> | Map<string, un
     if (w.chrome !== undefined && e.args === 'reconnect claude-in-chrome') delete w.chrome.as
     return { text: 'Successfully reconnected to claude-in-chrome' }
   })
-  on('prompt.submit', (_$, e) => {
+  on('prompt.submit', async (_$, e) => {
     w.submitted.push(e.text)
     w.asUser.push(e.origin.kind === 'plugin' && e.origin.asUser === true)
     if (w.submitDrop !== undefined) return { drop: w.submitDrop }
+    await w.submitHold
     return { text: e.text }
   })
+  // The kit keeps no cause a test writes on the mod's own fill, so a dialog reads as a refusal with its cause left out.
+  on('prompt.fill', () => ({ isFilled: w.isDialog !== true }))
+  on('turn.start', (_$, e) => ({ turnId: e.turnId }))
+  on('turn.complete', (_$, e) => ({ text: e.answer }))
   on('session.start', (_$, e) => {
     w.markAtStart = w.otherEnv.ACCOUNT_ROTATOR_SESSION
     return { cwd: e.cwd }
@@ -339,6 +350,7 @@ function world(on: On, w: World, store: Record<string, unknown> | Map<string, un
     return { value: undefined }
   })
   on('ui.log', (_$, e) => {
+    if (w.isLogFailing?.(e.text) === true) throw new Error('log refused')
     w.logged = [...(w.logged ?? []), e.text]
     return { value: undefined }
   })
@@ -10028,4 +10040,168 @@ test('a tick that moves to a login whose usage read failed, with no reading, log
   expect(slots(w)).toEqual([SLOT2])
   expect(w.submitted).toEqual([])
   expect(whats(stopLogOf(store, w))).toEqual(['moved to 2 by the tick or a response, its usage read failed, no carry-on'])
+})
+
+test('a stop-log write that fails, its debug line failing too, leaves the stop-log writing the next entries (puma-9arph.34 C)', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await loggedWorld(on, w, { 'rotate-to': 'off' })
+  let isFailing = true
+  w.onStoreSet = key => {
+    if (isFailing && key.startsWith('stop-log:')) throw new Error('disk full')
+  }
+  w.isLogFailing = text => isFailing && text.includes('stop-log failed')
+  await start($, clock)
+  await $.classic.StopFailure({ error: 'rate_limit' })
+  await clock.settle()
+  isFailing = false
+  await $.classic.StopFailure({ error: 'rate_limit' })
+  await clock.settle()
+  expect(whats(stopLogOf(store, w))).toEqual([STOP_RATE_LIMIT, 'stayed: rotation off'])
+})
+
+// ---------------------------------------------------------------- puma-9arph.34 C: one Escape frees a carry-on held under the limit modal
+
+const PANE_HANDLE = 'term_test-pane'
+const ESCAPE_ARGV = ['orca', 'terminal', 'send', '--terminal', PANE_HANDLE, '--text', '\u001b', '--json']
+const ESCAPE_SENT = "carry-on queued under a dialog: one Escape to this session's pane (exit 0)"
+const GAVE_UP = 'carry-on still queued after the Escape: gave up'
+const noKey = (why: string) => `carry-on queued, no key: ${why}`
+
+/**
+ * A world whose carry-on stays queued under Claude Code's limit modal, as the spike read it on vox: a dialog holds
+ * the keys, and the session runs in an Orca pane. Answers what lets the queued prompt enter.
+ */
+function underModal(on: On, w: World): () => void {
+  let enter = () => {}
+  w.submitHold = new Promise<void>(resolve => {
+    enter = resolve
+  })
+  w.isDialog = true
+  w.env.ORCA_TERMINAL_HANDLE = PANE_HANDLE
+  on('process.spawn', async function* (_$, e) {
+    w.spawned.push(e)
+    yield* []
+    return { value: { code: 0, signal: null } }
+  })
+  return () => {
+    w.isDialog = false
+    enter()
+  }
+}
+
+/** The main loop's turn that dies on a stop: it starts, the stop is heard, then it ends on the error, in the order the spike read. */
+async function turnStops($: Engine, clock: MockClock, stop: { error: string } = { error: 'rate_limit' }, isEnded = true): Promise<void> {
+  await $.turn.start({ text: 'go on', turnId: 'turn-1' })
+  await $.classic.StopFailure(stop)
+  if (isEnded) await $.turn.complete({ turnId: 'turn-1', reason: 'error', answer: '', durationMs: 1, isAborted: false })
+  await clock.settle()
+}
+
+test('a carry-on queued under the limit modal gets one Escape, sent to this session\'s own Orca pane, and then enters (puma-9arph.34 C1)', async ($, on) => {
+  const w = fresh()
+  const enter = underModal(on, w)
+  const { store, clock } = await loggedWorld(on, w)
+  await start($, clock)
+  w.usage['tok-1'] = [100, 41]
+  await turnStops($, clock)
+  await clock.advance(36_000)
+  expect(w.submitted).toHaveLength(1)
+  expect(w.spawned).toEqual([])
+  await clock.advance(5_000)
+  expect(w.spawned.map(s => s.argv)).toEqual([ESCAPE_ARGV])
+  enter()
+  await clock.settle()
+  await clock.advance(10_000)
+  expect(w.spawned).toHaveLength(1)
+  expect(w.submitted).toHaveLength(1)
+  expect(whats(stopLogOf(store, w)).slice(-2)).toEqual([ESCAPE_SENT, 'carry-on entered'])
+})
+
+test('a carry-on still queued after its Escape gets no second key, and the stop-log says it gave up (puma-9arph.34 C7)', async ($, on) => {
+  const w = fresh()
+  underModal(on, w)
+  const { store, clock } = await loggedWorld(on, w)
+  await start($, clock)
+  w.usage['tok-1'] = [100, 41]
+  await turnStops($, clock)
+  await clock.advance(41_000)
+  expect(w.spawned).toHaveLength(1)
+  await clock.advance(10_000)
+  expect(whats(stopLogOf(store, w)).slice(-2)).toEqual([ESCAPE_SENT, GAVE_UP])
+  await clock.advance(10 * 60_000)
+  expect(w.spawned).toHaveLength(1)
+  expect(w.submitted).toHaveLength(1)
+})
+
+test('a carry-on that enters within 5 s gets no key (puma-9arph.34 C6)', async ($, on) => {
+  const w = fresh()
+  const enter = underModal(on, w)
+  enter()
+  const { store, clock } = await loggedWorld(on, w)
+  await start($, clock)
+  w.usage['tok-1'] = [100, 41]
+  await turnStops($, clock)
+  await clock.advance(36_000)
+  await clock.advance(20_000)
+  expect(w.submitted).toHaveLength(1)
+  expect(w.spawned).toEqual([])
+  expect(whats(stopLogOf(store, w)).at(-1)).toBe('carry-on entered')
+})
+
+// Each row keeps one condition of the Escape false, every other as in the modal case: no key goes, and the stop-log says why.
+for (const [name, arrange, why] of [
+  ["an agent's turn is open (C2)", { during: ($: Engine) => $.turn.start({ text: 'look', turnId: 'agent-turn', agentId: 'agent-1' }) }, 'a turn is open'],
+  ['the main turn is still open (C3)', { isEnded: false }, 'a turn is open'],
+  ['the session runs in no Orca pane (C4)', { isOutsideOrca: true }, 'no Orca pane'],
+  ['no dialog holds the box (C5)', { isNoDialog: true }, 'no dialog holds it'],
+  ['the stop was a rejected sign-in, not a limit (RULING 6008)', { stop: { error: 'authentication_failed' } }, 'no limit stop before it'],
+  [
+    'a turn ran since the limit stop',
+    {
+      during: async ($: Engine) => {
+        await $.turn.start({ text: 'and this', turnId: 'turn-2' })
+        await $.turn.complete({ turnId: 'turn-2', reason: 'answer', answer: 'done', durationMs: 1, isAborted: false })
+      },
+    },
+    'no limit stop before it',
+  ],
+] as const) {
+  test(`a queued carry-on gets no key where ${name} (puma-9arph.34 C)`, async ($, on) => {
+    const w = fresh()
+    const rule: { during?: ($: Engine) => Promise<unknown>; isEnded?: boolean; isOutsideOrca?: boolean; isNoDialog?: boolean; stop?: { error: string } } = arrange
+    underModal(on, w)
+    if (rule.isOutsideOrca === true) delete w.env.ORCA_TERMINAL_HANDLE
+    if (rule.isNoDialog === true) w.isDialog = false
+    const { store, clock } = await loggedWorld(on, w)
+    await start($, clock)
+    w.usage['tok-1'] = [100, 41]
+    await turnStops($, clock, rule.stop, rule.isEnded ?? true)
+    await rule.during?.($)
+    await clock.settle()
+    await clock.advance(36_000)
+    expect(w.submitted).toHaveLength(1)
+    await clock.advance(20_000)
+    expect(w.spawned).toEqual([])
+    expect(whats(stopLogOf(store, w)).at(-1)).toBe(noKey(why))
+  })
+}
+
+test('the line a stop cut by the Claude in Chrome visit carries on with gets the same one Escape, and the stop sends one line (puma-9arph.34 C8)', async ($, on) => {
+  const w = fresh()
+  w.chrome = { extensions: [SLOT2] }
+  await spentTwo(w)
+  underModal(on, w)
+  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'chrome-account': '2' }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  await turnStops($, clock)
+  await clock.advance(36_000)
+  expect(w.submitted).toEqual([])
+  await clock.advance(36_000)
+  expect(w.submitted).toHaveLength(1)
+  await clock.advance(5_000)
+  expect(w.spawned.map(s => s.argv)).toEqual([ESCAPE_ARGV])
+  await clock.advance(10 * 60_000)
+  expect(w.spawned).toHaveLength(1)
+  expect(w.submitted).toHaveLength(1)
 })
