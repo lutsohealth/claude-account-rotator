@@ -11014,8 +11014,9 @@ test('a stop\'s rotation that moves the session while a late switch\'s put-back 
   // The press's switch has settled by the stop: the stop rotates, it does not ride the settle.
   await clock.advance(40_000)
   await settleReal(clock)
-  // The given-up switch lands: its put-back reads the view (login 3) and waits there.
-  held.arm(() => w.envSets.length === 2)
+  // The given-up switch lands: its put-back reads the view (login 3) and waits there. Its own write may be followed by
+  // the newer ask's, so the hold takes the first read once it has written.
+  held.arm(() => w.envSets.length >= 2)
   openLate()
   await settleReal(clock)
   expect(held.isHeld()).toBe(true)

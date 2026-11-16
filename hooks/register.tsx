@@ -933,6 +933,30 @@ async function useSlot($: Host, slot: string): Promise<void> {
 }
 
 /**
+ * The slot the session should be on, and the ask that named it. The newest ask wins whatever order the engine answers
+ * the writes in: a write that lands late, the session asked elsewhere since, is followed by the newer ask's slot.
+ */
+let slotIntent: { slot: string; seq: number } | undefined
+let slotSeq = 0
+
+/** A fresh ask for `slot`, set with no await before it; answers its number. Only a switch, a point-back or the start asks. */
+function claimSlot(slot: string): number {
+  slotSeq += 1
+  slotIntent = { slot, seq: slotSeq }
+  return slotSeq
+}
+
+/**
+ * Writes the slot the newest ask names, and again while a newer ask came during the write; asks nothing itself. It
+ * ends once no ask comes during its last write: each extra pass needs an ask made meanwhile.
+ */
+async function settleSlot($: Host): Promise<void> {
+  for (let want = slotIntent?.slot; want !== undefined; want = slotIntent?.slot === want ? undefined : slotIntent?.slot) {
+    await useSlot($, want)
+  }
+}
+
+/**
  * Claude Code's security policy refuses switching in this session: says so
  * once, as a toast and a notification, and the pane says so while it lasts.
  * False when it was said already.
@@ -955,7 +979,10 @@ async function blocked($: Host): Promise<boolean> {
  */
 async function checkSwitching($: Host, slot: string): Promise<void> {
   try {
-    await useSlot($, slot)
+    // The start asks only while nothing has: a switch that asked first owns the slot, and its write is the probe. The
+    // slot in use is where a switch still settling from before a reload moved to, so its point-back owns this ask.
+    if (slotIntent === undefined) pendingSeq = claimSlot(slot)
+    await settleSlot($)
   } catch (error) {
     if (isPolicyRefusal(error)) await blocked($)
     else await debug($, `switch check failed: ${String(error)}`)
@@ -1456,6 +1483,8 @@ const SWITCH_WAIT_MS = 30_000
 let switchInFlight: Promise<boolean> | undefined
 /** Moves on each give-up: a switch that sees it moved during its slot write lands too late and writes nothing. */
 let switchGeneration = 0
+/** The slot ask of the switch whose `pending` stands: its point-back asks only while no newer ask came. */
+let pendingSeq: number | undefined
 
 /**
  * Points this session at `target`; false while the refresh guard holds it back, or Claude Code's policy refuses it. Quiet: no toast.
@@ -1516,10 +1545,15 @@ async function switchNow($: Host, target: Account, why: string, isQuiet: boolean
     if (carry !== undefined) void logStop($, 'stop switch given up on: landed late, no carry-on')
     return false
   }
+  // This switch's ask for the slot, once made.
+  let mine: number | undefined
   const putBack = async (): Promise<false> => {
     const { accounts, activeId } = await getView($)
     const back = accounts.find(a => a.id === activeId)
-    if (back !== undefined) await useSlot($, back.slot).catch(error => debug($, `putting the slot back after a late switch failed: ${String(error)}`))
+    // The view's login is the slot to go back to only while no ask came since this one's, checked and claimed with no
+    // await between; a newer ask owns the slot, and the put-back only follows it.
+    if (slotIntent?.seq === mine && back !== undefined) claimSlot(back.slot)
+    if (slotIntent?.seq !== mine) await settleSlot($).catch(error => debug($, `putting the slot back after a late switch failed: ${String(error)}`))
     return givenUp()
   }
   const active = await refreshingSoon($, await getView($), target, await $.clock.now())
@@ -1545,6 +1579,7 @@ async function switchNow($: Host, target: Account, why: string, isQuiet: boolean
   await setView($, v => ({ ...v, held: undefined }))
   await keepChrome($)
   try {
+    mine = claimSlot(target.slot)
     await useSlot($, target.slot)
   } catch (error) {
     if (!isPolicyRefusal(error)) throw error
@@ -1570,6 +1605,7 @@ async function switchNow($: Host, target: Account, why: string, isQuiet: boolean
     pending: { id: target.id, from: v.activeId, since: now },
     removing: undefined,
   }))
+  pendingSeq = mine
   // The carry-on is armed and carriedFor set straight after pending's write, with no await between, so a second stop
   // cannot arm a second carry-on; the toast reads the view after them.
   if (carry !== undefined) void logStop($, `moved to ${target.id}`)
@@ -1635,8 +1671,13 @@ async function settlePending($: Host, isResponse: boolean): Promise<void> {
     }
     untaken.add(pending.id)
     await undoProvisionalStop($)
+    // It asks only while the switch it undoes still owns the slot, checked with no await before the ask: a switch
+    // that asked since (a press between its slot write and its view write) owns the slot and the view.
+    if (slotIntent !== undefined && slotIntent.seq !== pendingSeq) return
+    claimSlot(from.slot)
     try {
-      await useSlot($, from.slot)
+      // A press that asks during this write publishes its own login after it: the slot follows that ask.
+      await settleSlot($)
       movedAt = now
       moves += 1
     } catch (error) {
