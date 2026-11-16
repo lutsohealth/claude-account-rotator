@@ -1496,9 +1496,13 @@ async function waitInFlight($: Host, before: Promise<boolean>): Promise<boolean>
   const late = $.clock.sleep(SWITCH_WAIT_MS).then(() => 'late' as const)
   const result = await Promise.race([before.catch(() => false), late])
   if (result !== 'late') return result
+  // Only the waiter that frees the guard moves the generation: a later one would end the switch that waiter started.
+  // Both go before the debug line's await, so the switch given up on cannot land between the give-up and the move.
+  if (switchInFlight === before) {
+    switchInFlight = undefined
+    switchGeneration += 1
+  }
   await debug($, `gave up waiting on the switch in flight after ${SWITCH_WAIT_MS / 1000} s`)
-  switchGeneration += 1
-  if (switchInFlight === before) switchInFlight = undefined
   return false
 }
 
@@ -1535,6 +1539,7 @@ async function switchNow($: Host, target: Account, why: string, isQuiet: boolean
     const { accounts, activeId } = await getView($)
     const back = accounts.find(a => a.id === activeId)
     if (back !== undefined) await useSlot($, back.slot).catch(error => debug($, `putting the slot back after a late switch failed: ${String(error)}`))
+    if (carry !== undefined) void logStop($, 'stop switch given up on: landed late, no carry-on')
     return false
   }
   // A switch that replaces an unproven one ends it unproven. A stop's own move (it carries on) keeps what the stop
@@ -2582,8 +2587,9 @@ async function boot($: Host, isInteractive: boolean): Promise<void> {
   const survived = await getView($)
   if (survived.isBound === true && survived.isFableStopped !== undefined) kept = { ...kept, isFableStopped: survived.isFableStopped }
   if (survived.isBound === true && survived.isStuckTold !== undefined) kept = { ...kept, isStuckTold: survived.isStuckTold }
-  // So does a carry-on owed once a login frees up: the tick, armed again by the reload, sends it.
-  if (survived.isBound === true && survived.carryDue !== undefined && due === undefined) due = survived.carryDue
+  // So does a carry-on owed once a login frees up: the tick, armed again by the reload, sends it. The reload zeroed the
+  // count of main turns, so the grace counts from here: a turn after the reload shows Claude Code carried on by itself.
+  if (survived.isBound === true && survived.carryDue !== undefined && due === undefined) due = { ...survived.carryDue, turns: mainTurns }
   // Terminal.app is the terminal that names itself so and draws block characters from its font.
   const hasFontBlocks = (await $.env.get('TERM_PROGRAM')) === 'Apple_Terminal'
   kept = { ...kept, hasFontBlocks }

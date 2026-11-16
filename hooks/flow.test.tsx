@@ -10121,7 +10121,8 @@ test('a rejected sign-in with every other login spent owes no carry-on: it waits
 
 test('a carry-on owed once a login frees up survives a hot reload, then /clear: the rebound view holds it again (puma-9arph.35)', async ($, on) => {
   const owed = { at: Date.parse('2026-10-12T12:00:00Z'), from: '1' }
-  expect((await reloadThenClear($, on, { carryDue: owed }))?.carryDue).toEqual(owed)
+  // The turns the reload counts from ride along: each reload counts them again.
+  expect((await reloadThenClear($, on, { carryDue: owed }))?.carryDue).toMatchObject(owed)
 })
 
 test('with every login spent, the band says when the first login frees up (puma-9arph.35)', async ($, on) => {
