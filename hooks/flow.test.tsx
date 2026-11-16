@@ -11027,3 +11027,65 @@ test('a /clear while a switch waits on its slot write ends with the view on the 
   await settleReal(clock)
   expect([s.view()?.activeId, slots(w).at(-1), s.view()?.pending?.id, ownerOf(s.view())]).toEqual(['2', SLOT2, '2', undefined])
 })
+
+// puma-9arph.42: a rejected sign-in stands until a new sign-in or a usage read that works, so a check that reads nothing
+// never gives it back to the launch pick. SOURCE of the expected pick: pickLaunch's doc comment, "the signed-in logins
+// with room". Login 1 is the one picked for new sessions ('launch-on': 'account:1'), so only its health keeps it out.
+
+/** Two logins; 1's sign-in is rejected at a stop and the session moves to 2. */
+async function rejectedOnOne($: Engine, on: On, isTokenLive: boolean, twoUsed = 30) {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1', isTokenLive ? NOW + 6 * HOUR : NOW - HOUR)
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.failing = { 'tok-1': 401 }
+  w.usage['tok-2'] = [null, twoUsed]
+  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'launch-on': 'account:1' }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  await $.classic.StopFailure({ error: 'authentication_failed' })
+  await clock.settle()
+  return { w, store, clock }
+}
+
+const healthOfStored = (store: Map<string, unknown>, id: string) => store.get(`health:${id}`) as { kind?: string; why?: string } | undefined
+const pickOf = (store: Map<string, unknown>) => (store.get('launch-slot') as { id?: string } | undefined)?.id
+/** Another session holds login 1's next usage read, so this session's checks read none of it. */
+const readHeldElsewhere = (store: Map<string, unknown>) => store.set('usage-due:1', { next: NOW + 6 * HOUR, fails: 0, at: NOW, v: 1 })
+const TEN_MINUTE_CHECK = 10 * 60_000 + 1000
+
+for (const twoUsed of [30, 100]) {
+  const expected = twoUsed === 100 ? undefined : '2'
+  test(`puma-9arph.42 A: a check of a rejected login whose token has run out keeps it rejected; the pick is ${expected ?? 'none'}`, async ($, on) => {
+    const { store, clock } = await rejectedOnOne($, on, false, twoUsed)
+    expect(healthOfStored(store, '1')?.why, 'the stop marks login 1').toBe('sign-in rejected')
+    await clock.advance(TEN_MINUTE_CHECK)
+    expect([healthOfStored(store, '1')?.kind, healthOfStored(store, '1')?.why, pickOf(store)]).toEqual(['login-needed', 'sign-in rejected', expected])
+  })
+
+  test(`puma-9arph.42 B: a check that reads no usage of a rejected login, its token live, keeps it rejected; the pick is ${expected ?? 'none'}`, async ($, on) => {
+    const { store, clock } = await rejectedOnOne($, on, true, twoUsed)
+    expect(healthOfStored(store, '1')?.why, 'the stop marks login 1').toBe('sign-in rejected')
+    readHeldElsewhere(store)
+    await clock.advance(TEN_MINUTE_CHECK)
+    expect([healthOfStored(store, '1')?.kind, healthOfStored(store, '1')?.why, pickOf(store)]).toEqual(['login-needed', 'sign-in rejected', expected])
+  })
+}
+
+test('puma-9arph.42 C: a new sign-in on a rejected login ends the rejection, and it is the pick again', async ($, on) => {
+  const { w, store, clock } = await rejectedOnOne($, on, false)
+  w.keychain['Claude Code-credentials'] = blob('tok-1b')
+  w.owners['tok-1b'] = 'one@example.com'
+  w.usage['tok-1b'] = [null, 10]
+  readHeldElsewhere(store)
+  await clock.advance(TEN_MINUTE_CHECK)
+  expect([healthOfStored(store, '1')?.kind, pickOf(store)]).toEqual(['ok', '1'])
+})
+
+test('puma-9arph.42 C: a usage read of a rejected login that works ends the rejection, and it is the pick again', async ($, on) => {
+  const { w, store, clock } = await rejectedOnOne($, on, true)
+  w.failing = {}
+  w.usage['tok-1'] = [null, 10]
+  store.delete('usage-due:1')
+  await clock.advance(TEN_MINUTE_CHECK)
+  expect([healthOfStored(store, '1')?.kind, pickOf(store)]).toEqual(['ok', '1'])
+})

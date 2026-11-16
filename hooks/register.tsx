@@ -44,6 +44,7 @@ import {
   footerStyleFrom,
   freeId,
   healthOf,
+  SIGN_IN_REJECTED,
   identityFromProfile,
   identityFromStatus,
   isFableSpent,
@@ -1190,9 +1191,15 @@ async function checkAccount($: Host, account: Account, gate: UsageGate): Promise
   }
   const credential = stored.state === 'present' ? stored.credential : undefined
   let health = healthOf(credential, now)
+  // A rejected sign-in stands until a usage read works or a profile call names a sign-in no check had named: a check
+  // that reads nothing (its token run out, or another session's turn to read) never gives it back to the picks.
+  const stood = (await $.store.get(`health:${account.id}`)) as Health | undefined
+  const known = holderFrom(await $.store.get(`holder:${account.id}`))
+  let isSignInProven = false
   if (health.kind === 'ok' && credential !== undefined) {
     const isLive = credential.expiresAt > now + TOKEN_LIVE_MARGIN_MS
     const holder = await holderOf($, account, credential, isLive)
+    isSignInProven = holder !== undefined && holder.token !== known?.token
     // The tier is the sign-in's own, read at every check: a holder named before it was kept lacks it.
     const who = holder === undefined ? undefined : { ...holder.who, ...(credential.tier === undefined ? {} : { tier: credential.tier }) }
     const twin = who === undefined ? undefined : await followSignIn($, account, who)
@@ -1200,9 +1207,10 @@ async function checkAccount($: Host, account: Account, gate: UsageGate): Promise
     // A token no profile call has named may be another login's: its usage is read and stored once it is named.
     else if (isLive && holder !== undefined) {
       const usage = await requestUsage($, account, credential.accessToken, gate)
-      if (usage?.kind === 'rejected') health = { kind: 'login-needed', why: 'sign-in rejected' }
+      if (usage?.kind === 'rejected') health = { kind: 'login-needed', why: SIGN_IN_REJECTED }
       if (usage?.kind === 'failed') await saveCheckError($, account.id, failedWhy(usage), true)
       if (usage?.kind === 'ok') {
+        isSignInProven = true
         await saveCheckError($, account.id, undefined)
         const read = readingFromUsage(usage.body, now)
         if (read !== undefined) {
@@ -1219,6 +1227,12 @@ async function checkAccount($: Host, account: Account, gate: UsageGate): Promise
       }
     }
     // A token run out is not read until a session refreshes it: its row says idle, from its health.
+  }
+  // The rejection is left as stored, `at` and all: undoProvisionalStop gives it back only while it holds what the stop wrote.
+  const isRejectionKept = health.kind === 'ok' && !isSignInProven && stood?.kind === 'login-needed' && stood.why === SIGN_IN_REJECTED
+  if (isRejectionKept) {
+    await setView($, v => ({ ...v, health: { ...v.health, [account.id]: stood } }))
+    return hasFreshFable
   }
   const before = await saveHealth($, account.id, health)
   if (health.kind === 'login-needed' && before?.kind !== 'login-needed') {
@@ -1785,8 +1799,8 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
     // Its time makes the write this stop's own, so another session's rejection since never reads as it.
     const keys = [`health:${active.id}`]
     const stood = await stopKeys($, active.id, keys)
-    const before = await saveHealth($, active.id, { kind: 'login-needed', why: 'sign-in rejected', at: await $.clock.now() })
-    if (before?.kind !== 'login-needed') await announceLockout($, active, 'sign-in rejected')
+    const before = await saveHealth($, active.id, { kind: 'login-needed', why: SIGN_IN_REJECTED, at: await $.clock.now() })
+    if (before?.kind !== 'login-needed') await announceLockout($, active, SIGN_IN_REJECTED)
     if (since !== undefined && !hasResponseSince) {
       const record = await recordStop($, active.id, since, stood, view.isFableStopped === true, await $.clock.now(), keys)
       await setView($, v => ({ ...v, provisionalStop: record }))
