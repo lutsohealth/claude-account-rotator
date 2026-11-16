@@ -49,7 +49,7 @@ import {
   identityFromProfile,
   identityFromStatus,
   isFableSpent,
-  isSignedOutStatus,
+  signInFromStatus,
   isFableStop,
   isWeeklyStop,
   withWeekMark,
@@ -107,7 +107,7 @@ import {
   mayWrite,
   switchFields,
 } from './model'
-import type { Credential, Identity, Need, StayReason, SwitchWriter } from './model'
+import type { Credential, Identity, Need, SignInRead, StayReason, SwitchWriter } from './model'
 import { Band, Footer, PANE_COLUMNS, Pane } from './view'
 import type { Actions } from './view'
 
@@ -938,24 +938,25 @@ async function fetchIdentity($: Host, accessToken: string): Promise<{ who?: Iden
 
 /** Who a slot is signed in as: email, organization and plan. */
 async function signedInAs($: Host, slot: string): Promise<Identity | undefined> {
-  const { exitCode, stdout } = await $.process.run(['claude', 'auth', 'status', '--json'], {
-    env: slotEnv(slot),
-    timeoutMs: 20_000,
-  })
+  const { exitCode, stdout } = await runAuthStatus($, slot, ['--json'], 20_000)
   return exitCode === 0 ? identityFromStatus(stdout) : undefined
 }
 
+/** `claude auth status` under a slot's login, the one place the mod runs it. */
+function runAuthStatus($: Host, slot: string, flags: readonly string[], timeoutMs: number): ReturnType<Host['process']['run']> {
+  return $.process.run(['claude', 'auth', 'status', ...flags], { env: slotEnv(slot), timeoutMs })
+}
+
 /**
- * Whether Claude Code counts no login in a slot, though its keychain may hold a record. Only its exit code and
- * authMethod are read, and its output (it names the account) goes nowhere. A run refused, timed out or answering
- * anything else says nothing.
+ * Whether Claude Code counts a login in a slot, though its keychain may hold a record. Only its exit code and
+ * authMethod are read, and its output (it names the account) goes nowhere. A run refused or timed out says nothing.
  */
-async function isSignedOut($: Host, slot: string): Promise<boolean> {
+async function signInRead($: Host, slot: string): Promise<SignInRead> {
   try {
-    const { exitCode, stdout } = await $.process.run(['claude', 'auth', 'status'], { env: slotEnv(slot), timeoutMs: STATUS_TIMEOUT_MS })
-    return isSignedOutStatus(exitCode, stdout)
+    const { exitCode, stdout } = await runAuthStatus($, slot, [], STATUS_TIMEOUT_MS)
+    return signInFromStatus(exitCode, stdout)
   } catch {
-    return false
+    return 'unknown'
   }
 }
 
@@ -1212,7 +1213,8 @@ async function checkAccount($: Host, account: Account, gate: UsageGate): Promise
   let health = healthOf(credential, now)
   // A record Claude Code does not count as a login is no sign-in, whatever its own expiry says; read at every check, so a
   // new sign-in ends it at the next.
-  if (health.kind === 'ok' && (await isSignedOut($, account.slot))) health = { kind: 'login-needed', why: NOT_SIGNED_IN }
+  const statusRead = health.kind === 'ok' ? await signInRead($, account.slot) : 'unknown'
+  if (statusRead === 'out') health = { kind: 'login-needed', why: NOT_SIGNED_IN }
   // A rejected sign-in stands until a usage read works or a profile call names a sign-in no check had named: a check
   // that reads nothing (its token run out, or another session's turn to read) never gives it back to the picks.
   const known = holderFrom(await $.store.get(`holder:${account.id}`))
@@ -1251,9 +1253,13 @@ async function checkAccount($: Host, account: Account, gate: UsageGate): Promise
   }
   // Read after the check's own calls, so a rejection another session stored meanwhile counts. It is left as stored, `at`
   // and all: undoProvisionalStop gives it back only while it holds what the stop wrote.
+  // A stored mark ends only on its proof: a rejection on a new sign-in or a usage read that works (a signed-out read
+  // keeps its text), 'not signed in' on those or a read that says logged in. A read that says nothing ends neither.
   const stood = (await $.store.get(`health:${account.id}`)) as Health | undefined
-  const isRejectionKept = health.kind === 'ok' && !isSignInProven && stood?.kind === 'login-needed' && stood.why === SIGN_IN_REJECTED
-  if (isRejectionKept) return hasFreshFable
+  const stoodWhy = stood?.kind === 'login-needed' ? stood.why : undefined
+  const isRejectionKept = stoodWhy === SIGN_IN_REJECTED && !isSignInProven && (health.kind === 'ok' || statusRead === 'out')
+  const isSignOutKept = stoodWhy === NOT_SIGNED_IN && !isSignInProven && health.kind === 'ok' && statusRead === 'unknown'
+  if (isRejectionKept || isSignOutKept) return hasFreshFable
   const before = await saveHealth($, account.id, health)
   if (health.kind === 'login-needed' && before?.kind !== 'login-needed') {
     await announceLockout($, account, health.why)

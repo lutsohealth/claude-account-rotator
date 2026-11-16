@@ -589,17 +589,23 @@ export const SIGN_IN_REJECTED = 'sign-in rejected'
 /** Why a login needs a sign-in when it holds none: nothing stored, or nothing Claude Code counts as logged in. */
 export const NOT_SIGNED_IN = 'not signed in'
 
+/** What `claude auth status` said of a slot: logged in, not logged in, or nothing a check may act on. */
+export type SignInRead = 'in' | 'out' | 'unknown'
+
 /**
- * Whether `claude auth status` said the slot is not logged in: exit 1 with authMethod 'none', both documented
- * (https://code.claude.com/docs/en/cli-reference). Any other answer, a timeout's or one that is not JSON, says nothing.
+ * What `claude auth status` said of a slot, by its documented exit code and authMethod
+ * (https://code.claude.com/docs/en/cli-reference): exit 0 is logged in; exit 1 with authMethod 'none' is not. Any
+ * other answer, a timeout's or one that is not JSON, says nothing.
  */
-export function isSignedOutStatus(exitCode: number | null, stdout: string): boolean {
-  if (exitCode !== 1) return false
+export function signInFromStatus(exitCode: number | null, stdout: string): SignInRead {
+  if (exitCode === 0) return 'in'
+  if (exitCode !== 1) return 'unknown'
   try {
     const parsed: unknown = JSON.parse(stdout)
-    return typeof parsed === 'object' && parsed !== null && (parsed as { authMethod?: unknown }).authMethod === 'none'
+    const isNone = typeof parsed === 'object' && parsed !== null && (parsed as { authMethod?: unknown }).authMethod === 'none'
+    return isNone ? 'out' : 'unknown'
   } catch {
-    return false
+    return 'unknown'
   }
 }
 
