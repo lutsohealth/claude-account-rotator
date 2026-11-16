@@ -1193,7 +1193,6 @@ async function checkAccount($: Host, account: Account, gate: UsageGate): Promise
   let health = healthOf(credential, now)
   // A rejected sign-in stands until a usage read works or a profile call names a sign-in no check had named: a check
   // that reads nothing (its token run out, or another session's turn to read) never gives it back to the picks.
-  const stood = (await $.store.get(`health:${account.id}`)) as Health | undefined
   const known = holderFrom(await $.store.get(`holder:${account.id}`))
   let isSignInProven = false
   if (health.kind === 'ok' && credential !== undefined) {
@@ -1228,7 +1227,9 @@ async function checkAccount($: Host, account: Account, gate: UsageGate): Promise
     }
     // A token run out is not read until a session refreshes it: its row says idle, from its health.
   }
-  // The rejection is left as stored, `at` and all: undoProvisionalStop gives it back only while it holds what the stop wrote.
+  // Read after the check's own calls, so a rejection another session stored meanwhile counts. It is left as stored, `at`
+  // and all: undoProvisionalStop gives it back only while it holds what the stop wrote.
+  const stood = (await $.store.get(`health:${account.id}`)) as Health | undefined
   const isRejectionKept = health.kind === 'ok' && !isSignInProven && stood?.kind === 'login-needed' && stood.why === SIGN_IN_REJECTED
   if (isRejectionKept) return hasFreshFable
   const before = await saveHealth($, account.id, health)

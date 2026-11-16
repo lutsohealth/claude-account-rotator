@@ -11081,6 +11081,30 @@ test('puma-9arph.42 C: a new sign-in on a rejected login ends the rejection, and
   expect([healthOfStored(store, '1')?.kind, pickOf(store)]).toEqual(['ok', '1'])
 })
 
+// Codex round on 4a97eb1, AUTH-RACE: a rejection another session stores while this check waits on its usage call stands.
+for (const status of [429, 500]) {
+  test(`puma-9arph.42 AUTH-RACE: a rejection stored during a check whose usage read fails (${status}) stands, and the pick is 2`, async ($, on) => {
+    const w = fresh()
+    w.keychain['Claude Code-credentials'] = blob('tok-1')
+    w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+    w.usage['tok-1'] = [null, 10]
+    w.usage['tok-2'] = [null, 30]
+    const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'launch-on': 'account:1' }))
+    const clock = world(on, w, store)
+    await start($, clock)
+    w.failing = { 'tok-1': status }
+    store.delete('usage-due:1')
+    let hasWritten = false
+    w.beforeFetch = async () => {
+      if (hasWritten) return
+      hasWritten = true
+      store.set('health:1', { kind: 'login-needed', why: 'sign-in rejected', at: NOW + TEN_MINUTE_CHECK })
+    }
+    await clock.advance(TEN_MINUTE_CHECK)
+    expect([healthOfStored(store, '1')?.why, pickOf(store)]).toEqual(['sign-in rejected', '2'])
+  })
+}
+
 test('puma-9arph.42 C: a usage read of a rejected login that works ends the rejection, and it is the pick again', async ($, on) => {
   const { w, store, clock } = await rejectedOnOne($, on, true)
   w.failing = {}
