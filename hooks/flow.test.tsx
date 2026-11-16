@@ -10017,19 +10017,22 @@ test('with every login spent, the tick at the reset switches to the freed login 
   await clock.settle()
   expect(whats(stopLogOf(store, w)).filter(isWaitLine)).toEqual(['no login left: one carry-on at 2026-10-12T12:00:00.000Z'])
   w.failing = { 'tok-2': 429 }
-  // On a Mac the keychain read before a switch takes milliseconds, long enough for a second job of the same tick to
-  // reach the switch too: two switches, and the second ends the first one's carry-on.
-  w.beforeKeychain = () => new Promise<void>(resolve => setTimeout(resolve, 5))
   const isSwitched = (t: unknown) => String(t).startsWith('Switched to ')
   const settleReal = async () => {
     await new Promise(resolve => setTimeout(resolve, 100))
     await clock.settle()
   }
-  // One tick at a time, each let finish in real time: only a race inside one tick can make a second switch.
-  await clock.advance(Date.parse('2026-10-12T12:00:00Z') - clock.now())
+  await clock.advance(Date.parse('2026-10-12T11:59:30Z') - clock.now())
   await settleReal()
-  await clock.advance(60_000)
-  await settleReal()
+  // On a Mac the keychain read before a switch takes milliseconds, long enough for a second job of the same tick to
+  // reach the switch too: two switches, and the second ends the first one's carry-on.
+  w.beforeKeychain = () => new Promise<void>(resolve => setTimeout(resolve, 5))
+  // One tick at a time, each let finish in real time, as ticks a minute apart do: only a race inside one tick can make
+  // a second switch.
+  for (let i = 0; i < 3 && w.toasts.filter(isSwitched).length === 0; i += 1) {
+    await clock.advance(60_000)
+    await settleReal()
+  }
   expect([w.envSets.at(-1)?.value, w.toasts.filter(isSwitched).length]).toEqual([SLOT2, 1])
   // The carry-on goes once that one tick's switch lands, not a tick later.
   await clock.advance(36_000)
