@@ -9999,7 +9999,8 @@ test('with every login spent, a login whose usage read fails since the stop is s
   expect(w.envSets.at(-1)?.value).toBe(SLOT2)
   await clock.advance(36_000)
   expect(w.submitted).toHaveLength(1)
-  expect(whats(stopLogOf(store, w))).toContain('moved to 2')
+  // The tick's own rotation moved there; the carry-on owed went on login 2.
+  expect(whats(stopLogOf(store, w))).toContain('a login is free: carry-on on 2')
   // No second notice and no second carry-on on later ticks.
   await clock.advance(10 * 60_000)
   expect(w.submitted).toHaveLength(1)
@@ -10024,8 +10025,13 @@ test('with every login spent, the tick at the reset switches to the freed login 
     await new Promise(resolve => setTimeout(resolve, 100))
     await clock.settle()
   }
-  await clock.advance(Date.parse('2026-10-12T12:00:00Z') - clock.now() + 60_000)
+  // One tick at a time, each let finish in real time: only a race inside one tick can make a second switch.
+  await clock.advance(Date.parse('2026-10-12T12:00:00Z') - clock.now())
   await settleReal()
+  for (let i = 0; i < 2; i += 1) {
+    await clock.advance(60_000)
+    await settleReal()
+  }
   expect([w.envSets.at(-1)?.value, w.toasts.filter(isSwitched).length]).toEqual([SLOT2, 1])
   await clock.advance(36_000)
   await settleReal()

@@ -1358,28 +1358,23 @@ function awaitFreeLogin($: Host, view: View, now: number): void {
 }
 
 /**
- * Sends the carry-on awaitFreeLogin owes, once: at its time, or sooner once the login in use is not spent. From a spent
- * login the rotation moves to a freed one, and that switch carries on once it lands. On a login not spent it carries on
- * there; where a switch without a carry-on (the tick's own) is still settling, once that switch lands, armed once.
+ * Sends the carry-on awaitFreeLogin owes, once, at the first tick that finds the login in use not spent: its own window
+ * reset, or the tick's own rotation, which runs just before this, moved to a login that freed up. It never switches
+ * itself: a second move in the same tick would end the first one's carry-on. Where that switch is still settling, it
+ * carries on once the switch lands, armed once.
  */
 async function carryOnWhenFree($: Host): Promise<void> {
   if (due === undefined) return
   const view = await getView($)
   const now = await $.clock.now()
-  const isTime = due?.at !== undefined && now >= due.at
-  if (!isTime && shouldLeave(view, now)) return
+  if (shouldLeave(view, now)) return
   // Another tick may have taken it during the reads: the check and the clear go with no await between.
   if (due === undefined) return
   due = undefined
+  void logStop($, `a login is free: carry-on on ${view.activeId}`)
   await setView($, v => ({ ...v, carryDue: undefined }))
-  if (shouldLeave(view, now) && (await maybeRotate($, undefined, {}))) return
-  // Still spent: a switch held for a refresh carries on when it lands, and a stop with no login left owes one anew.
-  const after = await getView($)
-  const at = await $.clock.now()
-  if (shouldLeave(after, at)) return
-  void logStop($, `a login is free: carry-on on ${after.activeId}`)
-  const since = after.pending?.since
-  if (since === undefined || at - since >= SETTLE_MS) {
+  const since = view.pending?.since
+  if (since === undefined || now - since >= SETTLE_MS) {
     await carryOn($)
     return
   }
@@ -2553,12 +2548,15 @@ export const register: Register = on => {
     $.clock.every(60_000, () => {
       // Armed again by a reload, which keeps the view and cancels every wait. Its own catch: a failing merge skips no retry.
       void retryHeld($).catch(error => debug($, `held switch retry failed: ${String(error)}`))
-      void carryOnWhenFree($).catch(error => debug($, `carry-on once a login is free failed: ${String(error)}`))
       void mergeStore($)
         .then(() => applyRequests($).catch(error => debug($, `requests failed: ${String(error)}`)))
         .then(() => settlePending($, false))
         .then(() => checkAll($, false))
         .catch(error => debug($, `sync failed: ${String(error)}`))
+        // After checkAll's own move, never beside it: two moves in one tick, each past the settle guard before either
+        // writes pending, make two switches, and the second ends the first's carry-on. Run whether the sync failed or not.
+        .then(() => carryOnWhenFree($))
+        .catch(error => debug($, `carry-on once a login is free failed: ${String(error)}`))
     })
     $.clock.every(10 * 60_000, () => {
       void checkAll($).catch(error => debug($, `check failed: ${String(error)}`))
