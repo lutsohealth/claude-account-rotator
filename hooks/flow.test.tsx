@@ -10274,6 +10274,99 @@ for (const [name, keys] of [
   })
 }
 
+// Review r1 of #104 and #105 (Codex gpt-6-sol at b503ddd), class [STALE-WRITE-AFTER-GIVE-UP]: a switch given up on
+// wrote a record at an await its one generation check did not cover. Each order of the two presses is swept.
+for (const [first, later] of [['2', '3'], ['3', '2']]) {
+  test(`a switch given up on during its keychain read leaves the held press for login ${later} standing (Review STALE_HELD_INTENT)`, async ($, on) => {
+    const w = fresh()
+    const { clock } = await loggedWorld(on, w, THREE_LOGINS)
+    w.keychain[await keychainItem(SLOT3)] = blob('tok-3')
+    w.usage['tok-3'] = [10, 30]
+    const view = watchedView(on)
+    await start($, clock)
+    await settleReal(clock)
+    // The token in use refreshes soon, so each press is held; the first one's keychain read hangs past SWITCH_WAIT_MS.
+    w.keychain['Claude Code-credentials'] = blob('tok-1', NOW + 5 * 60_000)
+    let open: () => void = () => undefined
+    const gate = new Promise<void>(resolve => { open = resolve })
+    let reads = 0
+    w.beforeKeychain = () => (reads++ === 0 ? gate : Promise.resolve())
+    const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+    void pane.press({ key: `use-${first}` })
+    await settleReal(clock)
+    void pane.press({ key: `use-${later}` })
+    await settleReal(clock)
+    await clock.advance(30_000)
+    await settleReal(clock)
+    open()
+    await settleReal(clock)
+    await pane.unmount()
+    expect(view()?.held?.target.id).toBe(later)
+  })
+
+  test(`a switch given up on during its keychain read that then finds no refresh due leaves the held press for login ${later} standing (Review STALE_HELD_CLEARED)`, async ($, on) => {
+    const w = fresh()
+    const { clock } = await loggedWorld(on, w, THREE_LOGINS)
+    w.keychain[await keychainItem(SLOT3)] = blob('tok-3')
+    w.usage['tok-3'] = [10, 30]
+    const view = watchedView(on)
+    await start($, clock)
+    await settleReal(clock)
+    // The later press reads the token in use about to refresh and is held; the first press's read hangs past
+    // SWITCH_WAIT_MS and, once open, reads that token refreshed, so it goes on past the hold to its own switch.
+    w.keychain['Claude Code-credentials'] = blob('tok-1', NOW + 5 * 60_000)
+    let open: () => void = () => undefined
+    const gate = new Promise<void>(resolve => { open = resolve })
+    let reads = 0
+    w.beforeKeychain = () => (reads++ === 0 ? gate : Promise.resolve())
+    const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+    void pane.press({ key: `use-${first}` })
+    await settleReal(clock)
+    void pane.press({ key: `use-${later}` })
+    await settleReal(clock)
+    await clock.advance(30_000)
+    await settleReal(clock)
+    const isHeldFirst = view()?.held?.target.id === later
+    w.keychain['Claude Code-credentials'] = blob('tok-1', NOW + 8 * HOUR)
+    open()
+    await settleReal(clock)
+    await pane.unmount()
+    expect([isHeldFirst, view()?.held?.target.id]).toEqual([true, later])
+  })
+
+  test(`a switch given up on after its slot check leaves the session on login ${later}, pressed for since (Review STALE_PENDING_WRITE)`, async ($, on) => {
+    const w = fresh()
+    const { clock } = await loggedWorld(on, w, THREE_LOGINS)
+    w.keychain[await keychainItem(SLOT3)] = blob('tok-3')
+    w.usage['tok-3'] = [10, 30]
+    const view = watchedView(on)
+    // The first press's switch passes its slot check, then its next view read hangs past SWITCH_WAIT_MS.
+    let open: () => void = () => undefined
+    const gate = new Promise<void>(resolve => { open = resolve })
+    let isHeld = false
+    on('state.get', async (_$, e, next) => {
+      if (e.key === 'view' && w.envSets.at(-1)?.value === (first === '2' ? SLOT2 : SLOT3) && !isHeld) {
+        isHeld = true
+        await gate
+      }
+      return next(e)
+    })
+    await start($, clock)
+    await settleReal(clock)
+    const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+    void pane.press({ key: `use-${first}` })
+    await settleReal(clock)
+    void pane.press({ key: `use-${later}` })
+    await settleReal(clock)
+    await clock.advance(30_000)
+    await settleReal(clock)
+    open()
+    await settleReal(clock)
+    await pane.unmount()
+    expect([isHeld, view()?.activeId]).toEqual([true, later])
+  })
+}
+
 test('a stop that gives up on a hung switch after a press gave up on it leaves the press\'s own switch standing (puma-9arph.39)', async ($, on) => {
   const w = fresh()
   const { clock } = await loggedWorld(on, w, { ...THREE_LOGINS, 'rotate-to': 'order' })
