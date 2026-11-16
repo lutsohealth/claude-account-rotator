@@ -11263,3 +11263,64 @@ test('puma-9arph.48: an ok another session writes over the mark is marked again 
   await clock.advance(TEN_MINUTE_CHECK)
   expect([healthOfStored(store, '1')?.kind, healthOfStored(store, '1')?.why, pickOf(store)]).toEqual(['login-needed', 'not signed in', '2'])
 })
+
+// Review r1 (Codex, d5d822e) [MARK-ENDS-WITHOUT-PROOF], UNKNOWN-KEEPS-MARK: a read that says nothing ends no mark.
+test('Review r1 UNKNOWN-KEEPS-MARK: a status read that times out after a signed-out one keeps the login out of the pick', async ($, on) => {
+  const { w, store, clock } = await storedOnOne($, on, true)
+  expect(healthOfStored(store, '1')?.why).toBe('not signed in')
+  w.statusFails = 'timeout'
+  await clock.advance(TEN_MINUTE_CHECK)
+  expect([healthOfStored(store, '1')?.kind, pickOf(store)]).toEqual(['login-needed', '2'])
+})
+
+for (const way of ['timeout', 'exit', 'other', 'refused'] as const) {
+  test(`Review r1 UNKNOWN-KEEPS-MARK class: a status read that ends ${way} keeps a stored 'not signed in'`, async ($, on) => {
+    const { w, store, clock } = await storedOnOne($, on, true)
+    expect(healthOfStored(store, '1')?.why).toBe('not signed in')
+    w.statusFails = way
+    await clock.advance(TEN_MINUTE_CHECK)
+    expect([healthOfStored(store, '1')?.kind, pickOf(store)]).toEqual(['login-needed', '2'])
+  })
+}
+
+// Review r1 [MARK-ENDS-WITHOUT-PROOF], REJECTION-KEEP: a signed-out read keeps a rejection, which only #110's proofs end.
+test('Review r1 REJECTION-KEEP: a signed-out status read does not replace a rejected sign-in', async ($, on) => {
+  const { w, store, clock } = await rejectedOnOne($, on, false)
+  expect(healthOfStored(store, '1')?.why).toBe('sign-in rejected')
+  w.signedOut = ['']
+  await clock.advance(TEN_MINUTE_CHECK)
+  expect(healthOfStored(store, '1')?.why).toBe('sign-in rejected')
+})
+
+for (const isTokenLive of [false, true]) {
+  test(`Review r1 REJECTION-KEEP class: a rejected sign-in stands through a signed-out read, its token ${isTokenLive ? 'live' : 'run out'}`, async ($, on) => {
+    const { w, store, clock } = await rejectedOnOne($, on, isTokenLive)
+    expect(healthOfStored(store, '1')?.why).toBe('sign-in rejected')
+    w.signedOut = ['']
+    await clock.advance(TEN_MINUTE_CHECK)
+    expect(healthOfStored(store, '1')?.why).toBe('sign-in rejected')
+  })
+}
+
+// The rest of the matrix, stored mark x read (in, out, unknown), that no test above pins.
+test('puma-9arph.48 matrix: a stored ok stays ok through an unknown read', async ($, on) => {
+  const { w, store, clock } = await storedOnOne($, on, false)
+  w.statusFails = 'timeout'
+  await clock.advance(TEN_MINUTE_CHECK)
+  expect([healthOfStored(store, '1')?.kind, pickOf(store)]).toEqual(['ok', '1'])
+})
+
+test('puma-9arph.48 matrix: a stored not signed in ends at a read that says logged in, and it is the pick again', async ($, on) => {
+  const { w, store, clock } = await storedOnOne($, on, true)
+  expect(healthOfStored(store, '1')?.why).toBe('not signed in')
+  w.signedOut = []
+  await clock.advance(TEN_MINUTE_CHECK)
+  expect([healthOfStored(store, '1')?.kind, pickOf(store)]).toEqual(['ok', '1'])
+})
+
+test('puma-9arph.48 matrix: a rejected sign-in stands through an unknown read', async ($, on) => {
+  const { w, store, clock } = await rejectedOnOne($, on, false)
+  w.statusFails = 'timeout'
+  await clock.advance(TEN_MINUTE_CHECK)
+  expect([healthOfStored(store, '1')?.why, pickOf(store)]).toEqual(['sign-in rejected', '2'])
+})
