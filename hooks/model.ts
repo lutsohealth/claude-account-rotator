@@ -284,6 +284,32 @@ export function nextReset(view: View, now: number, need?: Need): number | undefi
 }
 
 /**
+ * When the first login spent now stops being spent, epoch ms, always after `now`: per login, the earliest of its
+ * window resets at which isSpent no longer holds (with a spent 5-hour window and a spent week, the later reset), the
+ * soonest login answering. Unlike nextReset it never names a reset that frees no login. A login that needs a sign-in,
+ * one in `skip`, one not spent now, and one with no reset time known answer nothing.
+ */
+export function freesAt(view: View, now: number, skip: ReadonlySet<string> = new Set()): number | undefined {
+  const times = view.accounts.flatMap(a => {
+    const r = view.readings[a.id]
+    if (view.health[a.id]?.kind !== 'ok' || skip.has(a.id) || !isSpent(r, now, view.weekLeave)) return []
+    const resets = [r?.fiveHour, r?.sevenDay]
+      .map(w => Date.parse(w?.resetsAt ?? ''))
+      .filter(t => Number.isFinite(t) && t > now)
+      .sort((x, y) => x - y)
+    const free = resets.find(t => !isSpent(r, t, view.weekLeave))
+    return free === undefined ? [] : [free]
+  })
+  return times.length === 0 ? undefined : Math.min(...times)
+}
+
+/** What to say when every login is near its limit: when the first one frees up, where that is known. */
+export function limitNotice(view: View, now: number, skip: ReadonlySet<string> = new Set()): string {
+  const at = freesAt(view, now, skip)
+  return `Every Claude account is near its limit${at === undefined ? '' : `; the next frees up ${untilText(at, now)}`}.`
+}
+
+/**
  * What to say when every login's Fable week is spent, the soonest reset
  * included where one is known; undefined while any login has Fable room.
  */
