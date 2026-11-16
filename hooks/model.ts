@@ -583,6 +583,9 @@ export function credentialFrom(text: string): Credential | undefined {
 /** A token that runs out sooner than this is not used for a usage read: the read could outlast it. */
 export const TOKEN_LIVE_MARGIN_MS = 60_000
 
+/** Why a login needs a sign-in once Claude Code rejected it, at a stop or at a usage read. */
+export const SIGN_IN_REJECTED = 'sign-in rejected'
+
 /** A login's health from its stored credential alone. */
 export function healthOf(cred: Credential | undefined, now: number): Health {
   if (cred === undefined) return { kind: 'login-needed', why: 'not signed in' }
