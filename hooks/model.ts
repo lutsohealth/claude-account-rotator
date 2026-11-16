@@ -1514,6 +1514,14 @@ export function slotNumber(slot: string, home: string): string | undefined {
 }
 
 /**
+ * Whether a StopFailure of this kind raises Claude Code's limit modal, which holds a submitted prompt queued: a
+ * usage-limit stop does. A rejected sign-in (authentication_failed) does not: read in a test session, its turn ends on
+ * an error line with the prompt box free, and the carry-on enters by itself, so an Escape there could only close a
+ * dialog someone else opened.
+ */
+export const raisesLimitModal = (error: string): boolean => error === 'rate_limit'
+
+/**
  * Why a carry-on still queued gets no Escape, else undefined. The key goes only after a usage-limit stop with no
  * main-loop turn begun since, with no turn open in any loop, while the engine refuses a fill with its own 'dialog'
  * (a hook's refusal carries no cause, so it proves no dialog), and in an Orca pane. Without `fill`, only what the
