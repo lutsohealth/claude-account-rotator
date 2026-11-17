@@ -2,6 +2,11 @@
 
 What each version of the account rotator changed. To get each one as Claude Code starts, turn on auto-update: in `/plugin`, open **Marketplaces**, pick **claude-account-rotator** and choose **Enable auto-update**. To update by hand, run `claude plugin marketplace update claude-account-rotator`, then `claude plugin update account-rotator@claude-account-rotator`, and start a new session.
 
+## 0.5.44-lutso.1 - 2026-11-17
+
+- **A switch held for a token refresh no longer waits hours while no turn runs**: with the prompt box empty, the session sends one line of its own on the account in use 4 minutes before that token runs out. The request refreshes the token, the turn stops on the limit, and that stop lands the switch and carries on (`refresh nudge` in the stop log). A token that runs out unrefreshed gets one more line, never a third, and a draft in the box holds the switch until you send it or clear the box. At the token's expiry, only a rejected sign-in the stop itself saw, or a refresh, lets the held switch go; a check's mark does not (#129, #130; puma-9arph.57, .65, .32, .64).
+- **Not fixed yet**: the switch's own read of the stored sign-in has no 10-second bound; a stop's rejected-sign-in mark is not bound to the token it saw, so a later token's expiry can let a held switch go (puma-9arph.69); a reload of the mod's code during a stop drops the carry-on it owes and the Esc for the limit menu (puma-9arph.66); the minute's retry of a held switch can hold it again after a drop (puma-9arph.67); **Use now** on the login in use can clear a held switch while a switch runs (puma-9arph.68).
+
 ## 0.5.43-lutso.1 - 2026-11-17
 
 - **A read that hangs while a stop is handled no longer holds a later stop and the resume**: a stop's own read of the account, its stored sign-in, its usage or its profile, with no answer in 10 seconds counts as a failed read. The stop still marks the account, moves and carries on, and the stop log names the read that timed out (`stop read failed: UsageReadTimedOut`, `ProfileReadTimedOut` or `CredentialReadTimedOut`). Every usage and profile read, the scheduled check's too, ends at the same 10 seconds (#127, puma-9arph.59).
