@@ -74,6 +74,18 @@ type World = {
   loginEmail?: string
   /** How the store refuses the `store-id` key: its write, or its read and its write. */
   storeIdFails?: 'write' | 'read'
+  /** puma-9arph.26: the text of the mod's own bin/account-rotator-claude, as `$.fs.read` finds it under the plugin's folder. */
+  ownLauncher?: string
+  /** puma-9arph.26: every chmod, test, mv and rm the mod ran, as typed. */
+  fileCommands?: string[]
+  /** puma-9arph.26: what a write of the temporary launcher leaves on disk instead of its text, as an engine write that went wrong would. */
+  temporaryStores?: string
+  /** puma-9arph.26: chmod exits 0 and gives no mode, so `test -x` of the file exits 1. */
+  isChmodIgnored?: boolean
+  /** puma-9arph.26: which of chmod, mv and rm exits 1, or every one is refused as a managed policy does. */
+  fileCommandFails?: 'chmod' | 'mv' | 'rm' | 'refused'
+  /** puma-9arph.26: path -> the mode chmod gave it; `mv` carries a mode to its target. */
+  modes?: Record<string, string>
   /** What the mod wrote to the debug log. */
   logged?: string[]
   /** Runs before each write of a shared store, to read what stood before it. */
@@ -265,6 +277,23 @@ function world(on: On, w: World, store: Record<string, unknown> | Map<string, un
       const named = email ? { email, orgId: `org-${email}`, orgName: 'Org', subscriptionType: 'max' } : {}
       return { value: ran(0, JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', ...named })) }
     }
+    if (cmd === 'chmod' || cmd === 'test' || cmd === 'mv' || cmd === 'rm') {
+      w.fileCommands = [...(w.fileCommands ?? []), e.argv.join(' ')]
+      if (w.fileCommandFails === 'refused') return { deny: `process (managed): ${cmd} is not for plugins to run` }
+      if (w.fileCommandFails === cmd) return { value: { ...ran(1, ''), stderr: `${cmd}: failed` } }
+      w.modes = w.modes ?? {}
+      if (cmd === 'chmod' && !w.isChmodIgnored) w.modes[e.argv[2] ?? ''] = sub ?? ''
+      if (cmd === 'test') return { value: ran(sub === '-x' && w.modes[e.argv[2] ?? ''] === '755' ? 0 : 1, '') }
+      if (cmd === 'mv') {
+        const [from, to] = [e.argv[2] ?? '', e.argv[3] ?? '']
+        w.files[to] = w.files[from] ?? null
+        if (w.modes[from] !== undefined) w.modes[to] = w.modes[from]
+        delete w.files[from]
+        delete w.modes[from]
+      }
+      if (cmd === 'rm') delete w.files[e.argv[2] ?? '']
+      return { value: ran(0, '') }
+    }
     if (cmd === 'claude' && sub === 'auth' && verb === 'logout') {
       w.logouts = [...(w.logouts ?? []), e.init?.env?.CLAUDE_SECURESTORAGE_CONFIG_DIR ?? '']
       return { value: { ...ran(0, ''), ...w.logoutFails } }
@@ -393,7 +422,7 @@ function world(on: On, w: World, store: Record<string, unknown> | Map<string, un
     return { value: undefined }
   })
   on('fs.write', (_$, e) => {
-    w.files[e.path] = e.text
+    w.files[e.path] = e.path.endsWith('/claude.new') && w.temporaryStores !== undefined ? w.temporaryStores : e.text
     w.writes = [...(w.writes ?? []), e.path]
     return { value: undefined }
   })
@@ -406,6 +435,8 @@ function world(on: On, w: World, store: Record<string, unknown> | Map<string, un
   on('fs.exists', (_$, e) => ({ value: (e.path === '/System/Library/CoreServices/SystemVersion.plist' && w.system === 'macOS') || (w.folders ?? []).includes(e.path) }))
   on('fs.read', async (_$, e) => {
     await w.readGate
+    // puma-9arph.26: the mod's own launcher file, wherever the host puts the plugin's folder.
+    if (w.ownLauncher !== undefined && e.path.endsWith('/bin/account-rotator-claude')) return { value: w.ownLauncher }
     const text = w.files[e.path]
     if (text === null) return { deny: `EACCES: permission denied, open '${e.path}'` }
     return text === undefined ? { deny: `ENOENT: no such file or directory, open '${e.path}'` } : { value: text }
@@ -11324,3 +11355,72 @@ test('puma-9arph.48 matrix: a rejected sign-in stands through an unknown read', 
   await clock.advance(TEN_MINUTE_CHECK)
   expect([healthOfStored(store, '1')?.why, pickOf(store)]).toEqual(['sign-in rejected', '2'])
 })
+
+// puma-9arph.26: the mod keeps the launcher copy a person installed as `claude` current, at a session's start.
+const COPY_DIR = `${HOME}/.claude/accounts/bin`
+const COPY = `${COPY_DIR}/claude`
+const OLD_LAUNCHER = '#!/usr/bin/env python3\n# the 0.5.37 build\n'
+const NEW_LAUNCHER = '#!/usr/bin/env python3\n# the 0.5.38 build\n'
+/** A world that holds the mod's own launcher file and, where given, a copy of it at the README's place. */
+async function launcherWorld($: Engine, on: On, copy: string | undefined, setup: (w: World) => void = () => undefined) {
+  const w = fresh()
+  w.ownLauncher = NEW_LAUNCHER
+  if (copy !== undefined) w.files[COPY] = copy
+  setup(w)
+  return selectWorld($, on, [10, 20], [10, 20], w)
+}
+const kept = (w: World) => Object.keys(w.files).filter(path => path.startsWith(`${COPY_DIR}/`))
+
+test('puma-9arph.26: a copy that differs from the mod\'s launcher is replaced at mode 755, and says so in one line', async ($, on) => {
+  const { w } = await launcherWorld($, on, OLD_LAUNCHER)
+  expect([w.files[COPY], w.modes?.[COPY], kept(w)]).toEqual([NEW_LAUNCHER, '755', [COPY]])
+  expect(debugLines(w, 'launcher copy').length).toBe(1)
+  // The commands, their flags and their order: the move comes last, after the executable check.
+  expect(w.fileCommands).toEqual([`chmod 755 ${COPY}.new`, `test -x ${COPY}.new`, `mv -f ${COPY}.new ${COPY}`])
+})
+
+// Codex round 2: an equal copy is left alone whatever its text, an empty one included.
+for (const own of [NEW_LAUNCHER, '']) {
+  test(`puma-9arph.26: a copy equal to the mod's launcher is not written${own === '' ? ', both empty' : ''}`, async ($, on) => {
+    const { w } = await launcherWorld($, on, own, world => { world.ownLauncher = own })
+    expect([w.files[COPY], (w.writes ?? []).filter(path => path.startsWith(COPY_DIR)), w.fileCommands, debugLines(w, 'launcher copy')]).toEqual([own, [], undefined, []])
+  })
+}
+
+test('puma-9arph.26: where no copy is installed, none is made', async ($, on) => {
+  const { w } = await launcherWorld($, on, undefined)
+  expect([kept(w), w.fileCommands]).toEqual([[], undefined])
+})
+
+test('puma-9arph.26: a link at the copy\'s place is left alone', async ($, on) => {
+  const { w } = await launcherWorld($, on, OLD_LAUNCHER, world => { world.linkFiles = ['claude'] })
+  expect([w.files[COPY], w.fileCommands]).toEqual([OLD_LAUNCHER, undefined])
+})
+
+test('puma-9arph.26: a move that fails leaves the old copy whole, no temporary file, and the session running', async ($, on) => {
+  const { w, store } = await launcherWorld($, on, OLD_LAUNCHER, world => { world.fileCommandFails = 'mv' })
+  expect([w.files[COPY], kept(w), debugLines(w, 'launcher copy not refreshed').length]).toEqual([OLD_LAUNCHER, [COPY], 1])
+  expect(typeof store.get('store-id')).toBe('string')
+})
+
+test('puma-9arph.26: a managed policy that refuses the commands leaves the old copy whole and the session running', async ($, on) => {
+  const { w, store } = await launcherWorld($, on, OLD_LAUNCHER, world => { world.fileCommandFails = 'refused' })
+  // Codex r1 F2: a refused rm leaves the temporary file, and its name is ONE stable name, so a leftover is overwritten next boot.
+  expect([w.files[COPY], kept(w).sort(), debugLines(w, 'launcher copy not refreshed').length]).toEqual([OLD_LAUNCHER, [COPY, `${COPY}.new`], 1])
+  expect(typeof store.get('store-id')).toBe('string')
+})
+
+// RULING 6298: the temporary file is checked before the move, so a write or chmod that went wrong is never moved over the copy.
+const BAD_TEMPORARY: [string, (world: World) => void][] = [
+  ['a write that reads back other text', world => { world.temporaryStores = '#!/usr/bin/env python3\n# half a file\n' }],
+  ['a write that reads back empty', world => { world.temporaryStores = '' }],
+  ['a chmod that leaves the file not executable', world => { world.isChmodIgnored = true }],
+  ['a launcher of the mod that is empty', world => { world.ownLauncher = '' }],
+]
+for (const [name, setup] of BAD_TEMPORARY) {
+  test(`puma-9arph.26: ${name}: no move, the old copy whole, no temporary file`, async ($, on) => {
+    const { w } = await launcherWorld($, on, OLD_LAUNCHER, setup)
+    const isMoved = (w.fileCommands ?? []).some(command => command.startsWith('mv '))
+    expect([w.files[COPY], kept(w), isMoved, debugLines(w, 'launcher copy not refreshed').length]).toEqual([OLD_LAUNCHER, [COPY], false, 1])
+  })
+}
