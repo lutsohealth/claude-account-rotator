@@ -127,6 +127,8 @@ const SETTLE_MS = 35_000
 const CONFIRM_GIVE_UP_MS = 4 * 60_000
 /** How long a check waits on `claude auth status`: a check reads every login in turn, so a hung one holds each this long. */
 const STATUS_TIMEOUT_MS = 5_000
+/** How long a usage or profile read waits for its answer: a stop's own read holds the stop path's lock, and with it every later stop and the owed resume. */
+const READ_TIMEOUT_MS = 10_000
 /**
  * Claude Code refreshes a token 5 minutes before it expires. A refresh that
  * runs while the old login's read is still cached is saved under the new
@@ -963,9 +965,18 @@ const oauthHeaders = (accessToken: string) => ({
   'Content-Type': 'application/json',
 })
 
+const LATE: unique symbol = Symbol('late')
+
+/** A read's answer, or a throw named `name` once READ_TIMEOUT_MS passes with none: a late answer is never read. */
+async function answerWithin<T>($: Host, name: string, read: Promise<T>): Promise<T> {
+  const answer = await Promise.race([read, $.clock.sleep(READ_TIMEOUT_MS).then(() => LATE)])
+  if (answer === LATE) throw Object.assign(new Error(`no answer in ${READ_TIMEOUT_MS} ms`), { name })
+  return answer
+}
+
 /** The usage of the login a token belongs to, as `/usage` reads it. */
 async function fetchUsage($: Host, accessToken: string): Promise<UsageAnswer> {
-  const res = await $.http.fetch(USAGE_URL, { headers: oauthHeaders(accessToken) })
+  const res = await answerWithin($, 'UsageReadTimedOut', $.http.fetch(USAGE_URL, { headers: oauthHeaders(accessToken) }))
   if (res.status === 401 || res.status === 403) return { kind: 'rejected' }
   if (!res.ok) {
     const retryAfter = retryAfterFrom(res.headers ?? {}, await $.clock.now())
@@ -985,7 +996,7 @@ async function fetchUsage($: Host, accessToken: string): Promise<UsageAnswer> {
  * caller's catch decides, as a throw here is no answer about who.
  */
 async function fetchIdentity($: Host, accessToken: string): Promise<{ who?: Identity; status: number }> {
-  const res = await $.http.fetch(PROFILE_URL, { headers: oauthHeaders(accessToken) })
+  const res = await answerWithin($, 'ProfileReadTimedOut', $.http.fetch(PROFILE_URL, { headers: oauthHeaders(accessToken) }))
   if (!res.ok) return { status: res.status }
   try {
     return { who: identityFromProfile(JSON.parse(res.text)), status: res.status }
