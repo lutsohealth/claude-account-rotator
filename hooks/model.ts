@@ -158,6 +158,16 @@ export function isWeeklyStop(text: string | undefined): boolean {
   return /hit your weekly limit/.test(text ?? '')
 }
 
+/** Which limit a stop's last message names, in markStop's order: a message naming two limits is the first of them here. */
+export type Wording = 'none' | 'fable' | 'session' | 'weekly' | 'unknown'
+
+export function wordingClass(said: string | undefined): Wording {
+  if (said === undefined || said === '') return 'none'
+  if (isFableStop(said)) return 'fable'
+  if (isSessionStop(said)) return 'session'
+  return isWeeklyStop(said) ? 'weekly' : 'unknown'
+}
+
 export function shouldLeave(view: View, now: number, need?: Need): boolean {
   const r = view.readings[view.activeId]
   return view.health[view.activeId]?.kind === 'login-needed' || isSpent(r, now, view.weekLeave) || (need === 'fable' && isFableSpent(r, now))
@@ -204,17 +214,23 @@ export function pickTarget(view: View, now: number, need?: Need): Account | unde
   const unreadTried = open.filter(a => isUnread(view, a) && view.checkErrors?.[a.id]?.isUsageRead === true)
   const fableRead = isFable ? known.filter(a => view.readings[a.id]?.fable !== undefined) : []
   const ready = [fableRead, known, unreadTried].find(tier => tier.length > 0) ?? []
+  return firstByRotateTo(view, ready, view.readings, now, need)
+}
+
+/** The first of `ready` by the `rotateTo` rule, judged on `readings`: the most room, the soonest reset, or the list's order after the login in use. */
+function firstByRotateTo(view: View, ready: Account[], readings: Readonly<Record<string, Reading | undefined>>, now: number, need?: Need): Account | undefined {
+  const isFable = need === 'fable'
   // A login with no 5-hour window serves what its week has left.
-  const available = (a: Account) => availableNow(view.readings[a.id], now, view.weekLeave) ?? roomLeft(view.readings[a.id]?.sevenDay, now) ?? 100
-  const fableRoom = (a: Account) => 100 - (windowPct(view.readings[a.id]?.fable, now) ?? 0)
+  const available = (a: Account) => availableNow(readings[a.id], now, view.weekLeave) ?? roomLeft(readings[a.id]?.sevenDay, now) ?? 100
+  const fableRoom = (a: Account) => 100 - (windowPct(readings[a.id]?.fable, now) ?? 0)
   const byRoom = (a: Account, b: Account) => (isFable && fableRoom(a) !== fableRoom(b) ? fableRoom(b) - fableRoom(a) : available(b) - available(a))
   switch (view.rotateTo) {
     case 'room':
     case 'off':
-      return ready.sort(byRoom)[0]
+      return [...ready].sort(byRoom)[0]
     case 'reset': {
-      const reset = (a: Account) => resetOf(view.readings[a.id], now)
-      return ready.sort((a, b) => (reset(a) === reset(b) ? byRoom(a, b) : reset(a) < reset(b) ? -1 : 1))[0]
+      const reset = (a: Account) => resetOf(readings[a.id], now)
+      return [...ready].sort((a, b) => (reset(a) === reset(b) ? byRoom(a, b) : reset(a) < reset(b) ? -1 : 1))[0]
     }
     case 'order': {
       const at = view.accounts.findIndex(a => a.id === view.activeId)
@@ -222,6 +238,55 @@ export function pickTarget(view: View, now: number, need?: Need): Account | unde
       return after.find(a => ready.includes(a))
     }
   }
+}
+
+/** How old a login's own read may be and still show its room after a stop: the shared schedule reads an idle login every 30 minutes, so an older read means one failed or was skipped. */
+export const FRESH_READ_MS = 35 * 60_000
+
+/** The class a login takes after a usage-limit stop, tried in this order. */
+export type StopTier = 'fresh' | 'stale' | 'unread' | 'spent-old'
+const STOP_TIERS: readonly StopTier[] = ['fresh', 'stale', 'unread', 'spent-old']
+
+/** Whether a stop's mark on a login, any session's, still stands. */
+const isMarked = (view: View, id: string, now: number): boolean =>
+  [view.marks?.[id], view.weekMarks?.[id], view.fableMarks?.[id]].some(m => m !== undefined && Date.parse(m.resetsAt) > now)
+
+/**
+ * The login a session moves to after a usage-limit stop, judged on each login's own stored read (`raw`, no marks
+ * folded in), counted by the 5-hour limit setting: one with a fresh read and room first, then a stale read with room,
+ * then no read, then one marked or read spent, the soonest reset first. A fresh read that shows the login spent counts
+ * as its try. Never one in `tried` (the logins this stop's episode already died on), one in `untaken`, one whose health
+ * is not ok, or one with no read whose check failed before a profile call named its sign-in. The first tier with a
+ * login in it answers; inside it, for the Fable week, a login whose read lists that week with room comes first.
+ */
+export function pickAfterStop(view: View, raw: Readonly<Record<string, Reading | undefined>>, now: number, need: Need | undefined, tried: readonly string[], untaken: ReadonlySet<string>): { account: Account; tier: StopTier; readAgeMs?: number } | undefined {
+  const isFable = need === 'fable'
+  const counts: Record<string, Reading | undefined> = {}
+  for (const a of view.accounts) counts[a.id] = raw[a.id] && counted(raw[a.id] as Reading, view.fiveHourLimit, now)
+  const hasRoom = (r: Reading) => !isSpent(r, now, view.weekLeave) && !(isFable && isFableSpent(r, now))
+  const tierOf = (a: Account): StopTier | undefined => {
+    if (isMarked(view, a.id, now)) return 'spent-old'
+    const r = counts[a.id]
+    const error = view.checkErrors?.[a.id]
+    if (r === undefined) return error === undefined || error.isUsageRead === true ? 'unread' : undefined
+    const isFresh = now - r.at <= FRESH_READ_MS && !(error !== undefined && error.at > r.at)
+    if (isFresh) return hasRoom(r) ? 'fresh' : undefined
+    return hasRoom(r) ? 'stale' : 'spent-old'
+  }
+  const open = view.accounts.filter(a => a.id !== view.activeId && !tried.includes(a.id) && !untaken.has(a.id) && view.health[a.id]?.kind === 'ok')
+  for (const tier of STOP_TIERS) {
+    const ready = open.filter(a => tierOf(a) === tier)
+    if (ready.length === 0) continue
+    const account =
+      tier === 'spent-old'
+        ? [...ready].sort((a, b) => Math.sign(resetOf(view.readings[a.id], now) - resetOf(view.readings[b.id], now)) || 0)[0]
+        : (isFable ? firstByRotateTo(view, ready.filter(a => counts[a.id]?.fable !== undefined && !isFableSpent(counts[a.id], now)), counts, now, need) : undefined) ??
+          firstByRotateTo(view, ready, counts, now, need)
+    if (account === undefined) continue
+    const read = raw[account.id]
+    return read === undefined ? { account, tier } : { account, tier, readAgeMs: now - read.at }
+  }
+  return undefined
 }
 
 /** Whether a login has room on every limit it reports: none of its windows, the Fable week among them, is at 100%. */
@@ -1544,18 +1609,42 @@ export function slotNumber(slot: string, home: string): string | undefined {
  */
 export const raisesLimitModal = (error: string): boolean => error === 'rate_limit'
 
+/** The least time between two Escapes of one stop's episode. */
+export const ESCAPE_GAP_MS = 30_000
+
+/** What the owed-resume look knows when it weighs an Escape; `fill` is the engine's answer to an empty fill, asked last. */
+export type EscapeLook = {
+  isCarryOnInFlight: boolean
+  isLimitStopLast: boolean
+  openTurns: number
+  isSettling: boolean
+  isHeld: boolean
+  escapes: number
+  budget: number
+  /** Since the episode's last Escape; undefined before its first. */
+  sinceEscapeMs?: number
+  pane?: string
+  fill?: { refusal?: string }
+}
+
 /**
- * Why a carry-on still queued gets no Escape, else undefined. The key goes only after a usage-limit stop with no
- * main-loop turn begun since, with no turn open in any loop, while the engine refuses a fill with its own 'dialog'
- * (a hook's refusal carries no cause, so it proves no dialog), and in an Orca pane. Without `fill`, only what the
- * session knows without asking.
+ * Why a carry-on still queued gets no Escape, else undefined. The key goes only for a carry-on in flight after a
+ * usage-limit stop with no main-loop turn begun since, with no turn open in any loop, the switch settled and none held,
+ * within the episode's budget and ESCAPE_GAP_MS after its last, in an Orca pane, while the engine refuses a fill with its
+ * own 'dialog' (a hook's refusal carries no cause, so it proves no dialog). Without `fill`, what the session knows
+ * without asking.
  */
-export function escapeHeldBack(s: { isLimitStopLast: boolean; openTurns: number; fill?: { refusal?: string; pane?: string } }): string | undefined {
+export function escapeHeldBack(s: EscapeLook): string | undefined {
+  if (!s.isCarryOnInFlight) return 'no carry-on in flight'
   if (!s.isLimitStopLast) return 'no limit stop before it'
   if (s.openTurns > 0) return 'a turn is open'
+  if (s.isSettling) return 'the switch is settling'
+  if (s.isHeld) return 'a switch is held'
+  if (s.escapes >= s.budget) return 'Escapes spent'
+  if (s.sinceEscapeMs !== undefined && s.sinceEscapeMs < ESCAPE_GAP_MS) return 'too soon after the last Escape'
+  if (!s.pane) return 'no Orca pane'
   if (s.fill === undefined) return undefined
-  if (s.fill.refusal !== 'dialog') return 'no dialog holds it'
-  return s.fill.pane ? undefined : 'no Orca pane'
+  return s.fill.refusal === 'dialog' ? undefined : 'no dialog holds it'
 }
 
 /** One Escape to the Orca pane `pane`, by Orca's CLI: a fixed argv, run with no shell. */

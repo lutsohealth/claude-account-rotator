@@ -104,11 +104,13 @@ import {
   launcherCopyDir,
   escapeArgv,
   escapeHeldBack,
+  pickAfterStop,
   raisesLimitModal,
+  wordingClass,
   mayWrite,
   switchFields,
 } from './model'
-import type { Credential, Identity, Need, SignInRead, StayReason, SwitchWriter } from './model'
+import type { Credential, EscapeLook, Identity, Need, SignInRead, StayReason, SwitchWriter } from './model'
 import { Band, Footer, PANE_COLUMNS, Pane } from './view'
 import type { Actions } from './view'
 
@@ -230,6 +232,41 @@ let moves = 0
 const untaken = new Set<string>()
 /** When this session last moved to another login: until SETTLE_MS after, its requests may still go out as the one before. */
 let movedAt: number | undefined
+
+/**
+ * A usage-limit stop of the main loop, from its StopFailure until the work answers on a login: the logins its stops
+ * died on (tried), its Escapes against `budget` (two a login, plus two, set at its first stop), and when the resume
+ * entered. Module state, so /clear, /resume and /branch keep it; a reload drops it.
+ */
+type Episode = { need?: Need; stops: number; tried: string[]; budget?: number; escapes: number; lastEscapeAt?: number; enteredAt?: number; lastWaitCount?: number; told: Set<'pane' | 'nothing' | 'stuck' | 'fill'> }
+let episode: Episode | undefined
+/** A carry-on submitted and not yet entered: no second is submitted, and the look may free it. */
+let isCarryOnInFlight = false
+/** Carry-ons armed and not yet due: the look says nothing is queued only while none is. */
+let armedCarryOns = 0
+/** How often the owed-resume look runs, between turns as well. */
+const OWED_LOOK_MS = 15_000
+/** A measure this long after the resume entered proves it answered: a turn that dies on a limit dies within seconds. */
+const ENTRY_PROOF_MS = 30_000
+/** The one lock of the stop path and the look: the stop path waits for it, the look skips a tick that finds it held. */
+let lockTail: Promise<void> = Promise.resolve()
+let isLocked = false
+
+async function withLock<T>(fn: () => Promise<T>): Promise<T> {
+  const before = lockTail
+  let release = () => {}
+  lockTail = new Promise<void>(resolve => {
+    release = resolve
+  })
+  await before
+  isLocked = true
+  try {
+    return await fn()
+  } finally {
+    isLocked = false
+    release()
+  }
+}
 /** Connect is under way: the rotation waits for it, and browser calls are held back. */
 let isConnectingChrome = false
 
@@ -564,7 +601,7 @@ async function setSessionMark($: Host): Promise<void> {
 }
 
 /** What the stop-log keeps per session, and how long a session's log outlives its last entry. */
-const STOP_LOG_KEEP = 20
+const STOP_LOG_KEEP = 50
 const STOP_LOG_MAX_AGE_MS = 7 * 24 * 3600_000
 type StopLogEntry = { at: number; what: string }
 
@@ -1378,11 +1415,24 @@ async function maybeRotate($: Host, need?: Need, carry?: CarryOn): Promise<boole
   }
   // A tick or a response is no stop: it leaves a held Fable recovery where it is going, to a login with Fable room.
   if (need === undefined && carry === undefined && view.held?.carry !== undefined) return false
+  // Nor does it move a session whose stop is still being recovered: that move would be in no stop's tried list.
+  if (carry === undefined && episode !== undefined) return false
   // A settling switch holds every tick and response; a stop (it carries on) may move the session on from it.
   const isSettling = view.pending !== undefined && carry === undefined
   if (isConnectingChrome) return stays('Claude in Chrome is connecting')
   if (view.rotateTo === 'off') return stays('rotation off')
   if (isSettling) return stays('a switch is settling')
+  // A stop's own move: the stop is the reason to leave, and every login not yet tried in its episode is a candidate.
+  const tried = episode?.tried
+  if (carry !== undefined && tried !== undefined) {
+    const raw: Record<string, Reading | undefined> = {}
+    for (const a of view.accounts) raw[a.id] = await ownedReading($, a.id)
+    const pick = pickAfterStop(view, raw, now, need, tried, untaken)
+    if (pick === undefined) return stays(`no untried login (tried ${tried.join(', ')})`)
+    const age = pick.readAgeMs === undefined ? '' : `, read ${Math.round(pick.readAgeMs / 60_000)} min ago`
+    void logStop($, `picked ${pick.account.id}: ${pick.tier}${age}; tried ${tried.join(', ')}`)
+    return switchTo($, pick.account, whyLeave(view, now, need), false, carry, true)
+  }
   if (!shouldLeave(view, now, need)) return stays('the login in use need not be left')
   // With none to move to, the band above the prompt says when the next login frees up.
   const target = pickTarget({ ...view, accounts: view.accounts.filter(a => !untaken.has(a.id)) }, now, need)
@@ -1437,7 +1487,9 @@ async function retryHeld($: Host): Promise<void> {
  */
 function carryOnAfterSettle($: Host, owed: CarryOn): void {
   const mark = moves
+  armedCarryOns += 1
   $.clock.after(SETTLE_MS, () => {
+    armedCarryOns -= 1
     if (moves === mark) void carryOn($, owed.need).catch(error => debug($, `carry-on failed: ${String(error)}`))
     else void logStop($, 'carry-on skipped: another switch since')
   })
@@ -1725,62 +1777,106 @@ async function carryOn($: Host, need?: Need): Promise<void> {
   await sendCarryOn($, kept === undefined ? { text: CONTINUE } : { text: kept, asUser: true })
 }
 
-/** How long after a carry-on goes out the mod looks whether Claude Code's limit modal holds it queued. */
-const MODAL_LOOK_MS = 5_000
-/** How long after its one Escape a carry-on still queued is given up on. */
-const MODAL_GIVE_UP_MS = 10_000
-
 /**
- * Submits a carry-on and logs its answer, which comes once the prompt enters. After a usage-limit stop Claude Code
- * shows a modal that holds a submitted prompt queued, and no mod call closes it: 5 s on, a carry-on not entered yet
- * gets one Escape to the session's own pane (freeQueued), which closes the modal and lets it enter.
+ * Submits a carry-on, one at a time, and logs its answer: it resolves once the prompt entered and its turn started, or
+ * was queued behind a running one. After a usage-limit stop Claude Code shows a menu that holds a submitted prompt
+ * queued, and no mod call closes it: the owed-resume look (lookOwed) frees it with an Escape.
  */
 async function sendCarryOn($: Host, prompt: { text: string; asUser?: true }): Promise<void> {
-  let isSettled = false
-  $.clock.after(MODAL_LOOK_MS, () => {
-    void freeQueued($, () => isSettled).catch(error => debug($, `carry-on watch failed: ${String(error)}`))
-  })
-  try {
-    const answer = await $.prompt.submit(prompt)
-    // The engine's own refusal (a Stop stands, a host's limit): said in debug, with its reason, and not tried again.
-    if (answer.drop !== undefined) await debug($, `carry-on dropped: ${answer.drop}`)
-    void logStop($, answer.drop === undefined ? 'carry-on entered' : 'carry-on drop')
-  } finally {
-    isSettled = true
-  }
-}
-
-/** What this session knows of a queued carry-on's Escape without asking: whether a limit stop's modal can stand, and how many turns are open. */
-const known = () => ({ isLimitStopLast: limitStopAfter === mainTurns, openTurns: openTurns.size })
-
-/**
- * Sends one Escape to this session's Orca pane for a carry-on still queued, where escapeHeldBack finds nothing
- * holding it back. One a carry-on: still queued 10 s on, it is given up on. Each outcome goes to the stop-log.
- */
-async function freeQueued($: Host, isSettled: () => boolean): Promise<void> {
-  if (isSettled()) return
-  let why = escapeHeldBack(known())
-  let pane: string | undefined
-  if (why === undefined) {
-    const box = await $.prompt.fill({ text: '', mode: 'append' })
-    pane = await $.env.get('ORCA_TERMINAL_HANDLE')
-    why = escapeHeldBack({ ...known(), fill: { refusal: box.refusal, pane } })
-  }
-  if (isSettled()) return
-  if (why !== undefined || !pane) {
-    void logStop($, `carry-on queued, no key: ${why ?? 'no Orca pane'}`)
+  if (isCarryOnInFlight) {
+    void logStop($, 'carry-on not sent again: one is queued')
     return
   }
-  const code = await sendEscape($, pane)
-  void logStop($, `carry-on queued under a dialog: one Escape to this session's pane (exit ${code ?? 'none'})`)
-  $.clock.after(MODAL_GIVE_UP_MS, () => {
-    if (!isSettled()) void logStop($, 'carry-on still queued after the Escape: gave up')
-  })
+  isCarryOnInFlight = true
+  void logStop($, 'carry-on queued')
+  let answer: Awaited<ReturnType<Host['prompt']['submit']>>
+  try {
+    answer = await $.prompt.submit(prompt)
+  } catch (error) {
+    isCarryOnInFlight = false
+    throw error
+  }
+  if (answer.drop === undefined) {
+    void logStop($, 'carry-on resolved')
+    return
+  }
+  // The engine's own refusal (a Stop stands, a host's limit): said in debug, with its reason, and not tried again.
+  isCarryOnInFlight = false
+  await debug($, `carry-on dropped: ${answer.drop}`)
+  void logStop($, 'carry-on drop')
 }
 
-/** Sends escapeArgv's one Escape; answers the exit code, null where it did not run. */
-async function sendEscape($: Host, pane: string): Promise<number | null> {
-  const child = $.process.spawn({ argv: escapeArgv(pane) })
+/** Ends a stop's episode once its resume has answered: a later stop opens a new one, with its own tried list and budget. */
+async function endEpisode($: Host, ep: Episode): Promise<void> {
+  if (episode !== ep) return
+  episode = undefined
+  isCarryOnInFlight = false
+  const { activeId } = await getView($)
+  void logStop($, `work resumed on login ${activeId}`)
+}
+
+/** Writes a look's line once an episode, where the look would otherwise write it every tick. */
+function tellOnce($: Host, ep: Episode, what: 'pane' | 'nothing' | 'stuck' | 'fill', line: string): void {
+  if (ep.told.has(what)) return
+  ep.told.add(what)
+  void logStop($, line)
+}
+
+/**
+ * Every OWED_LOOK_MS while a stop's episode stands and its resume has not entered: notes the turns a queued carry-on
+ * waits on, and sends one Escape to this session's Orca pane where escapeHeldBack finds nothing holding it back, so
+ * Claude Code's limit menu lets the carry-on enter. A tick that finds the lock held does nothing; the lock is let go
+ * as the key's child starts, so a hung `orca` holds nothing.
+ */
+async function lookOwed($: Host): Promise<void> {
+  const ep = episode
+  if (ep === undefined || ep.enteredAt !== undefined || isLocked) return
+  const sent = await withLock(async () => {
+    if (episode !== ep || ep.enteredAt !== undefined) return undefined
+    const view = await getView($)
+    const now = await $.clock.now()
+    ep.budget ??= 2 * view.accounts.length + 2
+    const turns = openTurns.size
+    if (isCarryOnInFlight && turns !== ep.lastWaitCount) {
+      ep.lastWaitCount = turns
+      if (turns > 0) void logStop($, `owed resume waits: ${turns} turns open`)
+    }
+    const isSettling = movedAt !== undefined && now - movedAt < SETTLE_MS
+    if (!isCarryOnInFlight && armedCarryOns === 0 && !isSettling && view.held === undefined) tellOnce($, ep, 'nothing', 'owed resume: no carry-on queued, no key')
+    const look: EscapeLook = {
+      isCarryOnInFlight,
+      isLimitStopLast: limitStopAfter === mainTurns,
+      openTurns: turns,
+      isSettling,
+      isHeld: view.held !== undefined,
+      escapes: ep.escapes,
+      budget: ep.budget,
+      sinceEscapeMs: ep.lastEscapeAt === undefined ? undefined : now - ep.lastEscapeAt,
+      pane: await $.env.get('ORCA_TERMINAL_HANDLE'),
+    }
+    const why = escapeHeldBack(look)
+    if (why === 'no Orca pane') tellOnce($, ep, 'pane', 'owed resume: no Orca pane, waits for an Esc')
+    if (why === 'Escapes spent') tellOnce($, ep, 'stuck', `owed resume stuck: ${ep.budget} Escapes spent, not entered`)
+    if (why !== undefined || look.pane === undefined) return undefined
+    const box = await $.prompt.fill({ text: '', mode: 'append' })
+    if (escapeHeldBack({ ...look, fill: { refusal: box.refusal } }) !== undefined) {
+      tellOnce($, ep, 'fill', `owed resume: fill answered ${box.refusal ?? 'no cause'}, no key`)
+      return undefined
+    }
+    // Read again with no await before the key: a turn that began during the fill gets no Escape.
+    if (openTurns.size > 0 || limitStopAfter !== mainTurns || !isCarryOnInFlight || episode !== ep) return undefined
+    const child = $.process.spawn({ argv: escapeArgv(look.pane) })
+    ep.escapes += 1
+    ep.lastEscapeAt = now
+    return { child, escape: ep.escapes, budget: ep.budget }
+  })
+  if (sent === undefined) return
+  const code = await exitOf($, sent.child)
+  void logStop($, `owed resume: Escape ${sent.escape} of ${sent.budget} (exit ${code ?? 'none'})`)
+}
+
+/** An Escape's exit code, null where it did not run. */
+async function exitOf($: Host, child: HookStream<ProcessSpawnChunk, ProcessSpawnResult>): Promise<number | null> {
   try {
     // Its output goes unread: the exit code says whether the key went.
     for await (const chunk of child) void chunk
@@ -1810,7 +1906,14 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
   // switch has landed.
   const isFable = isFableStop(stop.last_assistant_message)
   // Not awaited, as no stop-log line is: an await here would let a second stop act on a view read before this one's switch.
-  void logStop($, `stop heard: ${error}${isFable ? ' (Fable week)' : ''}, login ${active.id} in use`)
+  void logStop($, `stop heard: ${error} (wording: ${wordingClass(stop.last_assistant_message)}), login ${active.id} in use`)
+  // The login each usage-limit stop of the episode died on is never tried again in it.
+  const ep = episode
+  if (ep !== undefined && error === 'rate_limit') {
+    ep.stops += 1
+    if (!ep.tried.includes(active.id)) ep.tried.push(active.id)
+    ep.budget ??= 2 * view.accounts.length + 2
+  }
   const since = view.pending?.since
   const hasResponseSince = since !== undefined && lastMeasured !== undefined && lastMeasured.at > since
   const isProvenRejection = error === 'authentication_failed' && hasResponseSince && provenStopper(view, lastMeasured?.reading)?.id === active.id
@@ -1819,6 +1922,13 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
     if (isConnectingChrome) isCutByVisit = true
     else if (carriedFor !== view.pending?.since) carryOnAfterSettle($, isFable ? { need: 'fable' } : {})
     carriedFor = view.pending?.since
+    return
+  }
+  // A later stop of the episode, on a login no response has shown since the switch to it: that try died. Nothing is
+  // marked (the stop may have gone out on the login left), and the next untried login is tried.
+  if (ep !== undefined && ep.stops > 1 && error === 'rate_limit' && since !== undefined && !hasResponseSince) {
+    void logStop($, `stop on owed resume: login ${active.id} tried, no response since its switch, no mark`)
+    if (!(await maybeRotate($, ep.need, { need: ep.need })) && isConnectingChrome) isCutByVisit = true
     return
   }
   if (error === 'authentication_failed') {
@@ -1863,7 +1973,10 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
       readAt = await $.clock.now()
     }
     if (owner === undefined) await debug($, `a stop while the switch to account ${view.pending?.id} is unproven marks no account`)
-    else need = await markStop($, owner, stop.last_assistant_message, isProvisional ? snapshot : undefined)
+    else {
+      need = await markStop($, owner, stop.last_assistant_message, isProvisional ? snapshot : undefined)
+      if (ep !== undefined) ep.need = need
+    }
     if (isProvisional && owner !== undefined) {
       const record = await recordStop($, active.id, since, before, wasFableStopped, readAt)
       await setView($, v => ({ ...v, provisionalStop: record }))
@@ -1974,8 +2087,10 @@ async function markStop($: Host, active: Account, said: string | undefined, afte
     // gives the resets.
     const owned = await ownedReading($, active.id)
     const read = owned ?? r
-    // Claude's own words tell the Fable week from any other limit; the usage read decides only where there are none.
-    const isFable = said === undefined || said === '' ? isFableSpent(r, now) : isFableStop(said)
+    // Claude's own words tell the Fable week from any other limit; the usage read decides where there are none, or
+    // where they name no limit this mod knows.
+    const wording = wordingClass(said)
+    const isFable = wording === 'none' || wording === 'unknown' ? isFableSpent(r, now) : wording === 'fable'
     if (isFable) {
       need = 'fable'
       kept = { ...kept, isFableStopped: true }
@@ -2737,6 +2852,10 @@ export const register: Register = on => {
     $.clock.every(10 * 60_000, () => {
       void checkAll($).catch(error => debug($, `check failed: ${String(error)}`))
     })
+    // Timers run between turns: a resume owed after a stop is acted on with no turn and no person.
+    $.clock.every(OWED_LOOK_MS, () => {
+      void lookOwed($).catch(error => debug($, `owed resume look failed: ${String(error)}`))
+    })
     return started
   })
 
@@ -2751,6 +2870,9 @@ export const register: Register = on => {
     if (e.changed.includes('rateLimits')) {
       void onMeasure($, e.rateLimits).catch(error => debug($, `measure failed: ${String(error)}`))
     }
+    // A measure well after the resume entered: the work goes on, on the login in use.
+    const ep = episode
+    if (ep?.enteredAt !== undefined && (await $.clock.now()) - ep.enteredAt >= ENTRY_PROOF_MS) await endEpisode($, ep)
     return next(e)
   })
 
@@ -2763,9 +2885,19 @@ export const register: Register = on => {
   })
 
   on('classic.StopFailure', async ($, e, next) => {
-    // Only a stop that raises the limit modal arms the Escape; onStopFailure's wider list says which stops switch at all.
-    if (raisesLimitModal(e.error)) limitStopAfter = mainTurns
-    void onStopFailure($, e).catch(error => {
+    // A subagent's stop switches nothing: the main loop's own stop, which follows it, does the work.
+    if (e.agent_id !== undefined) {
+      void logStop($, `stop heard from agent ${e.agent_type ?? 'unknown'}: ${e.error}, no switch`)
+      return next(e)
+    }
+    // Only a stop that raises the limit modal arms the Escape and opens an episode; onStopFailure's wider list says
+    // which stops switch at all. Both are set here, before any await, so no branch of the stop runs without them.
+    if (raisesLimitModal(e.error)) {
+      limitStopAfter = mainTurns
+      episode ??= { stops: 0, tried: [], escapes: 0, told: new Set() }
+      episode.enteredAt = undefined
+    }
+    void withLock(() => onStopFailure($, e)).catch(error => {
       // A fault of the host itself (its store, its view) outside the stop's own read: the recovery ends here, and the
       // stop-log says so.
       void logStop($, `stop handling failed: ${errorName(error)}`)
@@ -2777,12 +2909,30 @@ export const register: Register = on => {
   // The turns open now, any loop's, and how many the main loop began: what a queued carry-on's Escape waits on.
   on('turn.start', async ($, e, next) => {
     openTurns.add(e.turnId)
-    if (e.agentId === undefined) mainTurns += 1
+    if (e.agentId === undefined) {
+      mainTurns += 1
+      isCarryOnInFlight = false
+      const ep = episode
+      if (ep !== undefined && ep.enteredAt === undefined) {
+        ep.enteredAt = await $.clock.now()
+        void logStop($, 'resume entered')
+      }
+    }
     return next(e)
   })
 
   on('turn.complete', async ($, e, next) => {
-    openTurns.delete(e.turnId)
+    const wasOpen = openTurns.delete(e.turnId)
+    const ep = episode
+    if (ep !== undefined) {
+      if (!wasOpen) void logStop($, `turn end with no start heard: agent ${e.agentId ?? 'main'}, reason ${e.reason}`)
+      else if (ep.enteredAt === undefined && openTurns.size === 0) void logStop($, 'owed resume: turns closed')
+      if (e.agentId === undefined && ep.enteredAt !== undefined) {
+        // An answer proves the resume; an interrupted or failed one leaves it owed, and the look acts again.
+        if (e.reason === 'answer') await endEpisode($, ep)
+        else if (e.reason === 'aborted' || e.reason === 'error') ep.enteredAt = undefined
+      }
+    }
     return next(e)
   })
 
