@@ -11182,8 +11182,59 @@ test('row v: a nudge answered while the held switch\'s retry owns the switch dro
 test('row v: an authentication_failed after a nudge whose retry lands the switch meanwhile drops nothing and ends no episode', async ($, on) => {
   const { w, store } = await dropDuringRetry($, on, 'authentication_failed', true)
   const lines = whats(stopLogOf(store, w))
-  expect([slots(w), lines.filter(l => l.startsWith('held switch') || l.startsWith('work resumed'))]).toEqual([[SLOT2], ['held switch not dropped: none held']])
+  expect([slots(w), lines.filter(l => l.startsWith('held switch') || l.startsWith('work resumed'))]).toEqual([[SLOT2], ["held switch not dropped: the stop's hold is gone"]])
 })
+
+// Review r3 STALE-RETRY: a minute retry that read the hold and has not claimed yet outlasts the drop's wait; it would
+// write the hold back after any drop, so the drop drops nothing and says so.
+for (const end of ['authentication_failed', 'answer'] as const) {
+  test(`row v: a nudge ending in ${end} while a minute retry sits on the hold it read past the wait drops nothing`, async ($, on) => {
+    const w = fresh()
+    const view = watchedView(on)
+    const gate = holdViewRead(on, true)
+    const { store, clock } = await heldWorld($, on, w)
+    await clock.advance(3 * 60_000 + 15_000)
+    await $.turn.start({ text: NUDGE_TEXT, turnId: 'turn-nudge' })
+    // The minute timer fires before the look's at the same time: its retry is the first to read the view there.
+    const tick = NOW + (Math.floor((clock.now() - NOW) / 60_000) + 1) * 60_000
+    await clock.advance(tick - clock.now() - 1)
+    gate.arm(() => true)
+    await clock.advance(1)
+    expect([gate.isHeld(), view()?.owner]).toEqual([true, undefined])
+    if (end !== 'answer') await $.classic.StopFailure({ error: end })
+    const done = $.turn.complete({ turnId: 'turn-nudge', reason: end === 'answer' ? 'answer' : 'error', answer: '', durationMs: 1, isAborted: false })
+    await clock.advance(31_000)
+    await done
+    gate.open()
+    await clock.settle()
+    const lines = whats(stopLogOf(store, w)).filter(l => l.startsWith('held switch') || l.startsWith('work resumed'))
+    expect([view()?.held?.target.id, lines]).toEqual(['2', ['held switch not dropped: the retry is running']])
+  })
+}
+
+// Review r3 REPLACED-HOLD: a press after the nudge replaces the stop's hold with its own; the drop is for the stop's alone.
+for (const key of ['use-2', 'use-3'] as const) {
+  for (const end of ['answer', 'authentication_failed'] as const) {
+    test(`row v: a ${key} press after the nudge keeps its hold through the nudge's ${end}`, async ($, on) => {
+      const w = fresh()
+      const view = watchedView(on)
+      const { store, clock } = await heldWorld($, on, w)
+      await clock.advance(3 * 60_000 + 15_000)
+      await $.turn.start({ text: NUDGE_TEXT, turnId: 'turn-nudge' })
+      const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+      await pane.press({ key })
+      await clock.settle()
+      const target = key.slice('use-'.length)
+      expect([view()?.held?.target.id, view()?.held?.carry]).toEqual([target, undefined])
+      if (end !== 'answer') await $.classic.StopFailure({ error: end })
+      await $.turn.complete({ turnId: 'turn-nudge', reason: end === 'answer' ? 'answer' : 'error', answer: '', durationMs: 1, isAborted: false })
+      await clock.settle()
+      const lines = whats(stopLogOf(store, w)).filter(l => l.startsWith('held switch'))
+      expect([view()?.held?.target.id, lines]).toEqual([target, ["held switch not dropped: the stop's hold is gone"]])
+      await pane.unmount()
+    })
+  }
+}
 
 // ---------------------------------------------------------------- puma-9arph.38: one switch in flight
 

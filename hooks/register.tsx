@@ -1552,18 +1552,22 @@ let live: number | undefined
 let lastToken = 0
 
 /**
- * Drops the held switch once the retry under way, if any, has ended (up to SWITCH_WAIT_MS): a retry that read the hold
- * before the drop holds it again after it, under its own claim. 'dropped' only where this write cleared a hold.
+ * Drops a stop's held switch (the one that carries on) once the retry under way, if any, has ended: a retry that read
+ * the hold before the drop holds it again after it, under its own claim, so one still running after SWITCH_WAIT_MS
+ * drops nothing. A press's hold stands. 'dropped' only where this write cleared a stop's hold.
  */
-async function dropHeld($: Host): Promise<'dropped' | 'none held' | 'a switch is running'> {
-  if (retryRun !== undefined) await Promise.race([retryRun, $.clock.sleep(SWITCH_WAIT_MS)]).catch(() => undefined)
+async function dropHeld($: Host): Promise<'dropped' | "the stop's hold is gone" | 'a switch is running' | 'the retry is running'> {
+  if (retryRun !== undefined) {
+    const late = $.clock.sleep(SWITCH_WAIT_MS).then(() => true)
+    if (await Promise.race([retryRun.then(() => false, () => false), late])) return 'the retry is running'
+  }
   let wasHeld = false
   const isApplied = await writeSwitch($, { idle: true }, v => {
-    wasHeld = v.held !== undefined
-    return { ...v, held: undefined }
+    wasHeld = v.held?.carry !== undefined
+    return wasHeld ? { ...v, held: undefined } : v
   })
   if (!isApplied) return 'a switch is running'
-  return wasHeld ? 'dropped' : 'none held'
+  return wasHeld ? 'dropped' : "the stop's hold is gone"
 }
 
 /**
