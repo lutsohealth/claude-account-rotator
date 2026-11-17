@@ -1274,7 +1274,8 @@ async function checkAccount($: Host, account: Account, gate: UsageGate): Promise
   const now = await $.clock.now()
   let hasFreshFable = false
   if (signingIn === account.id) return hasFreshFable
-  const stored = await readStored($, account.slot)
+  // Bounded here and not in readStored: refreshingSoon's read must hold the move when it cannot answer (puma-9arph.57).
+  const stored = await answerWithin($, 'CredentialReadTimedOut', readStored($, account.slot))
   if (stored.state === 'unreadable') {
     tell($, `Could not read ${claudeAccount(account, (await getView($)).accounts)} from the keychain (exit ${stored.code}); is it locked?`)
     return hasFreshFable
