@@ -118,6 +118,10 @@ type World = {
   submitHold?: Promise<void>
   /** A hook keeps the mod's fill out of the box, so the fill answers isFilled false with no cause. */
   isFillRefused?: boolean
+  /** How many fills the mod made; while `fillHold` is set, a fill answers only once it settles; `isFillThrown` makes a fill throw. */
+  fills?: number
+  fillHold?: Promise<void>
+  isFillThrown?: boolean
   /** Where it answers true, a debug line fails to write. */
   isLogFailing?: (text: string) => boolean
   /** Whether each line in `submitted` was sent as the person's own words (`asUser`), not under the mod's name. */
@@ -384,7 +388,12 @@ function world(on: On, w: World, store: Record<string, unknown> | Map<string, un
     return { text: e.text }
   })
   // The kit keeps no cause a test writes on the mod's own fill: a refusal here is a hook's, never the engine's 'dialog'.
-  on('prompt.fill', () => ({ isFilled: w.isFillRefused !== true }))
+  on('prompt.fill', async () => {
+    w.fills = (w.fills ?? 0) + 1
+    if (w.isFillThrown === true) throw new Error('the fill broke')
+    await w.fillHold
+    return { isFilled: w.isFillRefused !== true }
+  })
   on('turn.start', (_$, e) => ({ turnId: e.turnId }))
   on('turn.complete', (_$, e) => ({ text: e.answer }))
   on('session.start', (_$, e) => {
@@ -502,6 +511,16 @@ async function start($: Engine, clock: MockClock): Promise<void> {
   await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
   await clock.settle()
   await clock.advance(USAGE_CLAIM_WAIT_MS)
+}
+
+/**
+ * The resume a stop's carry-on starts, answering: the main loop's turn begins (the resume entered) and ends with an
+ * answer, which ends the stop's episode (v4 s.2), so the next stop opens an episode of its own.
+ */
+async function resumeAnswers($: Engine, clock: MockClock, turnId = 'resumed'): Promise<void> {
+  await $.turn.start({ text: 'go on', turnId })
+  await $.turn.complete({ turnId, reason: 'answer', answer: 'done', durationMs: 1, isAborted: false })
+  await clock.settle()
 }
 
 test('a login with nothing in the keychain shows as needing a sign-in, with one button for it', async ($, on) => {
@@ -1053,7 +1072,9 @@ async function hasFableBand($: Engine): Promise<boolean> {
 }
 
 /** What Claude says when a turn dies on a limit that is not the Fable week. */
-const PLAIN_STOPS = ["You've hit your session limit · resets 3pm", 'Claude usage limit reached.']
+// v4 s.7: a wording that names no limit the mod knows ('Claude usage limit reached.') is read as no wording, so a spent
+// Fable week makes it a Fable stop (row u's test); the plain stops here each name the 5-hour window.
+const PLAIN_STOPS = ["You've hit your session limit · resets 3pm", "You've hit your 5-hour limit"]
 
 for (const message of PLAIN_STOPS) {
   test(`a plain usage-limit stop ("${message}") on a login whose Fable week is spent marks the 5-hour window and moves to any login with room, with no Fable band`, async ($, on) => {
@@ -1132,7 +1153,8 @@ for (const rotateTo of ['reset', 'room', 'order']) {
   })
 }
 
-test('with no login read for the Fable week a Fable stop takes one, the stop there moves on, and once all are marked spent nothing moves', async ($, on) => {
+// v4 s.1: a login whose mark stands is still tried, last and soonest reset first, so the third stop moves to login 1.
+test('with no login read for the Fable week a Fable stop takes one, the stop there moves on, and once all are marked spent the stop tries the one that frees soonest', async ($, on) => {
   const w = fresh()
   const SLOT3 = `${HOME}/.claude/accounts/3`
   w.keychain['Claude Code-credentials'] = blob('tok-1')
@@ -1148,17 +1170,19 @@ test('with no login read for the Fable week a Fable stop takes one, the stop the
   await clock.settle()
   await clock.advance(36_000)
   expect(slots(w)).toHaveLength(1)
+  await resumeAnswers($, clock)
   await $.classic.StopFailure(FABLE_STOP)
   await clock.settle()
   await clock.advance(36_000)
   // Logins 2 and 3, each once; login 1 was marked at the first stop.
   expect([...slots(w)].sort()).toEqual([SLOT2, SLOT3])
   expect(w.submitted).toHaveLength(2)
+  await resumeAnswers($, clock, 'resumed-2')
   await $.classic.StopFailure(FABLE_STOP)
   await clock.settle()
   await clock.advance(36_000)
-  expect([...slots(w)].sort()).toEqual([SLOT2, SLOT3])
-  expect(w.submitted).toHaveLength(2)
+  expect(slots(w)).toEqual([SLOT2, SLOT3, ''])
+  expect(w.submitted).toHaveLength(3)
 })
 
 /** One login only: the usage its read answers at the session's start and at the stop, and the stop. */
@@ -1317,6 +1341,8 @@ test('a check whose usage lists the same Fable week lower, 30 minutes or more af
   const clock = await markedThenReread($, on, w, {})
   w.usage['tok-1'] = [20, 30, 40]
   await pastNextRead(clock)
+  // The first stop's resume answered, so this stop is an episode of its own (v4 s.2).
+  await resumeAnswers($, clock)
   await $.classic.StopFailure(FABLE_STOP)
   await clock.settle()
   await clock.advance(36_000)
@@ -1331,6 +1357,7 @@ test('the mark a stop left ends at the reset time of the week it marks: a check 
   // Two hours on, the week the mark stood for has reset.
   await clock.advance(2 * HOUR)
   w.usage['tok-2'] = [10, 30]
+  await resumeAnswers($, clock)
   await $.classic.StopFailure(FABLE_STOP)
   await clock.settle()
   await clock.advance(36_000)
@@ -1387,6 +1414,7 @@ test('a Fable mark with no reset time from the usage, then a check that lists th
   await clock.advance(3 * HOUR)
   w.usage['tok-1'] = [20, 30, 10]
   await pastNextRead(clock)
+  await resumeAnswers($, clock)
   await $.classic.StopFailure(FABLE_STOP)
   await clock.settle()
   await clock.advance(36_000)
@@ -1465,6 +1493,7 @@ test('a Fable stop that moves to a login with room tells the terminal nothing of
   await clock.advance(36_000)
   expect(slots(w)).toEqual([SLOT2])
   expect(w.notices.filter(t => /Fable week/.test(t))).toEqual([])
+  await resumeAnswers($, clock)
   // A plain stop with every Fable week spent is the 5-hour window's, not told as the Fable week.
   w.usage['tok-2'] = [100, 30, 100]
   await pastLastRead(clock)
@@ -1472,6 +1501,7 @@ test('a Fable stop that moves to a login with room tells the terminal nothing of
   await clock.settle()
   await clock.advance(36_000)
   expect(w.notices.filter(t => /Fable week/.test(t))).toEqual([])
+  await resumeAnswers($, clock, 'resumed-2')
   w.usage['tok-2'] = [10, 30, 100]
   await pastLastRead(clock)
   await $.classic.StopFailure(FABLE_STOP)
@@ -9535,6 +9565,8 @@ test('Review codex AUTH-VIEW class: a replaced switch clears a deleted provision
 test('a rejected sign-in on an unproven switch that moves the session keeps the account moved to as needing a sign-in after the session ends', async ($, on) => {
   const { w, store, clock } = await fableMoved($, on)
   await clock.advance(36_000)
+  // The limit stop's resume answered, so its episode no longer holds login 1 as tried (v4 s.1, s.2).
+  await resumeAnswers($, clock)
   await $.classic.StopFailure({ error: 'authentication_failed' })
   await clock.settle()
   expect(slots(w), 'premise: the stop moves the session back').toEqual([SLOT2, ''])
@@ -9559,7 +9591,10 @@ test('a rejected sign-in on a proven switch still stands after the session ends'
 
 // Measured on vox (2026-11-12 11:48Z): the turn the mod's own carry-on started, sent as the settle ended, still went
 // out on the login left and died on its Fable week; it marked the login moved to, whose usage read 35% that week.
-for (const isReadOld of [false, true]) test(`a Fable stop answering the mod's own carry-on just past the settle, before any response, marks nothing on the account moved to, whose read ${isReadOld ? 'over' : 'under'} a minute old shows Fable room, and carries on once more`, async ($, on) => {
+// v4 s.6: the carry-on's turn dying is the episode's later stop. It marks nothing, whatever the read of the login moved
+// to (so the read's age no longer matters), and moves to the next untried login: with two logins there is none, so no
+// carry-on follows, and a second such stop marks nothing either.
+for (const isReadOld of [false, true]) test(`a Fable stop answering the mod's own carry-on just past the settle, before any response, marks nothing on the account moved to, whose read ${isReadOld ? 'over' : 'under'} a minute old shows Fable room, and moves to no login, there being none untried`, async ($, on) => {
   const { w, store, clock } = await fableMoved($, on, isReadOld)
   await clock.advance(35_500)
   expect(w.submitted).toHaveLength(1)
@@ -9569,15 +9604,15 @@ for (const isReadOld of [false, true]) test(`a Fable stop answering the mod's ow
   expect(slots(w)).toEqual([SLOT2])
   expect(w.notices.map(String).filter(t => /^Fable limit reached/.test(t))).toEqual([])
   await clock.advance(36_000)
-  expect(w.submitted).toHaveLength(2)
-  // A second Fable stop on the same switch, still before any response, is login 2's own: marked as before.
+  expect(w.submitted).toHaveLength(1)
   await $.classic.StopFailure(FABLE_STOP)
   await clock.settle()
-  expect(markOf(store.get('fable-mark:2'))).toEqual([100, FABLE_RESET])
+  expect(store.get('fable-mark:2')).toBeUndefined()
 })
 
-// The other side of the carry-on rule: a login whose own read shows its Fable week spent did stop the turn.
-test('a Fable stop answering the mod\'s own carry-on, whose login\'s own read shows its Fable week spent, is that login\'s: no carry-on again, and the pane reads it spent', async ($, on) => {
+// v4 s.6: the other side of the carry-on rule is gone for a stop of a standing episode: it marks nothing, though the
+// login's own read shows its Fable week spent, so the pane keeps what the last check read, and no carry-on follows.
+test('a Fable stop answering the mod\'s own carry-on, whose login\'s own read shows its Fable week spent, marks nothing: no carry-on again, and the pane keeps the last check\'s reading', async ($, on) => {
   const w = fresh()
   w.keychain['Claude Code-credentials'] = blob('tok-1')
   w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
@@ -9598,8 +9633,8 @@ test('a Fable stop answering the mod\'s own carry-on, whose login\'s own read sh
   await clock.settle()
   await clock.advance(36_000)
   expect(w.submitted).toHaveLength(1)
-  expect(await fableRows($)).toEqual([`${longBar(100)} 100%`, `${longBar(100)} 100%`])
-  expect(w.notices.map(String).filter(t => /Fable week/.test(t))).toHaveLength(1)
+  expect(await fableRows($)).toEqual([`${longBar(100)} 100%`, `${longBar(10)}  10%`])
+  expect(w.notices.map(String).filter(t => /Fable week/.test(t))).toEqual([])
 })
 
 test('a Fable stop while Chrome connects marks nothing on the visited account, though a browser answering proves the visit', async ($, on) => {
@@ -9754,6 +9789,8 @@ test('Review codex-r1: a real Fable stop on the target is not cleared by its 35-
   const { w, clock } = await fableMoved($, on, false)
   await clock.advance(35_500)
   expect(w.submitted).toHaveLength(1)
+  // The carry-on's turn answered, ending the first stop's episode: this stop is the first of its own (v4 s.2, s.6).
+  await resumeAnswers($, clock)
   w.usage['tok-2'] = [10, 30, 100]
   const calls = callsWith(w, 'tok-2')
   await $.classic.StopFailure(FABLE_STOP)
@@ -9774,6 +9811,7 @@ for (const gate of ['backoff', 'other-claim', 'expired-token'] as const) {
     if (gate === 'other-claim') store.set('usage-due:2', { ...prior, fails: 0, claim: 'other-session', next: NOW + HOUR })
     if (gate === 'expired-token') w.keychain[await keychainItem(SLOT2)] = blob('tok-2', NOW - 1)
     await clock.advance(35_500)
+    await resumeAnswers($, clock)
     w.usage['tok-2'] = [10, 30, 100]
     const calls = callsWith(w, 'tok-2')
     await $.classic.StopFailure(FABLE_STOP)
@@ -9792,6 +9830,7 @@ test('Review codex-r2 R1: a good target read after switch does not turn a stale 
   const due = store.get('usage-due:2') as { next: number; fails: number; at?: number; claim?: string }
   store.set('usage:2', { ...(store.get('usage:2') as object), at: NOW + 10_000, src: 'body' })
   store.set('usage-due:2', { ...due, at: NOW + 10_000 })
+  await resumeAnswers($, clock)
   const calls = callsWith(w, 'tok-2')
   await $.classic.StopFailure(FABLE_STOP)
   await clock.settle()
@@ -9811,6 +9850,7 @@ for (const [site, fable] of [['the endpoint still reads Fable room', 10], ['the 
     store.set('usage:2', { ...(store.get('usage:2') as object), at: NOW + 10_000, src: 'body' })
     store.set('usage-due:2', { ...due, at: NOW + 10_000 })
     w.usage['tok-2'] = [10, 30, fable]
+    await resumeAnswers($, clock)
     await $.classic.StopFailure(FABLE_STOP)
     await clock.settle()
     await clock.advance(36_000)
@@ -9956,7 +9996,13 @@ test('every signed-in login uses its email while signing in', async ($, on) => {
 
 type StopLogEntry = { at: number; what: string }
 const DAY = 24 * HOUR
-const STOP_RATE_LIMIT = 'stop heard: rate_limit, login 1 in use'
+/** The stop-log's first line of a usage-limit stop: its wording class (model.ts's wordingClass) and the login in use. */
+const stopHeard = (wording: 'none' | 'fable' | 'session' | 'weekly' | 'unknown', id = '1') => `stop heard: rate_limit (wording: ${wording}), login ${id} in use`
+/** A stop with no words, and the plain stop (PLAIN, naming the session limit), on login 1. */
+const STOP_RATE_LIMIT = stopHeard('none')
+const STOP_SESSION = stopHeard('session')
+/** The line a stop writes when it moves to a login with a fresh read, read just now; the one tried is login 1. */
+const PICKED_TWO = 'picked 2: fresh, read 0 min ago; tried 1'
 
 /** This session's stop-log: what the store holds under the session's mark. */
 const stopLogOf = (store: Map<string, unknown>, w: World): StopLogEntry[] => (store.get(`stop-log:${w.otherEnv.ACCOUNT_ROTATOR_SESSION}`) ?? []) as StopLogEntry[]
@@ -9983,7 +10029,7 @@ test('a stop, its switch and its carry-on write their entries in order under thi
   await clock.settle()
   await clock.advance(36_000)
   expect(w.submitted).toHaveLength(1)
-  expect(whats(stopLogOf(store, w))).toEqual([STOP_RATE_LIMIT, 'moved to 2', 'carry-on armed', 'carry-on entered'])
+  expect(whats(stopLogOf(store, w))).toEqual([STOP_RATE_LIMIT, PICKED_TWO, 'moved to 2', 'carry-on armed', 'carry-on queued', 'carry-on resolved'])
   expect(stopLogOf(store, w).every(e => typeof e.at === 'number' && e.at >= NOW)).toBe(true)
 })
 
@@ -10000,11 +10046,11 @@ test('a stop held back for a token about to refresh logs the hold, then the move
   w.usage['tok-1'] = [100, 41]
   await $.classic.StopFailure(PLAIN)
   await clock.settle()
-  expect(whats(stopLogOf(store, w))).toEqual([STOP_RATE_LIMIT, 'held for 2: the token in use refreshes soon'])
+  expect(whats(stopLogOf(store, w))).toEqual([STOP_SESSION, PICKED_TWO, 'held for 2: the token in use refreshes soon'])
   refresh(w)
   await clock.advance(60_000)
   await clock.advance(36_000)
-  expect(whats(stopLogOf(store, w))).toEqual([STOP_RATE_LIMIT, 'held for 2: the token in use refreshes soon', 'moved to 2', 'carry-on armed', 'carry-on entered'])
+  expect(whats(stopLogOf(store, w))).toEqual([STOP_SESSION, PICKED_TWO, 'held for 2: the token in use refreshes soon', 'moved to 2', 'carry-on armed', 'carry-on queued', 'carry-on resolved'])
 })
 
 test('a switch made after the carry-on was armed logs that the carry-on was skipped (puma-9arph.34 B3)', async ($, on) => {
@@ -10020,12 +10066,12 @@ test('a switch made after the carry-on was armed logs that the carry-on was skip
   await pane.unmount()
   await clock.advance(36_000)
   expect(w.submitted).toEqual([])
-  expect(whats(stopLogOf(store, w))).toEqual([STOP_RATE_LIMIT, 'moved to 2', 'carry-on armed', 'carry-on skipped: another switch since'])
+  expect(whats(stopLogOf(store, w))).toEqual([STOP_RATE_LIMIT, PICKED_TWO, 'moved to 2', 'carry-on armed', 'carry-on skipped: another switch since'])
 })
 
 for (const [name, setup, reason] of [
   ['rotation is off', { 'rotate-to': 'off' }, 'stayed: rotation off'],
-  ['no other login has room', {}, 'stayed: no login to move to'],
+  ['no other login has room', {}, 'stayed: no untried login (tried 1)'],
 ] as const) {
   test(`a stop that stays because ${name} logs the reason (puma-9arph.34 B4)`, async ($, on) => {
     const w = fresh()
@@ -10053,6 +10099,9 @@ test('a stop where Claude Code\'s policy refuses switching logs that it stayed f
 
 // ---------------------------------------------------------------- puma-9arph.37: a stop whose own read throws
 
+/** PICKED_TWO where login 2's read, made at the start, is a minute old by the stop (pastLastRead). */
+const PICKED_ONE_MIN = 'picked 2: fresh, read 1 min ago; tried 1'
+
 const isReadFailed = (id: string) => (what: string) => new RegExp(`^stop read failed: \\w+, login ${id}$`).test(what)
 
 test('a usage-limit stop whose own forced usage read throws still marks the login, moves and carries on once, and says so in the stop-log (puma-9arph.37)', async ($, on) => {
@@ -10065,9 +10114,9 @@ test('a usage-limit stop whose own forced usage read throws still marks the logi
   await clock.settle()
   await clock.advance(36_000)
   const lines = whats(stopLogOf(store, w))
-  expect(lines[0]).toBe(STOP_RATE_LIMIT)
+  expect(lines[0]).toBe(STOP_SESSION)
   expect(lines.filter(isReadFailed('1'))).toHaveLength(1)
-  expect(lines.filter(l => !isReadFailed('1')(l))).toEqual([STOP_RATE_LIMIT, 'moved to 2', 'carry-on armed', 'carry-on entered'])
+  expect(lines.filter(l => !isReadFailed('1')(l))).toEqual([STOP_SESSION, PICKED_ONE_MIN, 'moved to 2', 'carry-on armed', 'carry-on queued', 'carry-on resolved'])
   expect(store.get('mark:1')).toBeDefined()
   expect(w.submitted).toHaveLength(1)
 })
@@ -10085,7 +10134,7 @@ test('a usage-limit stop whose profile call throws, its sign-in new since the la
   await clock.advance(36_000)
   const lines = whats(stopLogOf(store, w))
   expect(lines.filter(isReadFailed('1'))).toHaveLength(1)
-  expect(lines.filter(l => !isReadFailed('1')(l))).toEqual([STOP_RATE_LIMIT, 'moved to 2', 'carry-on armed', 'carry-on entered'])
+  expect(lines.filter(l => !isReadFailed('1')(l))).toEqual([STOP_SESSION, PICKED_ONE_MIN, 'moved to 2', 'carry-on armed', 'carry-on queued', 'carry-on resolved'])
   expect(store.get('mark:1')).toBeDefined()
   expect(w.submitted).toHaveLength(1)
 })
@@ -10094,6 +10143,7 @@ test('a Fable stop on the carry-on whose own read of the login moved to throws m
   const { w, store, clock } = await fableMoved($, on, false)
   await clock.advance(35_500)
   expect(w.submitted).toHaveLength(1)
+  await resumeAnswers($, clock)
   w.throwing = ['tok-2']
   await $.classic.StopFailure(FABLE_STOP)
   await clock.settle()
@@ -10114,7 +10164,7 @@ test('Review HOST-FAULT-MISCLASSIFIED: a store write refused inside the stop\'s 
   await $.classic.StopFailure(PLAIN)
   await clock.settle()
   await clock.advance(36_000)
-  expect(whats(stopLogOf(store, w))).toEqual([STOP_RATE_LIMIT, 'stop read failed: HooksError, login 1', 'moved to 2', 'carry-on armed', 'carry-on entered'])
+  expect(whats(stopLogOf(store, w))).toEqual([STOP_SESSION, 'stop read failed: HooksError, login 1', PICKED_ONE_MIN, 'moved to 2', 'carry-on armed', 'carry-on queued', 'carry-on resolved'])
   expect(store.get('mark:1')).toBeDefined()
   expect(w.submitted).toHaveLength(1)
 })
@@ -10123,6 +10173,7 @@ test('Review HOST-FAULT-MISCLASSIFIED class: a store write refused inside the Fa
   const { w, store, clock } = await fableMoved($, on, false)
   await clock.advance(35_500)
   expect(w.submitted).toHaveLength(1)
+  await resumeAnswers($, clock)
   w.onStoreSet = key => {
     if (key === 'usage-due:2') throw new Error('store write refused at /secret/path')
   }
@@ -10143,7 +10194,7 @@ test('a stop whose handling throws in a local step says so in the stop-log, by t
   await $.classic.StopFailure(PLAIN)
   await clock.settle()
   // The host hands the mod its own error kind for a hook's throw; the message, with its path, stays out.
-  expect(whats(stopLogOf(store, w))).toEqual([STOP_RATE_LIMIT, 'stop handling failed: HooksError'])
+  expect(whats(stopLogOf(store, w))).toEqual([STOP_SESSION, 'stop handling failed: HooksError'])
 })
 
 test('a carry-on the engine refuses is logged in debug and in the stop-log as a drop, and is not submitted again (puma-9arph.34 B2)', async ($, on) => {
@@ -10158,7 +10209,8 @@ test('a carry-on the engine refuses is logged in debug and in the stop-log as a 
   await clock.advance(10 * 60_000)
   expect(w.submitted).toHaveLength(1)
   expect(debugLines(w, 'carry-on dropped: a Stop stands')).toHaveLength(1)
-  expect(whats(stopLogOf(store, w)).at(-1)).toBe('carry-on drop')
+  // The drop clears the in-flight flag, so the look finds nothing queued and says so, once (v4 s.3, C4).
+  expect(whats(stopLogOf(store, w)).slice(-2)).toEqual(['carry-on drop', 'owed resume: no carry-on queued, no key'])
 })
 
 test('two sessions\' logs land under two keys, each untouched by the other (puma-9arph.34 B5)', async ($, on) => {
@@ -10186,16 +10238,16 @@ test('a boot drops a stop-log whose last entry is over 7 days old and keeps a fr
   expect(store.get('stop-log:fresh')).toEqual(fresh6)
 })
 
-test('a stop-log keeps only its last 20 entries (puma-9arph.34 B6)', async ($, on) => {
+test('a stop-log keeps only its last 50 entries (puma-9arph.34 B6)', async ($, on) => {
   const w = fresh()
   const { store, clock } = await loggedWorld(on, w, { 'rotate-to': 'off' })
   await start($, clock)
-  for (let i = 0; i < 12; i++) {
+  for (let i = 0; i < 30; i++) {
     await $.classic.StopFailure({ error: 'rate_limit' })
     await clock.settle()
   }
   const entries = whats(stopLogOf(store, w))
-  expect(entries).toHaveLength(20)
+  expect(entries).toHaveLength(50)
   expect(entries.slice(-2)).toEqual([STOP_RATE_LIMIT, 'stayed: rotation off'])
 })
 
@@ -10255,7 +10307,9 @@ test('a stop-log write that fails, its debug line failing too, leaves the stop-l
 
 // ---------------------------------------------------------------- puma-9arph.34 C: one Escape frees a carry-on held under the limit modal
 
-const noKey = (why: string) => `carry-on queued, no key: ${why}`
+/** What the look (every 15 s, v4 s.3) writes where it finds an open turn, or a fill that answers no 'dialog' (the kit's cannot). */
+const WAITS_ON_TURN = 'owed resume waits: 1 turns open'
+const FILL_NO_CAUSE = 'owed resume: fill answered no cause, no key'
 
 /**
  * A world whose carry-on stays queued, in an Orca pane, its fill refused by a hook. The kit keeps no cause on the
@@ -10285,7 +10339,8 @@ async function turnStops($: Engine, clock: MockClock, stop: { error: 'rate_limit
   await clock.settle()
 }
 
-test('a carry-on that enters within 5 s gets no key (puma-9arph.34 C6)', async ($, on) => {
+// The look (v4 s.3) replaces the 5 s watch: a carry-on whose resume enters (a main-loop turn starts) before the next look gets no key.
+test('a carry-on that enters before the next look gets no key (puma-9arph.34 C6)', async ($, on) => {
   const w = fresh()
   const enter = queuedWorld(on, w)
   enter()
@@ -10294,20 +10349,22 @@ test('a carry-on that enters within 5 s gets no key (puma-9arph.34 C6)', async (
   w.usage['tok-1'] = [100, 41]
   await turnStops($, clock)
   await clock.advance(36_000)
+  await $.turn.start({ text: w.submitted[0] ?? '', turnId: 'turn-carry' })
   await clock.advance(20_000)
   expect(w.submitted).toHaveLength(1)
   expect(w.spawned).toEqual([])
-  expect(whats(stopLogOf(store, w)).at(-1)).toBe('carry-on entered')
+  expect(whats(stopLogOf(store, w)).at(-1)).toBe('resume entered')
 })
 
-// Each row keeps one condition of the Escape false: no key goes, and the stop-log says why.
-for (const [name, arrange, why] of [
-  ["an agent's turn is open (C2)", { during: ($: Engine) => $.turn.start({ text: 'look', turnId: 'agent-turn', agentId: 'agent-1' }) }, 'a turn is open'],
-  ['the main turn is still open (C3)', { isEnded: false }, 'a turn is open'],
-  ['the box takes the fill (C5)', { isFilled: true }, 'no dialog holds it'],
+// Each row keeps one condition of the Escape false: no key goes, and the stop-log says what the look found last.
+for (const [name, arrange, last] of [
+  ["an agent's turn is open (C2)", { during: ($: Engine) => $.turn.start({ text: 'look', turnId: 'agent-turn', agentId: 'agent-1' }) }, WAITS_ON_TURN],
+  ['the main turn is still open (C3)', { isEnded: false }, WAITS_ON_TURN],
+  ['the box takes the fill (C5)', { isFilled: true }, FILL_NO_CAUSE],
   // Review CALL1 [UNPROVEN-DIALOG]: a hook's refusal carries no cause and proves no dialog.
-  ['a hook refused the fill, its cause left out (Review CALL1)', {}, 'no dialog holds it'],
-  ['the stop was a rejected sign-in, not a limit (RULING 6008)', { stop: { error: 'authentication_failed' } }, 'no limit stop before it'],
+  ['a hook refused the fill, its cause left out (Review CALL1)', {}, FILL_NO_CAUSE],
+  // No limit stop, so no episode and no look: the carry-on's own line is the last.
+  ['the stop was a rejected sign-in, not a limit (RULING 6008)', { stop: { error: 'authentication_failed' } }, 'carry-on queued'],
   [
     'a turn ran since the limit stop',
     {
@@ -10316,7 +10373,8 @@ for (const [name, arrange, why] of [
         await $.turn.complete({ turnId: 'turn-2', reason: 'answer', answer: 'done', durationMs: 1, isAborted: false })
       },
     },
-    'no limit stop before it',
+    // The turn that ran since is the resume entering and answering: it ends the episode, so no look follows.
+    'carry-on queued',
   ],
 ] as const) {
   test(`a queued carry-on gets no key where ${name} (puma-9arph.34 C)`, async ($, on) => {
@@ -10334,7 +10392,7 @@ for (const [name, arrange, why] of [
     expect(w.submitted).toHaveLength(1)
     await clock.advance(20_000)
     expect(w.spawned).toEqual([])
-    expect(whats(stopLogOf(store, w)).at(-1)).toBe(noKey(why))
+    expect(whats(stopLogOf(store, w)).at(-1)).toBe(last)
   })
 }
 
@@ -10353,7 +10411,7 @@ test('the line a stop cut by the Claude in Chrome visit carries on with gets the
   await clock.advance(36_000)
   expect(w.submitted).toHaveLength(1)
   await clock.advance(5_000)
-  expect(whats(stopLogOf(store, w)).at(-1)).toBe(noKey('no dialog holds it'))
+  expect(whats(stopLogOf(store, w)).at(-1)).toBe(FILL_NO_CAUSE)
   await clock.advance(10 * 60_000)
   expect(w.spawned).toEqual([])
   expect(w.submitted).toHaveLength(1)
@@ -10397,20 +10455,274 @@ test('a carry-on whose turn dies on the usage limit again moves to the next logi
   expect(w.submitted).toHaveLength(2)
   await clock.advance(10 * 60_000)
   expect(w.submitted).toHaveLength(2)
-  // The second stop is a limit stop with no turn begun since and none open, so the watch reaches the fill: the kit's box
-  // takes it, so no key goes (the engine's own 'dialog' is model.test.ts's row).
+  // The second stop is a limit stop with no turn begun since and none open, so the look reaches the fill: the kit's box
+  // answers no cause, so no key goes (the engine's own 'dialog' is model.test.ts's row). The second stop is the episode's
+  // later one, on a login no response has shown since its switch: it marks nothing and moves to the next untried login (v4 s.6).
   expect(w.spawned).toEqual([])
   expect(whats(stopLogOf(store, w))).toEqual([
     STOP_RATE_LIMIT,
+    'owed resume: turns closed',
+    PICKED_TWO,
     'moved to 2',
     'carry-on armed',
-    'carry-on entered',
-    'stop heard: rate_limit, login 2 in use',
+    'carry-on queued',
+    'carry-on resolved',
+    'resume entered',
+    stopHeard('none', '2'),
+    'owed resume: turns closed',
+    'stop on owed resume: login 2 tried, no response since its switch, no mark',
+    'picked 3: fresh, read 1 min ago; tried 1, 2',
     'moved to 3',
     'carry-on armed',
-    noKey('no dialog holds it'),
+    'carry-on queued',
+    FILL_NO_CAUSE,
   ])
 })
+
+// ---------------------------------------------------------------- puma-9arph.54: the owed resume (design v4)
+
+/**
+ * Three logins, each with room, login 1 in use and spent by the stop to come; the carry-on of a stop's switch stays
+ * queued, in an Orca pane unless `isPane` is false. The kit cannot draw the engine's 'dialog' refusal (queuedWorld's
+ * comment), so a test here that needs the Escape proves the wiring up to the fill, and model.test.ts holds the Escape's rows.
+ */
+async function owedWorld($: Engine, on: On, w: World, isPane = true) {
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.keychain[await keychainItem(SLOT3)] = blob('tok-3')
+  w.usage['tok-1'] = [60, 40]
+  w.usage['tok-2'] = [10, 30]
+  w.usage['tok-3'] = [20, 50]
+  queuedWorld(on, w)
+  if (!isPane) delete w.env.ORCA_TERMINAL_HANDLE
+  const store = new Map<string, unknown>(Object.entries({ ...THREE_LOGINS, 'rotate-to': 'room' }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  w.usage['tok-1'] = [100, 41]
+  return { store, clock }
+}
+
+/** The stop-log's time of its first line that starts with `prefix`. */
+const logTime = (store: Map<string, unknown>, w: World, prefix: string): number => stopLogOf(store, w).find(e => e.what.startsWith(prefix))?.at ?? Number.NaN
+
+test('row b: pickAfterStop skips tried logins and answers undefined once all are tried', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await owedWorld($, on, w)
+  // Each stop is the carry-on's turn dying: no response, no entry, so one episode, and its tried set grows.
+  for (let stop = 0; stop < 3; stop++) {
+    await $.classic.StopFailure({ error: 'rate_limit' })
+    await clock.settle()
+    await clock.advance(36_000)
+  }
+  expect(slots(w)).toEqual([SLOT2, SLOT3])
+  expect(whats(stopLogOf(store, w)).filter(l => l.startsWith('picked ') || l.startsWith('stayed'))).toEqual([
+    'picked 2: fresh, read 0 min ago; tried 1',
+    'picked 3: fresh, read 1 min ago; tried 1, 2',
+    'stayed: no untried login (tried 1, 2, 3)',
+  ])
+})
+
+// The kit cannot draw 'dialog': this proves the wiring up to the fill, at the first look after the agent's turn closes.
+test('row c: a carry-on queued while an agent turn is open gets its Escape at the first look after that turn closes, with no main-loop turn and no prompt typed', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await owedWorld($, on, w)
+  await turnStops($, clock)
+  await $.turn.start({ text: 'look', turnId: 'agent-turn', agentId: 'agent-1' })
+  await clock.advance(60_000)
+  expect(w.submitted).toHaveLength(1)
+  expect(whats(stopLogOf(store, w))).toContain(WAITS_ON_TURN)
+  expect(whats(stopLogOf(store, w))).not.toContain(FILL_NO_CAUSE)
+  await $.turn.complete({ turnId: 'agent-turn', agentId: 'agent-1', reason: 'answer', answer: 'done', durationMs: 1, isAborted: false })
+  await clock.advance(15_000)
+  const lines = whats(stopLogOf(store, w))
+  expect(lines.slice(-2)).toEqual(['owed resume: turns closed', FILL_NO_CAUSE])
+  expect(lines).not.toContain('resume entered')
+  expect(w.submitted).toHaveLength(1)
+  expect(w.spawned).toEqual([])
+})
+
+// The kit cannot draw 'dialog': this proves the wiring up to the fill, and the resume enters by a main-loop turn.
+test('row d: with no event after the stop, the 15 s look alone sends the Escape and the resume enters', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await owedWorld($, on, w)
+  await $.classic.StopFailure({ error: 'rate_limit' })
+  await clock.settle()
+  await clock.advance(36_000 + 15_000)
+  expect(whats(stopLogOf(store, w)).at(-1)).toBe(FILL_NO_CAUSE)
+  expect(w.submitted).toHaveLength(1)
+  expect(w.spawned).toEqual([])
+  await $.turn.start({ text: w.submitted[0] ?? '', turnId: 'turn-carry' })
+  await clock.settle()
+  expect(whats(stopLogOf(store, w)).at(-1)).toBe('resume entered')
+})
+
+// Review M403 A (C1): an entry that ends aborted, such as a waker's turn an Escape landed on, leaves the carry-on owed.
+test('C1: a main turn aborted after entry lets the next look reach the fill again', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await owedWorld($, on, w)
+  await $.classic.StopFailure({ error: 'rate_limit' })
+  await clock.settle()
+  await clock.advance(36_000 + 15_000)
+  expect(whats(stopLogOf(store, w)).at(-1)).toBe(FILL_NO_CAUSE)
+  await $.turn.start({ text: 'a waker', turnId: 'waker' })
+  await $.turn.complete({ turnId: 'waker', reason: 'aborted', answer: '', durationMs: 1, isAborted: true })
+  await clock.settle()
+  const fills = w.fills ?? 0
+  await clock.advance(15_000)
+  expect(w.fills ?? 0).toBe(fills + 1)
+  expect(whats(stopLogOf(store, w))).not.toContain('owed resume: no carry-on queued, no key')
+})
+
+// Review M403 B: a look whose fill has not answered holds the lock, and every later look skips its tick.
+test('row d: a look while another look holds the lock does nothing', async ($, on) => {
+  const w = fresh()
+  const { clock } = await owedWorld($, on, w)
+  let release = () => {}
+  w.fillHold = new Promise<void>(resolve => {
+    release = resolve
+  })
+  await $.classic.StopFailure({ error: 'rate_limit' })
+  await clock.settle()
+  await clock.advance(36_000 + 15_000)
+  expect(w.fills).toBe(1)
+  await clock.advance(30_000)
+  expect(w.fills).toBe(1)
+  release()
+  await clock.settle()
+  await clock.advance(15_000)
+  expect(w.fills).toBe(2)
+})
+
+// Review M403 E: a look that throws says so in the stop-log, once an episode.
+test('a throw in the owed-resume look writes one stop-log line', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await owedWorld($, on, w)
+  w.isFillThrown = true
+  await $.classic.StopFailure({ error: 'rate_limit' })
+  await clock.settle()
+  await clock.advance(36_000 + 30_000)
+  // One line, whatever name the engine gives the error; the next looks fail too and say nothing more.
+  expect(whats(stopLogOf(store, w)).filter(l => l.startsWith('owed resume look failed: '))).toHaveLength(1)
+})
+
+test('row h: a StopFailure with agent_id switches nothing, opens no episode and allows no Escape', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await owedWorld($, on, w)
+  await $.classic.StopFailure({ error: 'rate_limit', agent_id: 'agent-1', agent_type: 'Explore' })
+  await clock.settle()
+  await clock.advance(2 * 60_000)
+  expect([slots(w), w.submitted, w.spawned]).toEqual([[], [], []])
+  // An episode would have the look write that nothing is queued; the one line is the agent's stop.
+  expect(whats(stopLogOf(store, w))).toEqual(['stop heard from agent Explore: rate_limit, no switch'])
+})
+
+test('row i: an open turn that never ends holds every Escape and the stop-log names the wait once', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await owedWorld($, on, w)
+  await turnStops($, clock, undefined, false)
+  await clock.advance(5 * 60_000)
+  const lines = whats(stopLogOf(store, w))
+  expect(lines.filter(l => l === WAITS_ON_TURN)).toHaveLength(1)
+  expect(lines.filter(l => l.startsWith('owed resume: fill') || l.includes('Escape'))).toEqual([])
+  expect(w.spawned).toEqual([])
+})
+
+test('row j: a carry-on submitted while a main turn runs, that turn dies on a limit, no second carry-on is submitted', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await owedWorld($, on, w)
+  await turnStops($, clock)
+  // A main-loop turn (a waker's) runs as the carry-on goes out behind it, and dies on the limit on login 2.
+  await $.turn.start({ text: 'waker', turnId: 'turn-waker' })
+  await clock.advance(36_000)
+  expect(w.submitted).toHaveLength(1)
+  await $.classic.StopFailure({ error: 'rate_limit' })
+  await $.turn.complete({ turnId: 'turn-waker', reason: 'error', answer: '', durationMs: 1, isAborted: false })
+  await clock.settle()
+  await clock.advance(36_000)
+  expect(slots(w)).toEqual([SLOT2, SLOT3])
+  expect(w.submitted).toHaveLength(1)
+  expect(whats(stopLogOf(store, w))).toContain('carry-on not sent again: one is queued')
+})
+
+test('row l: with no pane, the look logs once and sends no key', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await owedWorld($, on, w, false)
+  await turnStops($, clock)
+  await clock.advance(5 * 60_000)
+  const lines = whats(stopLogOf(store, w))
+  expect(lines.filter(l => l === 'owed resume: no Orca pane, waits for an Esc')).toHaveLength(1)
+  expect(lines.filter(l => l.startsWith('owed resume: fill'))).toEqual([])
+  expect(w.spawned).toEqual([])
+})
+
+test('row r: a resume that dies with no response since its switch marks nothing on the target and moves to the next login', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await owedWorld($, on, w)
+  await turnStops($, clock)
+  await clock.advance(36_000)
+  // The resume enters on login 2 and dies at once on the limit.
+  await $.turn.start({ text: w.submitted[0] ?? '', turnId: 'turn-carry' })
+  await $.classic.StopFailure({ error: 'rate_limit' })
+  await $.turn.complete({ turnId: 'turn-carry', reason: 'error', answer: '', durationMs: 1, isAborted: false })
+  await clock.settle()
+  expect(slots(w)).toEqual([SLOT2, SLOT3])
+  expect(['mark:1', 'mark:2', 'week-mark:2', 'fable-mark:2'].map(key => store.get(key) !== undefined)).toEqual([true, false, false, false])
+  expect(whats(stopLogOf(store, w))).toContain('stop on owed resume: login 2 tried, no response since its switch, no mark')
+})
+
+// The kit cannot draw 'dialog': the look reaches the fill within v4's bound, and the resume enters there.
+test('row t: with no scheduled task firing, entry comes within the bound by mock-clock advances alone', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await owedWorld($, on, w)
+  await $.classic.StopFailure({ error: 'rate_limit' })
+  await clock.settle()
+  for (let waited = 0; waited < 120_000 && !whats(stopLogOf(store, w)).includes(FILL_NO_CAUSE); waited += 5_000) await clock.advance(5_000)
+  expect(whats(stopLogOf(store, w))).toContain(FILL_NO_CAUSE)
+  await $.turn.start({ text: w.submitted[0] ?? '', turnId: 'turn-carry' })
+  await clock.settle()
+  const stop = logTime(store, w, 'stop heard')
+  // entry - stop <= max(m + 35 s, close - stop) + 50 s x h + 65 s + 2 min x (n - 1), with no turn open, h = 0 and n = 1.
+  const m = logTime(store, w, 'moved to') - stop
+  const bound = m + 35_000 + 65_000
+  expect(logTime(store, w, 'resume entered') - stop).toBeLessThanOrEqual(bound)
+})
+
+test('row u: an unknown wording reads the Fable week from the usage read, as no wording does', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  // The usage read shows login 1's Fable week spent; the words name no limit.
+  w.usage['tok-1'] = [20, 30, 100]
+  w.usage['tok-2'] = [10, 30, 10]
+  const store = new Map<string, unknown>(Object.entries(TWO_LOGINS))
+  const clock = world(on, w, store)
+  await start($, clock)
+  await $.classic.StopFailure({ error: 'rate_limit', last_assistant_message: 'Claude usage limit reached.' })
+  await clock.settle()
+  // A Fable stop: the move is for the Fable week, and login 1's 5-hour window is left unmarked.
+  expect(slots(w)).toEqual([SLOT2])
+  expect(w.toasts.filter(t => /has 0% of its Fable week left\.$/.test(t))).toHaveLength(1)
+  expect(store.get('mark:1')).toBeUndefined()
+})
+
+test('row b: a measure within 30 s of entry, then a stop, keeps one episode and its tried set', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await owedWorld($, on, w)
+  await turnStops($, clock)
+  await clock.advance(36_000)
+  await $.turn.start({ text: w.submitted[0] ?? '', turnId: 'turn-carry' })
+  await clock.advance(10_000)
+  // A measure of the context alone, which proves no switch; less than ENTRY_PROOF_MS after the entry, it ends nothing.
+  await $.session.measure({ context: { window: 200_000 }, rateLimits: w.limits, changed: ['context'] })
+  await $.classic.StopFailure({ error: 'rate_limit' })
+  await $.turn.complete({ turnId: 'turn-carry', reason: 'error', answer: '', durationMs: 1, isAborted: false })
+  await clock.settle()
+  const lines = whats(stopLogOf(store, w))
+  expect(lines.filter(l => l.startsWith('work resumed'))).toEqual([])
+  expect(lines.filter(l => l.startsWith('picked 3'))).toEqual(['picked 3: fresh, read 1 min ago; tried 1, 2'])
+  expect(slots(w)).toEqual([SLOT2, SLOT3])
+})
+
 // ---------------------------------------------------------------- puma-9arph.38: one switch in flight
 
 const isSwitchedToast = (t: unknown) => String(t).startsWith('Switched to ')
@@ -10720,7 +11032,7 @@ test('a stop\'s switch given up on by a press says so in the stop-log when it la
   await settleReal(clock)
   await settleReal(clock)
   await pane.unmount()
-  expect([slots(w).at(-1), whats(stopLogOf(store, w))]).toEqual([SLOT3, [STOP_RATE_LIMIT, 'stop switch given up on: landed late, no carry-on']])
+  expect([slots(w).at(-1), whats(stopLogOf(store, w))]).toEqual([SLOT3, [STOP_RATE_LIMIT, PICKED_TWO, 'stop switch given up on: landed late, no carry-on']])
 })
 
 test('a switch given up on after SWITCH_WAIT_MS that lands late leaves the session on the login a person pressed for since (puma-9arph.39)', async ($, on) => {

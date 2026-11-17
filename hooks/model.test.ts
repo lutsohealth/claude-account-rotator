@@ -8,7 +8,7 @@ import { laterMark, spentMark, withFableMark } from './model'
 import { EMPTY_VIEW, USAGE_IDLE_MS, fitRow, hasRoom, rowOf, rowsOf, rowText, storedLine, storedLineText } from './model'
 import ROWS_FIXTURE from '../tests/fixtures/rows'
 import { REQUEST_TTL_MS, holdsLogin, isLoginOf, sameLogin, requestFrom, requestsDir, slotNumber } from './model'
-import { escapeArgv, escapeHeldBack, raisesLimitModal } from './model'
+import { ESCAPE_GAP_MS, escapeAfterFill, escapeArgv, escapeHeldBack, pickAfterStop, raisesLimitModal } from './model'
 import { mayWrite } from './model'
 import { signInFromStatus } from './model'
 import { USAGE_BACKOFF_MAX_MS, USAGE_CLAIM_MS, USAGE_CLAIM_WAIT_MS, USAGE_EARLY_MS, WRITER_VERSION, afterUsage, claimDueReads, gatingDue, isUsageDue, mayForceUsage, mayReadSince, renewClaim, retryAfterFrom, usageDueFrom } from './model'
@@ -1839,24 +1839,113 @@ test('a slot has a number only as a folder directly under the accounts folder, i
   expect(bad.filter(slot => slotNumber(slot, home) !== undefined)).toEqual([])
 })
 
-// puma-9arph.34 C (RULINGS 6008, 6034): the one Escape a queued carry-on gets goes only when nothing below holds it back.
-test('a queued carry-on gets its Escape only after a limit stop, with no turn open, under the engine\'s own dialog, in an Orca pane', () => {
-  const modal = { isLimitStopLast: raisesLimitModal('rate_limit'), openTurns: 0, fill: { refusal: 'dialog', pane: 'term_a' } }
+// puma-9arph.34 C (RULINGS 6008, 6034), v4 s.3: the look's Escape for a queued carry-on goes only when nothing below holds it back.
+test('row g: with prompts queued under the dialog and no turn, the look\'s Escape releases them and the resume enters', () => {
+  const modal: Parameters<typeof escapeHeldBack>[0] = {
+    isCarryOnInFlight: true,
+    isLimitStopLast: raisesLimitModal('rate_limit'),
+    openTurns: 0,
+    isSettling: false,
+    isHeld: false,
+    escapes: 0,
+    budget: 8,
+    pane: 'term_a',
+    fill: { refusal: 'dialog' },
+  }
+  // Under the engine's own 'dialog' with no turn open in any loop, the key goes.
   expect(escapeHeldBack(modal)).toBeUndefined()
   // Before the fill is asked, only what the session knows without asking.
-  expect(escapeHeldBack({ isLimitStopLast: true, openTurns: 0 })).toBeUndefined()
+  expect(escapeHeldBack({ ...modal, fill: undefined })).toBeUndefined()
   const rows: [string, Parameters<typeof escapeHeldBack>[0], string][] = [
+    ['no carry-on in flight', { ...modal, isCarryOnInFlight: false }, 'no carry-on in flight'],
     ['no limit stop since the last turn began', { ...modal, isLimitStopLast: false }, 'no limit stop before it'],
     // puma-9arph.36: a rejected sign-in raises no modal, so even under the engine's own dialog it gets no key.
     ['a rejected sign-in before it', { ...modal, isLimitStopLast: raisesLimitModal('authentication_failed') }, 'no limit stop before it'],
     ['a turn open in some loop', { ...modal, openTurns: 1 }, 'a turn is open'],
+    ['a switch settling', { ...modal, isSettling: true }, 'the switch is settling'],
+    ['a switch held', { ...modal, isHeld: true }, 'a switch is held'],
     // Review CALL1 [UNPROVEN-DIALOG]: a hook's refusal carries no cause and proves no dialog.
-    ['a refusal with its cause left out', { ...modal, fill: { pane: 'term_a' } }, 'no dialog holds it'],
-    ['a session with no box', { ...modal, fill: { refusal: 'no_composer', pane: 'term_a' } }, 'no dialog holds it'],
-    ['no Orca pane (C4)', { ...modal, fill: { refusal: 'dialog' } }, 'no Orca pane'],
-    ['an empty Orca handle', { ...modal, fill: { refusal: 'dialog', pane: '' } }, 'no Orca pane'],
+    ['a refusal with its cause left out', { ...modal, fill: {} }, 'no dialog holds it'],
+    ['a session with no box', { ...modal, fill: { refusal: 'no_composer' } }, 'no dialog holds it'],
+    ['no Orca pane (C4)', { ...modal, pane: undefined }, 'no Orca pane'],
+    ['an empty Orca handle', { ...modal, pane: '' }, 'no Orca pane'],
   ]
   expect(rows.map(([name, s]) => [name, escapeHeldBack(s)])).toEqual(rows.map(([name, , why]) => [name, why]))
+})
+
+test('row k: a carry-on still in flight 30 s after its Escape gets another, within the budget 2 x logins + 2, then stuck', () => {
+  const logins = 3
+  const budget = 2 * logins + 2
+  const look = (escapes: number, sinceEscapeMs: number | undefined): string | undefined =>
+    escapeHeldBack({ isCarryOnInFlight: true, isLimitStopLast: true, openTurns: 0, isSettling: false, isHeld: false, escapes, budget, sinceEscapeMs, pane: 'term_a', fill: { refusal: 'dialog' } })
+  // The gap: 1 ms short of ESCAPE_GAP_MS holds the key, the gap itself lets it go.
+  expect([look(1, ESCAPE_GAP_MS - 1), look(1, ESCAPE_GAP_MS)]).toEqual(['too soon after the last Escape', undefined])
+  // The budget: every Escape up to it goes, one gap apart; the next is 'Escapes spent'.
+  const answers = Array.from({ length: budget + 1 }, (_, spent) => look(spent, spent === 0 ? undefined : ESCAPE_GAP_MS))
+  expect(answers).toEqual([...Array.from({ length: budget }, () => undefined), 'Escapes spent'])
+})
+
+test('row k: the first Escape of an episode goes with lastEscapeAt unset', () => {
+  // No Escape yet: sinceEscapeMs is undefined, and the gap does not hold the first key.
+  expect(escapeHeldBack({ isCarryOnInFlight: true, isLimitStopLast: true, openTurns: 0, isSettling: false, isHeld: false, escapes: 0, budget: 8, sinceEscapeMs: undefined, pane: 'term_a', fill: { refusal: 'dialog' } })).toBeUndefined()
+})
+
+// Review M403 B: the Escape after the fill, the one place that counts it, times it and reads the session again before it.
+test('row k: an Escape after a dialog fill counts one and stamps its time, and a turn, entry or end during the fill sends none', () => {
+  const look = { isCarryOnInFlight: true, isLimitStopLast: true, openTurns: 0, isSettling: false, isHeld: false, escapes: 2, budget: 8, sinceEscapeMs: ESCAPE_GAP_MS, pane: 'term_a' }
+  const still = { openTurns: 0, isLimitStopLast: true, isCarryOnInFlight: true, isSameEpisode: true }
+  const rows: [string, string | undefined, typeof still, ReturnType<typeof escapeAfterFill>][] = [
+    ['a dialog, nothing changed', 'dialog', still, { escapes: 3, lastEscapeAt: NOW }],
+    ['no dialog', undefined, still, { why: 'no dialog holds it' }],
+    ['the episode ended during the fill', 'dialog', { ...still, isSameEpisode: false }, { why: 'the episode ended during the fill' }],
+    ['a turn began during the fill', 'dialog', { ...still, openTurns: 1 }, { why: 'a turn began during the fill' }],
+    ['a main-loop turn began during the fill', 'dialog', { ...still, isLimitStopLast: false }, { why: 'a main-loop turn began during the fill' }],
+    ['the carry-on entered during the fill', 'dialog', { ...still, isCarryOnInFlight: false }, { why: 'the carry-on entered during the fill' }],
+  ]
+  expect(rows.map(([name, refusal, after]) => [name, escapeAfterFill(look, refusal, after, NOW)])).toEqual(rows.map(([name, , , act]) => [name, act]))
+})
+
+// v4 s.1, row a: the pick after a stop judges each login on its own stored read, and a read is fresh within FRESH_READ_MS.
+test('row a: the case\'s shape: a week-old reading with a run-out token and a fresh reading with room, the move goes to the fresh one', () => {
+  // Login 1 is in use and spent; login 2, next in the list, was last read a week ago, its windows long reset (so it reads as
+  // room); login 3 was read just now and has room. The tick's pick takes login 2 by order; the pick after a stop takes login 3.
+  const v = view({ '1': [100, 50], '2': [0, 0], '3': [30, 40] }, {}, 'order')
+  v.readings['2'] = { fiveHour: { pct: 100, resetsAt: '2026-10-05T15:00:00Z' }, sevenDay: { pct: 100, resetsAt: '2026-10-05T03:00:00Z' }, at: NOW - 7 * 24 * HOUR }
+  const picked = pickAfterStop(v, v.readings, NOW, undefined, ['1'], new Set())
+  expect([pickTarget(v, NOW)?.id, picked?.account.id, picked?.tier]).toEqual(['2', '3', 'fresh'])
+})
+
+// Review R1 F1: the spent-old tier is ordered by when each login frees for the need, the latest reset of what spends it.
+test('row a: the spent-old tier goes to the login that frees first for the need, not the one whose other window resets first', () => {
+  const at = (hours: number) => new Date(NOW + hours * HOUR).toISOString()
+  // Read two hours ago, so stale: [5-hour pct, its reset in h, week pct, its reset in h, Fable pct, its reset in h].
+  const read = (w: [number, number, number, number, number, number]): Reading => ({
+    fiveHour: { pct: w[0], resetsAt: at(w[1]) },
+    sevenDay: { pct: w[2], resetsAt: at(w[3]) },
+    fable: { pct: w[4], resetsAt: at(w[5]) },
+    at: NOW - 2 * HOUR,
+  })
+  const cases: [string, 'fable' | undefined, Reading, Reading, Partial<View>, string][] = [
+    ['Fable week spent: its reset, not the 5-hour one', 'fable', read([20, 4, 20, 100, 100, 1]), read([20, 1, 20, 100, 100, 2]), {}, '2'],
+    ['week spent: its reset, not the 5-hour one', undefined, read([20, 1, 100, 3, 0, 9]), read([20, 5, 100, 2, 0, 9]), {}, '3'],
+    ['a week mark in force: its reset, not the read\'s 5-hour one', undefined, read([20, 1, 20, 100, 0, 9]), read([20, 5, 100, 3, 0, 9]), { weekMarks: { '2': { pct: 100, resetsAt: at(6), at: NOW } } }, '3'],
+    ['5-hour and week both spent: the later of the two', undefined, read([95, 1, 100, 5, 0, 9]), read([95, 2, 100, 3, 0, 9]), {}, '3'],
+    ['a Fable mark in force, for the Fable week: its reset', 'fable', read([20, 1, 20, 100, 20, 1]), read([20, 5, 20, 100, 100, 3]), { fableMarks: { '2': { pct: 100, resetsAt: at(6), at: NOW } } }, '3'],
+    ['a Fable mark, for no need: it frees nothing, so not its reset', undefined, read([20, 1, 20, 100, 0, 9]), read([20, 5, 100, 3, 0, 9]), { fableMarks: { '2': { pct: 100, resetsAt: at(10), at: NOW } } }, '2'],
+    // Review M403 C: a spending window with no reset known frees at no known time, so after every one that does.
+    ['week spent with no reset known: last, not by its 5-hour reset', undefined, { ...read([20, 1, 100, 0, 0, 9]), sevenDay: { pct: 100 } }, read([20, 5, 100, 3, 0, 9]), {}, '3'],
+  ]
+  const wrong: string[] = []
+  for (const [name, need, second, third, marks, wanted] of cases) {
+    for (const rotateTo of ['room', 'reset', 'order'] as RotateTo[]) {
+      const v: View = { ...view({ '1': [100, 50], '2': [0, 0], '3': [0, 0] }, {}, rotateTo), ...marks }
+      v.readings['2'] = second
+      v.readings['3'] = third
+      const got = pickAfterStop(v, v.readings, NOW, need, ['1'], new Set())
+      if (got?.account.id !== wanted || got?.tier !== 'spent-old') wrong.push(`${name}, ${rotateTo}: wanted ${wanted}, got ${got?.account.id}/${got?.tier}`)
+    }
+  }
+  expect(wrong).toEqual([])
 })
 
 test('the Escape goes to the one pane named, by a fixed argv with no shell (puma-9arph.34 C1)', () => {
