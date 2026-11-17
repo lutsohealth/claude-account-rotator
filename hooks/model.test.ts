@@ -10,6 +10,7 @@ import ROWS_FIXTURE from '../tests/fixtures/rows'
 import { REQUEST_TTL_MS, holdsLogin, isLoginOf, sameLogin, requestFrom, requestsDir, slotNumber } from './model'
 import { ESCAPE_GAP_MS, NUDGE_LEAD_MS, NUDGE_TEXT, escapeAfterFill, escapeArgv, escapeHeldBack, isBoxFree, nudgeHeld, pickAfterStop, raisesLimitModal, renudgeDue } from './model'
 import { mayWrite } from './model'
+import { OWN_CONTINUE_MARGIN_MS, isCountdownOnScreen, ownContinueAfterLook, ownContinueHeldBack, screenLinesFrom } from './model'
 import { signInFromStatus } from './model'
 import { USAGE_BACKOFF_MAX_MS, USAGE_CLAIM_MS, USAGE_CLAIM_WAIT_MS, USAGE_EARLY_MS, WRITER_VERSION, afterUsage, claimDueReads, gatingDue, isUsageDue, mayForceUsage, mayReadSince, renewClaim, retryAfterFrom, usageDueFrom } from './model'
 import { DEFAULT_FOOTER, availableNow, claudeAccount, blockedAdvice, braille, browsersFrom, chromeNote, continueTextFrom, counted, fiveHourLimitFrom, credentialFrom, credentialsFile, fableMark, fableSpentNotice, fableStay, footerStyleFrom, healthOf, identityFromProfile, isFableSpent, isFableStop, isNoBrowser, isPolicyRefusal, keepFable, keychainItem, label, legacyMark, markFrom, nextReset, pickTarget, pie, readingFromUsage, restartSteps, rotateToFrom, shouldLeave, roomColor, stuckText, windowPct, withMark, withWeekMark } from './model'
@@ -1877,6 +1878,140 @@ test('row g: with prompts queued under the dialog and no turn, the look\'s Escap
 test('row v: a held switch holds back every Escape but the refresh nudge\'s', () => {
   const look: Parameters<typeof escapeHeldBack>[0] = { isCarryOnInFlight: true, isLimitStopLast: true, openTurns: 0, isSettling: false, isHeld: true, escapes: 0, budget: 10, pane: 'term_a', fill: { refusal: 'dialog' } }
   expect([escapeHeldBack(look), escapeHeldBack({ ...look, isNudge: true })]).toEqual(['a switch is held', undefined])
+})
+
+// puma-9arph.71: the screens of the reading (Claude Code 2.1.326), the countdown's footer standing and gone.
+const COUNTDOWN_SCREEN = [
+  '⏺ Usage limit reached · continuing automatically at 1:11am · esc to cancel',
+  '──────────',
+  '❯ ',
+  '──────────',
+  '  ⚠ Usage limit reached · limit resets 1:11am',
+  '    Continuing automatically at 1:11am · Esc to cancel',
+  '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+]
+const CANCELLED_SCREEN = [
+  '⏺ Usage limit reached · continuing automatically at 1:11am · esc to cancel',
+  '⏺ Automatic continue cancelled · /rate-limit-options to re-arm',
+  '──────────',
+  '❯ ',
+  '──────────',
+  '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+]
+
+test('row ow: the countdown counts as on screen only by its footer under the prompt box (puma-9arph.71)', () => {
+  const shortly = COUNTDOWN_SCREEN.map(l => l.replace('Continuing automatically at 1:11am', 'Continuing shortly'))
+  // The transcript keeps the stop's own line, in lower case, after a cancel: it is no footer.
+  const footerAbove = ['    Continuing automatically at 1:11am · Esc to cancel', '❯ ', '  ⏵⏵ bypass permissions on']
+  expect([isCountdownOnScreen(COUNTDOWN_SCREEN), isCountdownOnScreen(shortly), isCountdownOnScreen(CANCELLED_SCREEN), isCountdownOnScreen(footerAbove), isCountdownOnScreen([])]).toEqual([true, true, false, false, false])
+})
+
+test('row ow: screenLinesFrom takes only a rendered screen from `orca terminal read --screen --json` (puma-9arph.71)', () => {
+  const json = (terminal: unknown) => JSON.stringify({ result: { terminal } })
+  expect([
+    screenLinesFrom(json({ source: 'screen', tail: ['a', 'b'] })),
+    screenLinesFrom(json({ source: 'stream', tail: ['a'] })),
+    screenLinesFrom(json({ source: 'screen-unavailable', tail: ['a'] })),
+    screenLinesFrom(json({ source: 'screen', tail: 'a' })),
+    screenLinesFrom(json({ source: 'screen', tail: ['a', 2] })),
+    screenLinesFrom('not json'),
+  ]).toEqual([['a', 'b'], undefined, undefined, undefined, undefined, undefined])
+})
+
+// puma-9arph.71 (the reading R0 to R8, RULING 6578): the Escape that cancels Claude Code's own continue goes only at an
+// idle, empty prompt with the countdown's footer on screen, after the mod's own carry-on answered.
+test('row ow: ownContinueHeldBack keys only the states the reading shows safe, and names why for every other', () => {
+  const now = 1_000_000
+  const idle: Parameters<typeof ownContinueHeldBack>[0] = {
+    isArmed: true,
+    isSent: false,
+    mainTurnsSince: 0,
+    openTurns: 0,
+    isCarryOnQueued: false,
+    isSettling: false,
+    isHeld: false,
+    isPanelShown: false,
+    now,
+    resetAt: now + 60_000,
+    pane: 'term_a',
+    box: { text: '' },
+    fill: { isFilled: true, text: '' },
+    screen: { lines: COUNTDOWN_SCREEN },
+  }
+  // R1, R6: the key goes. Each stage not asked yet holds nothing back: the look asks it next.
+  expect([
+    ownContinueHeldBack(idle),
+    ownContinueHeldBack({ ...idle, screen: undefined }),
+    ownContinueHeldBack({ ...idle, fill: undefined, screen: undefined }),
+    ownContinueHeldBack({ ...idle, box: undefined, fill: undefined, screen: undefined }),
+    ownContinueHeldBack({ ...idle, resetAt: undefined }),
+    ownContinueHeldBack({ ...idle, now: now + 60_000 + OWN_CONTINUE_MARGIN_MS - 1 }),
+  ]).toEqual([undefined, undefined, undefined, undefined, undefined, undefined])
+  const rows: [string, Parameters<typeof ownContinueHeldBack>[0], string][] = [
+    ['R0, R7: no carry-on of the mod answered', { ...idle, isArmed: false }, 'no carry-on answered'],
+    ['R8: the one key went', { ...idle, isSent: true }, 'Escape sent already'],
+    ["R3x: a main turn began since, a person's or the own continue's", { ...idle, mainTurnsSince: 1 }, 'a main turn began since the carry-on'],
+    ['R3, R4: a turn or a tool call running', { ...idle, openTurns: 1 }, 'a turn is open'],
+    ['R5: a permission dialog, its turn open', { ...idle, openTurns: 1, fill: { isFilled: false, refusal: 'dialog', text: '' } }, 'a turn is open'],
+    ['R5 alone: a dialog holds the keys', { ...idle, fill: { isFilled: false, refusal: 'dialog', text: '' } }, 'the fill was refused: dialog'],
+    ["a hook's refusal, its cause left out", { ...idle, fill: { isFilled: false, text: '' } }, 'the fill was refused: no cause'],
+    ['a session with no box', { ...idle, fill: { isFilled: false, refusal: 'no_composer', text: '' } }, 'the fill was refused: no_composer'],
+    ['a carry-on queued or armed', { ...idle, isCarryOnQueued: true }, 'a carry-on is queued'],
+    ['a switch settling', { ...idle, isSettling: true }, 'the switch is settling'],
+    ['a switch held', { ...idle, isHeld: true }, 'a switch is held'],
+    ['the accounts panel open', { ...idle, isPanelShown: true }, 'the accounts panel is shown'],
+    ['at the reset plus the margin', { ...idle, now: now + 60_000 + OWN_CONTINUE_MARGIN_MS }, "past the own continue's deadline"],
+    ['no Orca pane', { ...idle, pane: undefined }, 'no Orca pane'],
+    ['an empty Orca handle', { ...idle, pane: '' }, 'no Orca pane'],
+    ['a box read with no answer', { ...idle, box: { text: undefined } }, 'the box is unreadable'],
+    ['R2: a draft in the box', { ...idle, box: { text: 'a draft typed by the stand-in' } }, 'the prompt box holds a draft'],
+    ['a draft the fill shows and the read missed', { ...idle, fill: { isFilled: true, text: 'typed meanwhile' } }, 'the prompt box holds a draft'],
+    ['a screen read with no answer', { ...idle, screen: { lines: undefined } }, 'the screen is unreadable'],
+    ['R7: no countdown on screen (a cancel, a menu, a picker)', { ...idle, screen: { lines: CANCELLED_SCREEN } }, 'no countdown on screen'],
+  ]
+  expect(rows.map(([name, s]) => [name, ownContinueHeldBack(s)])).toEqual(rows.map(([name, , why]) => [name, why]))
+  // The order: a look that fails at two gates names the earlier.
+  expect([
+    ownContinueHeldBack({ ...idle, isArmed: false, isSent: true }),
+    ownContinueHeldBack({ ...idle, openTurns: 1, box: { text: 'draft' } }),
+    ownContinueHeldBack({ ...idle, pane: undefined, box: { text: 'draft' } }),
+  ]).toEqual(['no carry-on answered', 'a turn is open', 'no Orca pane'])
+})
+
+test('row ow: ownContinueAfterLook re-reads the turns with no await before the key (puma-9arph.71)', () => {
+  const look: Parameters<typeof ownContinueAfterLook>[0] = {
+    isArmed: true,
+    isSent: false,
+    mainTurnsSince: 0,
+    openTurns: 0,
+    isCarryOnQueued: false,
+    isSettling: false,
+    isHeld: false,
+    isPanelShown: false,
+    now: 0,
+    pane: 'term_a',
+    box: { text: '' },
+    fill: { isFilled: true, text: '' },
+    screen: { lines: COUNTDOWN_SCREEN },
+  }
+  const same = { isSameArm: true, openTurns: 0, mainTurnsSince: 0 }
+  expect([
+    ownContinueAfterLook(look, same),
+    ownContinueAfterLook({ ...look, box: { text: 'x' } }, same),
+    ownContinueAfterLook({ ...look, screen: undefined }, same),
+    ownContinueAfterLook(look, { ...same, isSameArm: false }),
+    ownContinueAfterLook(look, { ...same, openTurns: 1 }),
+    ownContinueAfterLook(look, { ...same, mainTurnsSince: 1 }),
+  ]).toEqual([
+    { escape: true },
+    { why: 'the prompt box holds a draft' },
+    { why: 'not looked' },
+    { why: 'the arm ended during the look' },
+    { why: 'a turn began during the look' },
+    { why: 'a main turn began during the look' },
+  ])
+  // The first Escape (RULING 6036) is not widened: an accepted fill still gives it no key.
+  expect(escapeHeldBack({ isCarryOnInFlight: true, isLimitStopLast: true, openTurns: 0, isSettling: false, isHeld: false, escapes: 0, budget: 8, pane: 'term_a', fill: {} })).toBe('no dialog holds it')
 })
 
 // puma-9arph.57 (council B1 to B5): one nudge an episode, under a held stop switch, NUDGE_LEAD_MS before the expiry.
