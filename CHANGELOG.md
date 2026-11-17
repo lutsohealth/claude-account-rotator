@@ -2,6 +2,11 @@
 
 What each version of the account rotator changed. To get each one as Claude Code starts, turn on auto-update: in `/plugin`, open **Marketplaces**, pick **claude-account-rotator** and choose **Enable auto-update**. To update by hand, run `claude plugin marketplace update claude-account-rotator`, then `claude plugin update account-rotator@claude-account-rotator`, and start a new session.
 
+## 0.5.45-lutso.1 - 2026-11-17
+
+- **`account-rotator account use` on the account in use says so when a running switch keeps the session's held switch**: it used to answer that the session already uses that account and exit 0, while the switch could still move the session. It now says a switch is running that may move it, and exits 4: run it again in a minute (#132, puma-9arph.68).
+- **Not fixed yet**: the switch's own read of the stored sign-in has no 10-second bound; a stop's rejected-sign-in mark is not bound to the token it saw, so a later token's expiry can let a held switch go (puma-9arph.69); a reload of the mod's code during a stop drops the carry-on it owes and the Esc for the limit menu (puma-9arph.66); the minute's retry of a held switch can hold it again after a drop, and can move the session after `account use` ended the hold while no switch ran (puma-9arph.67).
+
 ## 0.5.44-lutso.1 - 2026-11-17
 
 - **A switch held for a token refresh no longer waits hours while no turn runs**: with the prompt box empty, the session sends one line of its own on the account in use 4 minutes before that token runs out. The request refreshes the token, the turn stops on the limit, and that stop lands the switch and carries on (`refresh nudge` in the stop log). A token that runs out unrefreshed gets one more line, never a third, and a draft in the box holds the switch until you send it or clear the box. At the token's expiry, only a rejected sign-in the stop itself saw, or a refresh, lets the held switch go; a check's mark does not (#129, #130; puma-9arph.57, .65, .32, .64).
