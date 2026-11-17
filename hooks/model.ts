@@ -1708,6 +1708,31 @@ export function nudgeHeld(s: NudgeLook): string | undefined {
   return s.expiresInMs > NUDGE_LEAD_MS ? 'the token is not due' : undefined
 }
 
+/**
+ * Whether the prompt box counts as empty: it is, or it holds exactly one of the mod's own lines (`own`: the nudge's, the
+ * carry-on's, the kept Fable line), which a queued carry-on can leave there. A box the read could not show is not free.
+ */
+export function isBoxFree(text: string | undefined, own: readonly (string | undefined)[]): boolean {
+  return text !== undefined && (text === '' || own.includes(text))
+}
+
+/**
+ * Whether the one more nudge is due: none went yet, and the token in use is still the one the first was sent for (the
+ * same digest, `firstToken`, and the same expiry, `firstExpiresAt`: an expiry alone tells no token), now run out, so a
+ * request on it refreshes it first.
+ */
+export function renudgeDue(s: {
+  isRenudged: boolean
+  firstExpiresAt: number | undefined
+  expiresAt: number | undefined
+  firstToken: string | undefined
+  token: string | undefined
+  now: number
+}): boolean {
+  const isSameToken = s.firstToken !== undefined && s.token === s.firstToken
+  return !s.isRenudged && isSameToken && s.firstExpiresAt !== undefined && s.expiresAt === s.firstExpiresAt && s.expiresAt <= s.now
+}
+
 /** What the session knows again right after the fill, read with no await before the key. */
 export type AfterFill = { openTurns: number; isLimitStopLast: boolean; isCarryOnInFlight: boolean; isSameEpisode: boolean }
 
