@@ -11377,6 +11377,13 @@ test('puma-9arph.65: a rejected sign-in on a nudge sent with the token already e
   expect(slots(w)).toEqual([])
   await clock.advance(60_000)
   expect(slots(w)).toEqual([SLOT2])
+  // The operator's order: it switches AND resumes. The held stop's carry-on goes once the switch has settled.
+  await clock.advance(36_000)
+  expect(w.submitted, 'the stop carry-on after the landing').toHaveLength(3)
+  const carry = w.submitted[2] ?? ''
+  await $.turn.start({ text: carry, turnId: 'turn-carry' })
+  await clock.settle()
+  expect(whats(stopLogOf(store, w)).at(-1)).toBe('resume entered')
 })
 
 test('puma-9arph.65: a rejected sign-in on a nudge sent before the token\'s expiry still drops the held switch and marks nothing', async ($, on) => {
