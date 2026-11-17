@@ -283,7 +283,7 @@ function world(on: On, w: World, store: Record<string, unknown> | Map<string, un
       if (w.fileCommandFails === cmd) return { value: { ...ran(1, ''), stderr: `${cmd}: failed` } }
       w.modes = w.modes ?? {}
       if (cmd === 'chmod' && !w.isChmodIgnored) w.modes[e.argv[2] ?? ''] = sub ?? ''
-      if (cmd === 'test') return { value: ran(w.modes[e.argv[2] ?? ''] === '755' ? 0 : 1, '') }
+      if (cmd === 'test') return { value: ran(sub === '-x' && w.modes[e.argv[2] ?? ''] === '755' ? 0 : 1, '') }
       if (cmd === 'mv') {
         const [from, to] = [e.argv[2] ?? '', e.argv[3] ?? '']
         w.files[to] = w.files[from] ?? null
@@ -11375,12 +11375,17 @@ test('puma-9arph.26: a copy that differs from the mod\'s launcher is replaced at
   const { w } = await launcherWorld($, on, OLD_LAUNCHER)
   expect([w.files[COPY], w.modes?.[COPY], kept(w)]).toEqual([NEW_LAUNCHER, '755', [COPY]])
   expect(debugLines(w, 'launcher copy').length).toBe(1)
+  // The commands, their flags and their order: the move comes last, after the executable check.
+  expect(w.fileCommands).toEqual([`chmod 755 ${COPY}.new`, `test -x ${COPY}.new`, `mv -f ${COPY}.new ${COPY}`])
 })
 
-test('puma-9arph.26: a copy equal to the mod\'s launcher is not written', async ($, on) => {
-  const { w } = await launcherWorld($, on, NEW_LAUNCHER)
-  expect([w.files[COPY], (w.writes ?? []).filter(path => path.startsWith(COPY_DIR)), w.fileCommands]).toEqual([NEW_LAUNCHER, [], undefined])
-})
+// Codex round 2: an equal copy is left alone whatever its text, an empty one included.
+for (const own of [NEW_LAUNCHER, '']) {
+  test(`puma-9arph.26: a copy equal to the mod's launcher is not written${own === '' ? ', both empty' : ''}`, async ($, on) => {
+    const { w } = await launcherWorld($, on, own, world => { world.ownLauncher = own })
+    expect([w.files[COPY], (w.writes ?? []).filter(path => path.startsWith(COPY_DIR)), w.fileCommands, debugLines(w, 'launcher copy')]).toEqual([own, [], undefined, []])
+  })
+}
 
 test('puma-9arph.26: where no copy is installed, none is made', async ($, on) => {
   const { w } = await launcherWorld($, on, undefined)
