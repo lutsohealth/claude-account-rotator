@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import type { Reading, RotateTo, View } from '../types'
-import { weekLeaveFrom, launchOnFrom, pickLaunch, isSessionStop } from './model'
+import { weekLeaveFrom, launchOnFrom, pickLaunch, isSessionStop, isWeeklyStop } from './model'
 import { isSameWeek, whoseWeek } from './model'
 import { companyOf, identityFromStatus, planName } from './model'
 import { laterMark, spentMark, withFableMark } from './model'
@@ -546,6 +546,27 @@ test('a stop that says the Fable limit was reached is told from any other', () =
   expect(isFableStop("You've hit your session limit")).toBe(false)
   expect(isFableStop(undefined)).toBe(false)
 })
+
+test('a stop that says the Fable limit was hit, as Claude Code 2.1.325 and later words it, is a Fable stop', () => {
+  expect(isFableStop("You've hit your Fable limit · resets Nov 18 at 3pm (Europe/Tallinn)")).toBe(true)
+  expect(["You've hit your weekly limit · resets Nov 10", "You've hit your session limit", "You've hit your 5-hour limit"].map(isFableStop)).toEqual([false, false, false])
+  // The noun is "your Fable limit": a message that only names Fable is not a stop of that limit.
+  expect(isFableStop('Fable is available on your plan.')).toBe(false)
+})
+
+// The wordings of the rate_limit API error records on the host, counted by Claude Code version: the Fable stop says
+// "reached" up to 2.1.322 and "hit" from 2.1.325, and no record joins two limits. Each stop is read as one kind only.
+for (const [said, kinds] of [
+  ["You've reached your Fable limit. Switch to another model to continue.", [true, false, false]],
+  ["You've hit your Fable limit · resets Nov 18 at 3pm", [true, false, false]],
+  ["You've hit your weekly limit · resets Nov 10 at 11am", [false, false, true]],
+  ["You've hit your session limit · resets 3pm", [false, true, false]],
+  ["You've hit your 5-hour limit · resets 3pm", [false, true, false]],
+] as const) {
+  test(`the matchers read "${said}" as [Fable, session, weekly] = ${JSON.stringify(kinds)}`, () => {
+    expect([isFableStop(said), isSessionStop(said), isWeeklyStop(said)]).toEqual(kinds)
+  })
+}
 
 test('on a Fable stop the session leaves a login whose Fable week is spent, and only then', () => {
   const v = view({ '1': [20, 30, 100] })

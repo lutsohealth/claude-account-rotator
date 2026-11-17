@@ -956,6 +956,32 @@ test('a Fable stop moves to the login with Fable room and carries on, and the to
   await pane.unmount()
 })
 
+/** The same stop as Claude Code 2.1.325 and later words it. */
+const FABLE_HIT_STOP = { error: 'rate_limit', last_assistant_message: "You've hit your Fable limit · resets Nov 18 at 3pm" }
+
+test('a Fable stop worded "hit your Fable limit" moves to the login with Fable room and carries on, and the toast names the Fable week', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [20, 30, 100]
+  w.usage['tok-2'] = [10, 30, 10]
+  const clock = world(on, w, TWO_LOGINS)
+  await start($, clock)
+  await clock.advance(2 * 60_000)
+  expect(w.envSets).toEqual([])
+  await $.classic.StopFailure(FABLE_HIT_STOP)
+  await clock.settle()
+  expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
+  expect(w.toasts.filter(t => /^Switched to Claude account two@example.com.*: one@example.com has 0% of its Fable week left\.$/.test(t))).toHaveLength(1)
+  expect(w.toasts.filter(t => /5-hour/.test(t))).toEqual([])
+  await clock.advance(36_000)
+  expect(w.submitted).toHaveLength(1)
+  expect(w.submitted[0]).toMatch(/Continue where you left off/)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  expect(await pane.find({ text: ONE_AT_20 })).toBeDefined()
+  await pane.unmount()
+})
+
 test('a Fable stop moves past a login whose Fable week is spent, to the one with room, though the spent one has more 5-hour room', async ($, on) => {
   const w = fresh()
   const SLOT3 = `${HOME}/.claude/accounts/3`
@@ -4726,6 +4752,23 @@ for (const [name, by] of [['no owner', undefined], ['another login as owner', '2
     expect(store.get('usage:1')).toBeUndefined()
   })
 }
+
+// Claude Code 2.1.325 and later says "hit your Fable limit": the stop is read as the Fable week, not as a plain stop
+// that marks the whole week spent.
+test('a Fable stop worded "hit your Fable limit" stores the Fable mark, and no week mark and no 5-hour mark', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.failing = { 'tok-1': 429 }
+  const store = new Map<string, unknown>(Object.entries({ accounts: [TWO_LOGINS.accounts[0]], 'rotate-to': 'off' }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  await $.classic.StopFailure(FABLE_HIT_STOP)
+  await clock.settle()
+  expect(markOf(store.get('fable-mark:1'))[0]).toBe(100)
+  expect(store.get('usage:1')).toBeUndefined()
+  expect(store.get('week-mark:1')).toBeUndefined()
+  expect(store.get('mark:1')).toBeUndefined()
+})
 
 // RULING 4278: a week mark still spends a login whose reading was dropped as no one's.
 test('a week mark spends a login whose stored reading has no owner: the pane shows its week spent, and it is not the launch pick', async ($, on) => {
