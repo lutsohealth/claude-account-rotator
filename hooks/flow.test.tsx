@@ -11271,7 +11271,7 @@ for (const end of ['answer', 'authentication_failed'] as const) {
     const { store, clock } = await heldWorld($, on, w)
     await clock.advance(3 * 60_000 + 15_000)
     await $.turn.start({ text: NUDGE_TEXT, turnId: 'turn-nudge' })
-    await $.classic.StopFailure(FABLE_HIT_STOP)
+    await $.classic.StopFailure({ error: 'rate_limit', last_assistant_message: FABLE_HIT_STOP.last_assistant_message })
     await clock.settle()
     expect(view()?.held?.carry).toEqual({ need: 'fable' })
     if (end !== 'answer') await $.classic.StopFailure({ error: end })
