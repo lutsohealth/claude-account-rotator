@@ -2,6 +2,11 @@
 
 What each version of the account rotator changed. To get each one as Claude Code starts, turn on auto-update: in `/plugin`, open **Marketplaces**, pick **claude-account-rotator** and choose **Enable auto-update**. To update by hand, run `claude plugin marketplace update claude-account-rotator`, then `claude plugin update account-rotator@claude-account-rotator`, and start a new session.
 
+## 0.5.41-lutso.1 - 2026-11-17
+
+- **After a usage-limit stop the session moves to a login read lately and carries on with no person**: the mod moves first to a login whose usage read is under 35 minutes old and shows room, then to one read earlier, one never read, and last one spent, never to one this stop's recovery already died on. Every 15 seconds it looks whether the carry-on still waits under Claude Code's limit menu with no turn of any agent running, and presses Escape in the session's own Orca pane so the resume enters, also when another agent's turn was open at the stop. The stop log names each step (#123, puma-9arph.54).
+- **Not fixed yet**: a resume whose entering turn ends in an error is not acted on again and waits for you (puma-9arph.60); a usage or profile read that hangs while a stop is handled holds a later stop and the resume (puma-9arph.59); a stop's switch held for a token refresh, with no turn running, can land after the bound (puma-9arph.57). The look again after an entry that is interrupted is proven by a test alone.
+
 ## 0.5.40-lutso.1 - 2026-11-17
 
 - **A Fable stop is read as the Fable week in every wording Claude Code uses**: Claude Code 2.1.325 and later says "hit your Fable limit", where the mod knew only "reached your Fable limit", so such a stop marked the login's whole week spent and moved the session without looking for a login with Fable room. It now moves to a login with Fable room, marks only the Fable week and says so in the stop log, as it did before (#121, puma-9arph.56).
