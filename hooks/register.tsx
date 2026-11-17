@@ -262,6 +262,8 @@ type Episode = {
   nudgedAt?: number
   /** The held switch it went for (holdKey): a drop after it drops that one alone. */
   nudgedFor?: string
+  /** A carry-on held back while the nudge sat queued (a landing meanwhile): owed once the nudge's turn ends. */
+  isCarryOnHeldBack?: true
   told: Set<Told>
 }
 /** A stop's held switch by where it goes and what it carries on with; a press's, which carries on with nothing, has none. */
@@ -1843,6 +1845,7 @@ async function carryOn($: Host, need?: Need): Promise<void> {
  */
 async function sendCarryOn($: Host, prompt: { text: string; asUser?: true }): Promise<void> {
   if (isCarryOnInFlight) {
+    if (carryOnText === NUDGE_TEXT && episode !== undefined) episode.isCarryOnHeldBack = true
     void logStop($, 'carry-on not sent again: one is queued')
     return
   }
@@ -1866,6 +1869,16 @@ async function sendCarryOn($: Host, prompt: { text: string; asUser?: true }): Pr
   carryOnRefusals += 1
   await debug($, `carry-on dropped: ${answer.drop}`)
   void logStop($, 'carry-on drop')
+}
+
+/**
+ * Carries the person's turn on, once, after the refresh nudge's turn: owed where its answer dropped the hold on the login
+ * in use (`isOwed`), or where a landing held its carry-on back behind the nudge. Only while nothing is queued or armed.
+ */
+function carryOnAfterNudge($: Host, ep: Episode, isOwed: boolean): void {
+  if (episode !== ep || !(isOwed || ep.isCarryOnHeldBack === true) || isCarryOnInFlight || armedCarryOns > 0) return
+  ep.isCarryOnHeldBack = undefined
+  void carryOn($, ep.need).catch(error => debug($, `carry-on failed: ${String(error)}`))
 }
 
 /** Ends a stop's episode once its resume has answered: a later stop opens a new one, with its own tried list and budget. */
@@ -3097,7 +3110,8 @@ export const register: Register = on => {
         const dropped = await dropHeld($, ep.nudgedFor)
         const { activeId } = await getView($)
         void logStop($, dropped === 'dropped' ? `held switch dropped: the refresh nudge answered on login ${activeId}` : `held switch not dropped: ${dropped}`)
-        if (dropped === 'dropped') await endEpisode($, ep)
+        // Only the nudge was answered: the person's own turn carries on, and its entry and answer end the episode.
+        carryOnAfterNudge($, ep, dropped === 'dropped')
       }
       return next(e)
     }

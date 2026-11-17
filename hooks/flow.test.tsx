@@ -11120,16 +11120,57 @@ test('row v: a measure 31 s after the nudge\'s turn completes on the limit ends 
   expect(whats(stopLogOf(store, w)).some(x => x.startsWith('work resumed'))).toBe(false)
 })
 
-test('row v: a nudge that login 1 answers ends the episode and drops the held switch', async ($, on) => {
+/** The carry-on the person's turn is owed, as Claude Code starts it and the login in use answers it. */
+async function carryTurn($: Engine, clock: MockClock, w: World): Promise<void> {
+  const carry = w.submitted[1] ?? ''
+  expect(carry).not.toBe(NUDGE_TEXT)
+  await $.turn.start({ text: carry, turnId: 'turn-carry' })
+  await $.turn.complete({ turnId: 'turn-carry', reason: 'answer', answer: 'ok', durationMs: 1, isAborted: false })
+  await clock.advance(10 * 60_000)
+}
+
+// Merge read of #129, note 1 (RULING 6468): the answer was to the nudge alone, so the turn the limit stopped is still
+// owed, and it carries on once on login 1.
+test('row v: a nudge that login 1 answers drops the held switch and carries the person\'s turn on there once', async ($, on) => {
   const w = fresh()
   const view = watchedView(on)
   const { store, clock } = await heldWorld($, on, w)
   await clock.advance(3 * 60_000 + 15_000)
   expect(view()?.held?.target.id).toBe('2')
   await nudgeTurn($, clock, 'answer')
+  const done = (l: string) => l.startsWith('held switch dropped') || l.startsWith('work resumed')
+  expect(whats(stopLogOf(store, w)).filter(done)).toEqual(['held switch dropped: the refresh nudge answered on login 1'])
+  expect([view()?.held, w.submitted.length]).toEqual([undefined, 2])
+  await carryTurn($, clock, w)
+  expect(whats(stopLogOf(store, w)).filter(done)).toEqual(['held switch dropped: the refresh nudge answered on login 1', 'work resumed on login 1'])
+  expect([w.submitted.length, slots(w)]).toEqual([2, []])
+})
+
+/**
+ * Merge read of #129, block 1: another session on login 1 refreshes the shared token while the nudge sits queued, so the
+ * minute retry lands the held switch, and the landing's carry-on is held back behind the nudge.
+ */
+async function landedWhileNudgeQueued($: Engine, on: On, w: World) {
+  const { store, clock } = await heldWorld($, on, w)
+  await clock.advance(3 * 60_000 + 15_000)
+  expect(w.submitted).toEqual([NUDGE_TEXT])
+  refresh(w)
+  await clock.advance(60_000)
+  expect(slots(w)).toEqual([SLOT2])
+  await clock.advance(36_000)
+  expect([whats(stopLogOf(store, w)).includes('carry-on not sent again: one is queued'), w.submitted]).toEqual([true, [NUDGE_TEXT]])
+  return { store, clock }
+}
+
+test('row v: a landing while the nudge sits queued carries the person\'s turn on once the nudge is answered', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await landedWhileNudgeQueued($, on, w)
+  await nudgeTurn($, clock, 'answer')
+  expect(w.submitted).toHaveLength(2)
+  await carryTurn($, clock, w)
   const lines = whats(stopLogOf(store, w))
-  expect(lines.filter(l => l.startsWith('held switch dropped') || l.startsWith('work resumed'))).toEqual(['held switch dropped: the refresh nudge answered on login 1', 'work resumed on login 1'])
-  expect(view()?.held).toBe(undefined)
+  expect(lines.filter(l => l === 'resume entered' || l.startsWith('work resumed'))).toEqual(['resume entered', 'work resumed on login 2'])
+  expect([lines.some(l => l.startsWith('owed resume: no carry-on queued')), w.submitted.length]).toEqual([false, 2])
 })
 
 /**
