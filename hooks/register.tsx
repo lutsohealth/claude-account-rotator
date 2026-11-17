@@ -2639,7 +2639,6 @@ async function isBound($: Host): Promise<boolean> {
   return (await getView($)).isBound === true
 }
 
-/** First run makes the normal login number 1; then: which login this session uses, and Claude in Chrome connected as the extension's account. */
 const LAUNCHER_COPY = 'claude'
 const LAUNCHER_FILE = 'bin/account-rotator-claude'
 const LAUNCHER_COMMAND_TIMEOUT_MS = 10_000
@@ -2649,7 +2648,8 @@ const LAUNCHER_COMMAND_TIMEOUT_MS = 10_000
  * mod's own `bin/account-rotator-claude`. Only an existing regular file whose bytes differ is replaced, never a link
  * and never a copy made where none stands: `$.fs.write` makes a temporary file beside it under one stable name, so a
  * leftover (a refused rm) is overwritten by the next boot; chmod and mv (a rename in one folder) put it in place
- * whole. Any failure leaves the old copy as it stood, and is one debug line.
+ * whole. The temporary file is read back and asked `test -x` before the move, so whatever the host's write and chmod
+ * did, a bad file never replaces the copy. Any failure leaves the old copy as it stood, and is one debug line.
  */
 async function refreshLauncherCopy($: Host): Promise<void> {
   const dir = launcherCopyDir(await $.env.get('CLAUDE_CONFIG_DIR'), (await $.env.get('HOME')) ?? '')
@@ -2657,7 +2657,11 @@ async function refreshLauncherCopy($: Host): Promise<void> {
   const entries = await $.fs.list(dir).catch(() => [])
   if (!entries.some(entry => entry.name === LAUNCHER_COPY && entry.kind === 'file')) return
   const own = await $.fs.read(`${$.plugin.root}/${LAUNCHER_FILE}`)
-  if ((await $.fs.read(copy)) === own) return
+  const holdsOwn = async (path: string) => {
+    const text = await $.fs.read(path)
+    return text !== '' && text === own
+  }
+  if (await holdsOwn(copy)) return
   const temporary = `${copy}.new`
   const run = async (argv: string[]) => {
     const { exitCode } = await $.process.run(argv, { timeoutMs: LAUNCHER_COMMAND_TIMEOUT_MS })
@@ -2666,6 +2670,8 @@ async function refreshLauncherCopy($: Host): Promise<void> {
   try {
     await $.fs.write(temporary, own)
     await run(['chmod', '755', temporary])
+    if (!(await holdsOwn(temporary))) throw new Error('temporary file does not hold the mod\'s launcher')
+    await run(['test', '-x', temporary])
     await run(['mv', '-f', temporary, copy])
   } catch (error) {
     await $.process.run(['rm', '-f', temporary], { timeoutMs: LAUNCHER_COMMAND_TIMEOUT_MS }).catch(() => undefined)
@@ -2674,6 +2680,7 @@ async function refreshLauncherCopy($: Host): Promise<void> {
   debug($, `launcher copy ${copy} replaced by ${LAUNCHER_FILE} of the mod`)
 }
 
+/** First run makes the normal login number 1; then: which login this session uses, and Claude in Chrome connected as the extension's account. */
 async function boot($: Host, isInteractive: boolean): Promise<void> {
   // A view still bound outlived a reload of this code, which emptied `kept`: its Fable stop mark and its stuck notice
   // said go back into `kept`, so a later /clear, /resume or /branch restores them.
