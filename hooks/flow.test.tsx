@@ -11410,6 +11410,7 @@ const BAD_TEMPORARY: [string, (world: World) => void][] = [
   ['a write that reads back other text', world => { world.temporaryStores = '#!/usr/bin/env python3\n# half a file\n' }],
   ['a write that reads back empty', world => { world.temporaryStores = '' }],
   ['a chmod that leaves the file not executable', world => { world.isChmodIgnored = true }],
+  ['a launcher of the mod that is empty', world => { world.ownLauncher = '' }],
 ]
 for (const [name, setup] of BAD_TEMPORARY) {
   test(`puma-9arph.26: ${name}: no move, the old copy whole, no temporary file`, async ($, on) => {
