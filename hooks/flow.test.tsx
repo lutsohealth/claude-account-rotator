@@ -11135,7 +11135,7 @@ test('row v: a nudge that login 1 answers ends the episode and drops the held sw
 
 /**
  * Review r2 DROP_RACE: the held switch's minute retry owns the switch, paused in its keychain read after its owner claim,
- * when the nudge's turn ends in a drop; the retry then writes the hold again under its own token.
+ * when the nudge's turn ends in a drop; the drop's write is refused, and the retry then writes the hold again.
  */
 async function dropDuringRetry($: Engine, on: On, end: 'authentication_failed' | 'answer', isRefreshed = false) {
   const w = fresh()
@@ -11166,52 +11166,26 @@ async function dropDuringRetry($: Engine, on: On, end: 'authentication_failed' |
   return { w, view, store, clock }
 }
 
-test('row v: an authentication_failed after a nudge while the held switch\'s retry owns the switch drops it once the retry ends', async ($, on) => {
+test('row v: an authentication_failed after a nudge while the held switch\'s retry owns the switch drops nothing and ends no episode', async ($, on) => {
   const { w, view, store, clock } = await dropDuringRetry($, on, 'authentication_failed')
-  expect(view()?.held).toBe(undefined)
-  expect(whats(stopLogOf(store, w)).filter(l => l.startsWith('held switch'))).toEqual(['held switch dropped: authentication_failed after the refresh nudge, login 1 kept'])
+  expect(view()?.held?.target.id).toBe('2')
+  expect(whats(stopLogOf(store, w)).filter(l => l.startsWith('held switch'))).toEqual(['held switch not dropped: a switch is running'])
+  // The hold stands as a held stop's does: nothing lands it past the guard.
   await clock.advance(10 * 60_000)
   expect([slots(w), w.submitted]).toEqual([[], [NUDGE_TEXT]])
 })
 
-test('row v: a nudge answered while the held switch\'s retry owns the switch drops it once the retry ends', async ($, on) => {
+test('row v: a nudge answered while the held switch\'s retry owns the switch drops nothing and ends no episode', async ($, on) => {
   const { w, view, store } = await dropDuringRetry($, on, 'answer')
-  expect(view()?.held).toBe(undefined)
-  expect(whats(stopLogOf(store, w)).filter(l => l.startsWith('held switch') || l.startsWith('work resumed'))).toEqual(['held switch dropped: the refresh nudge answered on login 1', 'work resumed on login 1'])
+  expect(view()?.held?.target.id).toBe('2')
+  expect(whats(stopLogOf(store, w)).filter(l => l.startsWith('held switch') || l.startsWith('work resumed'))).toEqual(['held switch not dropped: a switch is running'])
 })
 
 test('row v: an authentication_failed after a nudge whose retry lands the switch meanwhile drops nothing and ends no episode', async ($, on) => {
   const { w, store } = await dropDuringRetry($, on, 'authentication_failed', true)
   const lines = whats(stopLogOf(store, w))
-  expect([slots(w), lines.filter(l => l.startsWith('held switch') || l.startsWith('work resumed'))]).toEqual([[SLOT2], ["held switch not dropped: the stop's hold is gone"]])
+  expect([slots(w), lines.filter(l => l.startsWith('held switch') || l.startsWith('work resumed'))]).toEqual([[SLOT2], ['held switch not dropped: a switch is running']])
 })
-
-// Review r3 STALE-RETRY: a minute retry that read the hold and has not claimed yet outlasts the drop's wait; it would
-// write the hold back after any drop, so the drop drops nothing and says so.
-for (const end of ['authentication_failed', 'answer'] as const) {
-  test(`row v: a nudge ending in ${end} while a minute retry sits on the hold it read past the wait drops nothing`, async ($, on) => {
-    const w = fresh()
-    const view = watchedView(on)
-    const gate = holdViewRead(on, true)
-    const { store, clock } = await heldWorld($, on, w)
-    await clock.advance(3 * 60_000 + 15_000)
-    await $.turn.start({ text: NUDGE_TEXT, turnId: 'turn-nudge' })
-    // The minute timer fires before the look's at the same time: its retry is the first to read the view there.
-    const tick = NOW + (Math.floor((clock.now() - NOW) / 60_000) + 1) * 60_000
-    await clock.advance(tick - clock.now() - 1)
-    gate.arm(() => true)
-    await clock.advance(1)
-    expect([gate.isHeld(), view()?.owner]).toEqual([true, undefined])
-    if (end !== 'answer') await $.classic.StopFailure({ error: end })
-    const done = $.turn.complete({ turnId: 'turn-nudge', reason: end === 'answer' ? 'answer' : 'error', answer: '', durationMs: 1, isAborted: false })
-    await clock.advance(31_000)
-    await done
-    gate.open()
-    await clock.settle()
-    const lines = whats(stopLogOf(store, w)).filter(l => l.startsWith('held switch') || l.startsWith('work resumed'))
-    expect([view()?.held?.target.id, lines]).toEqual(['2', ['held switch not dropped: the retry is running']])
-  })
-}
 
 // Review r3 REPLACED-HOLD: a press after the nudge replaces the stop's hold with its own; the drop is for the stop's alone.
 for (const key of ['use-2', 'use-3'] as const) {
@@ -11231,10 +11205,30 @@ for (const key of ['use-2', 'use-3'] as const) {
       await $.turn.complete({ turnId: 'turn-nudge', reason: end === 'answer' ? 'answer' : 'error', answer: '', durationMs: 1, isAborted: false })
       await clock.settle()
       const lines = whats(stopLogOf(store, w)).filter(l => l.startsWith('held switch'))
-      expect([view()?.held?.target.id, lines]).toEqual([target, ["held switch not dropped: the stop's hold is gone"]])
+      expect([view()?.held?.target.id, lines]).toEqual([target, ['held switch not dropped: not the hold the nudge went for']])
       await pane.unmount()
     })
   }
+}
+
+// Review r4 LATER-STOP-HOLD: a later stop that holds the switch for another need replaces the hold the nudge went for;
+// the drop after the nudge leaves that stop's hold standing.
+for (const end of ['answer', 'authentication_failed'] as const) {
+  test(`row v: a nudge ending in ${end} after a later Fable stop held the switch keeps that stop's hold`, async ($, on) => {
+    const w = fresh()
+    const view = watchedView(on)
+    const { store, clock } = await heldWorld($, on, w)
+    await clock.advance(3 * 60_000 + 15_000)
+    await $.turn.start({ text: NUDGE_TEXT, turnId: 'turn-nudge' })
+    await $.classic.StopFailure({ error: 'rate_limit', last_assistant_message: FABLE_HIT_STOP.last_assistant_message })
+    await clock.settle()
+    expect(view()?.held?.carry).toEqual({ need: 'fable' })
+    if (end !== 'answer') await $.classic.StopFailure({ error: end })
+    await $.turn.complete({ turnId: 'turn-nudge', reason: end === 'answer' ? 'answer' : 'error', answer: '', durationMs: 1, isAborted: false })
+    await clock.settle()
+    const lines = whats(stopLogOf(store, w)).filter(l => l.startsWith('held switch'))
+    expect([view()?.held?.carry, lines]).toEqual([{ need: 'fable' }, ['held switch not dropped: not the hold the nudge went for']])
+  })
 }
 
 // ---------------------------------------------------------------- puma-9arph.65: what ends a held switch, and the nudge's edges
