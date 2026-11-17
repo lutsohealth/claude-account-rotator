@@ -106,9 +106,11 @@ import {
   escapeArgv,
   escapeHeldBack,
   NUDGE_TEXT,
+  isBoxFree,
   nudgeHeld,
   pickAfterStop,
   raisesLimitModal,
+  renudgeDue,
   wordingClass,
   mayWrite,
   switchFields,
@@ -260,9 +262,13 @@ type Episode = {
   before?: { carryOn?: number; isLimitStopLast: boolean; isCarryOnTurn: boolean }
   /** When the refresh nudge went (puma-9arph.57): once an episode. */
   nudgedAt?: number
+  /** The last nudge's facts (puma-9arph.65): when it went, and the expiry of the stored token it went on. */
+  nudge?: { at: number; expiresAt: number }
+  /** The one more nudge, sent once the token the first went on had run out unrefreshed, went. */
+  isRenudged?: boolean
   told: Set<Told>
 }
-type Told = 'pane' | 'nothing' | 'stuck' | 'fill' | 'failed' | 'nudge'
+type Told = 'pane' | 'nothing' | 'stuck' | 'fill' | 'failed' | 'nudge' | 'sign-in wait' | 'draft' | 'draft told'
 let episode: Episode | undefined
 /** The refresh nudge's own turn while it runs: it is no entry of the resume (council B2). */
 let nudgeTurnId: string | undefined
@@ -976,7 +982,7 @@ const LATE: unique symbol = Symbol('late')
 
 /** A read's answer, or a throw named `name` once READ_TIMEOUT_MS passes with none: a late answer is never read. */
 async function answerWithin<T>($: Host, name: string, read: Promise<T>): Promise<T> {
-  const answer = await Promise.race([read, $.clock.sleep(READ_TIMEOUT_MS).then(() => LATE)])
+  const answer = await Promise.race([read, $.clock.sleep(READ_TIMEOUT_MS).then((): typeof LATE => LATE)])
   if (answer === LATE) throw Object.assign(new Error(`no answer in ${READ_TIMEOUT_MS} ms`), { name })
   return answer
 }
@@ -1335,7 +1341,11 @@ async function checkAccount($: Host, account: Account, gate: UsageGate): Promise
   // keeps its text), 'not signed in' on those or a read that says logged in. A read that says nothing ends neither.
   const stood = (await $.store.get(`health:${account.id}`)) as Health | undefined
   const stoodWhy = stood?.kind === 'login-needed' ? stood.why : undefined
-  const isRejectionKept = stoodWhy === SIGN_IN_REJECTED && !isSignInProven && (health.kind === 'ok' || statusRead === 'out')
+  // The stop's own mark (it carries `at`) also stands where this check's usage read was rejected too: the check writes
+  // nothing, so the `at` that lets a held switch go at the token's expiry stays.
+  const isStopMark = stood?.kind === 'login-needed' && typeof stood.at === 'number'
+  const isRejectedAgain = isStopMark && health.kind === 'login-needed' && health.why === SIGN_IN_REJECTED
+  const isRejectionKept = stoodWhy === SIGN_IN_REJECTED && !isSignInProven && (health.kind === 'ok' || statusRead === 'out' || isRejectedAgain)
   const isSignOutKept = stoodWhy === NOT_SIGNED_IN && !isSignInProven && health.kind === 'ok' && statusRead === 'unknown'
   if (isRejectionKept || isSignOutKept) return hasFreshFable
   const before = await saveHealth($, account.id, health)
@@ -1493,9 +1503,11 @@ async function refreshingSoon($: Host, view: View, target: Account, now: number)
   const credential = stored.state === 'present' ? stored.credential : undefined
   // A token that has already run out is refreshed first of all, at the session's next request: the switch waits for it too.
   // A sign-in whose refresh token has run out refreshes nothing, and nor does one already rejected with its token run out:
-  // nothing holds the switch off either.
+  // nothing holds the switch off either. Only a stop's rejection proves that (its mark carries `at`); a check's
+  // login-needed proves no refresh dead, so the hold stands until the token refreshes.
   const isExpired = credential !== undefined && credential.expiresAt <= now
-  const isRejected = isExpired && view.health[active.id]?.kind === 'login-needed'
+  const health = view.health[active.id]
+  const isRejected = isExpired && health?.kind === 'login-needed' && health.why === SIGN_IN_REJECTED && typeof health.at === 'number'
   const canRefresh = credential !== undefined && healthOf(credential, now).kind === 'ok' && !isRejected
   const isSoon = canRefresh && credential.expiresAt - now < REFRESH_GUARD_MS
   return isSoon ? active : undefined
@@ -1906,6 +1918,13 @@ function tellOnce($: Host, ep: Episode, what: Told, line: string): void {
   void logStop($, line)
 }
 
+/** Tells the person a line once an episode, where the look would otherwise tell it every tick. */
+function toastOnce($: Host, ep: Episode, what: Told, line: string): void {
+  if (ep.told.has(what)) return
+  ep.told.add(what)
+  tell($, line)
+}
+
 /**
  * Every OWED_LOOK_MS while a stop's episode stands and its resume has not entered: notes the turns a queued carry-on
  * waits on, and sends one Escape to this session's Orca pane where escapeHeldBack finds nothing holding it back, so
@@ -1967,36 +1986,59 @@ async function lookOwed($: Host): Promise<void> {
  * no turn running, Claude Code refreshes that token at no request. Once the token is due within NUDGE_LEAD_MS this
  * sends one carry-on of its own on the login in use: its request refreshes the token under that login's own slot,
  * and the stop it dies on lands the switch through the unchanged refresh guard. True when it sent one.
+ * One more goes (puma-9arph.65) once that token has run out unrefreshed, on the same terms: a request on a token past
+ * its expiry refreshes it first. Never a third. A draft in the box holds either, and the person is told once.
  */
 async function nudgeIfDue($: Host, ep: Episode, view: View, now: number): Promise<boolean> {
   const active = view.accounts.find(a => a.id === view.activeId)
   if (active === undefined) return false
   const isQuiet = !isCarryOnInFlight && nudgeTurnId === undefined && openTurns.size === 0
+  const isAgain = ep.nudge !== undefined
   if (ep.nudgedAt !== undefined) {
-    if (isQuiet && limitStopAfter === mainTurns) tellOnce($, ep, 'nudge', 'refresh nudge: token not refreshed, switch still held')
-    return false
+    if (isQuiet && limitStopAfter === mainTurns) {
+      tellOnce($, ep, 'nudge', 'refresh nudge: token not refreshed, switch still held')
+      if (ep.isRenudged === true) toastOnce($, ep, 'sign-in wait', "Switching accounts waits for this login's sign-in to refresh. Send any message to retry, or use /accounts.")
+    }
+    // The one more waits for the token's expiry, and for a quiet session as the first did.
+    if (ep.isRenudged === true || ep.nudge === undefined || now < ep.nudge.expiresAt || !isQuiet) return false
   }
   const stored = await answerWithin($, 'CredentialReadTimedOut', readStored($, active.slot)).catch(() => undefined)
   const credential = stored?.state === 'present' ? stored.credential : undefined
+  const boxText = (await $.prompt.read().catch(() => undefined))?.text
   const why = nudgeHeld({
     hasHeldCarry: true,
     isNudged: false,
     isLimitStopLast: limitStopAfter === mainTurns,
     openTurns: openTurns.size,
     isCarryOnQueued: isCarryOnInFlight || armedCarryOns > 0,
-    // A box the read cannot show is no empty box (council B5).
-    isBoxEmpty: (await $.prompt.read().catch(() => undefined))?.text === '',
+    isBoxEmpty: true,
     isTokenOk: credential !== undefined && healthOf(credential, now).kind === 'ok',
     expiresInMs: credential === undefined ? undefined : credential.expiresAt - now,
   })
   if (why !== undefined || credential === undefined) return false
+  if (isAgain && !renudgeDue({ isRenudged: ep.isRenudged === true, firstExpiresAt: ep.nudge?.expiresAt, expiresAt: credential.expiresAt, now })) return false
+  // A box the read cannot show is no empty box (council B5); the mod's own lines left in it count as empty.
+  if (!isBoxFree(boxText, [NUDGE_TEXT, CONTINUE, view.fableContinueText])) {
+    if (boxText !== undefined) {
+      tellOnce($, ep, 'draft', 'refresh nudge: a draft in the box, switch still held')
+      toastOnce($, ep, 'draft told', 'Switching accounts waits for your draft: press Enter to send it, or clear the box.')
+    }
+    return false
+  }
   // A press or a landing during the two reads may have replaced or cleared the held stop: the nudge is for it alone.
   const after = await getView($)
   const isSameHold = after.held?.carry !== undefined && after.held.target.id === view.held?.target.id && after.activeId === view.activeId
   if (!isSameHold || episode !== ep) return false
   ep.nudgedAt = now
+  ep.nudge = { at: now, expiresAt: credential.expiresAt }
+  if (isAgain) ep.isRenudged = true
   ep.budget = (ep.budget ?? 0) + 2
-  void logStop($, `refresh nudge: login ${active.id}'s token expires in ${Math.round((credential.expiresAt - now) / 1000)} s, carry-on sent on it`)
+  void logStop(
+    $,
+    isAgain
+      ? `refresh nudge again: login ${active.id}'s token expired ${Math.round((now - credential.expiresAt) / 1000)} s ago, carry-on sent on it`
+      : `refresh nudge: login ${active.id}'s token expires in ${Math.round((credential.expiresAt - now) / 1000)} s, carry-on sent on it`,
+  )
   void sendCarryOn($, { text: NUDGE_TEXT }).catch(error => debug($, `refresh nudge failed: ${String(error)}`))
   return true
 }
@@ -2040,7 +2082,19 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
   const ep = episode
   // Council B4: a nudge's request that fails another way (a refresh refused above all) drops the held switch, and marks
   // nothing: a rejection mark would let the guard go at the token's expiry with no refresh, a landing around it.
+  // The one exception (puma-9arph.65): a nudge sent with its token already past its expiry, the stored token still the
+  // same. A request on an expired token refreshes first, so its rejection proves the refresh dead: the mark is written
+  // and the hold stands, and the guard lets the switch go through its expiry release.
   if (ep?.nudgedAt !== undefined && error !== 'rate_limit' && view.held !== undefined) {
+    if (error === 'authentication_failed' && ep.nudge !== undefined && ep.nudge.expiresAt <= ep.nudge.at) {
+      const stored = await answerWithin($, 'CredentialReadTimedOut', readStored($, active.slot)).catch(() => undefined)
+      if (stored?.state === 'present' && stored.credential.expiresAt === ep.nudge.expiresAt) {
+        const before = await saveHealth($, active.id, { kind: 'login-needed', why: SIGN_IN_REJECTED, at: await $.clock.now() })
+        if (before?.kind !== 'login-needed') await announceLockout($, active, SIGN_IN_REJECTED)
+        void logStop($, 'stop rejected on the expired token after the refresh nudge: the held switch lands through the release')
+        return
+      }
+    }
     // A drop a running switch refused, or that found the hold gone, ends nothing: the episode goes on as it stands.
     const dropped = await dropHeld($)
     if (dropped !== 'dropped') {
