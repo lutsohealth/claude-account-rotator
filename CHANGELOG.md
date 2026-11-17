@@ -2,6 +2,11 @@
 
 What each version of the account rotator changed. To get each one as Claude Code starts, turn on auto-update: in `/plugin`, open **Marketplaces**, pick **claude-account-rotator** and choose **Enable auto-update**. To update by hand, run `claude plugin marketplace update claude-account-rotator`, then `claude plugin update account-rotator@claude-account-rotator`, and start a new session.
 
+## 0.5.38-lutso.1 - 2026-11-17
+
+- **A plain `claude` with no launch pick says on stderr when Claude Code's own login reads not signed in**: where the launcher starts `claude` on that login for want of a pick, one more line names the login as not signed in and says to type `/login`, so a start with no login says why. The `claude` still starts (#116, puma-9arph.50).
+- **The signal tests pass when a gate starts with `&`**: such a gate runs with SIGINT ignored, so the tests now give themselves the default SIGINT (#117, puma-9arph.44).
+
 ## 0.5.37-lutso.1 - 2026-11-16
 
 - **A login Claude Code does not count as signed in says ⚠ sign in needed, and New on passes it over**: each check asks Claude Code (`claude auth status`) whether the login is signed in, so `account-rotator-launch` and the launcher no longer start new sessions on a login whose sign-in Claude Code no longer counts, until it is signed in again (#114, puma-9arph.48).
