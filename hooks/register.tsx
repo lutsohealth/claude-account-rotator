@@ -259,7 +259,7 @@ type Episode = {
 let episode: Episode | undefined
 /** A carry-on submitted and not yet entered: no second is submitted, and the look may free it. */
 let isCarryOnInFlight = false
-/** The text of the carry-on last submitted: a main turn that begins with it is the carry-on's own. */
+/** The text of the carry-on last submitted: a main turn whose text holds it is the carry-on's own. */
 let carryOnText: string | undefined
 /** Counts carry-ons refused or dropped: a give-back revives a carry-on only while this has not moved since its turn began. */
 let carryOnRefusals = 0
@@ -2966,7 +2966,9 @@ export const register: Register = on => {
     if (e.agentId === undefined) {
       const ep = episode
       if (ep !== undefined && ep.enteredAt === undefined) {
-        const isCarryOnTurn = isCarryOnInFlight && e.text === carryOnText
+        // Claude Code hands turn.start a plugin's prompt inside its own frame ("The <plugin> plugin sent a message: ..."),
+        // unless it went asUser: the carry-on's own turn is the one whose text holds the carry-on's.
+        const isCarryOnTurn = isCarryOnInFlight && carryOnText !== undefined && e.text.includes(carryOnText)
         ep.before = { carryOn: isCarryOnInFlight ? carryOnRefusals : undefined, isLimitStopLast: limitStopAfter === mainTurns, isCarryOnTurn }
         void debug($, `resume entry: ${isCarryOnTurn ? "the carry-on's own turn" : 'another turn'}`)
       }

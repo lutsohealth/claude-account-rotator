@@ -10689,6 +10689,25 @@ test('C1: a rejected sign-in on another turn that entered sends no second carry-
   expect(lines).toContain('carry-on not sent again: one is queued')
 })
 
+// puma-9arph.60, stand-in run 2: Claude Code hands turn.start a plugin's prompt inside its own frame, so the carry-on's
+// own turn is told by its text within that frame; a framed carry-on that dies on a limit leaves the next login a carry-on.
+test('C1: the carry-on\'s own turn, framed by Claude Code, that dies on a limit sends the next login a carry-on', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await owedWorld($, on, w)
+  await $.classic.StopFailure({ error: 'rate_limit' })
+  await clock.settle()
+  await clock.advance(36_000)
+  expect(w.submitted).toHaveLength(1)
+  const framed = `The account-rotator plugin sent a message:\n${w.submitted[0]}\n\nThis is how Claude Code surfaces a prompt a plugin submits between turns.`
+  await $.turn.start({ text: framed, turnId: 'turn-carry' })
+  await $.classic.StopFailure({ error: 'rate_limit' })
+  await $.turn.complete({ turnId: 'turn-carry', reason: 'error', answer: '', durationMs: 1, isAborted: false })
+  await clock.settle()
+  await clock.advance(36_000)
+  expect(w.submitted).toHaveLength(2)
+  expect(whats(stopLogOf(store, w))).toContain("resume ended rate_limit: the carry-on's own turn, nothing queued")
+})
+
 // Review M403 B: a look whose fill has not answered holds the lock, and every later look skips its tick.
 test('row d: a look while another look holds the lock does nothing', async ($, on) => {
   const w = fresh()
