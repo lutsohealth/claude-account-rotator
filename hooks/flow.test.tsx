@@ -124,8 +124,9 @@ type World = {
   fills?: number
   fillHold?: Promise<void>
   isFillThrown?: boolean
-  /** What the prompt box holds, as `$.prompt.read` answers it. */
+  /** What the prompt box holds, as `$.prompt.read` answers it; while `readHold` is set, the read answers once it settles. */
   draft?: string
+  readHold?: Promise<void>
   /** Where it answers true, a debug line fails to write. */
   isLogFailing?: (text: string) => boolean
   /** Whether each line in `submitted` was sent as the person's own words (`asUser`), not under the mod's name. */
@@ -398,7 +399,10 @@ function world(on: On, w: World, store: Record<string, unknown> | Map<string, un
     await w.fillHold
     return { isFilled: w.isFillRefused !== true }
   })
-  on('prompt.read', () => ({ value: { text: w.draft ?? '', cursor: 0 } }))
+  on('prompt.read', async () => {
+    await w.readHold
+    return { value: { text: w.draft ?? '', cursor: 0 } }
+  })
   on('turn.start', (_$, e) => ({ turnId: e.turnId }))
   on('turn.complete', (_$, e) => ({ text: e.answer }))
   on('session.start', (_$, e) => {
@@ -11026,7 +11030,7 @@ test('row v: a nudge whose request refreshes nothing lands no switch and sends n
 })
 
 // Council B2: the nudge's own turn never counts as the resume's entry, so a measure after it ends nothing.
-test('row v: the nudge\'s own turn is no entry: a measure 30 s after it ends no episode and drops no held switch', async ($, on) => {
+test('row v: the nudge\'s own turn is no entry: a measure 31 s after it starts ends no episode and drops no held switch', async ($, on) => {
   const w = fresh()
   const { store, clock } = await heldWorld($, on, w)
   await clock.advance(3 * 60_000 + 15_000)
@@ -11052,6 +11056,60 @@ test('row v: an authentication_failed after a nudge drops the held switch and ne
   await clock.advance(10 * 60_000)
   expect(whats(stopLogOf(store, w))).toContain('held switch dropped: authentication_failed after the refresh nudge, login 1 kept')
   expect([slots(w), (store.get('health:1') as { kind?: string } | undefined)?.kind]).toEqual([[], 'ok'])
+  // Review r1 NUDGE_EPISODE: the drop ends the episode, so nothing waits on it and a later stop moves.
+  expect(whats(stopLogOf(store, w)).filter(l => l.startsWith('owed resume: no carry-on queued'))).toEqual([])
+  refresh(w)
+  await $.classic.StopFailure({ error: 'rate_limit' })
+  await clock.settle()
+  expect(slots(w)).toEqual([SLOT2])
+})
+
+// RULING 6441 item 2 (a named departure from council B4): a stop that neither marks a sign-in rejected nor raises the
+// limit leaves the hold as a held stop has it today; no mark is written, so the guard's expiry release stays out of reach.
+for (const error of ['overloaded', 'unknown'] as const) {
+  test(`row v: an ${error} stop after a nudge keeps the held switch and marks nothing`, async ($, on) => {
+    const w = fresh()
+    const view = watchedView(on)
+    const { store, clock } = await heldWorld($, on, w)
+    await clock.advance(3 * 60_000 + 15_000)
+    await $.turn.start({ text: NUDGE_TEXT, turnId: 'turn-nudge' })
+    await $.classic.StopFailure({ error })
+    await $.turn.complete({ turnId: 'turn-nudge', reason: 'error', answer: '', durationMs: 1, isAborted: false })
+    await clock.settle()
+    expect([view()?.held?.target.id, (store.get('health:1') as { kind?: string } | undefined)?.kind]).toEqual(['2', 'ok'])
+    expect(whats(stopLogOf(store, w)).filter(l => l.startsWith('held switch dropped'))).toEqual([])
+  })
+}
+
+// Review r1 NUDGE_STALE: a press during the nudge's reads replaces the held stop; the nudge was for that stop alone.
+test('row v: a press during the nudge\'s reads replaces the held switch, and no nudge goes', async ($, on) => {
+  const w = fresh()
+  const view = watchedView(on)
+  const { clock } = await heldWorld($, on, w)
+  let release = () => {}
+  w.readHold = new Promise<void>(resolve => {
+    release = resolve
+  })
+  await clock.advance(3 * 60_000 + 15_000)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  await pane.press({ key: 'use-3' })
+  await clock.settle()
+  expect([view()?.held?.target.id, view()?.held?.carry]).toEqual(['3', undefined])
+  release()
+  await clock.settle()
+  expect(w.submitted).toEqual([])
+  await pane.unmount()
+})
+
+// Review r1 NUDGE_TEST_TIMING, its instance as written: a measure 31 s after the nudge's turn completes ends nothing.
+test('row v: a measure 31 s after the nudge\'s turn completes on the limit ends no episode', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await heldWorld($, on, w)
+  await clock.advance(3 * 60_000 + 15_000)
+  await nudgeTurn($, clock, { error: 'rate_limit' })
+  await clock.advance(31_000)
+  await $.session.measure({ context: { window: 200_000 }, rateLimits: w.limits, changed: ['context'] })
+  expect(whats(stopLogOf(store, w)).some(x => x.startsWith('work resumed'))).toBe(false)
 })
 
 test('row v: a nudge that login 1 answers ends the episode and drops the held switch', async ($, on) => {

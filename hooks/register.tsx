@@ -1969,6 +1969,10 @@ async function nudgeIfDue($: Host, ep: Episode, view: View, now: number): Promis
     expiresInMs: credential === undefined ? undefined : credential.expiresAt - now,
   })
   if (why !== undefined || credential === undefined) return false
+  // A press or a landing during the two reads may have replaced or cleared the held stop: the nudge is for it alone.
+  const after = await getView($)
+  const isSameHold = after.held?.carry !== undefined && after.held.target.id === view.held?.target.id && after.activeId === view.activeId
+  if (!isSameHold || episode !== ep) return false
   ep.nudgedAt = now
   ep.budget = (ep.budget ?? 0) + 2
   void logStop($, `refresh nudge: login ${active.id}'s token expires in ${Math.round((credential.expiresAt - now) / 1000)} s, carry-on sent on it`)
@@ -2018,6 +2022,11 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
   if (ep?.nudgedAt !== undefined && error !== 'rate_limit' && view.held !== undefined) {
     await writeSwitch($, { idle: true }, v => ({ ...v, held: undefined }))
     void logStop($, `held switch dropped: ${error} after the refresh nudge, login ${active.id} kept`)
+    // Nothing is owed any more: the episode ends, so a later stop opens its own and moves (no work resumed here).
+    if (episode === ep) {
+      episode = undefined
+      isCarryOnInFlight = false
+    }
     return
   }
   if (ep !== undefined && error === 'rate_limit') {
