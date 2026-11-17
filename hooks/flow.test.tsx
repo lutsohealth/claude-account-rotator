@@ -11410,7 +11410,7 @@ test('puma-9arph.26: a managed policy that refuses the commands leaves the old c
   expect(typeof store.get('store-id')).toBe('string')
 })
 
-// RULING 6298: the temporary file is checked before the move, so whatever a real engine's write or chmod does, a bad file never replaces the copy.
+// RULING 6298: the temporary file is checked before the move, so a write or chmod that went wrong is never moved over the copy.
 const BAD_TEMPORARY: [string, (world: World) => void][] = [
   ['a write that reads back other text', world => { world.temporaryStores = '#!/usr/bin/env python3\n# half a file\n' }],
   ['a write that reads back empty', world => { world.temporaryStores = '' }],
