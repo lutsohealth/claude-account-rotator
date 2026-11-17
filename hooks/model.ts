@@ -1717,11 +1717,20 @@ export function isBoxFree(text: string | undefined, own: readonly (string | unde
 }
 
 /**
- * Whether the one more nudge is due: none went yet, and the token in use is still the one the first was sent for
- * (`firstExpiresAt`), now run out, so a request on it refreshes it first.
+ * Whether the one more nudge is due: none went yet, and the token in use is still the one the first was sent for (the
+ * same digest, `firstToken`, and the same expiry, `firstExpiresAt`: an expiry alone tells no token), now run out, so a
+ * request on it refreshes it first.
  */
-export function renudgeDue(s: { isRenudged: boolean; firstExpiresAt: number | undefined; expiresAt: number | undefined; now: number }): boolean {
-  return !s.isRenudged && s.firstExpiresAt !== undefined && s.expiresAt === s.firstExpiresAt && s.expiresAt <= s.now
+export function renudgeDue(s: {
+  isRenudged: boolean
+  firstExpiresAt: number | undefined
+  expiresAt: number | undefined
+  firstToken: string | undefined
+  token: string | undefined
+  now: number
+}): boolean {
+  const isSameToken = s.firstToken !== undefined && s.token === s.firstToken
+  return !s.isRenudged && isSameToken && s.firstExpiresAt !== undefined && s.expiresAt === s.firstExpiresAt && s.expiresAt <= s.now
 }
 
 /** What the session knows again right after the fill, read with no await before the key. */

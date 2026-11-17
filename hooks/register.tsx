@@ -264,8 +264,11 @@ type Episode = {
   nudgedAt?: number
   /** The held switch it went for (holdKey): a drop after it drops that one alone. */
   nudgedFor?: string
-  /** The last nudge's facts (puma-9arph.65): when it went, and the expiry of the stored token it went on. */
-  nudge?: { at: number; expiresAt: number }
+  /**
+   * The last nudge's facts (puma-9arph.65): when it went, and the expiry and digest (`fingerprint`, as the holder
+   * records take it; undefined where it failed) of the stored token it went on. The digest is never logged.
+   */
+  nudge?: { at: number; expiresAt: number; token: string | undefined }
   /** The one more nudge, sent once the token the first went on had run out unrefreshed, went. */
   isRenudged?: boolean
   /** A carry-on held back while the nudge sat queued (a landing meanwhile): owed once the nudge's turn ends. */
@@ -2038,7 +2041,10 @@ async function nudgeIfDue($: Host, ep: Episode, view: View, now: number): Promis
     expiresInMs: credential === undefined ? undefined : credential.expiresAt - now,
   })
   if (why !== undefined || credential === undefined) return false
-  if (isAgain && !renudgeDue({ isRenudged: ep.isRenudged === true, firstExpiresAt: ep.nudge?.expiresAt, expiresAt: credential.expiresAt, now })) return false
+  // The stored token's digest, taken once before the view is read again: an expiry alone tells no token (review r65).
+  const token = await fingerprint(credential.refreshToken ?? credential.accessToken).catch(() => undefined)
+  const due = { isRenudged: ep.isRenudged === true, firstExpiresAt: ep.nudge?.expiresAt, expiresAt: credential.expiresAt, firstToken: ep.nudge?.token, token, now }
+  if (isAgain && !renudgeDue(due)) return false
   // A box the read cannot show is no empty box (council B5); the mod's own lines left in it count as empty.
   if (!isBoxFree(boxText, [NUDGE_TEXT, CONTINUE, view.fableContinueText])) {
     if (boxText !== undefined) {
@@ -2053,7 +2059,7 @@ async function nudgeIfDue($: Host, ep: Episode, view: View, now: number): Promis
   if (!isSameHold || episode !== ep) return false
   ep.nudgedAt = now
   ep.nudgedFor = holdKey(after.held)
-  ep.nudge = { at: now, expiresAt: credential.expiresAt }
+  ep.nudge = { at: now, expiresAt: credential.expiresAt, token }
   if (isAgain) ep.isRenudged = true
   ep.budget = (ep.budget ?? 0) + 2
   void logStop(
@@ -2106,13 +2112,16 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
   // Council B4: a nudge's request that fails another way (a refresh refused above all) drops the held switch, and marks
   // nothing: a rejection mark would let the guard go at the token's expiry with no refresh, a landing around it.
   // The one exception (puma-9arph.65): a nudge sent with its token already past its expiry, the stored token still the
-  // same. A request on an expired token refreshes first, so its rejection proves the refresh dead: the mark is written
-  // and the hold stands, and the guard lets the switch go through its expiry release.
+  // same (the same digest and expiry: an expiry alone tells no token). A request on an expired token refreshes first,
+  // so its rejection proves the refresh dead: the mark is written and the hold stands, and the guard lets the switch go
+  // through its expiry release. A token that cannot be read or digested is not the same one: the drop below runs.
   if (ep?.nudgedAt !== undefined && error !== 'rate_limit' && view.held !== undefined) {
     if (error === 'authentication_failed' && ep.nudge !== undefined && ep.nudge.expiresAt <= ep.nudge.at) {
       const stored = await answerWithin($, 'CredentialReadTimedOut', readStored($, active.slot)).catch(() => undefined)
       const credential = stored?.state === 'present' ? stored.credential : undefined
-      if (credential !== undefined && credential.expiresAt === ep.nudge.expiresAt) {
+      const isSameExpiry = credential !== undefined && credential.expiresAt === ep.nudge.expiresAt
+      const token = isSameExpiry ? await fingerprint(credential.refreshToken ?? credential.accessToken).catch(() => undefined) : undefined
+      if (isSameExpiry && token !== undefined && token === ep.nudge.token) {
         const before = await saveHealth($, active.id, { kind: 'login-needed', why: SIGN_IN_REJECTED, at: await $.clock.now() })
         if (before?.kind !== 'login-needed') await announceLockout($, active, SIGN_IN_REJECTED)
         void logStop($, 'stop rejected on the expired token after the refresh nudge: the held switch lands through the release')
