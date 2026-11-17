@@ -11395,6 +11395,7 @@ test('puma-9arph.26: a move that fails leaves the old copy whole, no temporary f
 
 test('puma-9arph.26: a managed policy that refuses the commands leaves the old copy whole and the session running', async ($, on) => {
   const { w, store } = await launcherWorld($, on, OLD_LAUNCHER, world => { world.fileCommandFails = 'refused' })
-  expect([w.files[COPY], debugLines(w, 'launcher copy not refreshed').length]).toEqual([OLD_LAUNCHER, 1])
+  // Codex r1 F2: a refused rm leaves the temporary file, and its name is ONE stable name, so a leftover is overwritten next boot.
+  expect([w.files[COPY], kept(w).sort(), debugLines(w, 'launcher copy not refreshed').length]).toEqual([OLD_LAUNCHER, [COPY, `${COPY}.new`], 1])
   expect(typeof store.get('store-id')).toBe('string')
 })

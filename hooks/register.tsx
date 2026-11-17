@@ -2647,8 +2647,9 @@ const LAUNCHER_COMMAND_TIMEOUT_MS = 10_000
 /**
  * puma-9arph.26: keeps the launcher copy a person installed (README, "Picks where new sessions start") equal to this
  * mod's own `bin/account-rotator-claude`. Only an existing regular file whose bytes differ is replaced, never a link
- * and never a copy made where none stands: `$.fs.write` makes a temporary file beside it, chmod and mv (a rename in
- * one folder) put it in place whole. Any failure leaves the old copy as it stood, and is one debug line.
+ * and never a copy made where none stands: `$.fs.write` makes a temporary file beside it under one stable name, so a
+ * leftover (a refused rm) is overwritten by the next boot; chmod and mv (a rename in one folder) put it in place
+ * whole. Any failure leaves the old copy as it stood, and is one debug line.
  */
 async function refreshLauncherCopy($: Host): Promise<void> {
   const dir = launcherCopyDir(await $.env.get('CLAUDE_CONFIG_DIR'), (await $.env.get('HOME')) ?? '')
@@ -2657,7 +2658,7 @@ async function refreshLauncherCopy($: Host): Promise<void> {
   if (!entries.some(entry => entry.name === LAUNCHER_COPY && entry.kind === 'file')) return
   const own = await $.fs.read(`${$.plugin.root}/${LAUNCHER_FILE}`)
   if ((await $.fs.read(copy)) === own) return
-  const temporary = `${copy}.new-${String(await $.clock.now())}`
+  const temporary = `${copy}.new`
   const run = async (argv: string[]) => {
     const { exitCode } = await $.process.run(argv, { timeoutMs: LAUNCHER_COMMAND_TIMEOUT_MS })
     if (exitCode !== 0) throw new Error(`${argv[0]} did not finish`)
