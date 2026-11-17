@@ -2,6 +2,11 @@
 
 What each version of the account rotator changed. To get each one as Claude Code starts, turn on auto-update: in `/plugin`, open **Marketplaces**, pick **claude-account-rotator** and choose **Enable auto-update**. To update by hand, run `claude plugin marketplace update claude-account-rotator`, then `claude plugin update account-rotator@claude-account-rotator`, and start a new session.
 
+## 0.5.43-lutso.1 - 2026-11-17
+
+- **A read that hangs while a stop is handled no longer holds a later stop and the resume**: a stop's own read of the account, its stored sign-in, its usage or its profile, with no answer in 10 seconds counts as a failed read. The stop still marks the account, moves and carries on, and the stop log names the read that timed out (`stop read failed: UsageReadTimedOut`, `ProfileReadTimedOut` or `CredentialReadTimedOut`). Every usage and profile read, the scheduled check's too, ends at the same 10 seconds (#127, puma-9arph.59).
+- **Not fixed yet**: the switch's own read of the stored sign-in, made to see whether the token in use refreshes soon, still has no bound of the mod's own; a stop's switch held for a token refresh, with no turn running, can land after the bound (puma-9arph.57).
+
 ## 0.5.42-lutso.1 - 2026-11-17
 
 - **A resume another turn interrupts or fails is acted on again, and the carry-on goes out once**: when a turn that is not the carry-on's own enters the resume and is then interrupted, fails or dies on a limit, the mod looks again and frees the waiting carry-on, and the new stop's switch sends no second one. The carry-on's own turn is told by its text inside the frame Claude Code puts around a plugin's prompt, so when it dies on a limit the next login gets a carry-on of its own. A carry-on refused or dropped while another turn runs is not brought back. The stop log says how each such entry ended (`resume ended`) (#125, puma-9arph.60).
