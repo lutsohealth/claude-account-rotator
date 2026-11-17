@@ -1584,3 +1584,8 @@ export function requestsDir(configDir: string | undefined, home: string): string
   return `${configDir || `${home}/.claude`}/account-rotator-requests`
 }
 
+/** The folder of the launcher copy the README has a person install as `claude`: `accounts/bin` in the Claude config folder. */
+export function launcherCopyDir(configDir: string | undefined, home: string): string {
+  return `${configDir || `${home}/.claude`}/accounts/bin`
+}
+
