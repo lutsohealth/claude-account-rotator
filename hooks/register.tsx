@@ -105,6 +105,8 @@ import {
   escapeAfterFill,
   escapeArgv,
   escapeHeldBack,
+  NUDGE_TEXT,
+  nudgeHeld,
   pickAfterStop,
   raisesLimitModal,
   wordingClass,
@@ -256,9 +258,14 @@ type Episode = {
    * that same carry-on, so the look acts again.
    */
   before?: { carryOn?: number; isLimitStopLast: boolean; isCarryOnTurn: boolean }
-  told: Set<'pane' | 'nothing' | 'stuck' | 'fill' | 'failed'>
+  /** When the refresh nudge went (puma-9arph.57): once an episode. */
+  nudgedAt?: number
+  told: Set<Told>
 }
+type Told = 'pane' | 'nothing' | 'stuck' | 'fill' | 'failed' | 'nudge'
 let episode: Episode | undefined
+/** The refresh nudge's own turn while it runs: it is no entry of the resume (council B2). */
+let nudgeTurnId: string | undefined
 /** A carry-on submitted and not yet entered: no second is submitted, and the look may free it. */
 let isCarryOnInFlight = false
 /** The text of the carry-on last submitted: a main turn whose text holds it is the carry-on's own. */
@@ -1872,7 +1879,7 @@ function endEntry($: Host, ep: Episode, how: string): void {
 }
 
 /** Writes a look's line once an episode, where the look would otherwise write it every tick. */
-function tellOnce($: Host, ep: Episode, what: 'pane' | 'nothing' | 'stuck' | 'fill' | 'failed', line: string): void {
+function tellOnce($: Host, ep: Episode, what: Told, line: string): void {
   if (ep.told.has(what)) return
   ep.told.add(what)
   void logStop($, line)
@@ -1899,12 +1906,14 @@ async function lookOwed($: Host): Promise<void> {
     }
     const isSettling = movedAt !== undefined && now - movedAt < SETTLE_MS
     if (!isCarryOnInFlight && armedCarryOns === 0 && !isSettling && view.held === undefined) tellOnce($, ep, 'nothing', 'owed resume: no carry-on queued, no key')
+    if (view.held?.carry !== undefined && (await nudgeIfDue($, ep, view, now))) return undefined
     const look: EscapeLook = {
       isCarryOnInFlight,
       isLimitStopLast: limitStopAfter === mainTurns,
       openTurns: turns,
       isSettling,
       isHeld: view.held !== undefined,
+      isNudge: ep.nudgedAt !== undefined && isCarryOnInFlight && carryOnText === NUDGE_TEXT,
       escapes: ep.escapes,
       budget: ep.budget,
       sinceEscapeMs: ep.lastEscapeAt === undefined ? undefined : now - ep.lastEscapeAt,
@@ -1930,6 +1939,41 @@ async function lookOwed($: Host): Promise<void> {
   if (sent === undefined) return
   const code = await exitOf($, sent.child)
   void logStop($, `owed resume: Escape ${sent.escape} of ${sent.budget} (exit ${code ?? 'none'})`)
+}
+
+/**
+ * The refresh nudge (puma-9arph.57), under the look's lock: while a stop's switch is held for the token in use, with
+ * no turn running, Claude Code refreshes that token at no request. Once the token is due within NUDGE_LEAD_MS this
+ * sends one carry-on of its own on the login in use: its request refreshes the token under that login's own slot,
+ * and the stop it dies on lands the switch through the unchanged refresh guard. True when it sent one.
+ */
+async function nudgeIfDue($: Host, ep: Episode, view: View, now: number): Promise<boolean> {
+  const active = view.accounts.find(a => a.id === view.activeId)
+  if (active === undefined) return false
+  const isQuiet = !isCarryOnInFlight && nudgeTurnId === undefined && openTurns.size === 0
+  if (ep.nudgedAt !== undefined) {
+    if (isQuiet && limitStopAfter === mainTurns) tellOnce($, ep, 'nudge', 'refresh nudge: token not refreshed, switch still held')
+    return false
+  }
+  const stored = await answerWithin($, 'CredentialReadTimedOut', readStored($, active.slot)).catch(() => undefined)
+  const credential = stored?.state === 'present' ? stored.credential : undefined
+  const why = nudgeHeld({
+    hasHeldCarry: true,
+    isNudged: false,
+    isLimitStopLast: limitStopAfter === mainTurns,
+    openTurns: openTurns.size,
+    isCarryOnQueued: isCarryOnInFlight || armedCarryOns > 0,
+    // A box the read cannot show is no empty box (council B5).
+    isBoxEmpty: (await $.prompt.read().catch(() => undefined))?.text === '',
+    isTokenOk: credential !== undefined && healthOf(credential, now).kind === 'ok',
+    expiresInMs: credential === undefined ? undefined : credential.expiresAt - now,
+  })
+  if (why !== undefined || credential === undefined) return false
+  ep.nudgedAt = now
+  ep.budget = (ep.budget ?? 0) + 2
+  void logStop($, `refresh nudge: login ${active.id}'s token expires in ${Math.round((credential.expiresAt - now) / 1000)} s, carry-on sent on it`)
+  void sendCarryOn($, { text: NUDGE_TEXT }).catch(error => debug($, `refresh nudge failed: ${String(error)}`))
+  return true
 }
 
 /** An Escape's exit code, null where it did not run. */
@@ -1969,6 +2013,13 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
   void logStop($, `stop heard: ${error} (wording: ${wordingClass(stop.last_assistant_message)}), login ${active.id} in use`)
   // The login each usage-limit stop of the episode died on is never tried again in it.
   const ep = episode
+  // Council B4: a nudge's request that fails another way (a refresh refused above all) drops the held switch, and marks
+  // nothing: a rejection mark would let the guard go at the token's expiry with no refresh, a landing around it.
+  if (ep?.nudgedAt !== undefined && error !== 'rate_limit' && view.held !== undefined) {
+    await writeSwitch($, { idle: true }, v => ({ ...v, held: undefined }))
+    void logStop($, `held switch dropped: ${error} after the refresh nudge, login ${active.id} kept`)
+    return
+  }
   if (ep !== undefined && error === 'rate_limit') {
     ep.stops += 1
     if (!ep.tried.includes(active.id)) ep.tried.push(active.id)
@@ -2977,6 +3028,14 @@ export const register: Register = on => {
     openTurns.add(e.turnId)
     if (e.agentId === undefined) {
       const ep = episode
+      // The refresh nudge's own turn is no entry (council B2): the resume stays owed and the held switch stands.
+      if (ep?.nudgedAt !== undefined && isCarryOnInFlight && carryOnText === NUDGE_TEXT && e.text.includes(NUDGE_TEXT)) {
+        mainTurns += 1
+        isCarryOnInFlight = false
+        nudgeTurnId = e.turnId
+        void logStop($, `refresh nudge entered on login ${(await getView($)).activeId}`)
+        return next(e)
+      }
       if (ep !== undefined && ep.enteredAt === undefined) {
         // Claude Code hands turn.start a plugin's prompt inside its own frame ("The <plugin> plugin sent a message: ..."),
         // unless it went asUser: the carry-on's own turn is the one whose text holds the carry-on's.
@@ -2997,6 +3056,17 @@ export const register: Register = on => {
   on('turn.complete', async ($, e, next) => {
     const wasOpen = openTurns.delete(e.turnId)
     const ep = episode
+    if (e.turnId === nudgeTurnId) {
+      nudgeTurnId = undefined
+      // Login 1 answered the nudge: the work goes on there, and the switch held to leave it goes.
+      if (ep !== undefined && e.reason === 'answer') {
+        const { activeId } = await getView($)
+        await writeSwitch($, { idle: true }, v => ({ ...v, held: undefined }))
+        void logStop($, `held switch dropped: the refresh nudge answered on login ${activeId}`)
+        await endEpisode($, ep)
+      }
+      return next(e)
+    }
     if (ep !== undefined) {
       if (!wasOpen) void logStop($, `turn end with no start heard: agent ${e.agentId ?? 'main'}, reason ${e.reason}`)
       else if (ep.enteredAt === undefined && openTurns.size === 0) void logStop($, 'owed resume: turns closed')

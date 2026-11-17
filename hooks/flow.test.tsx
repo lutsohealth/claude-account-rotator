@@ -3,7 +3,7 @@ import type { Engine, MockClock } from 'claude-code/testing'
 import type { On, ProcessRunResult, SessionRateLimit, ToolCallArgs } from 'claude-code'
 import type { StoredRows, View } from '../types'
 
-import { DEFAULT_FOOTER, EMPTY_VIEW, USAGE_CLAIM_WAIT_MS, USAGE_FORCE_AFTER_MS, USAGE_IDLE_MS, fingerprint, keychainItem, roomColor } from './model'
+import { DEFAULT_FOOTER, EMPTY_VIEW, NUDGE_LEAD_MS, NUDGE_TEXT, USAGE_CLAIM_WAIT_MS, USAGE_FORCE_AFTER_MS, USAGE_IDLE_MS, fingerprint, keychainItem, roomColor } from './model'
 import { laterMark, longBar, markFrom, storedLineText } from './model'
 import { REQUEST_POLL_MS, REQUEST_TTL_MS, blockedText } from './model'
 import { PANE_COLUMNS } from './view'
@@ -124,6 +124,8 @@ type World = {
   fills?: number
   fillHold?: Promise<void>
   isFillThrown?: boolean
+  /** What the prompt box holds, as `$.prompt.read` answers it. */
+  draft?: string
   /** Where it answers true, a debug line fails to write. */
   isLogFailing?: (text: string) => boolean
   /** Whether each line in `submitted` was sent as the person's own words (`asUser`), not under the mod's name. */
@@ -396,6 +398,7 @@ function world(on: On, w: World, store: Record<string, unknown> | Map<string, un
     await w.fillHold
     return { isFilled: w.isFillRefused !== true }
   })
+  on('prompt.read', () => ({ value: { text: w.draft ?? '', cursor: 0 } }))
   on('turn.start', (_$, e) => ({ turnId: e.turnId }))
   on('turn.complete', (_$, e) => ({ text: e.answer }))
   on('session.start', (_$, e) => {
@@ -4147,9 +4150,12 @@ test('puma-9arph.18: Use now during Connect\'s visit moves nothing and says why'
 /** Claude Code's own way out of the Fable limit, which every notice of a stay ends on. */
 const WAY_OUT = 'Run /usage-credits to continue or switch models with /model.'
 
-/** Login 1's token refreshes in 5 minutes, inside the refresh guard: a switch off it waits for the refresh. */
+/**
+ * Login 1's token runs out in 7 minutes, inside the refresh guard: a switch off it waits for the refresh, which these
+ * tests bring before the refresh nudge's NUDGE_LEAD_MS would (puma-9arph.57).
+ */
 async function guarded(on: On, w: World, store: Record<string, unknown>, atStop: [number, number, number?]): Promise<MockClock> {
-  w.keychain['Claude Code-credentials'] = blob('tok-1', NOW + 5 * 60_000)
+  w.keychain['Claude Code-credentials'] = blob('tok-1', NOW + 7 * 60_000)
   w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
   w.usage['tok-1'] = atStop
   w.usage['tok-2'] = [10, 30, 10]
@@ -10941,6 +10947,123 @@ test('row b: a measure within 30 s of entry, then a stop, keeps one episode and 
   expect(lines.filter(l => l.startsWith('work resumed'))).toEqual([])
   expect(lines.filter(l => l.startsWith('picked 3'))).toEqual(['picked 3: fresh, read 1 min ago; tried 1, 2'])
   expect(slots(w)).toEqual([SLOT2, SLOT3])
+})
+
+// ---------------------------------------------------------------- puma-9arph.57: the refresh nudge
+
+/** owedWorld with login 1's token 7 minutes from expiry, then a usage-limit stop whose switch to 2 the refresh guard holds. */
+async function heldWorld($: Engine, on: On, w: World) {
+  const { store, clock } = await owedWorld($, on, w)
+  const expiresAt = clock.now() + 7 * 60_000
+  w.keychain['Claude Code-credentials'] = blob('tok-1', expiresAt)
+  const stopAt = clock.now()
+  await $.classic.StopFailure({ error: 'rate_limit' })
+  await clock.settle()
+  return { store, clock, expiresAt, stopAt }
+}
+
+/** The nudge's own turn, as Claude Code starts it once the Escape frees it, dying on the limit or answering. */
+async function nudgeTurn($: Engine, clock: MockClock, end: { error: 'rate_limit' | 'authentication_failed' } | 'answer'): Promise<void> {
+  await $.turn.start({ text: NUDGE_TEXT, turnId: 'turn-nudge' })
+  if (end !== 'answer') await $.classic.StopFailure(end)
+  await $.turn.complete({ turnId: 'turn-nudge', reason: end === 'answer' ? 'answer' : 'error', answer: '', durationMs: 1, isAborted: false })
+  await clock.settle()
+}
+
+const NUDGE_SENT = "refresh nudge: login 1's token expires in "
+
+test('row v: a held stop with no turn open sends one nudge NUDGE_LEAD_MS before the expiry, lands after the refresh and enters the resume within the bound', async ($, on) => {
+  const w = fresh()
+  const { store, clock, expiresAt, stopAt } = await heldWorld($, on, w)
+  expect(whats(stopLogOf(store, w))).toContain('held for 2: the token in use refreshes soon')
+  await clock.advance(2 * 60_000)
+  expect(w.submitted).toEqual([])
+  await clock.advance(75_000)
+  expect(w.submitted).toEqual([NUDGE_TEXT])
+  const sent = whats(stopLogOf(store, w)).find(l => l.startsWith(NUDGE_SENT)) ?? ''
+  expect(Number(sent.slice(NUDGE_SENT.length).split(' ')[0])).toBeLessThanOrEqual(NUDGE_LEAD_MS / 1000)
+  // Claude Code refreshes login 1's token before the nudge's request, under login 1's own slot; the request dies on the limit.
+  await $.turn.start({ text: NUDGE_TEXT, turnId: 'turn-nudge' })
+  refresh(w)
+  await $.classic.StopFailure({ error: 'rate_limit' })
+  await $.turn.complete({ turnId: 'turn-nudge', reason: 'error', answer: '', durationMs: 1, isAborted: false })
+  await clock.settle()
+  expect(slots(w)).toEqual([SLOT2])
+  expect(whats(stopLogOf(store, w)).filter(l => ['refresh nudge entered on login 1', 'moved to 2', 'resume entered'].includes(l))).toEqual(['refresh nudge entered on login 1', 'moved to 2'])
+  await clock.advance(36_000)
+  expect(w.submitted).toHaveLength(2)
+  const carry = w.submitted[1] ?? ''
+  // B3: neither text holds the other, so the turn check never takes one for the other.
+  expect([carry.includes(NUDGE_TEXT), NUDGE_TEXT.includes(carry)]).toEqual([false, false])
+  await $.turn.start({ text: carry, turnId: 'turn-carry' })
+  await clock.settle()
+  expect(whats(stopLogOf(store, w)).at(-1)).toBe('resume entered')
+  // The bound: the nudge at most one 15 s look after expiresAt - NUDGE_LEAD_MS, then the move's 35 s and 65 s for the entry.
+  expect(logTime(store, w, 'resume entered') - stopAt).toBeLessThanOrEqual(expiresAt - NUDGE_LEAD_MS - stopAt + 15_000 + 35_000 + 65_000)
+})
+
+// Council B5: the nudge never goes over what the person is typing.
+test('row v: a draft in the prompt box holds the nudge back until the box is empty', async ($, on) => {
+  const w = fresh()
+  const { clock } = await heldWorld($, on, w)
+  w.draft = 'half a thought'
+  await clock.advance(3 * 60_000 + 15_000)
+  expect(w.submitted).toEqual([])
+  w.draft = ''
+  await clock.advance(15_000)
+  expect(w.submitted).toEqual([NUDGE_TEXT])
+})
+
+test('row v: a nudge whose request refreshes nothing lands no switch and sends no second nudge', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await heldWorld($, on, w)
+  await clock.advance(3 * 60_000 + 15_000)
+  await nudgeTurn($, clock, { error: 'rate_limit' })
+  await clock.advance(30 * 60_000)
+  expect(slots(w)).toEqual([])
+  expect(w.submitted).toEqual([NUDGE_TEXT])
+  expect(whats(stopLogOf(store, w)).filter(l => l.startsWith('refresh nudge: token'))).toEqual(['refresh nudge: token not refreshed, switch still held'])
+})
+
+// Council B2: the nudge's own turn never counts as the resume's entry, so a measure after it ends nothing.
+test('row v: the nudge\'s own turn is no entry: a measure 30 s after it ends no episode and drops no held switch', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await heldWorld($, on, w)
+  await clock.advance(3 * 60_000 + 15_000)
+  await $.turn.start({ text: NUDGE_TEXT, turnId: 'turn-nudge' })
+  await clock.advance(31_000)
+  await $.session.measure({ context: { window: 200_000 }, rateLimits: w.limits, changed: ['context'] })
+  await clock.settle()
+  const lines = whats(stopLogOf(store, w))
+  expect([lines.includes('resume entered'), lines.some(l => l.startsWith('work resumed'))]).toEqual([false, false])
+  refresh(w)
+  await $.classic.StopFailure({ error: 'rate_limit' })
+  await $.turn.complete({ turnId: 'turn-nudge', reason: 'error', answer: '', durationMs: 1, isAborted: false })
+  await clock.settle()
+  expect(slots(w)).toEqual([SLOT2])
+})
+
+// Council B4: a rejected sign-in after a nudge drops the held switch; nothing marks login 1, so no later expiry releases the guard.
+test('row v: an authentication_failed after a nudge drops the held switch and never lands it', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await heldWorld($, on, w)
+  await clock.advance(3 * 60_000 + 15_000)
+  await nudgeTurn($, clock, { error: 'authentication_failed' })
+  await clock.advance(10 * 60_000)
+  expect(whats(stopLogOf(store, w))).toContain('held switch dropped: authentication_failed after the refresh nudge, login 1 kept')
+  expect([slots(w), (store.get('health:1') as { kind?: string } | undefined)?.kind]).toEqual([[], 'ok'])
+})
+
+test('row v: a nudge that login 1 answers ends the episode and drops the held switch', async ($, on) => {
+  const w = fresh()
+  const view = watchedView(on)
+  const { store, clock } = await heldWorld($, on, w)
+  await clock.advance(3 * 60_000 + 15_000)
+  expect(view()?.held?.target.id).toBe('2')
+  await nudgeTurn($, clock, 'answer')
+  const lines = whats(stopLogOf(store, w))
+  expect(lines.filter(l => l.startsWith('held switch dropped') || l.startsWith('work resumed'))).toEqual(['held switch dropped: the refresh nudge answered on login 1', 'work resumed on login 1'])
+  expect(view()?.held).toBe(undefined)
 })
 
 // ---------------------------------------------------------------- puma-9arph.38: one switch in flight

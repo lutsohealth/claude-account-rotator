@@ -8,7 +8,7 @@ import { laterMark, spentMark, withFableMark } from './model'
 import { EMPTY_VIEW, USAGE_IDLE_MS, fitRow, hasRoom, rowOf, rowsOf, rowText, storedLine, storedLineText } from './model'
 import ROWS_FIXTURE from '../tests/fixtures/rows'
 import { REQUEST_TTL_MS, holdsLogin, isLoginOf, sameLogin, requestFrom, requestsDir, slotNumber } from './model'
-import { ESCAPE_GAP_MS, escapeAfterFill, escapeArgv, escapeHeldBack, pickAfterStop, raisesLimitModal } from './model'
+import { ESCAPE_GAP_MS, NUDGE_LEAD_MS, escapeAfterFill, escapeArgv, escapeHeldBack, nudgeHeld, pickAfterStop, raisesLimitModal } from './model'
 import { mayWrite } from './model'
 import { signInFromStatus } from './model'
 import { USAGE_BACKOFF_MAX_MS, USAGE_CLAIM_MS, USAGE_CLAIM_WAIT_MS, USAGE_EARLY_MS, WRITER_VERSION, afterUsage, claimDueReads, gatingDue, isUsageDue, mayForceUsage, mayReadSince, renewClaim, retryAfterFrom, usageDueFrom } from './model'
@@ -1871,6 +1871,30 @@ test('row g: with prompts queued under the dialog and no turn, the look\'s Escap
     ['an empty Orca handle', { ...modal, pane: '' }, 'no Orca pane'],
   ]
   expect(rows.map(([name, s]) => [name, escapeHeldBack(s)])).toEqual(rows.map(([name, , why]) => [name, why]))
+})
+
+// puma-9arph.57: the refresh nudge's own carry-on goes under a held switch; any other carry-on still waits for it.
+test('row v: a held switch holds back every Escape but the refresh nudge\'s', () => {
+  const look: Parameters<typeof escapeHeldBack>[0] = { isCarryOnInFlight: true, isLimitStopLast: true, openTurns: 0, isSettling: false, isHeld: true, escapes: 0, budget: 10, pane: 'term_a', fill: { refusal: 'dialog' } }
+  expect([escapeHeldBack(look), escapeHeldBack({ ...look, isNudge: true })]).toEqual(['a switch is held', undefined])
+})
+
+// puma-9arph.57 (council B1 to B5): one nudge an episode, under a held stop switch, NUDGE_LEAD_MS before the expiry.
+test('row v: nudgeHeld sends only for a held stop switch, no turn, no carry-on, an empty box and a token due within NUDGE_LEAD_MS', () => {
+  const due: Parameters<typeof nudgeHeld>[0] = { hasHeldCarry: true, isNudged: false, isLimitStopLast: true, openTurns: 0, isCarryOnQueued: false, isBoxEmpty: true, isTokenOk: true, expiresInMs: NUDGE_LEAD_MS }
+  expect([NUDGE_LEAD_MS, nudgeHeld(due)]).toEqual([240_000, undefined])
+  const rows: [string, Parameters<typeof nudgeHeld>[0], string][] = [
+    ['no stop switch held', { ...due, hasHeldCarry: false }, 'no stop switch held'],
+    ['nudged already this episode', { ...due, isNudged: true }, 'nudged already'],
+    ['a turn began since the stop', { ...due, isLimitStopLast: false }, 'no limit stop before it'],
+    ['a turn open in some loop', { ...due, openTurns: 1 }, 'a turn is open'],
+    ['a carry-on queued or armed', { ...due, isCarryOnQueued: true }, 'a carry-on is queued'],
+    ['B5: a draft in the box', { ...due, isBoxEmpty: false }, 'the prompt box holds a draft'],
+    ['no token that can refresh', { ...due, isTokenOk: false }, 'the token cannot refresh'],
+    ['no stored token', { ...due, expiresInMs: undefined }, 'the token cannot refresh'],
+    ['1 ms before the lead', { ...due, expiresInMs: NUDGE_LEAD_MS + 1 }, 'the token is not due'],
+  ]
+  expect(rows.map(([name, s]) => [name, nudgeHeld(s)])).toEqual(rows.map(([name, , why]) => [name, why]))
 })
 
 test('row k: a carry-on still in flight 30 s after its Escape gets another, within the budget 2 x logins + 2, then stuck', () => {
