@@ -249,7 +249,7 @@ type Episode = {
   enteredAt?: number
   lastWaitCount?: number
   /**
-   * What stood when the turn that entered began (`carryOn`, the carry-on count while one was in flight), and whether
+   * What stood when the turn that entered began (`carryOn`, the refusal count while a carry-on was in flight), and whether
    * that turn was the carry-on's own (its text the one submitted): another turn that ends aborted or failed gives back
    * that same carry-on, so the look acts again.
    */
@@ -261,8 +261,8 @@ let episode: Episode | undefined
 let isCarryOnInFlight = false
 /** The text of the carry-on last submitted: a main turn that begins with it is the carry-on's own. */
 let carryOnText: string | undefined
-/** Counts each carry-on submitted and each refused: a give-back revives a carry-on only while this has not moved. */
-let carryOnCount = 0
+/** Counts carry-ons refused or dropped: a give-back revives a carry-on only while this has not moved since its turn began. */
+let carryOnRefusals = 0
 /** Carry-ons armed and not yet due: the look says nothing is queued only while none is. */
 let armedCarryOns = 0
 /** How often the owed-resume look runs, between turns as well. */
@@ -1810,14 +1810,13 @@ async function sendCarryOn($: Host, prompt: { text: string; asUser?: true }): Pr
   }
   isCarryOnInFlight = true
   carryOnText = prompt.text
-  carryOnCount += 1
   void logStop($, 'carry-on queued')
   let answer: Awaited<ReturnType<Host['prompt']['submit']>>
   try {
     answer = await $.prompt.submit(prompt)
   } catch (error) {
     isCarryOnInFlight = false
-    carryOnCount += 1
+    carryOnRefusals += 1
     throw error
   }
   if (answer.drop === undefined) {
@@ -1826,7 +1825,7 @@ async function sendCarryOn($: Host, prompt: { text: string; asUser?: true }): Pr
   }
   // The engine's own refusal (a Stop stands, a host's limit): said in debug, with its reason, and not tried again.
   isCarryOnInFlight = false
-  carryOnCount += 1
+  carryOnRefusals += 1
   await debug($, `carry-on dropped: ${answer.drop}`)
   void logStop($, 'carry-on drop')
 }
@@ -1853,8 +1852,9 @@ function endEntry($: Host, ep: Episode, how: string): void {
     void logStop($, `resume ended ${how}: the carry-on's own turn, nothing queued`)
     return
   }
-  // Only the carry-on that stood when this turn began, while no submit since replaced it and no refusal ended it.
-  if (before.carryOn === carryOnCount) isCarryOnInFlight = true
+  // Only the carry-on that stood when this turn began, while no refusal since ended it; one submitted since holds the
+  // flag up already.
+  if (before.carryOn === carryOnRefusals) isCarryOnInFlight = true
   if (before.isLimitStopLast) limitStopAfter = mainTurns
   void logStop($, `resume ended ${how}: another turn, ${isCarryOnInFlight ? 'the carry-on still queued' : 'nothing queued'}`)
 }
@@ -2967,7 +2967,7 @@ export const register: Register = on => {
       const ep = episode
       if (ep !== undefined && ep.enteredAt === undefined) {
         const isCarryOnTurn = isCarryOnInFlight && e.text === carryOnText
-        ep.before = { carryOn: isCarryOnInFlight ? carryOnCount : undefined, isLimitStopLast: limitStopAfter === mainTurns, isCarryOnTurn }
+        ep.before = { carryOn: isCarryOnInFlight ? carryOnRefusals : undefined, isLimitStopLast: limitStopAfter === mainTurns, isCarryOnTurn }
         void debug($, `resume entry: ${isCarryOnTurn ? "the carry-on's own turn" : 'another turn'}`)
       }
       mainTurns += 1
