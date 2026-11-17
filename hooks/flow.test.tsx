@@ -10468,6 +10468,7 @@ test('a carry-on whose turn dies on the usage limit again moves to the next logi
     'carry-on queued',
     'carry-on resolved',
     'resume entered',
+    "resume ended rate_limit: the carry-on's own turn, nothing queued",
     stopHeard('none', '2'),
     'owed resume: turns closed',
     'stop on owed resume: login 2 tried, no response since its switch, no mark',
@@ -10571,6 +10572,61 @@ test('C1: a main turn aborted after entry lets the next look reach the fill agai
   await clock.advance(15_000)
   expect(w.fills ?? 0).toBe(fills + 1)
   expect(whats(stopLogOf(store, w))).not.toContain('owed resume: no carry-on queued, no key')
+})
+
+// puma-9arph.60 point 1: another turn that enters and ends 'error', with no stop of its own, leaves the carry-on owed too.
+test('C1: an entry by another turn that ends in an error with no limit stop lets the next look reach the fill again', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await owedWorld($, on, w)
+  await $.classic.StopFailure({ error: 'rate_limit' })
+  await clock.settle()
+  await clock.advance(36_000 + 15_000)
+  expect(whats(stopLogOf(store, w)).at(-1)).toBe(FILL_NO_CAUSE)
+  await $.turn.start({ text: 'a waker', turnId: 'waker' })
+  await $.turn.complete({ turnId: 'waker', reason: 'error', answer: '', durationMs: 1, isAborted: false })
+  await clock.settle()
+  expect(whats(stopLogOf(store, w)).at(-1)).toBe('resume ended error: another turn, the carry-on still queued')
+  const fills = w.fills ?? 0
+  await clock.advance(15_000)
+  expect(w.fills ?? 0).toBe(fills + 1)
+  expect(whats(stopLogOf(store, w))).not.toContain('owed resume: no carry-on queued, no key')
+})
+
+// puma-9arph.60: another turn that enters and dies on a limit leaves the first carry-on queued: the stop's own carry-on is
+// not sent again, so one resume is never entered twice.
+test('C1: an entry by another turn that dies on a limit leaves the first carry-on queued and sends no second', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await owedWorld($, on, w)
+  await $.classic.StopFailure({ error: 'rate_limit' })
+  await clock.settle()
+  await clock.advance(36_000 + 15_000)
+  expect(w.submitted).toHaveLength(1)
+  await $.turn.start({ text: 'a waker', turnId: 'waker' })
+  await $.classic.StopFailure({ error: 'rate_limit' })
+  await $.turn.complete({ turnId: 'waker', reason: 'error', answer: '', durationMs: 1, isAborted: false })
+  await clock.settle()
+  await clock.advance(36_000)
+  const lines = whats(stopLogOf(store, w))
+  expect(lines).toContain('resume ended rate_limit: another turn, the carry-on still queued')
+  expect(lines).toContain('carry-on not sent again: one is queued')
+  expect(w.submitted).toHaveLength(1)
+})
+
+// puma-9arph.60 point 3: the carry-on's own turn, entered and then aborted, leaves nothing queued: no look reaches the fill.
+test('C1: the carry-on\'s own turn that enters and ends aborted leaves nothing queued, so no look reaches the fill', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await owedWorld($, on, w)
+  await $.classic.StopFailure({ error: 'rate_limit' })
+  await clock.settle()
+  await clock.advance(36_000 + 15_000)
+  expect(w.submitted).toHaveLength(1)
+  await $.turn.start({ text: w.submitted[0] ?? '', turnId: 'turn-carry' })
+  await $.turn.complete({ turnId: 'turn-carry', reason: 'aborted', answer: '', durationMs: 1, isAborted: true })
+  await clock.settle()
+  expect(whats(stopLogOf(store, w)).at(-1)).toBe("resume ended aborted: the carry-on's own turn, nothing queued")
+  const fills = w.fills ?? 0
+  await clock.advance(45_000)
+  expect(w.fills ?? 0).toBe(fills)
 })
 
 // Review M403 B: a look whose fill has not answered holds the lock, and every later look skips its tick.

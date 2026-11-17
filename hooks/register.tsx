@@ -248,13 +248,18 @@ type Episode = {
   lastEscapeAt?: number
   enteredAt?: number
   lastWaitCount?: number
-  /** What stood when the turn that entered began: an entry that ends aborted gives it back, so the look acts again. */
-  before?: { isCarryOnInFlight: boolean; isLimitStopLast: boolean }
+  /**
+   * What stood when the turn that entered began, and whether that turn was the carry-on's own (its text the one
+   * submitted): another turn that ends aborted or failed gives it back, so the look acts again.
+   */
+  before?: { isCarryOnInFlight: boolean; isLimitStopLast: boolean; isCarryOnTurn: boolean }
   told: Set<'pane' | 'nothing' | 'stuck' | 'fill' | 'failed'>
 }
 let episode: Episode | undefined
 /** A carry-on submitted and not yet entered: no second is submitted, and the look may free it. */
 let isCarryOnInFlight = false
+/** The text of the carry-on last submitted: a main turn that begins with it is the carry-on's own. */
+let carryOnText: string | undefined
 /** Carry-ons armed and not yet due: the look says nothing is queued only while none is. */
 let armedCarryOns = 0
 /** How often the owed-resume look runs, between turns as well. */
@@ -1801,6 +1806,7 @@ async function sendCarryOn($: Host, prompt: { text: string; asUser?: true }): Pr
     return
   }
   isCarryOnInFlight = true
+  carryOnText = prompt.text
   void logStop($, 'carry-on queued')
   let answer: Awaited<ReturnType<Host['prompt']['submit']>>
   try {
@@ -1826,6 +1832,25 @@ async function endEpisode($: Host, ep: Episode): Promise<void> {
   isCarryOnInFlight = false
   const { activeId } = await getView($)
   void logStop($, `work resumed on login ${activeId}`)
+}
+
+/**
+ * Ends an entry that did not answer (aborted, failed, or stopped by a limit). The carry-on's own turn used it up:
+ * nothing is queued. Another turn (a waker's, or one an Escape landed on) leaves it queued as before it, so the look acts
+ * again, and a new stop's carry-on is not sent again: one resume never enters twice.
+ */
+function endEntry($: Host, ep: Episode, how: string): void {
+  ep.enteredAt = undefined
+  const before = ep.before
+  if (before === undefined) return
+  if (before.isCarryOnTurn) {
+    void logStop($, `resume ended ${how}: the carry-on's own turn, nothing queued`)
+    return
+  }
+  // Raised, never lowered: a carry-on submitted after this turn began is in flight whatever stood before it.
+  if (before.isCarryOnInFlight) isCarryOnInFlight = true
+  if (before.isLimitStopLast) limitStopAfter = mainTurns
+  void logStop($, `resume ended ${how}: another turn, ${isCarryOnInFlight ? 'the carry-on still queued' : 'nothing queued'}`)
 }
 
 /** Writes a look's line once an episode, where the look would otherwise write it every tick. */
@@ -2911,6 +2936,8 @@ export const register: Register = on => {
     // Only a stop that raises the limit modal arms the Escape and opens an episode; onStopFailure's wider list says
     // which stops switch at all. Both are set here, before any await, so no branch of the stop runs without them.
     if (raisesLimitModal(e.error)) {
+      // A stop on the turn that entered comes before that turn's end: the entry ends here.
+      if (episode?.enteredAt !== undefined) endEntry($, episode, e.error)
       limitStopAfter = mainTurns
       episode ??= { stops: 0, tried: [], escapes: 0, told: new Set() }
       episode.enteredAt = undefined
@@ -2929,7 +2956,11 @@ export const register: Register = on => {
     openTurns.add(e.turnId)
     if (e.agentId === undefined) {
       const ep = episode
-      if (ep !== undefined && ep.enteredAt === undefined) ep.before = { isCarryOnInFlight, isLimitStopLast: limitStopAfter === mainTurns }
+      if (ep !== undefined && ep.enteredAt === undefined) {
+        const isCarryOnTurn = isCarryOnInFlight && e.text === carryOnText
+        ep.before = { isCarryOnInFlight, isLimitStopLast: limitStopAfter === mainTurns, isCarryOnTurn }
+        void debug($, `resume entry: ${isCarryOnTurn ? "the carry-on's own turn" : 'another turn'}`)
+      }
       mainTurns += 1
       isCarryOnInFlight = false
       if (ep !== undefined && ep.enteredAt === undefined) {
@@ -2949,14 +2980,7 @@ export const register: Register = on => {
       if (e.agentId === undefined && ep.enteredAt !== undefined) {
         // An answer proves the resume; an interrupted or failed one leaves it owed, and the look acts again.
         if (e.reason === 'answer') await endEpisode($, ep)
-        else if (e.reason === 'aborted' || e.reason === 'error') {
-          ep.enteredAt = undefined
-          // An entry that ends aborted (an Escape that landed on a waker's turn) leaves the carry-on queued as before it.
-          if (e.reason === 'aborted' && ep.before !== undefined) {
-            isCarryOnInFlight = ep.before.isCarryOnInFlight
-            if (ep.before.isLimitStopLast) limitStopAfter = mainTurns
-          }
-        }
+        else if (e.reason === 'aborted' || e.reason === 'error') endEntry($, ep, e.reason)
       }
     }
     return next(e)
