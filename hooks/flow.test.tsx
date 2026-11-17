@@ -11205,6 +11205,32 @@ for (const end of ['aborted', 'overloaded'] as const) {
   })
 }
 
+// Review r7 NUDGE_STALE_SETTLEMENT: the nudge's own submission refused late, after its turn ran and the person's carry-on
+// was queued, clears nothing of that newer carry-on, so a later landing sends no second one.
+for (const late of ['throw', 'drop'] as const) {
+  test(`row v: a late ${late} of the nudge's submission leaves the newer carry-on queued, and no second goes`, async ($, on) => {
+    const w = fresh()
+    const { clock } = await heldWorld($, on, w)
+    let settle = () => {}
+    w.submitHold = new Promise<void>((resolve, reject) => {
+      settle = late === 'drop' ? resolve : () => reject(new Error('late nudge refusal'))
+    })
+    await clock.advance(3 * 60_000 + 15_000)
+    expect(w.submitted).toEqual([NUDGE_TEXT])
+    w.submitHold = new Promise<void>(() => {})
+    await nudgeTurn($, clock, 'answer')
+    expect(w.submitted).toHaveLength(2)
+    if (late === 'drop') w.submitDrop = 'a Stop stands'
+    settle()
+    await clock.settle()
+    refresh(w)
+    await $.classic.StopFailure({ error: 'rate_limit' })
+    await clock.settle()
+    await clock.advance(36_000)
+    expect(w.submitted).toHaveLength(2)
+  })
+}
+
 /**
  * Review r2 DROP_RACE: the held switch's minute retry owns the switch, paused in its keychain read after its owner claim,
  * when the nudge's turn ends in a drop; the drop's write is refused, and the retry then writes the hold again.

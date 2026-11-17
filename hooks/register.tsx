@@ -274,6 +274,8 @@ let episode: Episode | undefined
 let nudgeTurnId: string | undefined
 /** A carry-on submitted and not yet entered: no second is submitted, and the look may free it. */
 let isCarryOnInFlight = false
+/** The latest carry-on submission: an older one's late refusal clears nothing of a newer one. */
+let carryOnSubmits = 0
 /** The text of the carry-on last submitted: a main turn whose text holds it is the carry-on's own. */
 let carryOnText: string | undefined
 /** Counts carry-ons refused or dropped: a give-back revives a carry-on only while this has not moved since its turn began. */
@@ -1851,14 +1853,18 @@ async function sendCarryOn($: Host, prompt: { text: string; asUser?: true }): Pr
   }
   isCarryOnInFlight = true
   carryOnText = prompt.text
+  const submit = (carryOnSubmits += 1)
   void logStop($, 'carry-on queued')
   let answer: Awaited<ReturnType<Host['prompt']['submit']>>
   try {
     answer = await $.prompt.submit(prompt)
   } catch (error) {
-    isCarryOnInFlight = false
-    carryOnRefusals += 1
-    if (prompt.text === NUDGE_TEXT && episode !== undefined) carryOnAfterNudge($, episode, false)
+    const isLatest = submit === carryOnSubmits
+    if (isLatest) {
+      isCarryOnInFlight = false
+      carryOnRefusals += 1
+    }
+    if (isLatest && prompt.text === NUDGE_TEXT && episode !== undefined) carryOnAfterNudge($, episode, false)
     throw error
   }
   if (answer.drop === undefined) {
@@ -1866,11 +1872,14 @@ async function sendCarryOn($: Host, prompt: { text: string; asUser?: true }): Pr
     return
   }
   // The engine's own refusal (a Stop stands, a host's limit): said in debug, with its reason, and not tried again.
-  isCarryOnInFlight = false
-  carryOnRefusals += 1
+  const isLatest = submit === carryOnSubmits
+  if (isLatest) {
+    isCarryOnInFlight = false
+    carryOnRefusals += 1
+  }
   await debug($, `carry-on dropped: ${answer.drop}`)
   void logStop($, 'carry-on drop')
-  if (prompt.text === NUDGE_TEXT && episode !== undefined) carryOnAfterNudge($, episode, false)
+  if (isLatest && prompt.text === NUDGE_TEXT && episode !== undefined) carryOnAfterNudge($, episode, false)
 }
 
 /**
