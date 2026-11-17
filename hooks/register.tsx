@@ -105,6 +105,8 @@ import {
   escapeAfterFill,
   escapeArgv,
   escapeHeldBack,
+  NUDGE_TEXT,
+  nudgeHeld,
   pickAfterStop,
   raisesLimitModal,
   wordingClass,
@@ -256,11 +258,24 @@ type Episode = {
    * that same carry-on, so the look acts again.
    */
   before?: { carryOn?: number; isLimitStopLast: boolean; isCarryOnTurn: boolean }
-  told: Set<'pane' | 'nothing' | 'stuck' | 'fill' | 'failed'>
+  /** When the refresh nudge went (puma-9arph.57): once an episode. */
+  nudgedAt?: number
+  /** The held switch it went for (holdKey): a drop after it drops that one alone. */
+  nudgedFor?: string
+  /** A carry-on held back while the nudge sat queued (a landing meanwhile): owed once the nudge's turn ends. */
+  isCarryOnHeldBack?: true
+  told: Set<Told>
 }
+/** A stop's held switch by where it goes and what it carries on with; a press's, which carries on with nothing, has none. */
+const holdKey = (h: View['held']): string | undefined => (h?.carry === undefined ? undefined : `${h.target.id} ${JSON.stringify(h.carry)}`)
+type Told = 'pane' | 'nothing' | 'stuck' | 'fill' | 'failed' | 'nudge'
 let episode: Episode | undefined
+/** The refresh nudge's own turn while it runs: it is no entry of the resume (council B2). */
+let nudgeTurnId: string | undefined
 /** A carry-on submitted and not yet entered: no second is submitted, and the look may free it. */
 let isCarryOnInFlight = false
+/** The latest carry-on submission: an older one's late refusal clears nothing of a newer one. */
+let carryOnSubmits = 0
 /** The text of the carry-on last submitted: a main turn whose text holds it is the carry-on's own. */
 let carryOnText: string | undefined
 /** Counts carry-ons refused or dropped: a give-back revives a carry-on only while this has not moved since its turn began. */
@@ -1543,6 +1558,21 @@ let live: number | undefined
 let lastToken = 0
 
 /**
+ * Drops the held switch `key` names (holdKey), at once and only while no switch runs; any other hold (a press's, a later
+ * stop's) stands. 'dropped' only where this write cleared that hold. Not fixed: a minute retry that read the hold before
+ * this write holds it again after it, and the hold then lands through the refresh guard once the token refreshes.
+ */
+async function dropHeld($: Host, key: string | undefined): Promise<'dropped' | 'not the hold the nudge went for' | 'a switch is running'> {
+  let wasHeld = false
+  const isApplied = await writeSwitch($, { idle: true }, v => {
+    wasHeld = key !== undefined && holdKey(v.held) === key
+    return wasHeld ? { ...v, held: undefined } : v
+  })
+  if (!isApplied) return 'a switch is running'
+  return wasHeld ? 'dropped' : 'not the hold the nudge went for'
+}
+
+/**
  * Runs `run` as the switch that owns the session, by `token`, already claimed in the view. Once it ends, held,
  * refused, given up or done, it owns nothing: no claim it made stands, and the slot follows the view again.
  */
@@ -1817,18 +1847,24 @@ async function carryOn($: Host, need?: Need): Promise<void> {
  */
 async function sendCarryOn($: Host, prompt: { text: string; asUser?: true }): Promise<void> {
   if (isCarryOnInFlight) {
+    if (carryOnText === NUDGE_TEXT && episode !== undefined) episode.isCarryOnHeldBack = true
     void logStop($, 'carry-on not sent again: one is queued')
     return
   }
   isCarryOnInFlight = true
   carryOnText = prompt.text
+  const submit = (carryOnSubmits += 1)
   void logStop($, 'carry-on queued')
   let answer: Awaited<ReturnType<Host['prompt']['submit']>>
   try {
     answer = await $.prompt.submit(prompt)
   } catch (error) {
-    isCarryOnInFlight = false
-    carryOnRefusals += 1
+    const isLatest = submit === carryOnSubmits
+    if (isLatest) {
+      isCarryOnInFlight = false
+      carryOnRefusals += 1
+    }
+    if (isLatest && prompt.text === NUDGE_TEXT && episode !== undefined) carryOnAfterNudge($, episode, false)
     throw error
   }
   if (answer.drop === undefined) {
@@ -1836,10 +1872,24 @@ async function sendCarryOn($: Host, prompt: { text: string; asUser?: true }): Pr
     return
   }
   // The engine's own refusal (a Stop stands, a host's limit): said in debug, with its reason, and not tried again.
-  isCarryOnInFlight = false
-  carryOnRefusals += 1
+  const isLatest = submit === carryOnSubmits
+  if (isLatest) {
+    isCarryOnInFlight = false
+    carryOnRefusals += 1
+  }
   await debug($, `carry-on dropped: ${answer.drop}`)
   void logStop($, 'carry-on drop')
+  if (isLatest && prompt.text === NUDGE_TEXT && episode !== undefined) carryOnAfterNudge($, episode, false)
+}
+
+/**
+ * Carries the person's turn on, once, after the refresh nudge's turn: owed where its answer dropped the hold on the login
+ * in use (`isOwed`), or where a landing held its carry-on back behind the nudge. Only while nothing is queued or armed.
+ */
+function carryOnAfterNudge($: Host, ep: Episode, isOwed: boolean): void {
+  if (episode !== ep || !(isOwed || ep.isCarryOnHeldBack === true) || isCarryOnInFlight || armedCarryOns > 0) return
+  ep.isCarryOnHeldBack = undefined
+  void carryOn($, ep.need).catch(error => debug($, `carry-on failed: ${String(error)}`))
 }
 
 /** Ends a stop's episode once its resume has answered: a later stop opens a new one, with its own tried list and budget. */
@@ -1872,7 +1922,7 @@ function endEntry($: Host, ep: Episode, how: string): void {
 }
 
 /** Writes a look's line once an episode, where the look would otherwise write it every tick. */
-function tellOnce($: Host, ep: Episode, what: 'pane' | 'nothing' | 'stuck' | 'fill' | 'failed', line: string): void {
+function tellOnce($: Host, ep: Episode, what: Told, line: string): void {
   if (ep.told.has(what)) return
   ep.told.add(what)
   void logStop($, line)
@@ -1899,12 +1949,14 @@ async function lookOwed($: Host): Promise<void> {
     }
     const isSettling = movedAt !== undefined && now - movedAt < SETTLE_MS
     if (!isCarryOnInFlight && armedCarryOns === 0 && !isSettling && view.held === undefined) tellOnce($, ep, 'nothing', 'owed resume: no carry-on queued, no key')
+    if (view.held?.carry !== undefined && (await nudgeIfDue($, ep, view, now))) return undefined
     const look: EscapeLook = {
       isCarryOnInFlight,
       isLimitStopLast: limitStopAfter === mainTurns,
       openTurns: turns,
       isSettling,
       isHeld: view.held !== undefined,
+      isNudge: ep.nudgedAt !== undefined && isCarryOnInFlight && carryOnText === NUDGE_TEXT,
       escapes: ep.escapes,
       budget: ep.budget,
       sinceEscapeMs: ep.lastEscapeAt === undefined ? undefined : now - ep.lastEscapeAt,
@@ -1930,6 +1982,46 @@ async function lookOwed($: Host): Promise<void> {
   if (sent === undefined) return
   const code = await exitOf($, sent.child)
   void logStop($, `owed resume: Escape ${sent.escape} of ${sent.budget} (exit ${code ?? 'none'})`)
+}
+
+/**
+ * The refresh nudge (puma-9arph.57), under the look's lock: while a stop's switch is held for the token in use, with
+ * no turn running, Claude Code refreshes that token at no request. Once the token is due within NUDGE_LEAD_MS this
+ * sends one carry-on of its own on the login in use: its request refreshes the token under that login's own slot,
+ * and the stop it dies on lands the switch through the unchanged refresh guard. True when it sent one.
+ */
+async function nudgeIfDue($: Host, ep: Episode, view: View, now: number): Promise<boolean> {
+  const active = view.accounts.find(a => a.id === view.activeId)
+  if (active === undefined) return false
+  const isQuiet = !isCarryOnInFlight && nudgeTurnId === undefined && openTurns.size === 0
+  if (ep.nudgedAt !== undefined) {
+    if (isQuiet && limitStopAfter === mainTurns) tellOnce($, ep, 'nudge', 'refresh nudge: token not refreshed, switch still held')
+    return false
+  }
+  const stored = await answerWithin($, 'CredentialReadTimedOut', readStored($, active.slot)).catch(() => undefined)
+  const credential = stored?.state === 'present' ? stored.credential : undefined
+  const why = nudgeHeld({
+    hasHeldCarry: true,
+    isNudged: false,
+    isLimitStopLast: limitStopAfter === mainTurns,
+    openTurns: openTurns.size,
+    isCarryOnQueued: isCarryOnInFlight || armedCarryOns > 0,
+    // A box the read cannot show is no empty box (council B5).
+    isBoxEmpty: (await answerWithin($, 'PromptReadTimedOut', $.prompt.read()).catch(() => undefined))?.text === '',
+    isTokenOk: credential !== undefined && healthOf(credential, now).kind === 'ok',
+    expiresInMs: credential === undefined ? undefined : credential.expiresAt - now,
+  })
+  if (why !== undefined || credential === undefined) return false
+  // A press or a landing during the two reads may have replaced or cleared the held stop: the nudge is for it alone.
+  const after = await getView($)
+  const isSameHold = after.held?.carry !== undefined && after.held.target.id === view.held?.target.id && after.activeId === view.activeId
+  if (!isSameHold || episode !== ep) return false
+  ep.nudgedAt = now
+  ep.nudgedFor = holdKey(after.held)
+  ep.budget = (ep.budget ?? 0) + 2
+  void logStop($, `refresh nudge: login ${active.id}'s token expires in ${Math.round((credential.expiresAt - now) / 1000)} s, carry-on sent on it`)
+  void sendCarryOn($, { text: NUDGE_TEXT }).catch(error => debug($, `refresh nudge failed: ${String(error)}`))
+  return true
 }
 
 /** An Escape's exit code, null where it did not run. */
@@ -1969,6 +2061,23 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
   void logStop($, `stop heard: ${error} (wording: ${wordingClass(stop.last_assistant_message)}), login ${active.id} in use`)
   // The login each usage-limit stop of the episode died on is never tried again in it.
   const ep = episode
+  // Council B4: a nudge's request that fails another way (a refresh refused above all) drops the held switch, and marks
+  // nothing: a rejection mark would let the guard go at the token's expiry with no refresh, a landing around it.
+  if (ep?.nudgedAt !== undefined && error !== 'rate_limit' && view.held !== undefined) {
+    // A drop a running switch refused, or that found the hold gone, ends nothing: the episode goes on as it stands.
+    const dropped = await dropHeld($, ep.nudgedFor)
+    if (dropped !== 'dropped') {
+      void logStop($, `held switch not dropped: ${dropped}`)
+      return
+    }
+    void logStop($, `held switch dropped: ${error} after the refresh nudge, login ${active.id} kept`)
+    // Nothing is owed any more: the episode ends, so a later stop opens its own and moves (no work resumed here).
+    if (episode === ep) {
+      episode = undefined
+      isCarryOnInFlight = false
+    }
+    return
+  }
   if (ep !== undefined && error === 'rate_limit') {
     ep.stops += 1
     if (!ep.tried.includes(active.id)) ep.tried.push(active.id)
@@ -2957,6 +3066,8 @@ export const register: Register = on => {
     // A stop that switches, on the turn that entered, comes before that turn's end: the entry ends here, so the stop's
     // carry-on finds the first one queued and one resume never enters twice.
     if (episode?.enteredAt !== undefined && isSwitchingStop(e.error)) endEntry($, episode, e.error)
+    // A switching stop on the nudge's own turn is the stop path's: its own landing carries the person's turn on.
+    if (nudgeTurnId !== undefined && isSwitchingStop(e.error) && episode !== undefined) episode.isCarryOnHeldBack = undefined
     // Only a stop that raises the limit modal arms the Escape and opens an episode; onStopFailure's wider list says
     // which stops switch at all. Both are set here, before any await, so no branch of the stop runs without them.
     if (raisesLimitModal(e.error)) {
@@ -2977,6 +3088,14 @@ export const register: Register = on => {
     openTurns.add(e.turnId)
     if (e.agentId === undefined) {
       const ep = episode
+      // The refresh nudge's own turn is no entry (council B2): the resume stays owed and the held switch stands.
+      if (ep?.nudgedAt !== undefined && isCarryOnInFlight && carryOnText === NUDGE_TEXT && e.text.includes(NUDGE_TEXT)) {
+        mainTurns += 1
+        isCarryOnInFlight = false
+        nudgeTurnId = e.turnId
+        void logStop($, `refresh nudge entered on login ${(await getView($)).activeId}`)
+        return next(e)
+      }
       if (ep !== undefined && ep.enteredAt === undefined) {
         // Claude Code hands turn.start a plugin's prompt inside its own frame ("The <plugin> plugin sent a message: ..."),
         // unless it went asUser: the carry-on's own turn is the one whose text holds the carry-on's.
@@ -2997,6 +3116,18 @@ export const register: Register = on => {
   on('turn.complete', async ($, e, next) => {
     const wasOpen = openTurns.delete(e.turnId)
     const ep = episode
+    if (e.turnId === nudgeTurnId) {
+      nudgeTurnId = undefined
+      // The login in use answered the nudge: the work goes on there, and the switch held to leave it goes.
+      if (ep !== undefined && e.reason === 'answer') {
+        const dropped = await dropHeld($, ep.nudgedFor)
+        const { activeId } = await getView($)
+        void logStop($, dropped === 'dropped' ? `held switch dropped: the refresh nudge answered on login ${activeId}` : `held switch not dropped: ${dropped}`)
+        // Only the nudge was answered: the person's own turn carries on, and its entry and answer end the episode.
+        carryOnAfterNudge($, ep, dropped === 'dropped')
+      } else if (ep !== undefined) carryOnAfterNudge($, ep, false)
+      return next(e)
+    }
     if (ep !== undefined) {
       if (!wasOpen) void logStop($, `turn end with no start heard: agent ${e.agentId ?? 'main'}, reason ${e.reason}`)
       else if (ep.enteredAt === undefined && openTurns.size === 0) void logStop($, 'owed resume: turns closed')

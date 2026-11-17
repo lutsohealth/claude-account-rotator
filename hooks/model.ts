@@ -1639,6 +1639,8 @@ export type EscapeLook = {
   openTurns: number
   isSettling: boolean
   isHeld: boolean
+  /** The carry-on in flight is the refresh nudge's: a held switch holds back every Escape but its. */
+  isNudge?: boolean
   escapes: number
   budget: number
   /** Since the episode's last Escape; undefined before its first. */
@@ -1659,12 +1661,51 @@ export function escapeHeldBack(s: EscapeLook): string | undefined {
   if (!s.isLimitStopLast) return 'no limit stop before it'
   if (s.openTurns > 0) return 'a turn is open'
   if (s.isSettling) return 'the switch is settling'
-  if (s.isHeld) return 'a switch is held'
+  if (s.isHeld && s.isNudge !== true) return 'a switch is held'
   if (s.escapes >= s.budget) return 'Escapes spent'
   if (s.sinceEscapeMs !== undefined && s.sinceEscapeMs < ESCAPE_GAP_MS) return 'too soon after the last Escape'
   if (!s.pane) return 'no Orca pane'
   if (s.fill === undefined) return undefined
   return s.fill.refusal === 'dialog' ? undefined : 'no dialog holds it'
+}
+
+/**
+ * How long before the token in use expires a held stop's switch sends the refresh nudge: a request refreshes the token
+ * first inside Claude Code's margin, read on Claude Code 2.1.326 between 265 and 333 s (puma-9arph.57 B1), less a minute.
+ */
+export const NUDGE_LEAD_MS = 240_000
+
+/** The refresh nudge's own line: it neither holds nor is held in the carry-on's, so the turn check tells them apart. */
+export const NUDGE_TEXT = 'The account-rotator plugin is checking the sign-in before it moves this session. No reply is needed.'
+
+/** What the owed-resume look knows when it weighs the refresh nudge. */
+export type NudgeLook = {
+  hasHeldCarry: boolean
+  isNudged: boolean
+  isLimitStopLast: boolean
+  openTurns: number
+  isCarryOnQueued: boolean
+  isBoxEmpty: boolean
+  /** The stored token of the login in use can refresh. */
+  isTokenOk: boolean
+  expiresInMs?: number
+}
+
+/**
+ * Why no refresh nudge goes, else undefined. It goes once an episode, for a stop's switch the refresh guard holds, with
+ * no turn begun since the stop and none open, no carry-on queued or armed, the prompt box empty, and the token in use
+ * able to refresh and due within NUDGE_LEAD_MS: its request makes Claude Code refresh that token, and the stop it dies
+ * on lands the held switch through the unchanged guard.
+ */
+export function nudgeHeld(s: NudgeLook): string | undefined {
+  if (!s.hasHeldCarry) return 'no stop switch held'
+  if (s.isNudged) return 'nudged already'
+  if (!s.isLimitStopLast) return 'no limit stop before it'
+  if (s.openTurns > 0) return 'a turn is open'
+  if (s.isCarryOnQueued) return 'a carry-on is queued'
+  if (!s.isBoxEmpty) return 'the prompt box holds a draft'
+  if (!s.isTokenOk || s.expiresInMs === undefined) return 'the token cannot refresh'
+  return s.expiresInMs > NUDGE_LEAD_MS ? 'the token is not due' : undefined
 }
 
 /** What the session knows again right after the fill, read with no await before the key. */
