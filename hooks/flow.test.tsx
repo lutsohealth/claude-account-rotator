@@ -10629,6 +10629,47 @@ test('C1: the carry-on\'s own turn that enters and ends aborted leaves nothing q
   expect(w.fills ?? 0).toBe(fills)
 })
 
+// puma-9arph.60, round 2 F1: a carry-on whose submit is refused during another turn is gone, so that turn's failed end
+// gives nothing back and no look acts on it.
+test('C1: a carry-on refused during another turn is not given back when that turn ends in an error', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await owedWorld($, on, w)
+  let refuse = (_error: Error) => {}
+  w.submitHold = new Promise<void>((_resolve, reject) => { refuse = reject })
+  await $.classic.StopFailure({ error: 'rate_limit' })
+  await clock.settle()
+  await clock.advance(36_000)
+  expect(w.submitted).toHaveLength(1)
+  await $.turn.start({ text: 'a waker', turnId: 'waker' })
+  refuse(new Error('submission refused'))
+  await clock.settle()
+  await $.turn.complete({ turnId: 'waker', reason: 'error', answer: '', durationMs: 1, isAborted: false })
+  await clock.settle()
+  expect(whats(stopLogOf(store, w))).toContain('resume ended error: another turn, nothing queued')
+  const fills = w.fills ?? 0
+  await clock.advance(15_000)
+  expect(w.fills ?? 0).toBe(fills)
+})
+
+// puma-9arph.60, round 2 F4: a rejected sign-in on another turn that entered ends the entry at once, so the switch's
+// carry-on finds the first one queued while that turn is still open, and one resume never enters twice.
+test('C1: a rejected sign-in on another turn that entered sends no second carry-on while that turn is open', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await owedWorld($, on, w)
+  await $.classic.StopFailure({ error: 'rate_limit' })
+  await clock.settle()
+  await clock.advance(36_000)
+  expect(w.submitted).toHaveLength(1)
+  await $.turn.start({ text: 'a waker', turnId: 'waker' })
+  await $.classic.StopFailure({ error: 'authentication_failed' })
+  await clock.settle()
+  await clock.advance(36_000)
+  expect(w.submitted).toHaveLength(1)
+  const lines = whats(stopLogOf(store, w))
+  expect(lines).toContain('resume ended authentication_failed: another turn, the carry-on still queued')
+  expect(lines).toContain('carry-on not sent again: one is queued')
+})
+
 // Review M403 B: a look whose fill has not answered holds the lock, and every later look skips its tick.
 test('row d: a look while another look holds the lock does nothing', async ($, on) => {
   const w = fresh()
