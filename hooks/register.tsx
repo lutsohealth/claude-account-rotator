@@ -101,6 +101,7 @@ import {
   SwitchHeld,
   requestFrom,
   requestsDir,
+  launcherCopyDir,
   escapeArgv,
   escapeHeldBack,
   raisesLimitModal,
@@ -2639,6 +2640,39 @@ async function isBound($: Host): Promise<boolean> {
 }
 
 /** First run makes the normal login number 1; then: which login this session uses, and Claude in Chrome connected as the extension's account. */
+const LAUNCHER_COPY = 'claude'
+const LAUNCHER_FILE = 'bin/account-rotator-claude'
+const LAUNCHER_COMMAND_TIMEOUT_MS = 10_000
+
+/**
+ * puma-9arph.26: keeps the launcher copy a person installed (README, "Picks where new sessions start") equal to this
+ * mod's own `bin/account-rotator-claude`. Only an existing regular file whose bytes differ is replaced, never a link
+ * and never a copy made where none stands: `$.fs.write` makes a temporary file beside it, chmod and mv (a rename in
+ * one folder) put it in place whole. Any failure leaves the old copy as it stood, and is one debug line.
+ */
+async function refreshLauncherCopy($: Host): Promise<void> {
+  const dir = launcherCopyDir(await $.env.get('CLAUDE_CONFIG_DIR'), (await $.env.get('HOME')) ?? '')
+  const copy = `${dir}/${LAUNCHER_COPY}`
+  const entries = await $.fs.list(dir).catch(() => [])
+  if (!entries.some(entry => entry.name === LAUNCHER_COPY && entry.kind === 'file')) return
+  const own = await $.fs.read(`${$.plugin.root}/${LAUNCHER_FILE}`)
+  if ((await $.fs.read(copy)) === own) return
+  const temporary = `${copy}.new-${String(await $.clock.now())}`
+  const run = async (argv: string[]) => {
+    const { exitCode } = await $.process.run(argv, { timeoutMs: LAUNCHER_COMMAND_TIMEOUT_MS })
+    if (exitCode !== 0) throw new Error(`${argv[0]} did not finish`)
+  }
+  try {
+    await $.fs.write(temporary, own)
+    await run(['chmod', '755', temporary])
+    await run(['mv', '-f', temporary, copy])
+  } catch (error) {
+    await $.process.run(['rm', '-f', temporary], { timeoutMs: LAUNCHER_COMMAND_TIMEOUT_MS }).catch(() => undefined)
+    throw error
+  }
+  debug($, `launcher copy ${copy} replaced by ${LAUNCHER_FILE} of the mod`)
+}
+
 async function boot($: Host, isInteractive: boolean): Promise<void> {
   // A view still bound outlived a reload of this code, which emptied `kept`: its Fable stop mark and its stuck notice
   // said go back into `kept`, so a later /clear, /resume or /branch restores them.
@@ -2653,6 +2687,7 @@ async function boot($: Host, isInteractive: boolean): Promise<void> {
   const slot = (await $.env.get('CLAUDE_SECURESTORAGE_CONFIG_DIR')) ?? ''
   kept = { ...kept, slot }
   await bindSession($, slot)
+  await refreshLauncherCopy($).catch(error => debug($, `launcher copy not refreshed: ${errorName(error)}`))
   await pruneStopLogs($).catch(error => debug($, `stop-log prune failed: ${String(error)}`))
   await checkSwitching($, slot)
   // A check that lands after a switch moved the session wrote the slot it started on back: set the slot right at once.

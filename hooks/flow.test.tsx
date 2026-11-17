@@ -280,13 +280,13 @@ function world(on: On, w: World, store: Record<string, unknown> | Map<string, un
       w.modes = w.modes ?? {}
       if (cmd === 'chmod') w.modes[e.argv[2] ?? ''] = sub ?? ''
       if (cmd === 'mv') {
-        const [from, to] = [e.argv[3] ?? '', e.argv[4] ?? '']
+        const [from, to] = [e.argv[2] ?? '', e.argv[3] ?? '']
         w.files[to] = w.files[from] ?? null
         if (w.modes[from] !== undefined) w.modes[to] = w.modes[from]
         delete w.files[from]
         delete w.modes[from]
       }
-      if (cmd === 'rm') delete w.files[e.argv[2] === '-f' ? (e.argv[3] ?? '') : (e.argv[2] ?? '')]
+      if (cmd === 'rm') delete w.files[e.argv[2] ?? '']
       return { value: ran(0, '') }
     }
     if (cmd === 'claude' && sub === 'auth' && verb === 'logout') {
