@@ -1996,7 +1996,7 @@ async function nudgeIfDue($: Host, ep: Episode, view: View, now: number): Promis
     openTurns: openTurns.size,
     isCarryOnQueued: isCarryOnInFlight || armedCarryOns > 0,
     // A box the read cannot show is no empty box (council B5).
-    isBoxEmpty: (await $.prompt.read().catch(() => undefined))?.text === '',
+    isBoxEmpty: (await answerWithin($, 'PromptReadTimedOut', $.prompt.read()).catch(() => undefined))?.text === '',
     isTokenOk: credential !== undefined && healthOf(credential, now).kind === 'ok',
     expiresInMs: credential === undefined ? undefined : credential.expiresAt - now,
   })

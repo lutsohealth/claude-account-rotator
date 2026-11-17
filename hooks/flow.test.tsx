@@ -11021,6 +11021,20 @@ test('row v: a draft in the prompt box holds the nudge back until the box is emp
   expect(w.submitted).toEqual([NUDGE_TEXT])
 })
 
+// Merge read of #129, note 4: a box read with no answer counts as a draft after READ_TIMEOUT_MS, so it holds the look's
+// lock, and with it every later look and stop, no longer.
+test('row v: a box read that never answers holds the look no longer than the read bound, and the nudge goes later', async ($, on) => {
+  const w = fresh()
+  const { clock } = await heldWorld($, on, w)
+  const never = new Promise<void>(() => {})
+  let reads = 0
+  w.onPromptRead = () => {
+    w.readHold = reads++ === 0 ? never : undefined
+  }
+  await clock.advance(3 * 60_000 + 15_000)
+  expect([reads > 1, w.submitted]).toEqual([true, [NUDGE_TEXT]])
+})
+
 test('row v: a nudge whose request refreshes nothing lands no switch and sends no second nudge', async ($, on) => {
   const w = fresh()
   const { store, clock } = await heldWorld($, on, w)
