@@ -11182,7 +11182,7 @@ test('row v: a nudge answered while the held switch\'s retry owns the switch dro
 test('row v: an authentication_failed after a nudge whose retry lands the switch meanwhile drops nothing and ends no episode', async ($, on) => {
   const { w, store } = await dropDuringRetry($, on, 'authentication_failed', true)
   const lines = whats(stopLogOf(store, w))
-  expect([slots(w), lines.filter(l => l.startsWith('held switch') || l.startsWith('work resumed'))]).toEqual([[SLOT2], ["held switch not dropped: the stop's hold is gone"]])
+  expect([slots(w), lines.filter(l => l.startsWith('held switch') || l.startsWith('work resumed'))]).toEqual([[SLOT2], ['held switch not dropped: not the hold the nudge went for']])
 })
 
 // Review r3 STALE-RETRY: a minute retry that read the hold and has not claimed yet outlasts the drop's wait; it would
@@ -11230,10 +11230,56 @@ for (const key of ['use-2', 'use-3'] as const) {
       await $.turn.complete({ turnId: 'turn-nudge', reason: end === 'answer' ? 'answer' : 'error', answer: '', durationMs: 1, isAborted: false })
       await clock.settle()
       const lines = whats(stopLogOf(store, w)).filter(l => l.startsWith('held switch'))
-      expect([view()?.held?.target.id, lines]).toEqual([target, ["held switch not dropped: the stop's hold is gone"]])
+      expect([view()?.held?.target.id, lines]).toEqual([target, ['held switch not dropped: not the hold the nudge went for']])
       await pane.unmount()
     })
   }
+}
+
+// Review r4 OVERWRITTEN-RETRY: a minute retry that read the hold still sits on it while the next minute's retry runs and
+// ends; the drop waits for both, so the older one cannot write the hold back after a "dropped" line.
+for (const end of ['answer', 'authentication_failed'] as const) {
+  test(`row v: a nudge ending in ${end} waits for an older retry that read the hold, then drops it`, async ($, on) => {
+    const w = fresh()
+    const view = watchedView(on)
+    const gate = holdViewRead(on, true)
+    const { store, clock } = await heldWorld($, on, w)
+    await clock.advance(3 * 60_000 + 15_000)
+    await $.turn.start({ text: NUDGE_TEXT, turnId: 'turn-nudge' })
+    const tick = NOW + (Math.floor((clock.now() - NOW) / 60_000) + 1) * 60_000
+    await clock.advance(tick - clock.now() - 1)
+    gate.arm(() => true)
+    await clock.advance(1)
+    await clock.advance(60_000)
+    expect([gate.isHeld(), view()?.owner, view()?.held?.target.id]).toEqual([true, undefined, '2'])
+    if (end !== 'answer') await $.classic.StopFailure({ error: end })
+    const done = $.turn.complete({ turnId: 'turn-nudge', reason: end === 'answer' ? 'answer' : 'error', answer: '', durationMs: 1, isAborted: false })
+    gate.open()
+    await done
+    await clock.settle()
+    const lines = whats(stopLogOf(store, w)).filter(l => l.startsWith('held switch'))
+    expect([view()?.held, lines.length, lines[0]?.startsWith('held switch dropped: ')]).toEqual([undefined, 1, true])
+  })
+}
+
+// Review r4 LATER-STOP-HOLD: a later stop that holds the switch for another need replaces the hold the nudge went for;
+// the drop after the nudge leaves that stop's hold standing.
+for (const end of ['answer', 'authentication_failed'] as const) {
+  test(`row v: a nudge ending in ${end} after a later Fable stop held the switch keeps that stop's hold`, async ($, on) => {
+    const w = fresh()
+    const view = watchedView(on)
+    const { store, clock } = await heldWorld($, on, w)
+    await clock.advance(3 * 60_000 + 15_000)
+    await $.turn.start({ text: NUDGE_TEXT, turnId: 'turn-nudge' })
+    await $.classic.StopFailure(FABLE_HIT_STOP)
+    await clock.settle()
+    expect(view()?.held?.carry).toEqual({ need: 'fable' })
+    if (end !== 'answer') await $.classic.StopFailure({ error: end })
+    await $.turn.complete({ turnId: 'turn-nudge', reason: end === 'answer' ? 'answer' : 'error', answer: '', durationMs: 1, isAborted: false })
+    await clock.settle()
+    const lines = whats(stopLogOf(store, w)).filter(l => l.startsWith('held switch'))
+    expect([view()?.held?.carry, lines]).toEqual([{ need: 'fable' }, ['held switch not dropped: not the hold the nudge went for']])
+  })
 }
 
 // ---------------------------------------------------------------- puma-9arph.38: one switch in flight

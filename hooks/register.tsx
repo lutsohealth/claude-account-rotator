@@ -260,8 +260,12 @@ type Episode = {
   before?: { carryOn?: number; isLimitStopLast: boolean; isCarryOnTurn: boolean }
   /** When the refresh nudge went (puma-9arph.57): once an episode. */
   nudgedAt?: number
+  /** The held switch it went for (holdKey): a drop after it drops that one alone. */
+  nudgedFor?: string
   told: Set<Told>
 }
+/** A stop's held switch by where it goes and what it carries on with; a press's, which carries on with nothing, has none. */
+const holdKey = (h: View['held']): string | undefined => (h?.carry === undefined ? undefined : `${h.target.id} ${JSON.stringify(h.carry)}`)
 type Told = 'pane' | 'nothing' | 'stuck' | 'fill' | 'failed' | 'nudge'
 let episode: Episode | undefined
 /** The refresh nudge's own turn while it runs: it is no entry of the resume (council B2). */
@@ -1552,22 +1556,22 @@ let live: number | undefined
 let lastToken = 0
 
 /**
- * Drops a stop's held switch (the one that carries on) once the retry under way, if any, has ended: a retry that read
- * the hold before the drop holds it again after it, under its own claim, so one still running after SWITCH_WAIT_MS
- * drops nothing. A press's hold stands. 'dropped' only where this write cleared a stop's hold.
+ * Drops the held switch `key` names (holdKey) once every retry under way has ended: a retry that read the hold before
+ * the drop holds it again after it, under its own claim, so one still running after SWITCH_WAIT_MS drops nothing. Any
+ * other hold (a press's, a later stop's) stands. 'dropped' only where this write cleared that hold.
  */
-async function dropHeld($: Host): Promise<'dropped' | "the stop's hold is gone" | 'a switch is running' | 'the retry is running'> {
+async function dropHeld($: Host, key: string | undefined): Promise<'dropped' | 'not the hold the nudge went for' | 'a switch is running' | 'the retry is running'> {
   if (retryRun !== undefined) {
     const late = $.clock.sleep(SWITCH_WAIT_MS).then(() => true)
     if (await Promise.race([retryRun.then(() => false, () => false), late])) return 'the retry is running'
   }
   let wasHeld = false
   const isApplied = await writeSwitch($, { idle: true }, v => {
-    wasHeld = v.held?.carry !== undefined
+    wasHeld = key !== undefined && holdKey(v.held) === key
     return wasHeld ? { ...v, held: undefined } : v
   })
   if (!isApplied) return 'a switch is running'
-  return wasHeld ? 'dropped' : "the stop's hold is gone"
+  return wasHeld ? 'dropped' : 'not the hold the nudge went for'
 }
 
 /**
@@ -1995,6 +1999,7 @@ async function nudgeIfDue($: Host, ep: Episode, view: View, now: number): Promis
   const isSameHold = after.held?.carry !== undefined && after.held.target.id === view.held?.target.id && after.activeId === view.activeId
   if (!isSameHold || episode !== ep) return false
   ep.nudgedAt = now
+  ep.nudgedFor = holdKey(after.held)
   ep.budget = (ep.budget ?? 0) + 2
   void logStop($, `refresh nudge: login ${active.id}'s token expires in ${Math.round((credential.expiresAt - now) / 1000)} s, carry-on sent on it`)
   void sendCarryOn($, { text: NUDGE_TEXT }).catch(error => debug($, `refresh nudge failed: ${String(error)}`))
@@ -2042,7 +2047,7 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
   // nothing: a rejection mark would let the guard go at the token's expiry with no refresh, a landing around it.
   if (ep?.nudgedAt !== undefined && error !== 'rate_limit' && view.held !== undefined) {
     // A drop a running switch refused, or that found the hold gone, ends nothing: the episode goes on as it stands.
-    const dropped = await dropHeld($)
+    const dropped = await dropHeld($, ep.nudgedFor)
     if (dropped !== 'dropped') {
       void logStop($, `held switch not dropped: ${dropped}`)
       return
@@ -2987,9 +2992,11 @@ export const register: Register = on => {
     $.clock.every(60_000, () => {
       // Armed again by a reload, which keeps the view and cancels every wait. Its own catch: a failing merge skips no retry.
       const retry = retryHeld($).catch(error => debug($, `held switch retry failed: ${String(error)}`))
-      retryRun = retry
-      void retry.then(() => {
-        if (retryRun === retry) retryRun = undefined
+      // An older retry still running is waited on too: it may have read the hold before this one.
+      const all = retryRun === undefined ? retry : Promise.all([retryRun, retry])
+      retryRun = all
+      void all.then(() => {
+        if (retryRun === all) retryRun = undefined
       })
       // A slot write that landed after the view moved on, or a repair that failed, is set right here.
       void reconcile($).catch(error => debug($, `slot repair failed: ${errorName(error)}`))
@@ -3099,7 +3106,7 @@ export const register: Register = on => {
       nudgeTurnId = undefined
       // The login in use answered the nudge: the work goes on there, and the switch held to leave it goes.
       if (ep !== undefined && e.reason === 'answer') {
-        const dropped = await dropHeld($)
+        const dropped = await dropHeld($, ep.nudgedFor)
         const { activeId } = await getView($)
         void logStop($, dropped === 'dropped' ? `held switch dropped: the refresh nudge answered on login ${activeId}` : `held switch not dropped: ${dropped}`)
         if (dropped === 'dropped') await endEpisode($, ep)
