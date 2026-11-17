@@ -1900,6 +1900,37 @@ test('row a: the case\'s shape: a week-old reading with a run-out token and a fr
   expect([pickTarget(v, NOW)?.id, picked?.account.id, picked?.tier]).toEqual(['2', '3', 'fresh'])
 })
 
+// Review R1 F1: the spent-old tier is ordered by when each login frees for the need, the latest reset of what spends it.
+test('row a: the spent-old tier goes to the login that frees first for the need, not the one whose other window resets first', () => {
+  const at = (hours: number) => new Date(NOW + hours * HOUR).toISOString()
+  // Read two hours ago, so stale: [5-hour pct, its reset in h, week pct, its reset in h, Fable pct, its reset in h].
+  const read = (w: [number, number, number, number, number, number]): Reading => ({
+    fiveHour: { pct: w[0], resetsAt: at(w[1]) },
+    sevenDay: { pct: w[2], resetsAt: at(w[3]) },
+    fable: { pct: w[4], resetsAt: at(w[5]) },
+    at: NOW - 2 * HOUR,
+  })
+  const cases: [string, 'fable' | undefined, Reading, Reading, Partial<View>, string][] = [
+    ['Fable week spent: its reset, not the 5-hour one', 'fable', read([20, 4, 20, 100, 100, 1]), read([20, 1, 20, 100, 100, 2]), {}, '2'],
+    ['week spent: its reset, not the 5-hour one', undefined, read([20, 1, 100, 3, 0, 9]), read([20, 5, 100, 2, 0, 9]), {}, '3'],
+    ['a week mark in force: its reset, not the read\'s 5-hour one', undefined, read([20, 1, 20, 100, 0, 9]), read([20, 5, 100, 3, 0, 9]), { weekMarks: { '2': { pct: 100, resetsAt: at(6), at: NOW } } }, '3'],
+    ['5-hour and week both spent: the later of the two', undefined, read([95, 1, 100, 5, 0, 9]), read([95, 2, 100, 3, 0, 9]), {}, '3'],
+    ['a Fable mark in force, for the Fable week: its reset', 'fable', read([20, 1, 20, 100, 20, 1]), read([20, 5, 20, 100, 100, 3]), { fableMarks: { '2': { pct: 100, resetsAt: at(6), at: NOW } } }, '3'],
+    ['a Fable mark, for no need: it frees nothing, so not its reset', undefined, read([20, 1, 20, 100, 0, 9]), read([20, 5, 100, 3, 0, 9]), { fableMarks: { '2': { pct: 100, resetsAt: at(10), at: NOW } } }, '2'],
+  ]
+  const wrong: string[] = []
+  for (const [name, need, second, third, marks, wanted] of cases) {
+    for (const rotateTo of ['room', 'reset', 'order'] as RotateTo[]) {
+      const v: View = { ...view({ '1': [100, 50], '2': [0, 0], '3': [0, 0] }, {}, rotateTo), ...marks }
+      v.readings['2'] = second
+      v.readings['3'] = third
+      const got = pickAfterStop(v, v.readings, NOW, need, ['1'], new Set())
+      if (got?.account.id !== wanted || got?.tier !== 'spent-old') wrong.push(`${name}, ${rotateTo}: wanted ${wanted}, got ${got?.account.id}/${got?.tier}`)
+    }
+  }
+  expect(wrong).toEqual([])
+})
+
 test('the Escape goes to the one pane named, by a fixed argv with no shell (puma-9arph.34 C1)', () => {
   expect(escapeArgv('term_a')).toEqual(['orca', 'terminal', 'send', '--terminal', 'term_a', '--text', '\u001b', '--json'])
 })

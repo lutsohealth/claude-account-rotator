@@ -252,9 +252,28 @@ const isMarked = (view: View, id: string, now: number): boolean =>
   [view.marks?.[id], view.weekMarks?.[id], view.fableMarks?.[id]].some(m => m !== undefined && Date.parse(m.resetsAt) > now)
 
 /**
+ * When a spent login has room again for `need`, epoch ms: the latest reset of what spends it, judged on `r`, its own
+ * read (a 5-hour window at its limit, a week at its leave threshold, a spent Fable week for the Fable week) and on the
+ * stop marks in force (a Fable mark for the Fable week only). Where none of them names a reset to come, resetOf's.
+ */
+function freesAt(view: View, id: string, r: Reading | undefined, now: number, need?: Need): number {
+  const isFable = need === 'fable'
+  const spending = [
+    (windowPct(r?.fiveHour, now) ?? 0) >= LEAVE_FIVE_HOUR ? r?.fiveHour : undefined,
+    isWeekSpent(r, now, view.weekLeave) ? r?.sevenDay : undefined,
+    isFable && isFableSpent(r, now) ? r?.fable : undefined,
+    view.marks?.[id],
+    view.weekMarks?.[id],
+    isFable ? view.fableMarks?.[id] : undefined,
+  ]
+  const resets = spending.map(w => (w?.resetsAt === undefined ? NaN : Date.parse(w.resetsAt))).filter(at => Number.isFinite(at) && at > now)
+  return resets.length > 0 ? Math.max(...resets) : resetOf(r, now)
+}
+
+/**
  * The login a session moves to after a usage-limit stop, judged on each login's own stored read (`raw`, no marks
  * folded in), counted by the 5-hour limit setting: one with a fresh read and room first, then a stale read with room,
- * then no read, then one marked or read spent, the soonest reset first. A fresh read that shows the login spent counts
+ * then no read, then one marked or read spent, the one that frees first for the need first (freesAt). A fresh read that shows the login spent counts
  * as its try. Never one in `tried` (the logins this stop's episode already died on), one in `untaken`, one whose health
  * is not ok, or one with no read whose check failed before a profile call named its sign-in. The first tier with a
  * login in it answers; inside it, for the Fable week, a login whose read lists that week with room comes first.
@@ -279,7 +298,7 @@ export function pickAfterStop(view: View, raw: Readonly<Record<string, Reading |
     if (ready.length === 0) continue
     const account =
       tier === 'spent-old'
-        ? [...ready].sort((a, b) => Math.sign(resetOf(view.readings[a.id], now) - resetOf(view.readings[b.id], now)) || 0)[0]
+        ? [...ready].sort((a, b) => Math.sign(freesAt(view, a.id, counts[a.id], now, need) - freesAt(view, b.id, counts[b.id], now, need)) || 0)[0]
         : (isFable ? firstByRotateTo(view, ready.filter(a => counts[a.id]?.fable !== undefined && !isFableSpent(counts[a.id], now)), counts, now, need) : undefined) ??
           firstByRotateTo(view, ready, counts, now, need)
     if (account === undefined) continue
