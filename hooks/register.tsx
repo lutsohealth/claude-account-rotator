@@ -2088,7 +2088,8 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
   if (ep?.nudgedAt !== undefined && error !== 'rate_limit' && view.held !== undefined) {
     if (error === 'authentication_failed' && ep.nudge !== undefined && ep.nudge.expiresAt <= ep.nudge.at) {
       const stored = await answerWithin($, 'CredentialReadTimedOut', readStored($, active.slot)).catch(() => undefined)
-      if (stored?.state === 'present' && stored.credential.expiresAt === ep.nudge.expiresAt) {
+      const credential = stored?.state === 'present' ? stored.credential : undefined
+      if (credential !== undefined && credential.expiresAt === ep.nudge.expiresAt) {
         const before = await saveHealth($, active.id, { kind: 'login-needed', why: SIGN_IN_REJECTED, at: await $.clock.now() })
         if (before?.kind !== 'login-needed') await announceLockout($, active, SIGN_IN_REJECTED)
         void logStop($, 'stop rejected on the expired token after the refresh nudge: the held switch lands through the release')
