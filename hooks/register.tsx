@@ -3058,7 +3058,7 @@ export const register: Register = on => {
     const ep = episode
     if (e.turnId === nudgeTurnId) {
       nudgeTurnId = undefined
-      // Login 1 answered the nudge: the work goes on there, and the switch held to leave it goes.
+      // The login in use answered the nudge: the work goes on there, and the switch held to leave it goes.
       if (ep !== undefined && e.reason === 'answer') {
         const { activeId } = await getView($)
         await writeSwitch($, { idle: true }, v => ({ ...v, held: undefined }))
