@@ -10579,13 +10579,14 @@ for (const [name, arrange, last] of [
     const w = fresh()
     const rule: { draft?: string; screen?: readonly string[] | 'unset'; isFillRefused?: boolean; noPane?: boolean; during?: ($: Engine) => Promise<unknown> } = arrange
     countdownWorld(on, w)
+    // The session reads its environment at its start.
+    if (rule.noPane === true) delete w.env.ORCA_TERMINAL_HANDLE
     const { store, clock } = await loggedWorld(on, w)
     await start($, clock)
     await carryOnAnswers($, clock, w)
     if (rule.draft !== undefined) w.draft = rule.draft
     if (rule.screen !== undefined) w.screen = rule.screen === 'unset' ? undefined : [...rule.screen]
     if (rule.isFillRefused === true) w.isFillRefused = true
-    if (rule.noPane === true) delete w.env.ORCA_TERMINAL_HANDLE
     await rule.during?.($)
     await clock.advance(46_000)
     expect(w.spawned).toEqual([])

@@ -1754,6 +1754,107 @@ export function escapeAfterFill(look: EscapeLook, refusal: string | undefined, a
 /** One Escape to the Orca pane `pane`, by Orca's CLI: a fixed argv, run with no shell. */
 export const escapeArgv = (pane: string): string[] => ['orca', 'terminal', 'send', '--terminal', pane, '--text', '\u001b', '--json']
 
+/** One read of the Orca pane `pane` as it renders, by Orca's CLI: a fixed argv, run with no shell. */
+export const screenArgv = (pane: string): string[] => ['orca', 'terminal', 'read', '--terminal', pane, '--screen', '--json']
+
+/**
+ * How long after the stopped login's reset the own-continue Escape may still go. Claude Code's own continue went 60 to
+ * 90 s after the reset (puma-9arph.71, readings R0, R2, R6c), and a key that lands on the turn it starts aborts it (R3).
+ */
+export const OWN_CONTINUE_MARGIN_MS = 45_000
+
+/**
+ * What the own-continue look knows when it weighs its Escape. `box` (the box as read), `fill` (the engine's answer to
+ * an empty fill) and `screen` (the pane as rendered) are asked in that order, each undefined until asked; an answer
+ * that never came is `{ text: undefined }` or `{ lines: undefined }`.
+ */
+export type OwnContinueLook = {
+  isArmed: boolean
+  isSent: boolean
+  mainTurnsSince: number
+  openTurns: number
+  isCarryOnQueued: boolean
+  isSettling: boolean
+  isHeld: boolean
+  isPanelShown: boolean
+  now: number
+  /** The stopped login's reset; undefined where none is stored, and then no time holds the key back. */
+  resetAt?: number
+  pane?: string
+  box?: { text?: string }
+  fill?: { isFilled: boolean; refusal?: string; text?: string }
+  screen?: { lines?: readonly string[] }
+}
+
+/**
+ * Why the Escape that cancels Claude Code's own continue does not go, else undefined (puma-9arph.71). After a usage-limit
+ * stop the mod switches and carries on, but Claude Code's own countdown still stands and continues again at the old
+ * login's reset (reading R6c); one Escape at an idle, empty prompt cancels it and loses nothing (R1, R6). The key goes
+ * once, after the mod's own carry-on answered, with no main turn begun since, no turn open in any loop, no carry-on
+ * queued, the switch settled and none held, the accounts panel closed, before the stopped login's reset plus
+ * OWN_CONTINUE_MARGIN_MS, in an Orca pane, the box empty as read and as filled, and the countdown's footer on screen.
+ * A key in a turn, a tool call or a dialog loses work (R3, R4, R5).
+ */
+export function ownContinueHeldBack(s: OwnContinueLook): string | undefined {
+  if (!s.isArmed) return 'no carry-on answered'
+  if (s.isSent) return 'Escape sent already'
+  if (s.mainTurnsSince > 0) return 'a main turn began since the carry-on'
+  if (s.openTurns > 0) return 'a turn is open'
+  if (s.isCarryOnQueued) return 'a carry-on is queued'
+  if (s.isSettling) return 'the switch is settling'
+  if (s.isHeld) return 'a switch is held'
+  if (s.isPanelShown) return 'the accounts panel is shown'
+  if (s.resetAt !== undefined && s.now >= s.resetAt + OWN_CONTINUE_MARGIN_MS) return "past the own continue's deadline"
+  if (!s.pane) return 'no Orca pane'
+  if (s.box === undefined) return undefined
+  if (s.box.text === undefined) return 'the box is unreadable'
+  if (s.box.text !== '') return 'the prompt box holds a draft'
+  if (s.fill === undefined) return undefined
+  if (!s.fill.isFilled || s.fill.refusal !== undefined) return `the fill was refused: ${s.fill.refusal ?? 'no cause'}`
+  if ((s.fill.text ?? '') !== '') return 'the prompt box holds a draft'
+  if (s.screen === undefined) return undefined
+  if (s.screen.lines === undefined) return 'the screen is unreadable'
+  return isCountdownOnScreen(s.screen.lines) ? undefined : 'no countdown on screen'
+}
+
+/**
+ * The look's decision once every stage answered: why no Escape goes, or that it goes now. `after` is read again with no
+ * await before the key: an arm that ended, or a turn that began, during the look gets no key.
+ */
+export function ownContinueAfterLook(look: OwnContinueLook, after: { isSameArm: boolean; openTurns: number; mainTurnsSince: number }): { why: string } | { escape: true } {
+  const why = ownContinueHeldBack(look)
+  if (why !== undefined) return { why }
+  if (look.box === undefined || look.fill === undefined || look.screen === undefined) return { why: 'not looked' }
+  if (!after.isSameArm) return { why: 'the arm ended during the look' }
+  if (after.openTurns > 0) return { why: 'a turn began during the look' }
+  if (after.mainTurnsSince > 0) return { why: 'a main turn began during the look' }
+  return { escape: true }
+}
+
+/**
+ * Whether the countdown's footer shows: a line under the prompt box (after the last line that opens with the box's
+ * `❯`) that reads both "Continuing" and "Esc to cancel", as Claude Code draws it (reading R0, R6c). The stop's own line
+ * in the transcript, in lower case, stays after a cancel and is no footer.
+ */
+export function isCountdownOnScreen(lines: readonly string[]): boolean {
+  const box = lines.findLastIndex(line => line.trimStart().startsWith('❯'))
+  return box >= 0 && lines.slice(box + 1).some(line => line.includes('Continuing') && line.includes('Esc to cancel'))
+}
+
+/** The rendered lines of `orca terminal read --screen --json`, only where the answer is the rendered screen. */
+export function screenLinesFrom(stdout: string): string[] | undefined {
+  let terminal: unknown
+  try {
+    terminal = (JSON.parse(stdout) as { result?: { terminal?: unknown } })?.result?.terminal
+  } catch {
+    return undefined
+  }
+  if (typeof terminal !== 'object' || terminal === null) return undefined
+  const { source, tail } = terminal as { source?: unknown; tail?: unknown }
+  if (source !== 'screen' || !Array.isArray(tail) || !tail.every(line => typeof line === 'string')) return undefined
+  return tail as string[]
+}
+
 /**
  * Who writes a field of the view that names the switch (`activeId`, `pending`, `held`, `owner`): the switch or
  * point-back running by its token; a claim over the token it saw running (undefined: none ran); a writer that acts on
