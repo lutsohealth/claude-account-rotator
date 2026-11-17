@@ -2,6 +2,10 @@
 
 What each version of the account rotator changed. To get each one as Claude Code starts, turn on auto-update: in `/plugin`, open **Marketplaces**, pick **claude-account-rotator** and choose **Enable auto-update**. To update by hand, run `claude plugin marketplace update claude-account-rotator`, then `claude plugin update account-rotator@claude-account-rotator`, and start a new session.
 
+## 0.5.40-lutso.1 - 2026-11-17
+
+- **A Fable stop is read as the Fable week in every wording Claude Code uses**: Claude Code 2.1.325 and later says "hit your Fable limit", where the mod knew only "reached your Fable limit", so such a stop marked the login's whole week spent and moved the session without looking for a login with Fable room. It now moves to a login with Fable room, marks only the Fable week and says so in the stop log, as it did before (#121, puma-9arph.56).
+
 ## 0.5.39-lutso.1 - 2026-11-17
 
 - **The mod keeps an installed launcher copy current**: at a session's start it replaces `~/.claude/accounts/bin/claude` with the mod's own `bin/account-rotator-claude` when their bytes differ, through a temporary file that it reads back and tests for execute before the rename. It never makes a copy where none stands and never replaces a link; a failure leaves the old copy and is one debug line (#119, puma-9arph.26).
