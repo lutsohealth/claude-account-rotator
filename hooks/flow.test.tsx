@@ -11187,6 +11187,24 @@ test('row v: a landing while the nudge sits queued carries the person\'s turn on
   expect([lines.some(l => l.startsWith('owed resume: no carry-on queued')), w.submitted.length]).toEqual([false, 2])
 })
 
+// RULING 6473: the carry-on the landing held back is owed at every ending of the nudge's turn, as the fork main carries
+// the turn on after the same landing. A switching stop on that turn is the stop path's (its own landing carries on).
+// The engine's own drop or throw of the nudge after such a landing no kit order reaches: a hook's answer counts only
+// within its budget (HookBudget.ms), and the landing holds its carry-on back SETTLE_MS after it lands.
+for (const end of ['aborted', 'overloaded'] as const) {
+  test(`row v: a landing while the nudge sits queued carries the person's turn on once when the nudge ends ${end}`, async ($, on) => {
+    const w = fresh()
+    const { clock } = await landedWhileNudgeQueued($, on, w)
+    await $.turn.start({ text: NUDGE_TEXT, turnId: 'turn-nudge' })
+    if (end === 'overloaded') await $.classic.StopFailure({ error: 'overloaded' })
+    await $.turn.complete({ turnId: 'turn-nudge', reason: end === 'aborted' ? 'aborted' : 'error', answer: '', durationMs: 1, isAborted: end === 'aborted' })
+    await clock.settle()
+    expect([w.submitted.length, w.submitted[1] === NUDGE_TEXT]).toEqual([2, false])
+    await clock.advance(10 * 60_000)
+    expect(w.submitted).toHaveLength(2)
+  })
+}
+
 /**
  * Review r2 DROP_RACE: the held switch's minute retry owns the switch, paused in its keychain read after its owner claim,
  * when the nudge's turn ends in a drop; the drop's write is refused, and the retry then writes the hold again.

@@ -1858,6 +1858,7 @@ async function sendCarryOn($: Host, prompt: { text: string; asUser?: true }): Pr
   } catch (error) {
     isCarryOnInFlight = false
     carryOnRefusals += 1
+    if (prompt.text === NUDGE_TEXT && episode !== undefined) carryOnAfterNudge($, episode, false)
     throw error
   }
   if (answer.drop === undefined) {
@@ -1869,6 +1870,7 @@ async function sendCarryOn($: Host, prompt: { text: string; asUser?: true }): Pr
   carryOnRefusals += 1
   await debug($, `carry-on dropped: ${answer.drop}`)
   void logStop($, 'carry-on drop')
+  if (prompt.text === NUDGE_TEXT && episode !== undefined) carryOnAfterNudge($, episode, false)
 }
 
 /**
@@ -3055,6 +3057,8 @@ export const register: Register = on => {
     // A stop that switches, on the turn that entered, comes before that turn's end: the entry ends here, so the stop's
     // carry-on finds the first one queued and one resume never enters twice.
     if (episode?.enteredAt !== undefined && isSwitchingStop(e.error)) endEntry($, episode, e.error)
+    // A switching stop on the nudge's own turn is the stop path's: its own landing carries the person's turn on.
+    if (nudgeTurnId !== undefined && isSwitchingStop(e.error) && episode !== undefined) episode.isCarryOnHeldBack = undefined
     // Only a stop that raises the limit modal arms the Escape and opens an episode; onStopFailure's wider list says
     // which stops switch at all. Both are set here, before any await, so no branch of the stop runs without them.
     if (raisesLimitModal(e.error)) {
@@ -3112,7 +3116,7 @@ export const register: Register = on => {
         void logStop($, dropped === 'dropped' ? `held switch dropped: the refresh nudge answered on login ${activeId}` : `held switch not dropped: ${dropped}`)
         // Only the nudge was answered: the person's own turn carries on, and its entry and answer end the episode.
         carryOnAfterNudge($, ep, dropped === 'dropped')
-      }
+      } else if (ep !== undefined) carryOnAfterNudge($, ep, false)
       return next(e)
     }
     if (ep !== undefined) {
