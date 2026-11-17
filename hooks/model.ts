@@ -145,7 +145,7 @@ export type Need = 'fable'
 
 /** Whether the last message of a turn that died on a limit says the limit was the Fable week: the fallback when the usage read does not show it. */
 export function isFableStop(text: string | undefined): boolean {
-  return /reached your Fable limit/.test(text ?? '')
+  return /your Fable limit/.test(text ?? '')
 }
 
 /** Whether the last message of a turn that died on a limit says the limit was the session's, the 5-hour window. */
