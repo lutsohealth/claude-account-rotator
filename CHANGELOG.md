@@ -2,6 +2,11 @@
 
 What each version of the account rotator changed. To get each one as Claude Code starts, turn on auto-update: in `/plugin`, open **Marketplaces**, pick **claude-account-rotator** and choose **Enable auto-update**. To update by hand, run `claude plugin marketplace update claude-account-rotator`, then `claude plugin update account-rotator@claude-account-rotator`, and start a new session.
 
+## 0.5.42-lutso.1 - 2026-11-17
+
+- **A resume another turn interrupts or fails is acted on again, and the carry-on goes out once**: when a turn that is not the carry-on's own enters the resume and is then interrupted, fails or dies on a limit, the mod looks again and frees the waiting carry-on, and the new stop's switch sends no second one. The carry-on's own turn is told by its text inside the frame Claude Code puts around a plugin's prompt, so when it dies on a limit the next login gets a carry-on of its own. A carry-on refused or dropped while another turn runs is not brought back. The stop log says how each such entry ended (`resume ended`) (#125, puma-9arph.60).
+- **Not fixed yet**: a usage or profile read that hangs while a stop is handled holds a later stop and the resume (puma-9arph.59); a stop's switch held for a token refresh, with no turn running, can land after the bound (puma-9arph.57). A prompt you type that holds the carry-on's whole text reads as the carry-on's own turn: if it is interrupted, the waiting carry-on waits for you. An interrupted carry-on turn, and the look again after an interrupted entry, are proven by tests alone.
+
 ## 0.5.41-lutso.1 - 2026-11-17
 
 - **After a usage-limit stop the session moves to a login read lately and carries on with no person**: the mod moves first to a login whose usage read is under 35 minutes old and shows room, then to one read earlier, one never read, and last one spent, never to one this stop's recovery already died on. Every 15 seconds it looks whether the carry-on still waits under Claude Code's limit menu with no turn of any agent running, and presses Escape in the session's own Orca pane so the resume enters, also when another agent's turn was open at the stop. The stop log names each step (#123, puma-9arph.54).
