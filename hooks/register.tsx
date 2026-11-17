@@ -815,7 +815,7 @@ async function useAccount($: Host, target: Account): Promise<{ ok: boolean; mess
   const name = label(target, view.accounts)
   if (isConnectingChrome) return { ok: false, message: CONNECTING_TEXT, activeId: view.activeId }
   if (view.activeId === target.id) {
-    // A running switch owns the hold: ending it is refused, and that switch may still move the session.
+    // While a switch runs, ending the hold is refused (mayWrite), and that switch may still move the session.
     if (!(await writeSwitch($, { idle: true }, v => ({ ...v, held: undefined })))) {
       return { ok: false, message: `this session uses ${name}, and a switch is running that may move it: run it again in a minute`, activeId: target.id }
     }
