@@ -383,8 +383,8 @@ function world(on: On, w: World, store: Record<string, unknown> | Map<string, un
   on('prompt.submit', async (_$, e) => {
     w.submitted.push(e.text)
     w.asUser.push(e.origin.kind === 'plugin' && e.origin.asUser === true)
-    if (w.submitDrop !== undefined) return { drop: w.submitDrop }
     await w.submitHold
+    if (w.submitDrop !== undefined) return { drop: w.submitDrop }
     return { text: e.text }
   })
   // The kit keeps no cause a test writes on the mod's own fill: a refusal here is a hook's, never the engine's 'dialog'.
@@ -10649,6 +10649,25 @@ test('C1: a carry-on refused during another turn is not given back when that tur
   const fills = w.fills ?? 0
   await clock.advance(15_000)
   expect(w.fills ?? 0).toBe(fills)
+})
+
+// puma-9arph.60, round 2 F1's class: a carry-on the engine drops during another turn is gone too.
+test('C1: a carry-on dropped during another turn is not given back when that turn ends in an error', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await owedWorld($, on, w)
+  let answer = () => {}
+  w.submitHold = new Promise<void>(resolve => { answer = resolve })
+  await $.classic.StopFailure({ error: 'rate_limit' })
+  await clock.settle()
+  await clock.advance(36_000)
+  expect(w.submitted).toHaveLength(1)
+  await $.turn.start({ text: 'a waker', turnId: 'waker' })
+  w.submitDrop = 'a Stop stands'
+  answer()
+  await clock.settle()
+  await $.turn.complete({ turnId: 'waker', reason: 'error', answer: '', durationMs: 1, isAborted: false })
+  await clock.settle()
+  expect(whats(stopLogOf(store, w))).toContain('resume ended error: another turn, nothing queued')
 })
 
 // puma-9arph.60, round 2 F4: a rejected sign-in on another turn that entered ends the entry at once, so the switch's
