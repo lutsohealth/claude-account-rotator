@@ -1549,22 +1549,16 @@ function carryOnAfterSettle($: Host, owed: CarryOn): void {
 const SWITCH_WAIT_MS = 30_000
 /** The run of the switch or point-back this module started and still owns, awaited by a switch that waits on it. */
 let switchRun: Promise<boolean> | undefined
-/** The held switch's retry the minute timer started, while it runs: dropHeld waits for it. */
-let retryRun: Promise<unknown> | undefined
 /** The token of that run, while it runs: a /clear's reset drops the view's owner, and rebindSession puts this one back. */
 let live: number | undefined
 let lastToken = 0
 
 /**
- * Drops the held switch `key` names (holdKey) once every retry under way has ended: a retry that read the hold before
- * the drop holds it again after it, under its own claim, so one still running after SWITCH_WAIT_MS drops nothing. Any
- * other hold (a press's, a later stop's) stands. 'dropped' only where this write cleared that hold.
+ * Drops the held switch `key` names (holdKey), at once and only while no switch runs; any other hold (a press's, a later
+ * stop's) stands. 'dropped' only where this write cleared that hold. Not fixed: a minute retry that read the hold before
+ * this write holds it again after it, and the hold then lands through the refresh guard once the token refreshes.
  */
-async function dropHeld($: Host, key: string | undefined): Promise<'dropped' | 'not the hold the nudge went for' | 'a switch is running' | 'the retry is running'> {
-  if (retryRun !== undefined) {
-    const late = $.clock.sleep(SWITCH_WAIT_MS).then(() => true)
-    if (await Promise.race([retryRun.then(() => false, () => false), late])) return 'the retry is running'
-  }
+async function dropHeld($: Host, key: string | undefined): Promise<'dropped' | 'not the hold the nudge went for' | 'a switch is running'> {
   let wasHeld = false
   const isApplied = await writeSwitch($, { idle: true }, v => {
     wasHeld = key !== undefined && holdKey(v.held) === key
@@ -2991,13 +2985,7 @@ export const register: Register = on => {
     })
     $.clock.every(60_000, () => {
       // Armed again by a reload, which keeps the view and cancels every wait. Its own catch: a failing merge skips no retry.
-      const retry = retryHeld($).catch(error => debug($, `held switch retry failed: ${String(error)}`))
-      // An older retry still running is waited on too: it may have read the hold before this one.
-      const all = retryRun === undefined ? retry : Promise.all([retryRun, retry])
-      retryRun = all
-      void all.then(() => {
-        if (retryRun === all) retryRun = undefined
-      })
+      void retryHeld($).catch(error => debug($, `held switch retry failed: ${String(error)}`))
       // A slot write that landed after the view moved on, or a repair that failed, is set right here.
       void reconcile($).catch(error => debug($, `slot repair failed: ${errorName(error)}`))
       void mergeStore($)
