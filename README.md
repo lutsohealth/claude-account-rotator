@@ -171,6 +171,8 @@ claude plugin test .
 python3 -m unittest discover -s tests   # bin/account-rotator and the store pick both bins share
 ```
 
+A gate started with `&` in a non-interactive shell runs with SIGINT ignored; the signal tests give themselves the default SIGINT, so they pass either way.
+
 `.github/workflows/checks.yml` runs the last three on every pull request and every push to main.
 
 `--plugin-dir` loads this folder over the installed release for that session only, with a list of accounts of its own, so a broken working tree breaks only that window. Keep the marketplace installed from GitHub: added from this folder instead, every window loads the folder as it stands. `/release` publishes a version, by the steps in `.claude/skills/release`.
