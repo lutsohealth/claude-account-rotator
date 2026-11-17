@@ -2,6 +2,10 @@
 
 What each version of the account rotator changed. To get each one as Claude Code starts, turn on auto-update: in `/plugin`, open **Marketplaces**, pick **claude-account-rotator** and choose **Enable auto-update**. To update by hand, run `claude plugin marketplace update claude-account-rotator`, then `claude plugin update account-rotator@claude-account-rotator`, and start a new session.
 
+## 0.5.39-lutso.1 - 2026-11-17
+
+- **The mod keeps an installed launcher copy current**: at a session's start it replaces `~/.claude/accounts/bin/claude` with the mod's own `bin/account-rotator-claude` when their bytes differ, through a temporary file that it reads back and tests for execute before the rename. It never makes a copy where none stands and never replaces a link; a failure leaves the old copy and is one debug line (#119, puma-9arph.26).
+
 ## 0.5.38-lutso.1 - 2026-11-17
 
 - **A plain `claude` with no launch pick says on stderr when Claude Code's own login reads not signed in**: where the launcher starts `claude` on that login for want of a pick, one more line names the login as not signed in and says to type `/login`, so a start with no login says why. The `claude` still starts (#116, puma-9arph.50).
