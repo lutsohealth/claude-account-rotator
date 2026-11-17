@@ -118,6 +118,10 @@ type World = {
   submitHold?: Promise<void>
   /** A hook keeps the mod's fill out of the box, so the fill answers isFilled false with no cause. */
   isFillRefused?: boolean
+  /** How many fills the mod made; while `fillHold` is set, a fill answers only once it settles; `isFillThrown` makes a fill throw. */
+  fills?: number
+  fillHold?: Promise<void>
+  isFillThrown?: boolean
   /** Where it answers true, a debug line fails to write. */
   isLogFailing?: (text: string) => boolean
   /** Whether each line in `submitted` was sent as the person's own words (`asUser`), not under the mod's name. */
@@ -384,7 +388,12 @@ function world(on: On, w: World, store: Record<string, unknown> | Map<string, un
     return { text: e.text }
   })
   // The kit keeps no cause a test writes on the mod's own fill: a refusal here is a hook's, never the engine's 'dialog'.
-  on('prompt.fill', () => ({ isFilled: w.isFillRefused !== true }))
+  on('prompt.fill', async () => {
+    w.fills = (w.fills ?? 0) + 1
+    if (w.isFillThrown === true) throw new Error('the fill broke')
+    await w.fillHold
+    return { isFilled: w.isFillRefused !== true }
+  })
   on('turn.start', (_$, e) => ({ turnId: e.turnId }))
   on('turn.complete', (_$, e) => ({ text: e.answer }))
   on('session.start', (_$, e) => {
@@ -10545,6 +10554,55 @@ test('row d: with no event after the stop, the 15 s look alone sends the Escape 
   await $.turn.start({ text: w.submitted[0] ?? '', turnId: 'turn-carry' })
   await clock.settle()
   expect(whats(stopLogOf(store, w)).at(-1)).toBe('resume entered')
+})
+
+// Review M403 A (C1): an entry that ends aborted, such as a waker's turn an Escape landed on, leaves the carry-on owed.
+test('C1: a main turn aborted after entry lets the next look reach the fill again', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await owedWorld($, on, w)
+  await $.classic.StopFailure({ error: 'rate_limit' })
+  await clock.settle()
+  await clock.advance(36_000 + 15_000)
+  expect(whats(stopLogOf(store, w)).at(-1)).toBe(FILL_NO_CAUSE)
+  await $.turn.start({ text: 'a waker', turnId: 'waker' })
+  await $.turn.complete({ turnId: 'waker', reason: 'aborted', answer: '', durationMs: 1, isAborted: true })
+  await clock.settle()
+  const fills = w.fills ?? 0
+  await clock.advance(15_000)
+  expect(w.fills ?? 0).toBe(fills + 1)
+  expect(whats(stopLogOf(store, w))).not.toContain('owed resume: no carry-on queued, no key')
+})
+
+// Review M403 B: a look whose fill has not answered holds the lock, and every later look skips its tick.
+test('row d: a look while another look holds the lock does nothing', async ($, on) => {
+  const w = fresh()
+  const { clock } = await owedWorld($, on, w)
+  let release = () => {}
+  w.fillHold = new Promise<void>(resolve => {
+    release = resolve
+  })
+  await $.classic.StopFailure({ error: 'rate_limit' })
+  await clock.settle()
+  await clock.advance(36_000 + 15_000)
+  expect(w.fills).toBe(1)
+  await clock.advance(30_000)
+  expect(w.fills).toBe(1)
+  release()
+  await clock.settle()
+  await clock.advance(15_000)
+  expect(w.fills).toBe(2)
+})
+
+// Review M403 E: a look that throws says so in the stop-log, once an episode.
+test('a throw in the owed-resume look writes one stop-log line', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await owedWorld($, on, w)
+  w.isFillThrown = true
+  await $.classic.StopFailure({ error: 'rate_limit' })
+  await clock.settle()
+  await clock.advance(36_000 + 30_000)
+  // One line, whatever name the engine gives the error; the next looks fail too and say nothing more.
+  expect(whats(stopLogOf(store, w)).filter(l => l.startsWith('owed resume look failed: '))).toHaveLength(1)
 })
 
 test('row h: a StopFailure with agent_id switches nothing, opens no episode and allows no Escape', async ($, on) => {

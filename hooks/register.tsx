@@ -102,6 +102,7 @@ import {
   requestFrom,
   requestsDir,
   launcherCopyDir,
+  escapeAfterFill,
   escapeArgv,
   escapeHeldBack,
   pickAfterStop,
@@ -238,7 +239,19 @@ let movedAt: number | undefined
  * died on (tried), its Escapes against `budget` (two a login, plus two, set at its first stop), and when the resume
  * entered. Module state, so /clear, /resume and /branch keep it; a reload drops it.
  */
-type Episode = { need?: Need; stops: number; tried: string[]; budget?: number; escapes: number; lastEscapeAt?: number; enteredAt?: number; lastWaitCount?: number; told: Set<'pane' | 'nothing' | 'stuck' | 'fill'> }
+type Episode = {
+  need?: Need
+  stops: number
+  tried: string[]
+  budget?: number
+  escapes: number
+  lastEscapeAt?: number
+  enteredAt?: number
+  lastWaitCount?: number
+  /** What stood when the turn that entered began: an entry that ends aborted gives it back, so the look acts again. */
+  before?: { isCarryOnInFlight: boolean; isLimitStopLast: boolean }
+  told: Set<'pane' | 'nothing' | 'stuck' | 'fill' | 'failed'>
+}
 let episode: Episode | undefined
 /** A carry-on submitted and not yet entered: no second is submitted, and the look may free it. */
 let isCarryOnInFlight = false
@@ -1816,7 +1829,7 @@ async function endEpisode($: Host, ep: Episode): Promise<void> {
 }
 
 /** Writes a look's line once an episode, where the look would otherwise write it every tick. */
-function tellOnce($: Host, ep: Episode, what: 'pane' | 'nothing' | 'stuck' | 'fill', line: string): void {
+function tellOnce($: Host, ep: Episode, what: 'pane' | 'nothing' | 'stuck' | 'fill' | 'failed', line: string): void {
   if (ep.told.has(what)) return
   ep.told.add(what)
   void logStop($, line)
@@ -1859,16 +1872,17 @@ async function lookOwed($: Host): Promise<void> {
     if (why === 'Escapes spent') tellOnce($, ep, 'stuck', `owed resume stuck: ${ep.budget} Escapes spent, not entered`)
     if (why !== undefined || look.pane === undefined) return undefined
     const box = await $.prompt.fill({ text: '', mode: 'append' })
-    if (escapeHeldBack({ ...look, fill: { refusal: box.refusal } }) !== undefined) {
-      tellOnce($, ep, 'fill', `owed resume: fill answered ${box.refusal ?? 'no cause'}, no key`)
+    // Read again with no await before the key: a turn that began during the fill gets no Escape.
+    const after = { openTurns: openTurns.size, isLimitStopLast: limitStopAfter === mainTurns, isCarryOnInFlight, isSameEpisode: episode === ep }
+    const act = escapeAfterFill(look, box.refusal, after, now)
+    if ('why' in act) {
+      if (act.why === 'no dialog holds it') tellOnce($, ep, 'fill', `owed resume: fill answered ${box.refusal ?? 'no cause'}, no key`)
       return undefined
     }
-    // Read again with no await before the key: a turn that began during the fill gets no Escape.
-    if (openTurns.size > 0 || limitStopAfter !== mainTurns || !isCarryOnInFlight || episode !== ep) return undefined
     const child = $.process.spawn({ argv: escapeArgv(look.pane) })
-    ep.escapes += 1
-    ep.lastEscapeAt = now
-    return { child, escape: ep.escapes, budget: ep.budget }
+    ep.escapes = act.escapes
+    ep.lastEscapeAt = act.lastEscapeAt
+    return { child, escape: act.escapes, budget: ep.budget }
   })
   if (sent === undefined) return
   const code = await exitOf($, sent.child)
@@ -2854,7 +2868,11 @@ export const register: Register = on => {
     })
     // Timers run between turns: a resume owed after a stop is acted on with no turn and no person.
     $.clock.every(OWED_LOOK_MS, () => {
-      void lookOwed($).catch(error => debug($, `owed resume look failed: ${String(error)}`))
+      void lookOwed($).catch(error => {
+        // A look that fails leaves the resume owed: the stop-log says so, once an episode.
+        if (episode !== undefined) tellOnce($, episode, 'failed', `owed resume look failed: ${errorName(error)}`)
+        return debug($, `owed resume look failed: ${String(error)}`)
+      })
     })
     return started
   })
@@ -2910,9 +2928,10 @@ export const register: Register = on => {
   on('turn.start', async ($, e, next) => {
     openTurns.add(e.turnId)
     if (e.agentId === undefined) {
+      const ep = episode
+      if (ep !== undefined && ep.enteredAt === undefined) ep.before = { isCarryOnInFlight, isLimitStopLast: limitStopAfter === mainTurns }
       mainTurns += 1
       isCarryOnInFlight = false
-      const ep = episode
       if (ep !== undefined && ep.enteredAt === undefined) {
         ep.enteredAt = await $.clock.now()
         void logStop($, 'resume entered')
@@ -2930,7 +2949,14 @@ export const register: Register = on => {
       if (e.agentId === undefined && ep.enteredAt !== undefined) {
         // An answer proves the resume; an interrupted or failed one leaves it owed, and the look acts again.
         if (e.reason === 'answer') await endEpisode($, ep)
-        else if (e.reason === 'aborted' || e.reason === 'error') ep.enteredAt = undefined
+        else if (e.reason === 'aborted' || e.reason === 'error') {
+          ep.enteredAt = undefined
+          // An entry that ends aborted (an Escape that landed on a waker's turn) leaves the carry-on queued as before it.
+          if (e.reason === 'aborted' && ep.before !== undefined) {
+            isCarryOnInFlight = ep.before.isCarryOnInFlight
+            if (ep.before.isLimitStopLast) limitStopAfter = mainTurns
+          }
+        }
       }
     }
     return next(e)

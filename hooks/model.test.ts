@@ -8,7 +8,7 @@ import { laterMark, spentMark, withFableMark } from './model'
 import { EMPTY_VIEW, USAGE_IDLE_MS, fitRow, hasRoom, rowOf, rowsOf, rowText, storedLine, storedLineText } from './model'
 import ROWS_FIXTURE from '../tests/fixtures/rows'
 import { REQUEST_TTL_MS, holdsLogin, isLoginOf, sameLogin, requestFrom, requestsDir, slotNumber } from './model'
-import { ESCAPE_GAP_MS, escapeArgv, escapeHeldBack, pickAfterStop, raisesLimitModal } from './model'
+import { ESCAPE_GAP_MS, escapeAfterFill, escapeArgv, escapeHeldBack, pickAfterStop, raisesLimitModal } from './model'
 import { mayWrite } from './model'
 import { signInFromStatus } from './model'
 import { USAGE_BACKOFF_MAX_MS, USAGE_CLAIM_MS, USAGE_CLAIM_WAIT_MS, USAGE_EARLY_MS, WRITER_VERSION, afterUsage, claimDueReads, gatingDue, isUsageDue, mayForceUsage, mayReadSince, renewClaim, retryAfterFrom, usageDueFrom } from './model'
@@ -1890,6 +1890,21 @@ test('row k: the first Escape of an episode goes with lastEscapeAt unset', () =>
   expect(escapeHeldBack({ isCarryOnInFlight: true, isLimitStopLast: true, openTurns: 0, isSettling: false, isHeld: false, escapes: 0, budget: 8, sinceEscapeMs: undefined, pane: 'term_a', fill: { refusal: 'dialog' } })).toBeUndefined()
 })
 
+// Review M403 B: the Escape after the fill, the one place that counts it, times it and reads the session again before it.
+test('row k: an Escape after a dialog fill counts one and stamps its time, and a turn, entry or end during the fill sends none', () => {
+  const look = { isCarryOnInFlight: true, isLimitStopLast: true, openTurns: 0, isSettling: false, isHeld: false, escapes: 2, budget: 8, sinceEscapeMs: ESCAPE_GAP_MS, pane: 'term_a' }
+  const still = { openTurns: 0, isLimitStopLast: true, isCarryOnInFlight: true, isSameEpisode: true }
+  const rows: [string, string | undefined, typeof still, ReturnType<typeof escapeAfterFill>][] = [
+    ['a dialog, nothing changed', 'dialog', still, { escapes: 3, lastEscapeAt: NOW }],
+    ['no dialog', undefined, still, { why: 'no dialog holds it' }],
+    ['the episode ended during the fill', 'dialog', { ...still, isSameEpisode: false }, { why: 'the episode ended during the fill' }],
+    ['a turn began during the fill', 'dialog', { ...still, openTurns: 1 }, { why: 'a turn began during the fill' }],
+    ['a main-loop turn began during the fill', 'dialog', { ...still, isLimitStopLast: false }, { why: 'a main-loop turn began during the fill' }],
+    ['the carry-on entered during the fill', 'dialog', { ...still, isCarryOnInFlight: false }, { why: 'the carry-on entered during the fill' }],
+  ]
+  expect(rows.map(([name, refusal, after]) => [name, escapeAfterFill(look, refusal, after, NOW)])).toEqual(rows.map(([name, , , act]) => [name, act]))
+})
+
 // v4 s.1, row a: the pick after a stop judges each login on its own stored read, and a read is fresh within FRESH_READ_MS.
 test('row a: the case\'s shape: a week-old reading with a run-out token and a fresh reading with room, the move goes to the fresh one', () => {
   // Login 1 is in use and spent; login 2, next in the list, was last read a week ago, its windows long reset (so it reads as
@@ -1917,6 +1932,8 @@ test('row a: the spent-old tier goes to the login that frees first for the need,
     ['5-hour and week both spent: the later of the two', undefined, read([95, 1, 100, 5, 0, 9]), read([95, 2, 100, 3, 0, 9]), {}, '3'],
     ['a Fable mark in force, for the Fable week: its reset', 'fable', read([20, 1, 20, 100, 20, 1]), read([20, 5, 20, 100, 100, 3]), { fableMarks: { '2': { pct: 100, resetsAt: at(6), at: NOW } } }, '3'],
     ['a Fable mark, for no need: it frees nothing, so not its reset', undefined, read([20, 1, 20, 100, 0, 9]), read([20, 5, 100, 3, 0, 9]), { fableMarks: { '2': { pct: 100, resetsAt: at(10), at: NOW } } }, '2'],
+    // Review M403 C: a spending window with no reset known frees at no known time, so after every one that does.
+    ['week spent with no reset known: last, not by its 5-hour reset', undefined, { ...read([20, 1, 100, 0, 0, 9]), sevenDay: { pct: 100 } }, read([20, 5, 100, 3, 0, 9]), {}, '3'],
   ]
   const wrong: string[] = []
   for (const [name, need, second, third, marks, wanted] of cases) {

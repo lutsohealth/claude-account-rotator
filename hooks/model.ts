@@ -266,7 +266,8 @@ function freesAt(view: View, id: string, r: Reading | undefined, now: number, ne
     view.weekMarks?.[id],
     isFable ? view.fableMarks?.[id] : undefined,
   ]
-  const resets = spending.map(w => (w?.resetsAt === undefined ? NaN : Date.parse(w.resetsAt))).filter(at => Number.isFinite(at) && at > now)
+  // A spending window with no reset to parse frees at no known time: after every one that does.
+  const resets = spending.flatMap(w => (w === undefined ? [] : [Date.parse(w.resetsAt ?? '')])).map(at => (Number.isNaN(at) ? Infinity : at)).filter(at => at > now)
   return resets.length > 0 ? Math.max(...resets) : resetOf(r, now)
 }
 
@@ -1664,6 +1665,24 @@ export function escapeHeldBack(s: EscapeLook): string | undefined {
   if (!s.pane) return 'no Orca pane'
   if (s.fill === undefined) return undefined
   return s.fill.refusal === 'dialog' ? undefined : 'no dialog holds it'
+}
+
+/** What the session knows again right after the fill, read with no await before the key. */
+export type AfterFill = { openTurns: number; isLimitStopLast: boolean; isCarryOnInFlight: boolean; isSameEpisode: boolean }
+
+/**
+ * The look's decision once the fill answered `refusal`: why no Escape goes (escapeHeldBack's reasons, or a turn, an
+ * entry or an episode's end during the fill), or the episode's Escape count and last-Escape time after the one that
+ * goes now.
+ */
+export function escapeAfterFill(look: EscapeLook, refusal: string | undefined, after: AfterFill, now: number): { why: string } | { escapes: number; lastEscapeAt: number } {
+  const why = escapeHeldBack({ ...look, fill: { refusal } })
+  if (why !== undefined) return { why }
+  if (!after.isSameEpisode) return { why: 'the episode ended during the fill' }
+  if (after.openTurns > 0) return { why: 'a turn began during the fill' }
+  if (!after.isLimitStopLast) return { why: 'a main-loop turn began during the fill' }
+  if (!after.isCarryOnInFlight) return { why: 'the carry-on entered during the fill' }
+  return { escapes: look.escapes + 1, lastEscapeAt: now }
 }
 
 /** One Escape to the Orca pane `pane`, by Orca's CLI: a fixed argv, run with no shell. */
