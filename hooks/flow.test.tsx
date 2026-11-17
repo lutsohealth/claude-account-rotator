@@ -11234,12 +11234,8 @@ for (const late of ['throw', 'drop'] as const) {
   })
 }
 
-/**
- * Review r2 DROP_RACE: the held switch's minute retry owns the switch, paused in its keychain read after its owner claim,
- * when the nudge's turn ends in a drop; the drop's write is refused, and the retry then writes the hold again.
- */
-async function dropDuringRetry($: Engine, on: On, end: 'authentication_failed' | 'answer', isRefreshed = false) {
-  const w = fresh()
+/** The held switch's minute retry owning the switch, paused in its keychain read after its owner claim, the nudge's turn open. */
+async function gatedRetry($: Engine, on: On, w: World) {
   const view = watchedView(on)
   const { store, clock } = await heldWorld($, on, w)
   await clock.advance(3 * 60_000 + 15_000)
@@ -11257,6 +11253,16 @@ async function dropDuringRetry($: Engine, on: On, end: 'authentication_failed' |
   await $.turn.start({ text: NUDGE_TEXT, turnId: 'turn-nudge' })
   await clock.advance(60_000)
   expect([isGated, view()?.owner !== undefined, view()?.held?.target.id]).toEqual([true, true, '2'])
+  return { view, store, clock, open }
+}
+
+/**
+ * Review r2 DROP_RACE: the held switch's minute retry owns the switch, paused in its keychain read after its owner claim,
+ * when the nudge's turn ends in a drop; the drop's write is refused, and the retry then writes the hold again.
+ */
+async function dropDuringRetry($: Engine, on: On, end: 'authentication_failed' | 'answer', isRefreshed = false) {
+  const w = fresh()
+  const { view, store, clock, open } = await gatedRetry($, on, w)
   if (end !== 'answer') await $.classic.StopFailure({ error: end })
   const done = $.turn.complete({ turnId: 'turn-nudge', reason: end === 'answer' ? 'answer' : 'error', answer: '', durationMs: 1, isAborted: false })
   // The retry's read then finds login 1's token refreshed, passes the guard and lands the switch.
@@ -11286,6 +11292,18 @@ test('row v: an authentication_failed after a nudge whose retry lands the switch
   const { w, store } = await dropDuringRetry($, on, 'authentication_failed', true)
   const lines = whats(stopLogOf(store, w))
   expect([slots(w), lines.filter(l => l.startsWith('held switch') || l.startsWith('work resumed'))]).toEqual([[SLOT2], ['held switch not dropped: a switch is running']])
+})
+
+// puma-9arph.68: `account use` on the login in use cannot end the hold while the retry owns the switch, and says so.
+test('a use of the login in use while the held switch\'s retry owns the switch is refused and says a switch is running', async ($, on) => {
+  const w = fresh()
+  const { view, store, clock, open } = await gatedRetry($, on, w)
+  w.files[`${REQUESTS}/${N1}.json`] = useRequest(N1, '1', store.get('store-id'), clock.now(), ownMark(w))
+  await untilTick(clock)
+  const answer = resultOf(w, N1)
+  expect([answer?.ok, /a switch is running/.test(String(answer?.message)), view()?.held?.target.id], `the answer: "${answer?.message}"`).toEqual([false, true, '2'])
+  open()
+  await clock.settle()
 })
 
 // Review r3 REPLACED-HOLD: a press after the nudge replaces the stop's hold with its own; the drop is for the stop's alone.
