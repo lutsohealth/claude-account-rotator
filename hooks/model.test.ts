@@ -8,7 +8,7 @@ import { laterMark, spentMark, withFableMark } from './model'
 import { EMPTY_VIEW, USAGE_IDLE_MS, fitRow, hasRoom, rowOf, rowsOf, rowText, storedLine, storedLineText } from './model'
 import ROWS_FIXTURE from '../tests/fixtures/rows'
 import { REQUEST_TTL_MS, holdsLogin, isLoginOf, sameLogin, requestFrom, requestsDir, slotNumber } from './model'
-import { ESCAPE_GAP_MS, NUDGE_LEAD_MS, escapeAfterFill, escapeArgv, escapeHeldBack, nudgeHeld, pickAfterStop, raisesLimitModal } from './model'
+import { ESCAPE_GAP_MS, NUDGE_LEAD_MS, NUDGE_TEXT, escapeAfterFill, escapeArgv, escapeHeldBack, isBoxFree, nudgeHeld, pickAfterStop, raisesLimitModal, renudgeDue } from './model'
 import { mayWrite } from './model'
 import { signInFromStatus } from './model'
 import { USAGE_BACKOFF_MAX_MS, USAGE_CLAIM_MS, USAGE_CLAIM_WAIT_MS, USAGE_EARLY_MS, WRITER_VERSION, afterUsage, claimDueReads, gatingDue, isUsageDue, mayForceUsage, mayReadSince, renewClaim, retryAfterFrom, usageDueFrom } from './model'
@@ -1895,6 +1895,43 @@ test('row v: nudgeHeld sends only for a held stop switch, no turn, no carry-on, 
     ['1 ms before the lead', { ...due, expiresInMs: NUDGE_LEAD_MS + 1 }, 'the token is not due'],
   ]
   expect(rows.map(([name, s]) => [name, nudgeHeld(s)])).toEqual(rows.map(([name, , why]) => [name, why]))
+})
+
+// puma-9arph.65 case B (a): the box counts as empty for the mod's own lines, which a queued carry-on can leave in it.
+test('puma-9arph.65: isBoxFree holds for an empty box and each of the mod\'s own lines, exactly, and for nothing else', () => {
+  const own = [NUDGE_TEXT, 'Continue where you left off.', undefined, 'Go on on Fable-free ground.']
+  const rows: [string, string | undefined, boolean][] = [
+    ['the empty box', '', true],
+    ['the nudge\'s line', NUDGE_TEXT, true],
+    ['the carry-on\'s line', 'Continue where you left off.', true],
+    ['the kept Fable line', 'Go on on Fable-free ground.', true],
+    ['the nudge\'s line, one character more', `${NUDGE_TEXT}.`, false],
+    ['the nudge\'s line, one character less', NUDGE_TEXT.slice(0, -1), false],
+    ['the carry-on\'s line, one character more', 'Continue where you left off. ', false],
+    ['the carry-on\'s line, one character less', 'Continue where you left off', false],
+    ['the kept Fable line, one character more', 'Go on on Fable-free ground.!', false],
+    ['the kept Fable line, one character less', 'Go on on Fable-free ground', false],
+    ['a person\'s text', 'half a thought', false],
+    ['a box the read could not show', undefined, false],
+  ]
+  expect(rows.map(([name, text]) => [name, isBoxFree(text, own)])).toEqual(rows.map(([name, , free]) => [name, free]))
+  // No line kept for Fable: an undefined own line frees nothing, not even an undefined box.
+  expect([isBoxFree(undefined, [undefined]), isBoxFree('', [])]).toEqual([false, true])
+})
+
+// puma-9arph.65 case A: one more nudge once the token it was sent for has run out unrefreshed.
+test('puma-9arph.65: renudgeDue holds once, for the same token past its expiry, and for nothing else', () => {
+  const due: Parameters<typeof renudgeDue>[0] = { isRenudged: false, firstExpiresAt: NOW, expiresAt: NOW, now: NOW }
+  expect(renudgeDue(due)).toBe(true)
+  const rows: [string, Parameters<typeof renudgeDue>[0], boolean][] = [
+    ['the second already went', { ...due, isRenudged: true }, false],
+    ['1 ms before the expiry', { ...due, now: NOW - 1 }, false],
+    ['a token refreshed to a later expiry', { ...due, expiresAt: NOW + HOUR, now: NOW + 2 * HOUR }, false],
+    ['no stored token', { ...due, expiresAt: undefined }, false],
+    ['no first nudge on record', { ...due, firstExpiresAt: undefined }, false],
+    ['long past the expiry', { ...due, now: NOW + HOUR }, true],
+  ]
+  expect(rows.map(([name, s]) => [name, renudgeDue(s)])).toEqual(rows.map(([name, , want]) => [name, want]))
 })
 
 test('row k: a carry-on still in flight 30 s after its Escape gets another, within the budget 2 x logins + 2, then stuck', () => {

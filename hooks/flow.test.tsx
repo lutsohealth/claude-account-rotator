@@ -11021,12 +11021,13 @@ test('row v: a draft in the prompt box holds the nudge back until the box is emp
   expect(w.submitted).toEqual([NUDGE_TEXT])
 })
 
-test('row v: a nudge whose request refreshes nothing lands no switch and sends no second nudge', async ($, on) => {
+test('row v: a nudge whose request refreshes nothing lands no switch and sends no second nudge before the token\'s expiry', async ($, on) => {
   const w = fresh()
   const { store, clock } = await heldWorld($, on, w)
   await clock.advance(3 * 60_000 + 15_000)
   await nudgeTurn($, clock, { error: 'rate_limit' })
-  await clock.advance(30 * 60_000)
+  // Short of the expiry, 7 minutes after the stop: puma-9arph.65 sends one more past it.
+  await clock.advance(3 * 60_000)
   expect(slots(w)).toEqual([])
   expect(w.submitted).toEqual([NUDGE_TEXT])
   expect(whats(stopLogOf(store, w)).filter(l => l.startsWith('refresh nudge: token'))).toEqual(['refresh nudge: token not refreshed, switch still held'])
@@ -11235,6 +11236,161 @@ for (const key of ['use-2', 'use-3'] as const) {
     })
   }
 }
+
+// ---------------------------------------------------------------- puma-9arph.65: what ends a held switch, and the nudge's edges
+
+/** Login 1's token runs out in 7 minutes, inside the refresh guard, over a store the test reads. */
+async function expiringWorld(on: On, w: World) {
+  w.keychain['Claude Code-credentials'] = blob('tok-1', NOW + 7 * 60_000)
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [20, 30]
+  w.usage['tok-2'] = [10, 30, 10]
+  const store = new Map<string, unknown>(Object.entries(TWO_LOGINS))
+  return { store, clock: world(on, w, store) }
+}
+
+const atOfStored = (store: Map<string, unknown>, id: string) => (store.get(`health:${id}`) as { at?: unknown } | undefined)?.at
+
+/** Where a check, not a stop, wrote login-needed on the login in use: the world's change, and the why it stores. */
+const CHECK_ROUTES: [string, (w: World) => void, RegExp][] = [
+  ['not signed in', w => { w.signedOut = [''] }, /^not signed in$/],
+  ['signed in as another login', w => { w.keychain['Claude Code-credentials'] = blob('tok-2', NOW + 7 * 60_000) }, /^signed in as /],
+  ['a rejected usage read', w => { w.failing = { 'tok-1': 401 } }, /^sign-in rejected$/],
+]
+
+for (const [route, change, why] of CHECK_ROUTES) {
+  test(`puma-9arph.65: a held switch outlives the token's expiry where a check wrote login-needed (${route}), and lands once the token refreshes`, async ($, on) => {
+    const w = fresh()
+    const view = watchedView(on)
+    const { store, clock } = await expiringWorld(on, w)
+    change(w)
+    await start($, clock)
+    const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+    await pane.press({ key: 'use-2' })
+    await clock.settle()
+    const stored = store.get('health:1') as { kind?: string; why?: string } | undefined
+    expect([stored?.kind, why.test(stored?.why ?? ''), atOfStored(store, '1'), view()?.held?.target.id]).toEqual(['login-needed', true, undefined, '2'])
+    // Past the expiry and one tick: no refresh came, so nothing says the switch is safe.
+    await clock.advance(8 * 60_000)
+    expect([slots(w), view()?.held?.target.id]).toEqual([[], '2'])
+    refresh(w)
+    await clock.advance(60_000)
+    expect(slots(w)).toEqual([SLOT2])
+    await pane.unmount()
+  })
+}
+
+/** A stop's rejected sign-in on login 1 whose token runs out in 7 minutes: the switch to 2 is held for the refresh. */
+async function rejectedAndHeld($: Engine, on: On, w: World) {
+  const { store, clock } = await expiringWorld(on, w)
+  await start($, clock)
+  await $.classic.StopFailure({ error: 'authentication_failed' })
+  await clock.settle()
+  expect(whats(stopLogOf(store, w))).toContain('held for 2: the token in use refreshes soon')
+  expect([healthOfStored(store, '1')?.why, typeof atOfStored(store, '1')], 'premise: the stop wrote the mark').toEqual(['sign-in rejected', 'number'])
+  return { store, clock }
+}
+
+test('puma-9arph.65: a held switch lands at the next tick after the token\'s expiry once a stop saw the sign-in rejected', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await rejectedAndHeld($, on, w)
+  // No check reads login 1 meanwhile.
+  readHeldElsewhere(store)
+  await clock.advance(6 * 60_000)
+  expect(slots(w)).toEqual([])
+  await clock.advance(2 * 60_000)
+  expect(slots(w)).toEqual([SLOT2])
+})
+
+test('puma-9arph.65: a check\'s rejected read in the hold keeps the stop\'s mark, so the switch still lands at the expiry', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await rejectedAndHeld($, on, w)
+  const readsBefore = w.usageCalls.filter(t => t === 'tok-1').length
+  w.failing = { 'tok-1': 401 }
+  store.delete('usage-due:1')
+  await clock.advance(2 * 60_000)
+  expect(w.usageCalls.filter(t => t === 'tok-1').length, 'premise: a check read login 1 and was rejected').toBeGreaterThan(readsBefore)
+  expect([healthOfStored(store, '1')?.why, typeof atOfStored(store, '1')], 'the stop\'s mark stands').toEqual(['sign-in rejected', 'number'])
+  expect(slots(w)).toEqual([])
+  await clock.advance(6 * 60_000)
+  expect(slots(w)).toEqual([SLOT2])
+})
+
+const SIGN_IN_WAIT = "Switching accounts waits for this login's sign-in to refresh. Send any message to retry, or use /accounts."
+const DRAFT_NOTICE = 'Switching accounts waits for your draft: press Enter to send it, or clear the box.'
+const DRAFT_LINE = 'refresh nudge: a draft in the box, switch still held'
+
+test('puma-9arph.65: a nudge whose token stays unrefreshed past its expiry is sent once more, never a third, and the person is told once', async ($, on) => {
+  const w = fresh()
+  const { store, clock, expiresAt } = await heldWorld($, on, w)
+  await clock.advance(3 * 60_000 + 15_000)
+  await nudgeTurn($, clock, { error: 'rate_limit' })
+  await clock.advance(expiresAt - clock.now() - 20_000)
+  expect(w.submitted, 'no second nudge before the expiry').toEqual([NUDGE_TEXT])
+  await clock.advance(40_000)
+  expect(w.submitted).toEqual([NUDGE_TEXT, NUDGE_TEXT])
+  expect(whats(stopLogOf(store, w)).filter(l => l.startsWith("refresh nudge again: login 1's token expired "))).toHaveLength(1)
+  await nudgeTurn($, clock, { error: 'rate_limit' })
+  await clock.advance(30 * 60_000)
+  expect(w.submitted).toEqual([NUDGE_TEXT, NUDGE_TEXT])
+  expect(w.toasts.filter(t => t === SIGN_IN_WAIT)).toHaveLength(1)
+  expect(slots(w)).toEqual([])
+})
+
+test('puma-9arph.65: the nudge goes where the box holds exactly the mod\'s own line a queued carry-on left in it', async ($, on) => {
+  const w = fresh()
+  const { clock } = await heldWorld($, on, w)
+  w.draft = NUDGE_TEXT
+  await clock.advance(3 * 60_000 + 15_000)
+  expect(w.submitted).toEqual([NUDGE_TEXT])
+})
+
+test('puma-9arph.65: a person\'s text in the box holds the switch and says so once, and only once the token is due', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await heldWorld($, on, w)
+  w.draft = 'half a thought'
+  await clock.advance(2 * 60_000)
+  expect([w.toasts.filter(t => t === DRAFT_NOTICE), whats(stopLogOf(store, w)).filter(l => l === DRAFT_LINE)], 'not told while the token is not due').toEqual([[], []])
+  await clock.advance(75_000)
+  await clock.advance(30_000)
+  expect(w.submitted).toEqual([])
+  expect([w.toasts.filter(t => t === DRAFT_NOTICE), whats(stopLogOf(store, w)).filter(l => l === DRAFT_LINE)]).toEqual([[DRAFT_NOTICE], [DRAFT_LINE]])
+  w.draft = ''
+  await clock.advance(15_000)
+  expect(w.submitted).toEqual([NUDGE_TEXT])
+})
+
+const EXPIRED_TOKEN_REJECTED = 'stop rejected on the expired token after the refresh nudge: the held switch lands through the release'
+
+test('puma-9arph.65: a rejected sign-in on a nudge sent with the token already expired and not refreshed marks it, keeps the hold, and the switch lands at the next tick', async ($, on) => {
+  const w = fresh()
+  const view = watchedView(on)
+  const { store, clock, expiresAt } = await heldWorld($, on, w)
+  await clock.advance(3 * 60_000 + 15_000)
+  await nudgeTurn($, clock, { error: 'rate_limit' })
+  await clock.advance(expiresAt - clock.now() + 20_000)
+  expect(w.submitted, 'premise: the second nudge went on the expired token').toEqual([NUDGE_TEXT, NUDGE_TEXT])
+  await nudgeTurn($, clock, { error: 'authentication_failed' })
+  expect([healthOfStored(store, '1')?.why, typeof atOfStored(store, '1'), view()?.held?.target.id]).toEqual(['sign-in rejected', 'number', '2'])
+  expect(whats(stopLogOf(store, w))).toContain(EXPIRED_TOKEN_REJECTED)
+  expect(whats(stopLogOf(store, w)).filter(l => l.startsWith('held switch dropped'))).toEqual([])
+  expect(slots(w)).toEqual([])
+  await clock.advance(60_000)
+  expect(slots(w)).toEqual([SLOT2])
+})
+
+test('puma-9arph.65: a rejected sign-in on a nudge sent before the token\'s expiry still drops the held switch and marks nothing', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await heldWorld($, on, w)
+  await clock.advance(3 * 60_000 + 15_000)
+  await nudgeTurn($, clock, { error: 'authentication_failed' })
+  const lines = whats(stopLogOf(store, w))
+  expect(lines).toContain('held switch dropped: authentication_failed after the refresh nudge, login 1 kept')
+  expect(lines).not.toContain(EXPIRED_TOKEN_REJECTED)
+  expect([healthOfStored(store, '1')?.kind, atOfStored(store, '1')]).toEqual(['ok', undefined])
+  await clock.advance(10 * 60_000)
+  expect(slots(w)).toEqual([])
+})
 
 // ---------------------------------------------------------------- puma-9arph.38: one switch in flight
 
