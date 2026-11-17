@@ -36,6 +36,18 @@ STORE = "account-rotator_claude-account-rotator-6a98198262ca.json"
 FIXTURE_PREFIX = "export default "
 
 
+def default_sigint() -> None:
+    """SIGINT as a command typed at a prompt has it. A gate started with `&` in a non-interactive shell runs with SIGINT
+    ignored, and Python then installs no KeyboardInterrupt handler, in the test process and in each child it starts."""
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
+
+
+def own_default_sigint(case: unittest.TestCase) -> None:
+    """The test process's own SIGINT is Python's handler for this test, and what it was before comes back after."""
+    case.addCleanup(signal.signal, signal.SIGINT, signal.getsignal(signal.SIGINT))
+    signal.signal(signal.SIGINT, signal.default_int_handler)
+
+
 def load_fixture() -> dict:
     """The fixture model.test.ts imports: a TypeScript module whose default export is JSON."""
     text = FIXTURE.read_text(encoding="utf-8")
@@ -471,7 +483,7 @@ class Select(RequestCase):
         self.assertTrue(signals)
         offenders = {}
         for name, signum in signals.items():
-            child = subprocess.Popen([sys.executable, str(CLI), "account", "select", "--account", "2", "--wait", "30"], env=self.env(), stderr=subprocess.PIPE, text=True)
+            child = subprocess.Popen([sys.executable, str(CLI), "account", "select", "--account", "2", "--wait", "30"], env=self.env(), stderr=subprocess.PIPE, text=True, preexec_fn=default_sigint)
             deadline = time.monotonic() + 5
             while time.monotonic() < deadline and not list(self.requests.glob("*.json")):
                 time.sleep(0.02)
@@ -485,6 +497,7 @@ class Select(RequestCase):
 
     # Review C11-R2 (Codex) [SIGNAL-PRETRY-GAP]: a signal anywhere in the verb, the folder lookup before the write too.
     def test_a_signal_during_the_folder_lookup_is_one_line_and_exit_130(self) -> None:
+        own_default_sigint(self)
         signals = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
         self.assertTrue(signals)
         outcomes = {}
@@ -739,7 +752,7 @@ class Use(RequestCase):
         self.assertTrue(signals)
         offenders = {}
         for name, signum in signals.items():
-            child = subprocess.Popen([sys.executable, str(CLI), "account", "use", "--account", "2", "--wait", "30"], env=self.session_env(), stderr=subprocess.PIPE, text=True)
+            child = subprocess.Popen([sys.executable, str(CLI), "account", "use", "--account", "2", "--wait", "30"], env=self.session_env(), stderr=subprocess.PIPE, text=True, preexec_fn=default_sigint)
             deadline = time.monotonic() + 5
             while time.monotonic() < deadline and not (self.requests.is_dir() and list(self.requests.glob("*.json"))):
                 time.sleep(0.02)
