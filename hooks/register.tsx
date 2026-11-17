@@ -3176,8 +3176,10 @@ export const register: Register = on => {
       // The login in use answered the nudge: the work goes on there, and the switch held to leave it goes.
       if (ep !== undefined && e.reason === 'answer') {
         const dropped = await dropHeld($, ep.nudgedFor)
-        const { activeId } = await getView($)
-        void logStop($, dropped === 'dropped' ? `held switch dropped: the refresh nudge answered on login ${activeId}` : `held switch not dropped: ${dropped}`)
+        const { activeId, held } = await getView($)
+        // A hold already gone (the switch landed while the nudge sat queued) is no refused drop: the line says so.
+        const gone = `held switch already gone at the refresh nudge's answer, on login ${activeId}`
+        void logStop($, dropped === 'dropped' ? `held switch dropped: the refresh nudge answered on login ${activeId}` : held === undefined ? gone : `held switch not dropped: ${dropped}`)
         // Only the nudge was answered: the person's own turn carries on, and its entry and answer end the episode.
         carryOnAfterNudge($, ep, dropped === 'dropped')
       } else if (ep !== undefined) carryOnAfterNudge($, ep, false)

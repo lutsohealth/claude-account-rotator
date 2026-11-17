@@ -11182,6 +11182,8 @@ test('row v: a landing while the nudge sits queued carries the person\'s turn on
   const { store, clock } = await landedWhileNudgeQueued($, on, w)
   await nudgeTurn($, clock, 'answer')
   expect(w.submitted).toHaveLength(2)
+  // Merge read b of #129, note 3: the hold landed, so the answer's line says it was gone, never a refused drop.
+  expect(whats(stopLogOf(store, w)).filter(l => l.startsWith('held switch'))).toEqual(["held switch already gone at the refresh nudge's answer, on login 2"])
   await carryTurn($, clock, w)
   const lines = whats(stopLogOf(store, w))
   expect(lines.filter(l => l === 'resume entered' || l.startsWith('work resumed'))).toEqual(['resume entered', 'work resumed on login 2'])
