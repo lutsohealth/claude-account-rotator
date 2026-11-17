@@ -127,6 +127,8 @@ type World = {
   /** What the prompt box holds, as `$.prompt.read` answers it; while `readHold` is set, the read answers once it settles. */
   draft?: string
   readHold?: Promise<void>
+  /** Called as a read of the box begins, before `readHold`: a test knows the look has reached it. */
+  onPromptRead?: () => void
   /** Where it answers true, a debug line fails to write. */
   isLogFailing?: (text: string) => boolean
   /** Whether each line in `submitted` was sent as the person's own words (`asUser`), not under the mod's name. */
@@ -400,6 +402,7 @@ function world(on: On, w: World, store: Record<string, unknown> | Map<string, un
     return { isFilled: w.isFillRefused !== true }
   })
   on('prompt.read', async () => {
+    w.onPromptRead?.()
     await w.readHold
     return { value: { text: w.draft ?? '', cursor: 0 } }
   })
@@ -11090,7 +11093,12 @@ test('row v: a press during the nudge\'s reads replaces the held switch, and no 
   w.readHold = new Promise<void>(resolve => {
     release = resolve
   })
+  // Review r2 STALE_TEST_GAP: the look runs unawaited, so the press waits until the look is inside its box read.
+  const reached = new Promise<void>(resolve => {
+    w.onPromptRead = resolve
+  })
   await clock.advance(3 * 60_000 + 15_000)
+  await reached
   const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
   await pane.press({ key: 'use-3' })
   await clock.settle()
