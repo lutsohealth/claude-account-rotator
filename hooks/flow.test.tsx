@@ -11132,6 +11132,59 @@ test('row v: a nudge that login 1 answers ends the episode and drops the held sw
   expect(view()?.held).toBe(undefined)
 })
 
+/**
+ * Review r2 DROP_RACE: the held switch's minute retry owns the switch, paused in its keychain read after its owner claim,
+ * when the nudge's turn ends in a drop; the retry then writes the hold again under its own token.
+ */
+async function dropDuringRetry($: Engine, on: On, end: 'authentication_failed' | 'answer', isRefreshed = false) {
+  const w = fresh()
+  const view = watchedView(on)
+  const { store, clock } = await heldWorld($, on, w)
+  await clock.advance(3 * 60_000 + 15_000)
+  expect(w.submitted).toEqual([NUDGE_TEXT])
+  let open = () => {}
+  const gate = new Promise<void>(resolve => {
+    open = resolve
+  })
+  let isGated = false
+  w.beforeKeychain = () => {
+    if (isGated || view()?.owner === undefined) return Promise.resolve()
+    isGated = true
+    return gate
+  }
+  await $.turn.start({ text: NUDGE_TEXT, turnId: 'turn-nudge' })
+  await clock.advance(60_000)
+  expect([isGated, view()?.owner !== undefined, view()?.held?.target.id]).toEqual([true, true, '2'])
+  if (end !== 'answer') await $.classic.StopFailure({ error: end })
+  const done = $.turn.complete({ turnId: 'turn-nudge', reason: end === 'answer' ? 'answer' : 'error', answer: '', durationMs: 1, isAborted: false })
+  // The retry's read then finds login 1's token refreshed, passes the guard and lands the switch.
+  if (isRefreshed) refresh(w)
+  open()
+  await done
+  await clock.settle()
+  return { w, view, store, clock }
+}
+
+test('row v: an authentication_failed after a nudge while the held switch\'s retry owns the switch drops it once the retry ends', async ($, on) => {
+  const { w, view, store, clock } = await dropDuringRetry($, on, 'authentication_failed')
+  expect(view()?.held).toBe(undefined)
+  expect(whats(stopLogOf(store, w)).filter(l => l.startsWith('held switch'))).toEqual(['held switch dropped: authentication_failed after the refresh nudge, login 1 kept'])
+  await clock.advance(10 * 60_000)
+  expect([slots(w), w.submitted]).toEqual([[], [NUDGE_TEXT]])
+})
+
+test('row v: a nudge answered while the held switch\'s retry owns the switch drops it once the retry ends', async ($, on) => {
+  const { w, view, store } = await dropDuringRetry($, on, 'answer')
+  expect(view()?.held).toBe(undefined)
+  expect(whats(stopLogOf(store, w)).filter(l => l.startsWith('held switch') || l.startsWith('work resumed'))).toEqual(['held switch dropped: the refresh nudge answered on login 1', 'work resumed on login 1'])
+})
+
+test('row v: an authentication_failed after a nudge whose retry lands the switch meanwhile drops nothing and ends no episode', async ($, on) => {
+  const { w, store } = await dropDuringRetry($, on, 'authentication_failed', true)
+  const lines = whats(stopLogOf(store, w))
+  expect([slots(w), lines.filter(l => l.startsWith('held switch') || l.startsWith('work resumed'))]).toEqual([[SLOT2], ['held switch not dropped: none held']])
+})
+
 // ---------------------------------------------------------------- puma-9arph.38: one switch in flight
 
 const isSwitchedToast = (t: unknown) => String(t).startsWith('Switched to ')

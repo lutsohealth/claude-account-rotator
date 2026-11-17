@@ -1545,9 +1545,26 @@ function carryOnAfterSettle($: Host, owed: CarryOn): void {
 const SWITCH_WAIT_MS = 30_000
 /** The run of the switch or point-back this module started and still owns, awaited by a switch that waits on it. */
 let switchRun: Promise<boolean> | undefined
+/** The held switch's retry the minute timer started, while it runs: dropHeld waits for it. */
+let retryRun: Promise<unknown> | undefined
 /** The token of that run, while it runs: a /clear's reset drops the view's owner, and rebindSession puts this one back. */
 let live: number | undefined
 let lastToken = 0
+
+/**
+ * Drops the held switch once the retry under way, if any, has ended (up to SWITCH_WAIT_MS): a retry that read the hold
+ * before the drop holds it again after it, under its own claim. 'dropped' only where this write cleared a hold.
+ */
+async function dropHeld($: Host): Promise<'dropped' | 'none held' | 'a switch is running'> {
+  if (retryRun !== undefined) await Promise.race([retryRun, $.clock.sleep(SWITCH_WAIT_MS)]).catch(() => undefined)
+  let wasHeld = false
+  const isApplied = await writeSwitch($, { idle: true }, v => {
+    wasHeld = v.held !== undefined
+    return { ...v, held: undefined }
+  })
+  if (!isApplied) return 'a switch is running'
+  return wasHeld ? 'dropped' : 'none held'
+}
 
 /**
  * Runs `run` as the switch that owns the session, by `token`, already claimed in the view. Once it ends, held,
@@ -2020,7 +2037,12 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
   // Council B4: a nudge's request that fails another way (a refresh refused above all) drops the held switch, and marks
   // nothing: a rejection mark would let the guard go at the token's expiry with no refresh, a landing around it.
   if (ep?.nudgedAt !== undefined && error !== 'rate_limit' && view.held !== undefined) {
-    await writeSwitch($, { idle: true }, v => ({ ...v, held: undefined }))
+    // A drop a running switch refused, or that found the hold gone, ends nothing: the episode goes on as it stands.
+    const dropped = await dropHeld($)
+    if (dropped !== 'dropped') {
+      void logStop($, `held switch not dropped: ${dropped}`)
+      return
+    }
     void logStop($, `held switch dropped: ${error} after the refresh nudge, login ${active.id} kept`)
     // Nothing is owed any more: the episode ends, so a later stop opens its own and moves (no work resumed here).
     if (episode === ep) {
@@ -2960,7 +2982,11 @@ export const register: Register = on => {
     })
     $.clock.every(60_000, () => {
       // Armed again by a reload, which keeps the view and cancels every wait. Its own catch: a failing merge skips no retry.
-      void retryHeld($).catch(error => debug($, `held switch retry failed: ${String(error)}`))
+      const retry = retryHeld($).catch(error => debug($, `held switch retry failed: ${String(error)}`))
+      retryRun = retry
+      void retry.then(() => {
+        if (retryRun === retry) retryRun = undefined
+      })
       // A slot write that landed after the view moved on, or a repair that failed, is set right here.
       void reconcile($).catch(error => debug($, `slot repair failed: ${errorName(error)}`))
       void mergeStore($)
@@ -3069,10 +3095,10 @@ export const register: Register = on => {
       nudgeTurnId = undefined
       // The login in use answered the nudge: the work goes on there, and the switch held to leave it goes.
       if (ep !== undefined && e.reason === 'answer') {
+        const dropped = await dropHeld($)
         const { activeId } = await getView($)
-        await writeSwitch($, { idle: true }, v => ({ ...v, held: undefined }))
-        void logStop($, `held switch dropped: the refresh nudge answered on login ${activeId}`)
-        await endEpisode($, ep)
+        void logStop($, dropped === 'dropped' ? `held switch dropped: the refresh nudge answered on login ${activeId}` : `held switch not dropped: ${dropped}`)
+        if (dropped === 'dropped') await endEpisode($, ep)
       }
       return next(e)
     }
