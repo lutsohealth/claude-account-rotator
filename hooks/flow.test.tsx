@@ -11494,6 +11494,48 @@ test('puma-9arph.65: a rejected sign-in on a nudge sent before the token\'s expi
   expect(slots(w)).toEqual([])
 })
 
+// Review r65 F1|F3 (RULING 6487): a token is told by its digest, not by its expiry alone. A replacement token with the
+// same expiry gets neither C6's mark (the hold is dropped as at main) nor the one more nudge.
+test('Review r65 F1: C6 does not release on a replacement token with the same expiry', async ($, on) => {
+  const w = fresh()
+  const view = watchedView(on)
+  const { clock, expiresAt } = await heldWorld($, on, w)
+  await clock.advance(3 * 60_000 + 15_000)
+  await nudgeTurn($, clock, { error: 'rate_limit' })
+  await clock.advance(expiresAt - clock.now() + 20_000)
+  expect(w.submitted).toEqual([NUDGE_TEXT, NUDGE_TEXT])
+
+  w.keychain['Claude Code-credentials'] = blob('replacement-1', expiresAt)
+  await nudgeTurn($, clock, { error: 'authentication_failed' })
+  expect(view()?.held).toBeUndefined()
+  await clock.advance(60_000)
+  expect(slots(w)).toEqual([])
+})
+
+for (const token of ['replacement-1', 'replacement-2']) {
+  test(`Review r65 F1 class: C6 requires the same token, not merely the same expiry: ${token}`, async ($, on) => {
+    const w = fresh()
+    const { store, clock, expiresAt } = await heldWorld($, on, w)
+    await clock.advance(3 * 60_000 + 15_000)
+    await nudgeTurn($, clock, { error: 'rate_limit' })
+    await clock.advance(expiresAt - clock.now() + 20_000)
+    w.keychain['Claude Code-credentials'] = blob(token, expiresAt)
+    await nudgeTurn($, clock, { error: 'authentication_failed' })
+    expect(atOfStored(store, '1')).toBeUndefined()
+    expect(slots(w)).toEqual([])
+  })
+}
+
+test('Review r65 F3: a replacement token with the same expiry gets no second nudge', async ($, on) => {
+  const w = fresh()
+  const { clock, expiresAt } = await heldWorld($, on, w)
+  await clock.advance(3 * 60_000 + 15_000)
+  await nudgeTurn($, clock, { error: 'rate_limit' })
+  w.keychain['Claude Code-credentials'] = blob('replacement-1', expiresAt)
+  await clock.advance(expiresAt - clock.now() + 20_000)
+  expect(w.submitted).toEqual([NUDGE_TEXT])
+})
+
 // ---------------------------------------------------------------- puma-9arph.38: one switch in flight
 
 const isSwitchedToast = (t: unknown) => String(t).startsWith('Switched to ')

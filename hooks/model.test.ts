@@ -1921,9 +1921,11 @@ test('puma-9arph.65: isBoxFree holds for an empty box and each of the mod\'s own
 
 // puma-9arph.65 case A: one more nudge once the token it was sent for has run out unrefreshed.
 test('puma-9arph.65: renudgeDue holds once, for the same token past its expiry, and for nothing else', () => {
-  const due: Parameters<typeof renudgeDue>[0] = { isRenudged: false, firstExpiresAt: NOW, expiresAt: NOW, now: NOW }
+  const due: Parameters<typeof renudgeDue>[0] = { isRenudged: false, firstExpiresAt: NOW, expiresAt: NOW, now: NOW, firstToken: 'token-a', token: 'token-a' }
   expect(renudgeDue(due)).toBe(true)
   const rows: [string, Parameters<typeof renudgeDue>[0], boolean][] = [
+    ['a replacement token with the same expiry (Review r65 F3)', { ...due, token: 'token-b' }, false],
+    ['no token digest on record for the first nudge', { ...due, firstToken: undefined }, false],
     ['the second already went', { ...due, isRenudged: true }, false],
     ['1 ms before the expiry', { ...due, now: NOW - 1 }, false],
     ['a token refreshed to a later expiry', { ...due, expiresAt: NOW + HOUR, now: NOW + 2 * HOUR }, false],
