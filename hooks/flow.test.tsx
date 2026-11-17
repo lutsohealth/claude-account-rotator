@@ -110,6 +110,8 @@ type World = {
   bashRuns?: Promise<void>
   /** While set, a file read waits until it settles, so two readers overlap as the engine's hops can make them. */
   readGate?: Promise<void>
+  /** While set, a file's existence check waits until it settles, as `readGate` does for a read. */
+  existsGate?: Promise<void>
   spawned: { argv: readonly string[]; env?: Record<string, string> }[]
   submitted: string[]
   /** The engine refuses every submit with this reason, as a Stop that stands or a host's limit does. */
@@ -441,7 +443,10 @@ function world(on: On, w: World, store: Record<string, unknown> | Map<string, un
     if (names.length === 0) return { deny: `ENOENT: no such file or directory, scandir '${e.path}'` }
     return { value: names.map(p => ({ name: p.slice(e.path.length + 1), kind: (w.linkFiles ?? []).includes(p.slice(e.path.length + 1)) ? 'other' : 'file', size: (w.files[p] ?? '').length, mtimeMs: 0, isLink: false })) }
   })
-  on('fs.exists', (_$, e) => ({ value: (e.path === '/System/Library/CoreServices/SystemVersion.plist' && w.system === 'macOS') || (w.folders ?? []).includes(e.path) }))
+  on('fs.exists', async (_$, e) => {
+    await w.existsGate
+    return { value: (e.path === '/System/Library/CoreServices/SystemVersion.plist' && w.system === 'macOS') || (w.folders ?? []).includes(e.path) }
+  })
   on('fs.read', async (_$, e) => {
     await w.readGate
     // puma-9arph.26: the mod's own launcher file, wherever the host puts the plugin's folder.
@@ -10183,6 +10188,86 @@ test('Review HOST-FAULT-MISCLASSIFIED class: a store write refused inside the Fa
   expect(whats(stopLogOf(store, w)).filter(l => l.startsWith('stop handling failed'))).toEqual([])
   expect(markOf(store.get('fable-mark:2'))).toEqual([100, FABLE_RESET])
 })
+
+// ---------------------------------------------------------------- puma-9arph.59: a stop whose own read hangs
+
+/** How long the mod waits on a usage or profile read (READ_TIMEOUT_MS). */
+const READ_TIMEOUT = 10_000
+
+/** Holds the first fetch from now on open for good, as a read that never answers; counts the fetches. */
+const holdFirstFetch = (w: World) => {
+  const held = { fetches: 0 }
+  w.beforeFetch = () => ((held.fetches += 1) === 1 ? new Promise<void>(() => {}) : Promise.resolve())
+  return held
+}
+
+test('puma-9arph.59: a stop whose own usage read hangs times out, so a later main-loop stop is handled and the owed-resume look reaches the fill', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await owedWorld($, on, w)
+  // Under the rotation line while the forced read's gap passes, so no tick moves before the stop.
+  w.usage['tok-1'] = [60, 40]
+  await pastLastRead(clock)
+  const held = holdFirstFetch(w)
+  await $.classic.StopFailure({ error: 'rate_limit' })
+  await clock.settle()
+  // A later stop of the main loop while the first one's read hangs: it waits on the lock that read holds.
+  await $.classic.StopFailure({ error: 'rate_limit' })
+  await clock.settle()
+  await clock.advance(READ_TIMEOUT + 36_000 + 15_000)
+  const lines = whats(stopLogOf(store, w))
+  expect(held.fetches, 'the stop made its own read').toBeGreaterThan(0)
+  expect(lines.filter(isReadFailed('1'))).toEqual(['stop read failed: UsageReadTimedOut, login 1'])
+  expect(lines.filter(l => l.startsWith('stop heard: rate_limit'))).toHaveLength(2)
+  expect(lines).toContain(FILL_NO_CAUSE)
+})
+
+test('puma-9arph.59: a stop whose profile call hangs, its sign-in new since the last check, times out, marks, moves and carries on once', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await loggedWorld(on, w)
+  await start($, clock)
+  await pastLastRead(clock)
+  // A sign-in no holder names yet: the stop's read asks the profile first, and that call never answers.
+  w.keychain['Claude Code-credentials'] = blob('tok-9')
+  holdFirstFetch(w)
+  await $.classic.StopFailure(PLAIN)
+  await clock.settle()
+  await clock.advance(READ_TIMEOUT + 36_000)
+  const lines = whats(stopLogOf(store, w))
+  expect(lines.filter(isReadFailed('1'))).toEqual(['stop read failed: ProfileReadTimedOut, login 1'])
+  expect(lines.filter(l => !isReadFailed('1')(l))).toEqual([STOP_SESSION, PICKED_ONE_MIN, 'moved to 2', 'carry-on armed', 'carry-on queued', 'carry-on resolved'])
+  expect(store.get('mark:1')).toBeDefined()
+  expect(w.submitted).toHaveLength(1)
+})
+
+// Review PREFETCH-READ (Codex round 1, RULING 6425): the stop's own read waits on the stored login before
+// either fetch. Its first stage is held open, then let go, so only that one wait hangs: refreshingSoon's read of the
+// same store, later in the stop, stays unbounded on purpose (puma-9arph.57).
+for (const stage of ['the credential file read (Linux)', 'the keychain marker check (macOS)'] as const) {
+  test(`Review PREFETCH-READ: a stop whose own wait on ${stage} hangs times out, so a later main-loop stop is handled (puma-9arph.59)`, async ($, on) => {
+    const isLinux = stage.endsWith('(Linux)')
+    const w = fresh(isLinux ? 'Linux' : 'macOS')
+    if (isLinux) {
+      w.files[FILE1] = blob('tok-1')
+      w.files[FILE2] = blob('tok-2')
+    }
+    const { store, clock } = await loggedWorld(on, w)
+    await start($, clock)
+    await pastLastRead(clock)
+    const held = new Promise<void>(() => {})
+    if (isLinux) w.readGate = held
+    else w.existsGate = held
+    await $.classic.StopFailure(PLAIN)
+    await clock.settle()
+    w.readGate = undefined
+    w.existsGate = undefined
+    await $.classic.StopFailure(PLAIN)
+    await clock.settle()
+    await clock.advance(READ_TIMEOUT + 60_000)
+    const lines = whats(stopLogOf(store, w))
+    expect(lines.filter(isReadFailed('1'))).toContain('stop read failed: CredentialReadTimedOut, login 1')
+    expect(lines.filter(l => l.startsWith('stop heard:'))).toHaveLength(2)
+  })
+}
 
 test('a stop whose handling throws in a local step says so in the stop-log, by the error name alone (puma-9arph.37)', async ($, on) => {
   const w = fresh()
