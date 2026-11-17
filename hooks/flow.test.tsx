@@ -76,8 +76,12 @@ type World = {
   storeIdFails?: 'write' | 'read'
   /** puma-9arph.26: the text of the mod's own bin/account-rotator-claude, as `$.fs.read` finds it under the plugin's folder. */
   ownLauncher?: string
-  /** puma-9arph.26: every chmod, mv and rm the mod ran, as typed. */
+  /** puma-9arph.26: every chmod, test, mv and rm the mod ran, as typed. */
   fileCommands?: string[]
+  /** puma-9arph.26: what a write of the temporary launcher leaves on disk instead of its text, as an engine write that went wrong would. */
+  temporaryStores?: string
+  /** puma-9arph.26: chmod exits 0 and gives no mode, so `test -x` of the file exits 1. */
+  isChmodIgnored?: boolean
   /** puma-9arph.26: which of chmod, mv and rm exits 1, or every one is refused as a managed policy does. */
   fileCommandFails?: 'chmod' | 'mv' | 'rm' | 'refused'
   /** puma-9arph.26: path -> the mode chmod gave it; `mv` carries a mode to its target. */
@@ -273,12 +277,13 @@ function world(on: On, w: World, store: Record<string, unknown> | Map<string, un
       const named = email ? { email, orgId: `org-${email}`, orgName: 'Org', subscriptionType: 'max' } : {}
       return { value: ran(0, JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', ...named })) }
     }
-    if (cmd === 'chmod' || cmd === 'mv' || cmd === 'rm') {
+    if (cmd === 'chmod' || cmd === 'test' || cmd === 'mv' || cmd === 'rm') {
       w.fileCommands = [...(w.fileCommands ?? []), e.argv.join(' ')]
       if (w.fileCommandFails === 'refused') return { deny: `process (managed): ${cmd} is not for plugins to run` }
       if (w.fileCommandFails === cmd) return { value: { ...ran(1, ''), stderr: `${cmd}: failed` } }
       w.modes = w.modes ?? {}
-      if (cmd === 'chmod') w.modes[e.argv[2] ?? ''] = sub ?? ''
+      if (cmd === 'chmod' && !w.isChmodIgnored) w.modes[e.argv[2] ?? ''] = sub ?? ''
+      if (cmd === 'test') return { value: ran(w.modes[e.argv[2] ?? ''] === '755' ? 0 : 1, '') }
       if (cmd === 'mv') {
         const [from, to] = [e.argv[2] ?? '', e.argv[3] ?? '']
         w.files[to] = w.files[from] ?? null
@@ -417,7 +422,7 @@ function world(on: On, w: World, store: Record<string, unknown> | Map<string, un
     return { value: undefined }
   })
   on('fs.write', (_$, e) => {
-    w.files[e.path] = e.text
+    w.files[e.path] = e.path.endsWith('/claude.new') && w.temporaryStores !== undefined ? w.temporaryStores : e.text
     w.writes = [...(w.writes ?? []), e.path]
     return { value: undefined }
   })
@@ -11399,3 +11404,17 @@ test('puma-9arph.26: a managed policy that refuses the commands leaves the old c
   expect([w.files[COPY], kept(w).sort(), debugLines(w, 'launcher copy not refreshed').length]).toEqual([OLD_LAUNCHER, [COPY, `${COPY}.new`], 1])
   expect(typeof store.get('store-id')).toBe('string')
 })
+
+// RULING 6298: the temporary file is checked before the move, so whatever a real engine's write or chmod does, a bad file never replaces the copy.
+const BAD_TEMPORARY: [string, (world: World) => void][] = [
+  ['a write that reads back other text', world => { world.temporaryStores = '#!/usr/bin/env python3\n# half a file\n' }],
+  ['a write that reads back empty', world => { world.temporaryStores = '' }],
+  ['a chmod that leaves the file not executable', world => { world.isChmodIgnored = true }],
+]
+for (const [name, setup] of BAD_TEMPORARY) {
+  test(`puma-9arph.26: ${name}: no move, the old copy whole, no temporary file`, async ($, on) => {
+    const { w } = await launcherWorld($, on, OLD_LAUNCHER, setup)
+    const isMoved = (w.fileCommands ?? []).some(command => command.startsWith('mv '))
+    expect([w.files[COPY], kept(w), isMoved, debugLines(w, 'launcher copy not refreshed').length]).toEqual([OLD_LAUNCHER, [COPY], false, 1])
+  })
+}
