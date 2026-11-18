@@ -10639,6 +10639,8 @@ test('a rejected sign-in arms no own-continue Escape: its stop raises no countdo
 const SOON = new Date(NOW + 3 * 60_000).toISOString()
 const LATE_MARK = { pct: 100, resetsAt: new Date(NOW + 4 * HOUR).toISOString(), at: NOW + 40_000 }
 const DEADLINE_LINE = "own continue: disarmed, past the own continue's deadline"
+/** How often the own-continue look runs, register.tsx's OWED_LOOK_MS: the line lands within one look of the deadline. */
+const LOOK_MS = 15_000
 for (const [kind, said, judged, other] of [
   ['weekly', "You've hit your weekly limit · resets Nov 10 at 11am", (w: World) => void (w.weekResets = { 'tok-1': SOON }), 'mark:1'],
   ['Fable', FABLE_HIT_STOP.last_assistant_message, (w: World) => void (w.fableResets = SOON), 'week-mark:1'],
@@ -10671,7 +10673,8 @@ for (const [kind, said, judged, other] of [
     const at = stopLogOf(store, w).filter(e => e.what === DEADLINE_LINE).map(e => e.at)
     expect(w.spawned).toEqual([])
     expect(at, `${kind}: the arm held no deadline at the judged window's reset (${SOON}); with no line it held none, or the newer mark's`).toHaveLength(1)
-    expect([kind, (at[0] ?? 0) >= deadline && (at[0] ?? 0) < deadline + 15_000]).toEqual([kind, true])
+    const isInLook = at[0] !== undefined && at[0] >= deadline && at[0] < deadline + LOOK_MS
+    expect(isInLook, `${kind}: the deadline line at ${new Date(at[0] ?? 0).toISOString()}, not in the look after ${new Date(deadline).toISOString()}`).toBe(true)
   })
 }
 
