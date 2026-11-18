@@ -1789,8 +1789,9 @@ export function ownContinueResetAt(view: Pick<View, 'marks' | 'weekMarks' | 'fab
 export type OwnContinueLook = {
   isArmed: boolean
   isSent: boolean
-  mainTurnsSince: number
   openTurns: number
+  /** A prompt of any origin submitted and not yet entered: its hooks run, its turn has not started. */
+  isPromptEntering: boolean
   isCarryOnQueued: boolean
   isSettling: boolean
   isHeld: boolean
@@ -1808,16 +1809,17 @@ export type OwnContinueLook = {
  * Why the Escape that cancels Claude Code's own continue does not go, else undefined (puma-9arph.71). After a usage-limit
  * stop the mod switches and carries on, but Claude Code's own countdown still stands and continues again at the old
  * login's reset (reading R6c); one Escape at an idle, empty prompt cancels it and loses nothing (R1, R6). The key goes
- * once, after the mod's own carry-on answered, with no main turn begun since, no turn open in any loop, no carry-on
- * queued, the switch settled and none held, the accounts panel closed, before the stopped login's reset plus
- * OWN_CONTINUE_MARGIN_MS, in an Orca pane, the box empty as read and as filled, and the countdown's footer on screen.
+ * once, after the stop's resume answered (a person's prompt since ends the arm: puma-9arph.80), with no turn open in
+ * any loop, no prompt entering, no carry-on queued, the switch settled and none held, the accounts panel closed, before the stopped
+ * login's reset plus OWN_CONTINUE_MARGIN_MS, in an Orca pane, the box empty as read and as filled, and the countdown's
+ * footer on screen.
  * A key in a turn, a tool call or a dialog loses work (R3, R4, R5).
  */
 export function ownContinueHeldBack(s: OwnContinueLook): string | undefined {
   if (!s.isArmed) return 'no carry-on answered'
   if (s.isSent) return 'Escape sent already'
-  if (s.mainTurnsSince > 0) return 'a main turn began since the carry-on'
   if (s.openTurns > 0) return 'a turn is open'
+  if (s.isPromptEntering) return 'a prompt is entering'
   if (s.isCarryOnQueued) return 'a carry-on is queued'
   if (s.isSettling) return 'the switch is settling'
   if (s.isHeld) return 'a switch is held'
@@ -1838,7 +1840,8 @@ export function ownContinueHeldBack(s: OwnContinueLook): string | undefined {
 
 /**
  * The look's decision once every stage answered: why no Escape goes, or that it goes now. `after` is read again with no
- * await before the key: an arm that ended, or a turn that began, during the look gets no key.
+ * await before the key: an arm that ended, or a turn that began, during the look gets no key; `mainTurnsSince` counts
+ * the main turns begun since the look's start.
  */
 export function ownContinueAfterLook(look: OwnContinueLook, after: { isSameArm: boolean; openTurns: number; mainTurnsSince: number }): { why: string } | { escape: true } {
   const why = ownContinueHeldBack(look)
