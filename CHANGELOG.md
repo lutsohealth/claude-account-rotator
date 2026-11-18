@@ -2,6 +2,11 @@
 
 What each version of the account rotator changed. To get each one as Claude Code starts, turn on auto-update: in `/plugin`, open **Marketplaces**, pick **claude-account-rotator** and choose **Enable auto-update**. To update by hand, run `claude plugin marketplace update claude-account-rotator`, then `claude plugin update account-rotator@claude-account-rotator`, and start a new session.
 
+## 0.5.46-lutso.1 - 2026-11-18
+
+- **After a usage-limit stop the work carries on once, not twice**: Claude Code arms its own continue at the old account's reset ("Continuing automatically · Esc to cancel"), and the mod's carry-on did not stop it, so the work carried on a second time at that reset. Once the carry-on's own turn answers, the mod presses one Escape in its Orca pane, only with no turn running, the prompt box empty and that countdown on screen (`own continue` in the stop log) (#134, puma-9arph.71). Read on Claude Code 2.1.327 in a stand-in: a 5-hour stop, a weekly stop near and far from its reset, and a Fable stop near its reset each carried on once; not read: a Fable stop far from its reset, and any stop on a real login (puma-9arph.75). Outside Orca, with a draft in the box, or after a reload of the mod's code, the countdown still continues once more.
+- **Not fixed yet**: the switch's own read of the stored sign-in has no 10-second bound; a stop's rejected-sign-in mark is not bound to the token it saw, so a later token's expiry can let a held switch go (puma-9arph.69); a reload of the mod's code during a stop drops the carry-on it owes and the Esc for the limit menu (puma-9arph.66); the minute's retry of a held switch can hold it again after a drop, and can move the session after `account use` ended the hold while no switch ran (puma-9arph.67); after a weekly or Fable stop that Escape has no deadline, as the stop marks the week and not the 5-hour window the deadline reads (puma-9arph.77).
+
 ## 0.5.45-lutso.1 - 2026-11-17
 
 - **`account-rotator account use` on the account in use says so when a running switch keeps the session's held switch**: it used to answer that the session already uses that account and exit 0, while the switch could still move the session. It now says a switch is running that may move it, and exits 4: run it again in a minute (#132, puma-9arph.68).
