@@ -1811,7 +1811,8 @@ export function ownContinueHeldBack(s: OwnContinueLook): string | undefined {
   if (s.box.text !== '') return 'the prompt box holds a draft'
   if (s.fill === undefined) return undefined
   if (!s.fill.isFilled || s.fill.refusal !== undefined) return `the fill was refused: ${s.fill.refusal ?? 'no cause'}`
-  if ((s.fill.text ?? '') !== '') return 'the prompt box holds a draft'
+  if (s.fill.text === undefined) return 'the fill gave no text'
+  if (s.fill.text !== '') return 'the prompt box holds a draft'
   if (s.screen === undefined) return undefined
   if (s.screen.lines === undefined) return 'the screen is unreadable'
   return isCountdownOnScreen(s.screen.lines) ? undefined : 'no countdown on screen'
