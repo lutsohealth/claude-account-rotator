@@ -133,6 +133,8 @@ type World = {
   readHold?: Promise<void>
   /** Called as a read of the box begins, before `readHold`: a test knows the look has reached it. */
   onPromptRead?: () => void
+  /** Called as a read of the pane's screen begins: a test acts between the look's fill and its key. */
+  onScreenRead?: () => void
   /** Where it answers true, a debug line fails to write. */
   isLogFailing?: (text: string) => boolean
   /** Whether each line in `submitted` was sent as the person's own words (`asUser`), not under the mod's name. */
@@ -264,6 +266,7 @@ function world(on: On, w: World, store: Record<string, unknown> | Map<string, un
   on('process.run', async (_$, e) => {
     const [cmd, sub, verb] = e.argv
     if (cmd === 'orca' && sub === 'terminal' && verb === 'read') {
+      w.onScreenRead?.()
       return { value: w.screen === undefined ? ran(1, '') : ran(0, JSON.stringify({ result: { terminal: { source: 'screen', tail: w.screen } } })) }
     }
     if (cmd === 'security') {
@@ -10689,6 +10692,77 @@ test("a task notification's turn during the look's fill gets that look no key; t
   expect(w.spawned.map(s => s.argv)).toEqual([OWN_ESCAPE])
 })
 
+// Codex round 1 KEY-QUEUED, its instance: a person's prompt typed while a turn runs waits in the queue, the box empty
+// and no turn open once that turn ends; it is the person's, so it ends the arm as it is submitted.
+test("a person's prompt queued behind an agent's turn ends the arm: no key once that turn ends (puma-9arph.80 KEY-QUEUED)", async ($, on) => {
+  const w = fresh()
+  countdownWorld(on, w)
+  const { store, clock } = await loggedWorld(on, w)
+  await start($, clock)
+  await carryOnAnswers($, clock, w)
+  await $.turn.start({ text: 'agent work', turnId: 'agent-turn', agentId: 'agent-1' })
+  await $.prompt.submit({ text: 'my next request', origin: { kind: 'composer' }, turnId: 'agent-turn', wait: false })
+  await $.turn.complete({ turnId: 'agent-turn', reason: 'answer', answer: 'done', durationMs: 1, isAborted: false })
+  await clock.advance(16_000)
+  expect(w.spawned).toEqual([])
+  expect(ownLines(store, w).at(-1)).toBe("own continue: disarmed, a person's prompt")
+})
+
+// KEY-QUEUED, its class: any prompt still entering (its hooks running, its turn not started) holds the key, whoever sent it.
+for (const kind of ['composer', 'task-notification'] as const) {
+  test(`a ${kind} prompt still entering holds the own-continue key (puma-9arph.80 KEY-QUEUED class)`, async ($, on) => {
+    const w = fresh()
+    countdownWorld(on, w)
+    const { store, clock } = await loggedWorld(on, w)
+    await start($, clock)
+    await carryOnAnswers($, clock, w)
+    let release = () => {}
+    w.submitHold = new Promise<void>(resolve => {
+      release = resolve
+    })
+    const entering = $.prompt.submit({ text: 'next', origin: { kind }, wait: false })
+    await clock.advance(16_000)
+    expect(w.spawned).toEqual([])
+    expect(ownLines(store, w).at(-1)).toBe(kind === 'composer' ? "own continue: disarmed, a person's prompt" : 'own continue: no key, a prompt is entering')
+    release()
+    await entering
+  })
+}
+
+// Codex round 1 KEY-STALE-PANEL: every gate the look read before an await is read again before the key, the box
+// among them; the accounts panel opened during the look's fill (its instance), a draft typed after the fill (its class).
+for (const [name, during, last] of [
+  [
+    'the accounts panel opened during the fill',
+    async ($: Engine) => void (await $.command.run({ command: 'accounts', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 120 } })),
+    'own continue: no key, the accounts panel is shown',
+  ],
+  ['a draft typed after the fill, before the key', undefined, 'own continue: no key, the prompt box holds a draft'],
+] as const) {
+  test(`the own-continue look sends no key where ${name} (puma-9arph.80 KEY-STALE-PANEL)`, async ($, on) => {
+    const w = fresh()
+    countdownWorld(on, w)
+    // The mod's /accounts opens its panel only where the engine took the command's registration.
+    on('command.register', (_$, e) => ({ value: { command: e.name } }))
+    const { store, clock } = await loggedWorld(on, w)
+    await start($, clock)
+    await carryOnAnswers($, clock, w)
+    let release = () => {}
+    w.fillHold = new Promise<void>(resolve => {
+      release = resolve
+    })
+    // The draft is typed as the look reads the screen, after its fill: only a read of the box after that sees it.
+    if (during === undefined) w.onScreenRead = () => void (w.draft = 'unfinished request')
+    await clock.advance(16_000)
+    await during?.($)
+    release()
+    w.fillHold = undefined
+    await clock.settle()
+    expect(w.spawned).toEqual([])
+    expect(ownLines(store, w).at(-1)).toBe(last)
+  })
+}
+
 // A person's prompt that entered the resume cancelled the countdown (R3x): the proven resume arms nothing.
 test("a resume a person's prompt entered arms no own-continue Escape (puma-9arph.80)", async ($, on) => {
   const w = fresh()
@@ -10715,15 +10789,6 @@ for (const [name, during, last] of [
       w.screen = [...NO_FOOTER]
     },
     'own continue: no key, no countdown on screen',
-  ],
-  // A prompt typed while an agent's turn runs is queued; the turn it starts later is no idle prompt's.
-  [
-    "a person's prompt typed while an agent's turn runs",
-    async ($: Engine) => {
-      await $.turn.start({ text: 'look', turnId: 'agent-turn', agentId: 'agent-1' })
-      await $.prompt.submit({ text: 'mine', origin: { kind: 'composer' }, wait: false, turnId: 'agent-turn' })
-    },
-    'own continue: no key, a turn is open',
   ],
 ] as const) {
   test(`the own-continue arm stands, and no key goes, where ${name} (puma-9arph.80)`, async ($, on) => {
