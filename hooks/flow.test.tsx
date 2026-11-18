@@ -10553,6 +10553,17 @@ async function carryOnAnswers($: Engine, clock: MockClock, w: World, stop: { err
 
 const ownLines = (store: Map<string, unknown>, w: World) => whats(stopLogOf(store, w)).filter(l => l.startsWith('own continue:'))
 
+/**
+ * A main turn as the engine raises it: `prompt.submit` stamps where the prompt came from, which `turn.start` does not
+ * carry (puma-9arph.80). The text is each kind's own shape as the stand-in read it; the person's prompt goes at an idle prompt.
+ */
+async function promptTurn($: Engine, turnId: string, kind: 'composer' | 'task-notification', isAnswered = true): Promise<void> {
+  const text = kind === 'composer' ? 'mine' : '<task-notification>\n<status>completed</status>\n</task-notification>'
+  await $.prompt.submit({ text, origin: { kind }, wait: false })
+  await $.turn.start({ text, turnId })
+  if (isAnswered) await $.turn.complete({ turnId, reason: 'answer', answer: 'done', durationMs: 1, isAborted: false })
+}
+
 // The kit draws no countdown of Claude Code's: this counts the mod's own key and carry-on. The proof of one continue for
 // the stop is the stand-in run on the bead (S5).
 test('the doubled path: once the carry-on answered, the mod sends one Escape, never a second, and its own carry-on once (puma-9arph.71)', async ($, on) => {
@@ -10577,7 +10588,7 @@ for (const [name, arrange, last] of [
   ['a hook refuses the fill, its cause left out', { isFillRefused: true }, 'own continue: no key, the fill was refused: no cause'],
   ['no Orca pane', { noPane: true }, 'own continue: no key, no Orca pane'],
   ["R3, R4: an agent's turn open", { during: ($: Engine) => $.turn.start({ text: 'look', turnId: 'agent-turn', agentId: 'agent-1' }) }, 'own continue: no key, a turn is open'],
-  ["R3x: a person's turn began since", { during: ($: Engine) => $.turn.start({ text: 'mine', turnId: 'turn-person' }) }, 'own continue: disarmed, a main turn began'],
+  ["R3x: a person's turn began since", { during: ($: Engine) => promptTurn($, 'turn-person', 'composer', false) }, "own continue: disarmed, a person's prompt"],
   // A stop heard with no turn start heard before it (as after a reload) raises its own countdown: the old arm ends.
   ['a new stop heard with no turn start', { during: ($: Engine) => $.classic.StopFailure({ error: 'rate_limit' }) }, 'own continue: disarmed, a new stop'],
 ] as const) {
@@ -10613,13 +10624,127 @@ test('a main turn that starts while the carry-on\'s answer arms leaves no arm be
   await clock.advance(36_000)
   await $.turn.start({ text: w.submitted[0] ?? '', turnId: 'turn-carry' })
   const answered = $.turn.complete({ turnId: 'turn-carry', reason: 'answer', answer: 'done', durationMs: 1, isAborted: false })
-  await $.turn.start({ text: 'mine', turnId: 'turn-person' })
+  await promptTurn($, 'turn-person', 'composer', false)
   await answered
   await $.turn.complete({ turnId: 'turn-person', reason: 'answer', answer: 'done', durationMs: 1, isAborted: false })
   await clock.settle()
   await clock.advance(46_000)
   expect(w.spawned).toEqual([])
   expect(ownLines(store, w)).not.toContain('own continue: Escape (exit 0)')
+})
+
+// puma-9arph.80 case A: a background agent's task notification is no person's prompt and does not end Claude Code's
+// countdown (stand-in run a3): the arm stands through its turn, and the key goes at the idle prompt after it.
+test("a task notification's turn after the carry-on answered leaves the arm: one Escape goes (puma-9arph.80 A)", async ($, on) => {
+  const w = fresh()
+  countdownWorld(on, w)
+  const { store, clock } = await loggedWorld(on, w)
+  await start($, clock)
+  await carryOnAnswers($, clock, w)
+  await promptTurn($, 'turn-note', 'task-notification')
+  await clock.settle()
+  await clock.advance(16_000)
+  expect(w.spawned.map(s => s.argv)).toEqual([OWN_ESCAPE])
+  expect(ownLines(store, w)).toEqual(['own continue: armed', 'own continue: Escape (exit 0)'])
+})
+
+// puma-9arph.80 case B: the resume enters by a task notification's turn, before the carry-on's own (stand-in run 1):
+// the countdown stands there too, so the proven resume arms the key, whichever turn entered.
+test("a resume that a task notification's turn entered arms the own-continue Escape: one goes (puma-9arph.80 B)", async ($, on) => {
+  const w = fresh()
+  countdownWorld(on, w)
+  const { store, clock } = await loggedWorld(on, w)
+  await start($, clock)
+  w.usage['tok-1'] = [100, 41]
+  await turnStops($, clock)
+  await clock.advance(36_000)
+  expect(w.submitted).toHaveLength(1)
+  await promptTurn($, 'turn-note', 'task-notification')
+  await clock.settle()
+  await clock.advance(16_000)
+  expect(w.spawned.map(s => s.argv)).toEqual([OWN_ESCAPE])
+  expect(ownLines(store, w)).toEqual(['own continue: armed', 'own continue: Escape (exit 0)'])
+})
+
+// A person's prompt that entered the resume cancelled the countdown (R3x): the proven resume arms nothing.
+test("a resume a person's prompt entered arms no own-continue Escape (puma-9arph.80)", async ($, on) => {
+  const w = fresh()
+  countdownWorld(on, w)
+  const { store, clock } = await loggedWorld(on, w)
+  await start($, clock)
+  w.usage['tok-1'] = [100, 41]
+  await turnStops($, clock)
+  await clock.advance(36_000)
+  await promptTurn($, 'turn-person', 'composer')
+  await clock.settle()
+  await clock.advance(46_000)
+  expect([w.spawned, ownLines(store, w)]).toEqual([[], []])
+})
+
+// The arm keeps the key's gates (RULING 6839 a): a turn that is no person's leaves it, and the gates still say no key.
+for (const [name, during, last] of [
+  // Claude Code's own resent turn, as the stand-in read its text; its origin is not measured, so none is raised.
+  [
+    "the countdown's own resent turn, the footer gone after it",
+    async ($: Engine, w: World) => {
+      await $.turn.start({ text: 'Your claude.ai usage limit has reset. Continue the task you were working on.', turnId: 'turn-own' })
+      await $.turn.complete({ turnId: 'turn-own', reason: 'answer', answer: 'done', durationMs: 1, isAborted: false })
+      w.screen = [...NO_FOOTER]
+    },
+    'own continue: no key, no countdown on screen',
+  ],
+  // A prompt typed while an agent's turn runs is queued; the turn it starts later is no idle prompt's.
+  [
+    "a person's prompt typed while an agent's turn runs",
+    async ($: Engine) => {
+      await $.turn.start({ text: 'look', turnId: 'agent-turn', agentId: 'agent-1' })
+      await $.prompt.submit({ text: 'mine', origin: { kind: 'composer' }, wait: false, turnId: 'agent-turn' })
+    },
+    'own continue: no key, a turn is open',
+  ],
+] as const) {
+  test(`the own-continue arm stands, and no key goes, where ${name} (puma-9arph.80)`, async ($, on) => {
+    const w = fresh()
+    countdownWorld(on, w)
+    const { store, clock } = await loggedWorld(on, w)
+    await start($, clock)
+    w.draft = 'half a thought'
+    await carryOnAnswers($, clock, w)
+    await during($, w)
+    w.draft = undefined
+    await clock.settle()
+    await clock.advance(46_000)
+    expect(w.spawned).toEqual([])
+    expect(ownLines(store, w).at(-1)).toBe(last)
+  })
+}
+
+// RULING 6839 b: an arm with no stored reset (the stop's read showed the login spent, so no stop mark was written) ends
+// at the five-hour window's length, the shortest window a stop marks, plus the margin; until then a draft holds the key.
+test('an own-continue arm with no stored reset ends at five hours plus the margin (puma-9arph.80)', async ($, on) => {
+  const w = fresh()
+  countdownWorld(on, w)
+  const { store, clock } = await loggedWorld(on, w)
+  await start($, clock)
+  w.usage['tok-1'] = [100, 41]
+  await turnStops($, clock)
+  await clock.advance(36_000)
+  // No mark of login 1 stands when the carry-on answers; the minute's merge takes that into the view.
+  for (const key of ['mark:1', 'week-mark:1', 'fable-mark:1']) store.delete(key)
+  await clock.advance(61_000)
+  await $.turn.start({ text: w.submitted[0] ?? '', turnId: 'turn-carry' })
+  await $.turn.complete({ turnId: 'turn-carry', reason: 'answer', answer: 'done', durationMs: 1, isAborted: false })
+  await clock.settle()
+  const armedAt = stopLogOf(store, w).find(e => e.what === 'own continue: armed')?.at
+  expect(armedAt, 'the carry-on armed no own continue').toBeDefined()
+  w.draft = 'half a thought'
+  await clock.advance(5 * HOUR)
+  expect(ownLines(store, w)).not.toContain(DEADLINE_LINE)
+  await clock.advance(OWN_CONTINUE_MARGIN_MS + LOOK_MS)
+  const at = stopLogOf(store, w).filter(e => e.what === DEADLINE_LINE).map(e => e.at)
+  expect(at, 'the arm with no stored reset held no deadline').toHaveLength(1)
+  expect((at[0] ?? 0) - (armedAt ?? 0)).toBeGreaterThanOrEqual(5 * HOUR + OWN_CONTINUE_MARGIN_MS)
+  expect(w.spawned).toEqual([])
 })
 
 test('a rejected sign-in arms no own-continue Escape: its stop raises no countdown (puma-9arph.71)', async ($, on) => {
