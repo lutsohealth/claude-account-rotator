@@ -303,6 +303,8 @@ let armedCarryOns = 0
  * (reading R3x). No other prompt is counted: a background agent's task notification does not cancel it (stand-in run a3).
  */
 let personPrompts = 0
+/** Prompts of any origin submitted and not yet entered: while one is, no own-continue key goes (Codex round 1 KEY-QUEUED). */
+let promptsEntering = 0
 /** The window the last stop's markStop judged spent, by login: the own-continue arm takes that window's reset. */
 let stopWindow: { id: string; window: StopWindow } | undefined
 /**
@@ -2082,6 +2084,7 @@ async function lookOwnContinue($: Host): Promise<void> {
       isArmed: true,
       isSent: arm.isSent,
       openTurns: openTurns.size,
+      isPromptEntering: promptsEntering > 0,
       isCarryOnQueued: isCarryOnInFlight || armedCarryOns > 0,
       isSettling: movedAt !== undefined && now - movedAt < SETTLE_MS,
       isHeld: view.held !== undefined,
@@ -2102,6 +2105,17 @@ async function lookOwnContinue($: Host): Promise<void> {
     if (why !== undefined) return tellWhy(why)
     const read = await $.process.run(screenArgv(look.pane), { timeoutMs: 5_000 }).catch(() => undefined)
     look = { ...look, screen: { lines: read?.exitCode === 0 ? screenLinesFrom(read.stdout) : undefined } }
+    // The box again after the screen, then every gate read with no await (Codex round 1 KEY-STALE-PANEL): a draft
+    // typed, the panel opened, a carry-on queued, a move or a prompt begun during the look's awaits gets no key.
+    const again = await answerWithin($, 'PromptReadTimedOut', $.prompt.read()).catch(() => undefined)
+    look = {
+      ...look,
+      box: { text: again?.text },
+      isPromptEntering: promptsEntering > 0,
+      isCarryOnQueued: isCarryOnInFlight || armedCarryOns > 0,
+      isSettling: movedAt !== undefined && now - movedAt < SETTLE_MS,
+      isPanelShown: isPaneShown,
+    }
     // Read again with no await before the key: an arm that ended, or a turn that began, during the look gets none.
     const act = ownContinueAfterLook(look, { isSameArm: ownContinue === arm, openTurns: openTurns.size, mainTurnsSince: mainTurns - turnsAt })
     if ('why' in act) return tellWhy(act.why)
@@ -3265,16 +3279,21 @@ export const register: Register = on => {
     return next(e)
   }).catch(($, e, next) => next(e))
 
-  // A person's own Enter at an idle prompt, once it entered, cancels Claude Code's countdown (reading R3x): the engine
-  // stamps where a prompt came from here (`origin`), which turn.start does not carry. A prompt typed while a turn runs
-  // (`turnId`) is queued, and no other origin is a person's: each leaves the arm, whose gates still hold the key.
+  // A person's own words (their Enter here, or the Remote Control bridge) cancel Claude Code's countdown (reading R3x)
+  // and end the arm as they are submitted, queued behind a turn or not: the engine stamps where a prompt came from here
+  // (`origin`), which turn.start does not carry. Every other origin leaves the arm, whose gates still hold the key, and
+  // any prompt still entering holds it (Codex round 1 KEY-QUEUED).
   on('prompt.submit', async ($, e, next) => {
-    const entered = await next(e)
-    if (e.origin.kind === 'composer' && e.turnId === undefined && entered.drop === undefined) {
+    if (e.origin.kind === 'composer' || e.origin.kind === 'bridge') {
       personPrompts += 1
       disarmOwnContinue($, "a person's prompt")
     }
-    return entered
+    promptsEntering += 1
+    try {
+      return await next(e)
+    } finally {
+      promptsEntering -= 1
+    }
   }).catch(($, e, next) => next(e))
 
   // The turns open now, any loop's, and how many the main loop began: what a queued carry-on's Escape waits on.
