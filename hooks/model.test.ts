@@ -10,7 +10,7 @@ import ROWS_FIXTURE from '../tests/fixtures/rows'
 import { REQUEST_TTL_MS, holdsLogin, isLoginOf, sameLogin, requestFrom, requestsDir, slotNumber } from './model'
 import { ESCAPE_GAP_MS, NUDGE_LEAD_MS, NUDGE_TEXT, escapeAfterFill, escapeArgv, escapeHeldBack, isBoxFree, nudgeHeld, pickAfterStop, raisesLimitModal, renudgeDue } from './model'
 import { mayWrite } from './model'
-import { OWN_CONTINUE_MARGIN_MS, isCountdownOnScreen, ownContinueAfterLook, ownContinueHeldBack, screenLinesFrom } from './model'
+import { OWN_CONTINUE_MARGIN_MS, isCountdownOnScreen, ownContinueAfterLook, ownContinueHeldBack, ownContinueResetAt, screenLinesFrom } from './model'
 import { signInFromStatus } from './model'
 import { USAGE_BACKOFF_MAX_MS, USAGE_CLAIM_MS, USAGE_CLAIM_WAIT_MS, USAGE_EARLY_MS, WRITER_VERSION, afterUsage, claimDueReads, gatingDue, isUsageDue, mayForceUsage, mayReadSince, renewClaim, retryAfterFrom, usageDueFrom } from './model'
 import { DEFAULT_FOOTER, availableNow, claudeAccount, blockedAdvice, braille, browsersFrom, chromeNote, continueTextFrom, counted, fiveHourLimitFrom, credentialFrom, credentialsFile, fableMark, fableSpentNotice, fableStay, footerStyleFrom, healthOf, identityFromProfile, isFableSpent, isFableStop, isNoBrowser, isPolicyRefusal, keepFable, keychainItem, label, legacyMark, markFrom, nextReset, pickTarget, pie, readingFromUsage, restartSteps, rotateToFrom, shouldLeave, roomColor, stuckText, windowPct, withMark, withWeekMark } from './model'
@@ -1978,6 +1978,35 @@ test('row ow: ownContinueHeldBack keys only the states the reading shows safe, a
     ownContinueHeldBack({ ...idle, openTurns: 1, box: { text: 'draft' } }),
     ownContinueHeldBack({ ...idle, pane: undefined, box: { text: 'draft' } }),
   ]).toEqual(['no carry-on answered', 'a turn is open', 'no Orca pane'])
+})
+
+// puma-9arph.77 (px's reading of puma-9arph.75): a weekly stop writes only week-mark and a Fable stop only fable-mark,
+// so an arm that read mark alone held no deadline after either.
+test("row ow: ownContinueResetAt holds the reset of the stopped login's newest stop mark, whatever window it marks", () => {
+  const at = NOW - HOUR
+  const five = { pct: 100, resetsAt: LATER, at }
+  const week = { pct: 100, resetsAt: WEEK_END, at }
+  const fable = { pct: 100, resetsAt: FABLE_END, at }
+  const rows: [string, Parameters<typeof ownContinueResetAt>[0], number | undefined][] = [
+    ['a 5-hour stop writes mark', { marks: { a: five } }, Date.parse(LATER)],
+    ['a weekly stop writes week-mark only', { weekMarks: { a: week } }, Date.parse(WEEK_END)],
+    ['a Fable stop writes fable-mark only', { fableMarks: { a: fable } }, Date.parse(FABLE_END)],
+    ["an older 5-hour mark beside the stop's week mark", { marks: { a: five }, weekMarks: { a: { ...week, at: at + 1 } } }, Date.parse(WEEK_END)],
+    ["an older Fable mark beside the stop's 5-hour mark", { marks: { a: { ...five, at: at + 1 } }, fableMarks: { a: fable } }, Date.parse(LATER)],
+    ['no mark on the stopped login', { marks: { b: five } }, undefined],
+    ['a mark whose reset does not parse', { marks: { a: { ...five, resetsAt: 'soon' } } }, undefined],
+  ]
+  expect(rows.map(([name, v]) => [name, ownContinueResetAt(v, 'a')])).toEqual(rows.map(([name, , reset]) => [name, reset]))
+  expect(ownContinueResetAt({ marks: { a: five } }, undefined)).toEqual(undefined)
+  // Codex round 1 MARK_ORIGIN [STOP-IDENTITY-BY-ORDER]: another session can write a newer mark of another window before
+  // the carry-on answers, so the window this stop judged decides, never the marks' order.
+  const later = at + 1
+  const judged: [string, Parameters<typeof ownContinueResetAt>[0], Parameters<typeof ownContinueResetAt>[2], number][] = [
+    ['a weekly stop, a newer 5-hour mark', { weekMarks: { a: week }, marks: { a: { ...five, at: later } } }, 'week', Date.parse(WEEK_END)],
+    ['a Fable stop, a newer week mark', { fableMarks: { a: fable }, weekMarks: { a: { ...week, at: later } } }, 'fable', Date.parse(FABLE_END)],
+    ['a 5-hour stop, a newer Fable mark', { marks: { a: five }, fableMarks: { a: { ...fable, at: later } } }, 'five-hour', Date.parse(LATER)],
+  ]
+  expect(judged.map(([name, v, kind]) => [name, ownContinueResetAt(v, 'a', kind)])).toEqual(judged.map(([name, , , reset]) => [name, reset]))
 })
 
 test('row ow: ownContinueAfterLook re-reads the turns with no await before the key (puma-9arph.71)', () => {

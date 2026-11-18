@@ -106,6 +106,7 @@ import {
   escapeArgv,
   escapeHeldBack,
   ownContinueAfterLook,
+  ownContinueResetAt,
   ownContinueHeldBack,
   screenArgv,
   screenLinesFrom,
@@ -119,7 +120,7 @@ import {
   mayWrite,
   switchFields,
 } from './model'
-import type { Credential, EscapeLook, Identity, Need, OwnContinueLook, SignInRead, StayReason, SwitchWriter } from './model'
+import type { Credential, EscapeLook, Identity, Need, OwnContinueLook, SignInRead, StayReason, StopWindow, SwitchWriter } from './model'
 import { Band, Footer, PANE_COLUMNS, Pane } from './view'
 import type { Actions } from './view'
 
@@ -297,6 +298,8 @@ let carryOnRefusals = 0
 let armedCarryOns = 0
 /** The main turn the mod's own carry-on entered as, and the login its stop died on: its answer arms the own-continue Escape. */
 let carryOnTurn: { turnId: string; stoppedId?: string } | undefined
+/** The window the last stop's markStop judged spent, by login: the own-continue arm takes that window's reset. */
+let stopWindow: { id: string; window: StopWindow } | undefined
 /**
  * The own-continue Escape owed after a usage-limit stop's carry-on answered (puma-9arph.71): Claude Code's own countdown
  * still stands and would continue a second time (reading R6c). `mainTurns` as armed; module state, as the episode ends
@@ -2025,10 +2028,10 @@ async function lookOwed($: Host): Promise<void> {
 async function armOwnContinue($: Host, stoppedId: string | undefined): Promise<void> {
   // Taken before the read: a main turn that starts during it has ended the need for the key (round 1 F3).
   const turnsAt = mainTurns
-  const { marks } = await getView($)
+  const view = await getView($)
   if (mainTurns !== turnsAt) return
-  const reset = stoppedId === undefined ? undefined : Date.parse(marks?.[stoppedId]?.resetsAt ?? '')
-  ownContinue = { mainTurns: turnsAt, resetAt: reset === undefined || Number.isNaN(reset) ? undefined : reset, isSent: false, told: new Set() }
+  const judged = stoppedId !== undefined && stopWindow?.id === stoppedId ? stopWindow.window : undefined
+  ownContinue = { mainTurns: turnsAt, resetAt: ownContinueResetAt(view, stoppedId, judged), isSent: false, told: new Set() }
   void logStop($, 'own continue: armed')
 }
 
@@ -2399,6 +2402,8 @@ async function stopRead($: Host, account: Account, gate: UsageGate): Promise<boo
 /** Marks what a usage-limit stop on `active` spent, after reading its usage when the gate lets it; answers the need it names. */
 async function markStop($: Host, active: Account, said: string | undefined, afterRead?: () => Promise<void>): Promise<Need | undefined> {
   let need: Need | undefined
+  // A stop that judges no window (its read already shows the account spent) leaves the arm to the newest mark.
+  stopWindow = undefined
   {
     await stopRead($, active, 'force')
     // What stands once the stop's own read is in: the stop's writes are judged against it.
@@ -2416,6 +2421,7 @@ async function markStop($: Host, active: Account, said: string | undefined, afte
     const isFable = wording === 'none' || wording === 'unknown' ? isFableSpent(r, now) : wording === 'fable'
     if (isFable) {
       need = 'fable'
+      stopWindow = { id: active.id, window: 'fable' }
       kept = { ...kept, isFableStopped: true }
       await setView($, v => ({ ...v, isFableStopped: true }))
       // The limit was hit before the usage call shows it: count the Fable week as full, under the mark's own key. Judged on
@@ -2427,15 +2433,18 @@ async function markStop($: Host, active: Account, said: string | undefined, afte
     } else if (!shouldLeave(after, now) && isSessionStop(said)) {
       // Claude's words name the 5-hour window: the account has one, whatever its last usage check said.
       await saveNoFiveHour($, active.id, false)
+      stopWindow = { id: active.id, window: 'five-hour' }
       const spent = spentMark(read?.fiveHour, now, FIVE_HOUR_MS)
       await saveMark($, active.id, { pct: spent.pct, resetsAt: spent.resetsAt ?? new Date(now + FIVE_HOUR_MS).toISOString(), at: now })
     } else if (!shouldLeave(after, now) && (isWeeklyStop(said) || reportsNoFiveHour(r))) {
       // The week ran out before the usage call shows it, by Claude's words or as the only window the account has:
       // count the week as full until its reset, never a 5-hour window.
+      stopWindow = { id: active.id, window: 'week' }
       const spent = spentMark(read?.sevenDay, now, WEEK_MS)
       await saveWeekMark($, active.id, { pct: spent.pct, resetsAt: spent.resetsAt ?? new Date(now + WEEK_MS).toISOString(), at: now })
     } else if (!shouldLeave(after, now)) {
       // The limit was hit before the usage call shows it: count the 5-hour window as full, five hours at most where no reset is known.
+      stopWindow = { id: active.id, window: 'five-hour' }
       const spent = spentMark(read?.fiveHour, now, FIVE_HOUR_MS)
       await saveMark($, active.id, { pct: spent.pct, resetsAt: spent.resetsAt ?? new Date(now + FIVE_HOUR_MS).toISOString(), at: now })
     }

@@ -1763,6 +1763,24 @@ export const screenArgv = (pane: string): string[] => ['orca', 'terminal', 'read
  */
 export const OWN_CONTINUE_MARGIN_MS = 45_000
 
+/** The window a usage-limit stop judged spent: a 5-hour stop writes mark, a weekly stop week-mark, a Fable stop fable-mark. */
+export type StopWindow = 'five-hour' | 'week' | 'fable'
+
+/**
+ * The reset the own-continue arm holds for the stopped login, epoch ms: that of the mark of the window this stop judged;
+ * where no window is known, that of its newest stop mark. Another session may write a newer mark of another window
+ * before the carry-on answers, so a known window decides, never the marks' order. Undefined where no such mark is
+ * stored or its reset does not parse.
+ */
+export function ownContinueResetAt(view: Pick<View, 'marks' | 'weekMarks' | 'fableMarks'>, stoppedId: string | undefined, judged?: StopWindow): number | undefined {
+  if (stoppedId === undefined) return undefined
+  const byWindow = { 'five-hour': view.marks?.[stoppedId], week: view.weekMarks?.[stoppedId], fable: view.fableMarks?.[stoppedId] }
+  const marks = judged === undefined ? Object.values(byWindow) : [byWindow[judged]]
+  const newest = marks.reduce<Mark | undefined>((best, m) => (m !== undefined && (best === undefined || m.at > best.at) ? m : best), undefined)
+  const reset = Date.parse(newest?.resetsAt ?? '')
+  return Number.isNaN(reset) ? undefined : reset
+}
+
 /**
  * What the own-continue look knows when it weighs its Escape. `box` (the box as read), `fill` (the engine's answer to
  * an empty fill) and `screen` (the pane as rendered) are asked in that order, each undefined until asked; an answer
