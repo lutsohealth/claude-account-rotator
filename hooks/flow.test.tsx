@@ -11032,6 +11032,77 @@ test('row d: with no event after the stop, the 15 s look alone sends the Escape 
   expect(whats(stopLogOf(store, w)).at(-1)).toBe('resume entered')
 })
 
+// puma-9arph.81: every gate the owed look read before its fill is read again after it, with no await before the key. The
+// kit cannot draw 'dialog', so each row proves its gate by the stop-log's reason; model.test.ts row k proves no key goes.
+for (const [name, during, why] of [
+  [
+    'a task notification still entering',
+    async ($: Engine, w: World) => {
+      let open = () => {}
+      w.submitHold = new Promise<void>(resolve => {
+        open = resolve
+      })
+      const entering = $.prompt.submit({ text: 'agent note', origin: { kind: 'task-notification' }, wait: false })
+      return async () => {
+        open()
+        await entering
+      }
+    },
+    'a prompt began entering during the fill',
+  ],
+  [
+    'a press of Use now that moves the session',
+    async ($: Engine) => {
+      const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+      const pressed = pane.press({ key: 'use-3' })
+      return async () => {
+        await pressed
+        await pane.unmount()
+      }
+    },
+    'the switch moved during the fill',
+  ],
+  [
+    'a press of Use now held for the token in use',
+    async ($: Engine, w: World, clock: MockClock) => {
+      const soon = blob('tok-2', clock.now() + 7 * 60_000)
+      w.keychain['Claude Code-credentials'] = soon
+      w.keychain[await keychainItem(SLOT2)] = soon
+      const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+      const pressed = pane.press({ key: 'use-3' })
+      return async () => {
+        await pressed
+        await pane.unmount()
+      }
+    },
+    'a switch was held during the fill',
+  ],
+] as const) {
+  test(`the owed look sends no key where ${name} begins during its fill (puma-9arph.81)`, { timeoutMs: 20_000 }, async ($, on) => {
+    const w = fresh()
+    const { store, clock } = await owedWorld($, on, w)
+    await $.classic.StopFailure({ error: 'rate_limit' })
+    await clock.settle()
+    await clock.advance(36_000)
+    let release = () => {}
+    w.fillHold = new Promise<void>(resolve => {
+      release = resolve
+    })
+    const fillsBefore = w.fills ?? 0
+    await clock.advance(15_000)
+    expect(w.fills ?? 0, 'the look waits in its fill').toBeGreaterThan(fillsBefore)
+    const finish = await during($, w, clock)
+    await clock.settle()
+    release()
+    w.fillHold = undefined
+    await clock.settle()
+    await finish()
+    const lines = whats(stopLogOf(store, w))
+    expect(w.spawned).toEqual([])
+    expect(lines).toContain(`owed resume: no key, ${why}`)
+  })
+}
+
 // Review M403 A (C1): an entry that ends aborted, such as a waker's turn an Escape landed on, leaves the carry-on owed.
 test('C1: a main turn aborted after entry lets the next look reach the fill again', async ($, on) => {
   const w = fresh()

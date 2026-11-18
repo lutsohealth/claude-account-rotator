@@ -2129,7 +2129,7 @@ test('row k: the first Escape of an episode goes with lastEscapeAt unset', () =>
 // Review M403 B: the Escape after the fill, the one place that counts it, times it and reads the session again before it.
 test('row k: an Escape after a dialog fill counts one and stamps its time, and a turn, entry or end during the fill sends none', () => {
   const look = { isCarryOnInFlight: true, isLimitStopLast: true, openTurns: 0, isSettling: false, isHeld: false, escapes: 2, budget: 8, sinceEscapeMs: ESCAPE_GAP_MS, pane: 'term_a' }
-  const still = { openTurns: 0, isLimitStopLast: true, isCarryOnInFlight: true, isSameEpisode: true }
+  const still = { openTurns: 0, isLimitStopLast: true, isCarryOnInFlight: true, isSameEpisode: true, isPromptEntering: false, isSettling: false, isHeld: false }
   const rows: [string, string | undefined, typeof still, ReturnType<typeof escapeAfterFill>][] = [
     ['a dialog, nothing changed', 'dialog', still, { escapes: 3, lastEscapeAt: NOW }],
     ['no dialog', undefined, still, { why: 'no dialog holds it' }],
@@ -2137,8 +2137,21 @@ test('row k: an Escape after a dialog fill counts one and stamps its time, and a
     ['a turn began during the fill', 'dialog', { ...still, openTurns: 1 }, { why: 'a turn began during the fill' }],
     ['a main-loop turn began during the fill', 'dialog', { ...still, isLimitStopLast: false }, { why: 'a main-loop turn began during the fill' }],
     ['the carry-on entered during the fill', 'dialog', { ...still, isCarryOnInFlight: false }, { why: 'the carry-on entered during the fill' }],
+    // puma-9arph.81: the gates the look read before its fill, read again after it; each is named before the fill's answer.
+    ['a prompt began entering during the fill', 'dialog', { ...still, isPromptEntering: true }, { why: 'a prompt began entering during the fill' }],
+    ['the switch moved during the fill', 'dialog', { ...still, isSettling: true }, { why: 'the switch moved during the fill' }],
+    ['a switch was held during the fill', 'dialog', { ...still, isHeld: true }, { why: 'a switch was held during the fill' }],
+    ['a gate read after the fill, named before the fill found no dialog', undefined, { ...still, isHeld: true }, { why: 'a switch was held during the fill' }],
   ]
   expect(rows.map(([name, refusal, after]) => [name, escapeAfterFill(look, refusal, after, NOW)])).toEqual(rows.map(([name, , , act]) => [name, act]))
+  // The refresh nudge's own carry-on goes past a held switch, after the fill as before it.
+  expect(escapeAfterFill({ ...look, isHeld: true, isNudge: true }, 'dialog', { ...still, isHeld: true }, NOW)).toEqual({ escapes: 3, lastEscapeAt: NOW })
+})
+
+// puma-9arph.81: a prompt still entering holds the owed Escape, before the fill as after it.
+test('row k2: a prompt still entering holds the owed Escape back', () => {
+  const look = { isCarryOnInFlight: true, isLimitStopLast: true, openTurns: 0, isSettling: false, isHeld: false, escapes: 0, budget: 8, pane: 'term_a' }
+  expect([escapeHeldBack({ ...look, isPromptEntering: true }), escapeHeldBack(look)]).toEqual(['a prompt is entering', undefined])
 })
 
 // v4 s.1, row a: the pick after a stop judges each login on its own stored read, and a read is fresh within FRESH_READ_MS.
