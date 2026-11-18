@@ -1763,10 +1763,16 @@ export const screenArgv = (pane: string): string[] => ['orca', 'terminal', 'read
  */
 export const OWN_CONTINUE_MARGIN_MS = 45_000
 
-/** The reset the own-continue arm holds for the stopped login, epoch ms; undefined where none is stored. */
+/**
+ * The reset the own-continue arm holds for the stopped login, epoch ms: that of its newest stop mark, the one the stop
+ * wrote, whichever window it marks (a 5-hour stop writes mark, a weekly stop week-mark, a Fable stop fable-mark);
+ * undefined where none is stored or its reset does not parse.
+ */
 export function ownContinueResetAt(view: Pick<View, 'marks' | 'weekMarks' | 'fableMarks'>, stoppedId: string | undefined): number | undefined {
   if (stoppedId === undefined) return undefined
-  const reset = Date.parse(view.marks?.[stoppedId]?.resetsAt ?? '')
+  const marks = [view.marks?.[stoppedId], view.weekMarks?.[stoppedId], view.fableMarks?.[stoppedId]]
+  const newest = marks.reduce<Mark | undefined>((best, m) => (m !== undefined && (best === undefined || m.at > best.at) ? m : best), undefined)
+  const reset = Date.parse(newest?.resetsAt ?? '')
   return Number.isNaN(reset) ? undefined : reset
 }
 
