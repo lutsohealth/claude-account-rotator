@@ -1763,6 +1763,13 @@ export const screenArgv = (pane: string): string[] => ['orca', 'terminal', 'read
  */
 export const OWN_CONTINUE_MARGIN_MS = 45_000
 
+/** The reset the own-continue arm holds for the stopped login, epoch ms; undefined where none is stored. */
+export function ownContinueResetAt(view: Pick<View, 'marks' | 'weekMarks' | 'fableMarks'>, stoppedId: string | undefined): number | undefined {
+  if (stoppedId === undefined) return undefined
+  const reset = Date.parse(view.marks?.[stoppedId]?.resetsAt ?? '')
+  return Number.isNaN(reset) ? undefined : reset
+}
+
 /**
  * What the own-continue look knows when it weighs its Escape. `box` (the box as read), `fill` (the engine's answer to
  * an empty fill) and `screen` (the pane as rendered) are asked in that order, each undefined until asked; an answer

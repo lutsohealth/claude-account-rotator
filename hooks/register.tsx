@@ -106,6 +106,7 @@ import {
   escapeArgv,
   escapeHeldBack,
   ownContinueAfterLook,
+  ownContinueResetAt,
   ownContinueHeldBack,
   screenArgv,
   screenLinesFrom,
@@ -2025,10 +2026,9 @@ async function lookOwed($: Host): Promise<void> {
 async function armOwnContinue($: Host, stoppedId: string | undefined): Promise<void> {
   // Taken before the read: a main turn that starts during it has ended the need for the key (round 1 F3).
   const turnsAt = mainTurns
-  const { marks } = await getView($)
+  const view = await getView($)
   if (mainTurns !== turnsAt) return
-  const reset = stoppedId === undefined ? undefined : Date.parse(marks?.[stoppedId]?.resetsAt ?? '')
-  ownContinue = { mainTurns: turnsAt, resetAt: reset === undefined || Number.isNaN(reset) ? undefined : reset, isSent: false, told: new Set() }
+  ownContinue = { mainTurns: turnsAt, resetAt: ownContinueResetAt(view, stoppedId), isSent: false, told: new Set() }
   void logStop($, 'own continue: armed')
 }
 
