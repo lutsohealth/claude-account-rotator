@@ -120,7 +120,7 @@ import {
   mayWrite,
   switchFields,
 } from './model'
-import type { Credential, EscapeLook, Identity, Need, OwnContinueLook, SignInRead, StayReason, StopWindow, SwitchWriter } from './model'
+import type { AfterFill, Credential, EscapeLook, Identity, Need, OwnContinueLook, SignInRead, StayReason, StopWindow, SwitchWriter } from './model'
 import { Band, Footer, PANE_COLUMNS, Pane } from './view'
 import type { Actions } from './view'
 
@@ -132,6 +132,8 @@ const TITLE = 'Claude accounts'
 const ACCOUNTS_COMMAND = 'accounts'
 /** Claude Code caches a keychain read for 30 s, so a switch lands within this. */
 const SETTLE_MS = 35_000
+/** The owed look's reasons for a gate it read before its fill and finds closed after it: each is written once an episode. */
+const GATES_AFTER_FILL: readonly string[] = ['a prompt began entering during the fill', 'the switch moved during the fill', 'a switch was held during the fill']
 /** A switch no response has shown after this long is reported as not taken. */
 const CONFIRM_GIVE_UP_MS = 4 * 60_000
 /** How long a check waits on `claude auth status`: a check reads every login in turn, so a hung one holds each this long. */
@@ -284,7 +286,7 @@ type Episode = {
 }
 /** A stop's held switch by where it goes and what it carries on with; a press's, which carries on with nothing, has none. */
 const holdKey = (h: View['held']): string | undefined => (h?.carry === undefined ? undefined : `${h.target.id} ${JSON.stringify(h.carry)}`)
-type Told = 'pane' | 'nothing' | 'stuck' | 'fill' | 'failed' | 'nudge' | 'sign-in wait' | 'draft' | 'draft told'
+type Told = 'pane' | 'nothing' | 'stuck' | 'fill' | 'failed' | 'nudge' | 'sign-in wait' | 'draft' | 'draft told' | `after fill: ${string}`
 let episode: Episode | undefined
 /** The refresh nudge's own turn while it runs: it is no entry of the resume (council B2). */
 let nudgeTurnId: string | undefined
@@ -2004,6 +2006,7 @@ async function lookOwed($: Host): Promise<void> {
       isCarryOnInFlight,
       isLimitStopLast: limitStopAfter === mainTurns,
       openTurns: turns,
+      isPromptEntering: promptsEntering > 0,
       isSettling,
       isHeld: view.held !== undefined,
       isNudge: ep.nudgedAt !== undefined && isCarryOnInFlight && carryOnText === NUDGE_TEXT,
@@ -2017,11 +2020,23 @@ async function lookOwed($: Host): Promise<void> {
     if (why === 'Escapes spent') tellOnce($, ep, 'stuck', `owed resume stuck: ${ep.budget} Escapes spent, not entered`)
     if (why !== undefined || look.pane === undefined) return undefined
     const box = await $.prompt.fill({ text: '', mode: 'append' })
-    // Read again with no await before the key: a turn that began during the fill gets no Escape.
-    const after = { openTurns: openTurns.size, isLimitStopLast: limitStopAfter === mainTurns, isCarryOnInFlight, isSameEpisode: episode === ep }
+    // Every gate the look read before its fill is read again with no await before the key, the fill's answer being the
+    // last awaited (puma-9arph.81, Codex round 1 F1): a prompt entering, a move (against the look's own `now`, so a move
+    // during the look reads as settling), a hold (from `kept`, which every view write of this session updates), or a turn
+    // begun during the fill gets no Escape.
+    const after: AfterFill = {
+      openTurns: openTurns.size,
+      isLimitStopLast: limitStopAfter === mainTurns,
+      isCarryOnInFlight,
+      isSameEpisode: episode === ep,
+      isPromptEntering: promptsEntering > 0,
+      isSettling: movedAt !== undefined && now - movedAt < SETTLE_MS,
+      isHeld: kept.held !== undefined,
+    }
     const act = escapeAfterFill(look, box.refusal, after, now)
     if ('why' in act) {
       if (act.why === 'no dialog holds it') tellOnce($, ep, 'fill', `owed resume: fill answered ${box.refusal ?? 'no cause'}, no key`)
+      else if (GATES_AFTER_FILL.includes(act.why)) tellOnce($, ep, `after fill: ${act.why}`, `owed resume: no key, ${act.why}`)
       return undefined
     }
     const child = $.process.spawn({ argv: escapeArgv(look.pane) })

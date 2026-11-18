@@ -1637,6 +1637,8 @@ export type EscapeLook = {
   isCarryOnInFlight: boolean
   isLimitStopLast: boolean
   openTurns: number
+  /** A prompt's hooks still run, its turn not begun, whoever sent it. */
+  isPromptEntering?: boolean
   isSettling: boolean
   isHeld: boolean
   /** The carry-on in flight is the refresh nudge's: a held switch holds back every Escape but its. */
@@ -1660,6 +1662,7 @@ export function escapeHeldBack(s: EscapeLook): string | undefined {
   if (!s.isCarryOnInFlight) return 'no carry-on in flight'
   if (!s.isLimitStopLast) return 'no limit stop before it'
   if (s.openTurns > 0) return 'a turn is open'
+  if (s.isPromptEntering === true) return 'a prompt is entering'
   if (s.isSettling) return 'the switch is settling'
   if (s.isHeld && s.isNudge !== true) return 'a switch is held'
   if (s.escapes >= s.budget) return 'Escapes spent'
@@ -1733,15 +1736,30 @@ export function renudgeDue(s: {
   return !s.isRenudged && isSameToken && s.firstExpiresAt !== undefined && s.expiresAt === s.firstExpiresAt && s.expiresAt <= s.now
 }
 
-/** What the session knows again right after the fill, read with no await before the key. */
-export type AfterFill = { openTurns: number; isLimitStopLast: boolean; isCarryOnInFlight: boolean; isSameEpisode: boolean }
+/**
+ * What the session knows again right after the fill, read with no await before the key: the turns, the carry-on and the
+ * episode, and every gate the look read before its fill (a prompt entering, the switch settling, a switch held).
+ */
+export type AfterFill = {
+  openTurns: number
+  isLimitStopLast: boolean
+  isCarryOnInFlight: boolean
+  isSameEpisode: boolean
+  isPromptEntering: boolean
+  isSettling: boolean
+  isHeld: boolean
+}
 
 /**
- * The look's decision once the fill answered `refusal`: why no Escape goes (escapeHeldBack's reasons, or a turn, an
- * entry or an episode's end during the fill), or the episode's Escape count and last-Escape time after the one that
- * goes now.
+ * The look's decision once the fill answered `refusal`: why no Escape goes (a gate the look read before its fill and
+ * finds closed after it, escapeHeldBack's reasons, or a turn, an entry or an episode's end during the fill), or the
+ * episode's Escape count and last-Escape time after the one that goes now. The gates read again come first, so the
+ * stop-log names them whatever the fill answered.
  */
 export function escapeAfterFill(look: EscapeLook, refusal: string | undefined, after: AfterFill, now: number): { why: string } | { escapes: number; lastEscapeAt: number } {
+  if (after.isPromptEntering) return { why: 'a prompt began entering during the fill' }
+  if (after.isSettling) return { why: 'the switch moved during the fill' }
+  if (after.isHeld && look.isNudge !== true) return { why: 'a switch was held during the fill' }
   const why = escapeHeldBack({ ...look, fill: { refusal } })
   if (why !== undefined) return { why }
   if (!after.isSameEpisode) return { why: 'the episode ended during the fill' }
