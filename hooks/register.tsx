@@ -286,7 +286,7 @@ type Episode = {
 }
 /** A stop's held switch by where it goes and what it carries on with; a press's, which carries on with nothing, has none. */
 const holdKey = (h: View['held']): string | undefined => (h?.carry === undefined ? undefined : `${h.target.id} ${JSON.stringify(h.carry)}`)
-type Told = 'pane' | 'nothing' | 'stuck' | 'fill' | 'failed' | 'nudge' | 'sign-in wait' | 'draft' | 'draft told' | 'after fill'
+type Told = 'pane' | 'nothing' | 'stuck' | 'fill' | 'failed' | 'nudge' | 'sign-in wait' | 'draft' | 'draft told' | `after fill: ${string}`
 let episode: Episode | undefined
 /** The refresh nudge's own turn while it runs: it is no entry of the resume (council B2). */
 let nudgeTurnId: string | undefined
@@ -2036,7 +2036,7 @@ async function lookOwed($: Host): Promise<void> {
     const act = escapeAfterFill(look, box.refusal, after, now)
     if ('why' in act) {
       if (act.why === 'no dialog holds it') tellOnce($, ep, 'fill', `owed resume: fill answered ${box.refusal ?? 'no cause'}, no key`)
-      else if (GATES_AFTER_FILL.includes(act.why)) tellOnce($, ep, 'after fill', `owed resume: no key, ${act.why}`)
+      else if (GATES_AFTER_FILL.includes(act.why)) tellOnce($, ep, `after fill: ${act.why}`, `owed resume: no key, ${act.why}`)
       return undefined
     }
     const child = $.process.spawn({ argv: escapeArgv(look.pane) })
