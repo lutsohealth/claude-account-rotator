@@ -10551,7 +10551,9 @@ async function carryOnAnswers($: Engine, clock: MockClock, w: World, stop: { err
 
 const ownLines = (store: Map<string, unknown>, w: World) => whats(stopLogOf(store, w)).filter(l => l.startsWith('own continue:'))
 
-test('the doubled path: once the carry-on answered, one Escape cancels Claude Code\'s own continue, and never a second (puma-9arph.71 acceptance 3)', async ($, on) => {
+// The kit draws no countdown of Claude Code's: this counts the mod's own key and carry-on. The proof of one continue for
+// the stop is the stand-in run on the bead (S5).
+test('the doubled path: once the carry-on answered, the mod sends one Escape, never a second, and its own carry-on once (puma-9arph.71)', async ($, on) => {
   const w = fresh()
   countdownWorld(on, w)
   const { store, clock } = await loggedWorld(on, w)
@@ -10596,6 +10598,27 @@ for (const [name, arrange, last] of [
     expect(ownLines(store, w).filter(l => l === last)).toHaveLength(1)
   })
 }
+
+// Round 1 F3 [ARM-LIFETIME]: a main turn that starts while the arm reads the view ends the need for the key before
+// the arm is set; no stale arm keys once that turn ends.
+test('a main turn that starts while the carry-on\'s answer arms leaves no arm behind (puma-9arph.71 round 1 F3)', async ($, on) => {
+  const w = fresh()
+  countdownWorld(on, w)
+  const { store, clock } = await loggedWorld(on, w)
+  await start($, clock)
+  w.usage['tok-1'] = [100, 41]
+  await turnStops($, clock)
+  await clock.advance(36_000)
+  await $.turn.start({ text: w.submitted[0] ?? '', turnId: 'turn-carry' })
+  const answered = $.turn.complete({ turnId: 'turn-carry', reason: 'answer', answer: 'done', durationMs: 1, isAborted: false })
+  await $.turn.start({ text: 'mine', turnId: 'turn-person' })
+  await answered
+  await $.turn.complete({ turnId: 'turn-person', reason: 'answer', answer: 'done', durationMs: 1, isAborted: false })
+  await clock.settle()
+  await clock.advance(46_000)
+  expect(w.spawned).toEqual([])
+  expect(ownLines(store, w)).not.toContain('own continue: Escape (exit 0)')
+})
 
 test('a rejected sign-in arms no own-continue Escape: its stop raises no countdown (puma-9arph.71)', async ($, on) => {
   const w = fresh()

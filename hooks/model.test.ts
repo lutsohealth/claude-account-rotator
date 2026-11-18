@@ -1966,6 +1966,8 @@ test('row ow: ownContinueHeldBack keys only the states the reading shows safe, a
     ['a box read with no answer', { ...idle, box: { text: undefined } }, 'the box is unreadable'],
     ['R2: a draft in the box', { ...idle, box: { text: 'a draft typed by the stand-in' } }, 'the prompt box holds a draft'],
     ['a draft the fill shows and the read missed', { ...idle, fill: { isFilled: true, text: 'typed meanwhile' } }, 'the prompt box holds a draft'],
+    // Round 1 F1 [UNVERIFIED-EMPTY]: a fill that answers no text proves no empty box.
+    ['an accepted fill with no text', { ...idle, fill: { isFilled: true } }, 'the fill gave no text'],
     ['a screen read with no answer', { ...idle, screen: { lines: undefined } }, 'the screen is unreadable'],
     ['R7: no countdown on screen (a cancel, a menu, a picker)', { ...idle, screen: { lines: CANCELLED_SCREEN } }, 'no countdown on screen'],
   ]
@@ -2010,6 +2012,13 @@ test('row ow: ownContinueAfterLook re-reads the turns with no await before the k
     { why: 'a turn began during the look' },
     { why: 'a main turn began during the look' },
   ])
+  // Round 1 F1, its class: a stage that answered nothing never reads as empty, so it never keys.
+  expect([
+    ownContinueAfterLook({ ...look, box: { text: undefined } }, same),
+    ownContinueAfterLook({ ...look, fill: { isFilled: true } }, same),
+    ownContinueAfterLook({ ...look, fill: { isFilled: true, text: undefined } }, same),
+    ownContinueAfterLook({ ...look, screen: { lines: undefined } }, same),
+  ].every(act => 'why' in act)).toBe(true)
   // The first Escape (RULING 6036) is not widened: an accepted fill still gives it no key.
   expect(escapeHeldBack({ isCarryOnInFlight: true, isLimitStopLast: true, openTurns: 0, isSettling: false, isHeld: false, escapes: 0, budget: 8, pane: 'term_a', fill: {} })).toBe('no dialog holds it')
 })
