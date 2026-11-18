@@ -10574,6 +10574,8 @@ for (const [name, arrange, last] of [
   ['no Orca pane', { noPane: true }, 'own continue: no key, no Orca pane'],
   ["R3, R4: an agent's turn open", { during: ($: Engine) => $.turn.start({ text: 'look', turnId: 'agent-turn', agentId: 'agent-1' }) }, 'own continue: no key, a turn is open'],
   ["R3x: a person's turn began since", { during: ($: Engine) => $.turn.start({ text: 'mine', turnId: 'turn-person' }) }, 'own continue: disarmed, a main turn began'],
+  // A stop heard with no turn start heard before it (as after a reload) raises its own countdown: the old arm ends.
+  ['a new stop heard with no turn start', { during: ($: Engine) => $.classic.StopFailure({ error: 'rate_limit' }) }, 'own continue: disarmed, a new stop'],
 ] as const) {
   test(`the own-continue Escape goes nowhere where ${name} (puma-9arph.71)`, async ($, on) => {
     const w = fresh()
