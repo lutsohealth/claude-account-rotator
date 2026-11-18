@@ -2020,10 +2020,10 @@ async function lookOwed($: Host): Promise<void> {
     if (why === 'Escapes spent') tellOnce($, ep, 'stuck', `owed resume stuck: ${ep.budget} Escapes spent, not entered`)
     if (why !== undefined || look.pane === undefined) return undefined
     const box = await $.prompt.fill({ text: '', mode: 'append' })
-    // The held switch lives in the store, so the view is read once more; then every gate the look read before its fill
-    // is read again with no await before the key (puma-9arph.81): a prompt entering, a move (against the look's own
-    // `now`, so a move during the look reads as settling), a hold, or a turn begun during the fill gets no Escape.
-    const viewAfter = await getView($)
+    // Every gate the look read before its fill is read again with no await before the key, the fill's answer being the
+    // last awaited (puma-9arph.81, Codex round 1 F1): a prompt entering, a move (against the look's own `now`, so a move
+    // during the look reads as settling), a hold (from `kept`, which every view write of this session updates), or a turn
+    // begun during the fill gets no Escape.
     const after: AfterFill = {
       openTurns: openTurns.size,
       isLimitStopLast: limitStopAfter === mainTurns,
@@ -2031,7 +2031,7 @@ async function lookOwed($: Host): Promise<void> {
       isSameEpisode: episode === ep,
       isPromptEntering: promptsEntering > 0,
       isSettling: movedAt !== undefined && now - movedAt < SETTLE_MS,
-      isHeld: viewAfter.held !== undefined,
+      isHeld: kept.held !== undefined,
     }
     const act = escapeAfterFill(look, box.refusal, after, now)
     if ('why' in act) {
