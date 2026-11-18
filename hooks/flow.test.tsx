@@ -11103,6 +11103,53 @@ for (const [name, during, why] of [
   })
 }
 
+// RULING 6891: each gate's reason is written once an episode, two different gates in one episode each once.
+test('two different gates in one episode are each named once (puma-9arph.81, RULING 6891)', { timeoutMs: 20_000 }, async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await owedWorld($, on, w)
+  await $.classic.StopFailure({ error: 'rate_limit' })
+  await clock.settle()
+  await clock.advance(36_000)
+  const holdFill = (): (() => void) => {
+    let release = () => {}
+    w.fillHold = new Promise<void>(resolve => {
+      release = resolve
+    })
+    return release
+  }
+  // The first look's fill: a task notification begins entering, then enters.
+  let release = holdFill()
+  await clock.advance(15_000)
+  let open = () => {}
+  w.submitHold = new Promise<void>(resolve => {
+    open = resolve
+  })
+  const entering = $.prompt.submit({ text: 'agent note', origin: { kind: 'task-notification' }, wait: false })
+  await clock.settle()
+  release()
+  w.fillHold = undefined
+  await clock.settle()
+  open()
+  w.submitHold = undefined
+  await entering
+  // The next look's fill: a press of Use now is held for the token in use, which refreshes soon.
+  release = holdFill()
+  await clock.advance(15_000)
+  const soon = blob('tok-2', clock.now() + 7 * 60_000)
+  w.keychain['Claude Code-credentials'] = soon
+  w.keychain[await keychainItem(SLOT2)] = soon
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  const pressed = pane.press({ key: 'use-3' })
+  await clock.settle()
+  release()
+  w.fillHold = undefined
+  await clock.settle()
+  await pressed
+  await pane.unmount()
+  const named = whats(stopLogOf(store, w)).filter(l => l.startsWith('owed resume: no key, '))
+  expect(named).toEqual(['owed resume: no key, a prompt began entering during the fill', 'owed resume: no key, a switch was held during the fill'])
+})
+
 // Review M403 A (C1): an entry that ends aborted, such as a waker's turn an Escape landed on, leaves the carry-on owed.
 test('C1: a main turn aborted after entry lets the next look reach the fill again', async ($, on) => {
   const w = fresh()
