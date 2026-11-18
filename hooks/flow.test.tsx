@@ -126,6 +126,8 @@ type World = {
   isFillThrown?: boolean
   /** What the prompt box holds, as `$.prompt.read` answers it; while `readHold` is set, the read answers once it settles. */
   draft?: string
+  /** The pane's rendered lines, as `orca terminal read --screen --json` answers them; unset, that read fails. */
+  screen?: string[]
   readHold?: Promise<void>
   /** Called as a read of the box begins, before `readHold`: a test knows the look has reached it. */
   onPromptRead?: () => void
@@ -259,6 +261,9 @@ function world(on: On, w: World, store: Record<string, unknown> | Map<string, un
   })
   on('process.run', async (_$, e) => {
     const [cmd, sub, verb] = e.argv
+    if (cmd === 'orca' && sub === 'terminal' && verb === 'read') {
+      return { value: w.screen === undefined ? ran(1, '') : ran(0, JSON.stringify({ result: { terminal: { source: 'screen', tail: w.screen } } })) }
+    }
     if (cmd === 'security') {
       await w.beforeKeychain?.()
       const stored = w.keychain[e.argv[e.argv.length - 1] ?? '']
@@ -399,7 +404,7 @@ function world(on: On, w: World, store: Record<string, unknown> | Map<string, un
     w.fills = (w.fills ?? 0) + 1
     if (w.isFillThrown === true) throw new Error('the fill broke')
     await w.fillHold
-    return { isFilled: w.isFillRefused !== true }
+    return { isFilled: w.isFillRefused !== true, text: w.draft ?? '' }
   })
   on('prompt.read', async () => {
     w.onPromptRead?.()
@@ -10513,6 +10518,116 @@ test('the line a stop cut by the Claude in Chrome visit carries on with gets the
   await clock.advance(10 * 60_000)
   expect(w.spawned).toEqual([])
   expect(w.submitted).toHaveLength(1)
+})
+
+// ---------------------------------------------------------------- puma-9arph.71: one Escape cancels Claude Code's own continue
+
+/** The pane after the carry-on answered, as the reading saw it (R6c): the countdown's footer under the prompt box. */
+const COUNTDOWN_FOOTER = ['⏺ stand-in: done', '──────────', '❯ ', '──────────', '  ⚠ Usage limit reached · limit resets 1:06am', '    Continuing shortly · Esc to cancel']
+/** The pane once the countdown is gone (R7): no footer. */
+const NO_FOOTER = ['⏺ Automatic continue cancelled · /rate-limit-options to re-arm', '──────────', '❯ ', '──────────']
+const OWN_ESCAPE = ['orca', 'terminal', 'send', '--terminal', 'term_test-pane', '--text', '\u001b', '--json']
+
+/** A world in an Orca pane whose screen shows the countdown, every spawn recorded. */
+function countdownWorld(on: On, w: World): void {
+  w.env.ORCA_TERMINAL_HANDLE = 'term_test-pane'
+  w.screen = COUNTDOWN_FOOTER
+  on('process.spawn', async function* (_$, e) {
+    w.spawned.push(e)
+    yield* []
+    return { value: { code: 0, signal: null } }
+  })
+}
+
+/** The doubled path of card D196: a usage-limit stop, the switch, and the mod's carry-on entering and answering. */
+async function carryOnAnswers($: Engine, clock: MockClock, w: World, stop: { error: 'rate_limit' | 'authentication_failed' } = { error: 'rate_limit' }): Promise<void> {
+  w.usage['tok-1'] = [100, 41]
+  await turnStops($, clock, stop)
+  await clock.advance(36_000)
+  await $.turn.start({ text: w.submitted[0] ?? '', turnId: 'turn-carry' })
+  await $.turn.complete({ turnId: 'turn-carry', reason: 'answer', answer: 'done', durationMs: 1, isAborted: false })
+  await clock.settle()
+}
+
+const ownLines = (store: Map<string, unknown>, w: World) => whats(stopLogOf(store, w)).filter(l => l.startsWith('own continue:'))
+
+// The kit draws no countdown of Claude Code's: this counts the mod's own key and carry-on. The proof of one continue for
+// the stop is the stand-in run on the bead (S5).
+test('the doubled path: once the carry-on answered, the mod sends one Escape, never a second, and its own carry-on once (puma-9arph.71)', async ($, on) => {
+  const w = fresh()
+  countdownWorld(on, w)
+  const { store, clock } = await loggedWorld(on, w)
+  await start($, clock)
+  await carryOnAnswers($, clock, w)
+  expect(w.spawned).toEqual([])
+  await clock.advance(16_000)
+  expect(w.spawned.map(s => s.argv)).toEqual([OWN_ESCAPE])
+  await clock.advance(5 * 60_000)
+  expect([w.spawned.length, w.submitted.length]).toEqual([1, 1])
+  expect(ownLines(store, w)).toEqual(['own continue: armed', 'own continue: Escape (exit 0)'])
+})
+
+// Each row keeps one gate of the own-continue Escape false (acceptance 2): no key goes, and the stop-log says why once.
+for (const [name, arrange, last] of [
+  ['R2: a draft in the box', { draft: 'half a thought' }, 'own continue: no key, the prompt box holds a draft'],
+  ['R7: no countdown on screen', { screen: NO_FOOTER }, 'own continue: no key, no countdown on screen'],
+  ['the screen read fails', { screen: 'unset' }, 'own continue: no key, the screen is unreadable'],
+  ['a hook refuses the fill, its cause left out', { isFillRefused: true }, 'own continue: no key, the fill was refused: no cause'],
+  ['no Orca pane', { noPane: true }, 'own continue: no key, no Orca pane'],
+  ["R3, R4: an agent's turn open", { during: ($: Engine) => $.turn.start({ text: 'look', turnId: 'agent-turn', agentId: 'agent-1' }) }, 'own continue: no key, a turn is open'],
+  ["R3x: a person's turn began since", { during: ($: Engine) => $.turn.start({ text: 'mine', turnId: 'turn-person' }) }, 'own continue: disarmed, a main turn began'],
+  // A stop heard with no turn start heard before it (as after a reload) raises its own countdown: the old arm ends.
+  ['a new stop heard with no turn start', { during: ($: Engine) => $.classic.StopFailure({ error: 'rate_limit' }) }, 'own continue: disarmed, a new stop'],
+] as const) {
+  test(`the own-continue Escape goes nowhere where ${name} (puma-9arph.71)`, async ($, on) => {
+    const w = fresh()
+    const rule: { draft?: string; screen?: readonly string[] | 'unset'; isFillRefused?: boolean; noPane?: boolean; during?: ($: Engine) => Promise<unknown> } = arrange
+    countdownWorld(on, w)
+    // The session reads its environment at its start.
+    if (rule.noPane === true) delete w.env.ORCA_TERMINAL_HANDLE
+    const { store, clock } = await loggedWorld(on, w)
+    await start($, clock)
+    await carryOnAnswers($, clock, w)
+    if (rule.draft !== undefined) w.draft = rule.draft
+    if (rule.screen !== undefined) w.screen = rule.screen === 'unset' ? undefined : [...rule.screen]
+    if (rule.isFillRefused === true) w.isFillRefused = true
+    await rule.during?.($)
+    await clock.advance(46_000)
+    expect(w.spawned).toEqual([])
+    expect(ownLines(store, w).at(-1)).toBe(last)
+    expect(ownLines(store, w).filter(l => l === last)).toHaveLength(1)
+  })
+}
+
+// Round 1 F3 [ARM-LIFETIME]: a main turn that starts while the arm reads the view ends the need for the key before
+// the arm is set; no stale arm keys once that turn ends.
+test('a main turn that starts while the carry-on\'s answer arms leaves no arm behind (puma-9arph.71 round 1 F3)', async ($, on) => {
+  const w = fresh()
+  countdownWorld(on, w)
+  const { store, clock } = await loggedWorld(on, w)
+  await start($, clock)
+  w.usage['tok-1'] = [100, 41]
+  await turnStops($, clock)
+  await clock.advance(36_000)
+  await $.turn.start({ text: w.submitted[0] ?? '', turnId: 'turn-carry' })
+  const answered = $.turn.complete({ turnId: 'turn-carry', reason: 'answer', answer: 'done', durationMs: 1, isAborted: false })
+  await $.turn.start({ text: 'mine', turnId: 'turn-person' })
+  await answered
+  await $.turn.complete({ turnId: 'turn-person', reason: 'answer', answer: 'done', durationMs: 1, isAborted: false })
+  await clock.settle()
+  await clock.advance(46_000)
+  expect(w.spawned).toEqual([])
+  expect(ownLines(store, w)).not.toContain('own continue: Escape (exit 0)')
+})
+
+test('a rejected sign-in arms no own-continue Escape: its stop raises no countdown (puma-9arph.71)', async ($, on) => {
+  const w = fresh()
+  countdownWorld(on, w)
+  const { store, clock } = await loggedWorld(on, w)
+  await start($, clock)
+  await carryOnAnswers($, clock, w, { error: 'authentication_failed' })
+  await clock.advance(46_000)
+  expect([w.spawned, ownLines(store, w)]).toEqual([[], []])
 })
 
 // puma-9arph.34 acceptance 3(c): a carry-on whose turn dies on the limit again, on the login moved to, moves on and carries on once more.

@@ -105,6 +105,10 @@ import {
   escapeAfterFill,
   escapeArgv,
   escapeHeldBack,
+  ownContinueAfterLook,
+  ownContinueHeldBack,
+  screenArgv,
+  screenLinesFrom,
   NUDGE_TEXT,
   isBoxFree,
   nudgeHeld,
@@ -115,7 +119,7 @@ import {
   mayWrite,
   switchFields,
 } from './model'
-import type { Credential, EscapeLook, Identity, Need, SignInRead, StayReason, SwitchWriter } from './model'
+import type { Credential, EscapeLook, Identity, Need, OwnContinueLook, SignInRead, StayReason, SwitchWriter } from './model'
 import { Band, Footer, PANE_COLUMNS, Pane } from './view'
 import type { Actions } from './view'
 
@@ -291,6 +295,14 @@ let carryOnText: string | undefined
 let carryOnRefusals = 0
 /** Carry-ons armed and not yet due: the look says nothing is queued only while none is. */
 let armedCarryOns = 0
+/** The main turn the mod's own carry-on entered as, and the login its stop died on: its answer arms the own-continue Escape. */
+let carryOnTurn: { turnId: string; stoppedId?: string } | undefined
+/**
+ * The own-continue Escape owed after a usage-limit stop's carry-on answered (puma-9arph.71): Claude Code's own countdown
+ * still stands and would continue a second time (reading R6c). `mainTurns` as armed; module state, as the episode ends
+ * with that answer; a reload drops it.
+ */
+let ownContinue: { mainTurns: number; resetAt?: number; isSent: boolean; told: Set<string> } | undefined
 /** How often the owed-resume look runs, between turns as well. */
 const OWED_LOOK_MS = 15_000
 /** A measure this long after the resume entered proves it answered: a turn that dies on a limit dies within seconds. */
@@ -2009,6 +2021,81 @@ async function lookOwed($: Host): Promise<void> {
   void logStop($, `owed resume: Escape ${sent.escape} of ${sent.budget} (exit ${code ?? 'none'})`)
 }
 
+/** Owes the own-continue Escape once the mod's carry-on answered, by the stopped login's stored reset where one is kept. */
+async function armOwnContinue($: Host, stoppedId: string | undefined): Promise<void> {
+  // Taken before the read: a main turn that starts during it has ended the need for the key (round 1 F3).
+  const turnsAt = mainTurns
+  const { marks } = await getView($)
+  if (mainTurns !== turnsAt) return
+  const reset = stoppedId === undefined ? undefined : Date.parse(marks?.[stoppedId]?.resetsAt ?? '')
+  ownContinue = { mainTurns: turnsAt, resetAt: reset === undefined || Number.isNaN(reset) ? undefined : reset, isSent: false, told: new Set() }
+  void logStop($, 'own continue: armed')
+}
+
+/** Ends the own-continue arm, saying why where it was still owed. */
+function disarmOwnContinue($: Host, why: string): void {
+  const arm = ownContinue
+  ownContinue = undefined
+  if (arm !== undefined && !arm.isSent) void logStop($, `own continue: disarmed, ${why}`)
+}
+
+/**
+ * Every OWED_LOOK_MS while the own-continue Escape is owed (puma-9arph.71): weighs it by ownContinueHeldBack, asking the
+ * box, then an empty fill, then the pane's rendered screen, and sends ONE Escape to this session's Orca pane only where
+ * all of it answers an idle, empty prompt under the countdown's footer. The turns are read again with no await before
+ * the key. Each reason it holds back for is written once an arm; no screen text is kept or written.
+ */
+async function lookOwnContinue($: Host): Promise<void> {
+  const arm = ownContinue
+  if (arm === undefined || arm.isSent || isLocked) return
+  const sent = await withLock(async () => {
+    if (ownContinue !== arm || arm.isSent) return undefined
+    const view = await getView($)
+    const now = await $.clock.now()
+    const tellWhy = (why: string): undefined => {
+      if (why === "past the own continue's deadline") disarmOwnContinue($, why)
+      else if (!arm.told.has(why)) {
+        arm.told.add(why)
+        void logStop($, `own continue: no key, ${why}`)
+      }
+      return undefined
+    }
+    let look: OwnContinueLook = {
+      isArmed: true,
+      isSent: arm.isSent,
+      mainTurnsSince: mainTurns - arm.mainTurns,
+      openTurns: openTurns.size,
+      isCarryOnQueued: isCarryOnInFlight || armedCarryOns > 0,
+      isSettling: movedAt !== undefined && now - movedAt < SETTLE_MS,
+      isHeld: view.held !== undefined,
+      isPanelShown: isPaneShown,
+      now,
+      resetAt: arm.resetAt,
+      pane: await $.env.get('ORCA_TERMINAL_HANDLE'),
+    }
+    let why = ownContinueHeldBack(look)
+    if (why !== undefined || !look.pane) return tellWhy(why ?? 'no Orca pane')
+    const box = await answerWithin($, 'PromptReadTimedOut', $.prompt.read()).catch(() => undefined)
+    look = { ...look, box: { text: box?.text } }
+    why = ownContinueHeldBack(look)
+    if (why !== undefined) return tellWhy(why)
+    const fill = await $.prompt.fill({ text: '', mode: 'append' }).catch(() => undefined)
+    look = { ...look, fill: fill === undefined ? { isFilled: false } : { isFilled: fill.isFilled, refusal: fill.refusal, text: fill.text } }
+    why = ownContinueHeldBack(look)
+    if (why !== undefined) return tellWhy(why)
+    const read = await $.process.run(screenArgv(look.pane), { timeoutMs: 5_000 }).catch(() => undefined)
+    look = { ...look, screen: { lines: read?.exitCode === 0 ? screenLinesFrom(read.stdout) : undefined } }
+    // Read again with no await before the key: an arm that ended, or a turn that began, during the look gets none.
+    const act = ownContinueAfterLook(look, { isSameArm: ownContinue === arm, openTurns: openTurns.size, mainTurnsSince: mainTurns - arm.mainTurns })
+    if ('why' in act) return tellWhy(act.why)
+    arm.isSent = true
+    return { child: $.process.spawn({ argv: escapeArgv(look.pane) }) }
+  })
+  if (sent === undefined) return
+  const code = await exitOf($, sent.child)
+  void logStop($, `own continue: Escape (exit ${code ?? 'none'})`)
+}
+
 /**
  * The refresh nudge (puma-9arph.57), under the look's lock: while a stop's switch is held for the token in use, with
  * no turn running, Claude Code refreshes that token at no request. Once the token is due within NUDGE_LEAD_MS this
@@ -3095,6 +3182,7 @@ export const register: Register = on => {
         if (episode !== undefined) tellOnce($, episode, 'failed', `owed resume look failed: ${errorName(error)}`)
         return debug($, `owed resume look failed: ${String(error)}`)
       })
+      void lookOwnContinue($).catch(error => debug($, `own continue look failed: ${String(error)}`))
     })
     return started
   })
@@ -3130,6 +3218,10 @@ export const register: Register = on => {
       void logStop($, `stop heard from agent ${e.agent_type ?? 'unknown'}: ${e.error}, no switch`)
       return next(e)
     }
+    // A new stop of the main loop raises its own countdown: the Escape owed for the last one ends, and no answer of the
+    // carry-on in flight arms it again.
+    carryOnTurn = undefined
+    disarmOwnContinue($, 'a new stop')
     // A stop that switches, on the turn that entered, comes before that turn's end: the entry ends here, so the stop's
     // carry-on finds the first one queued and one resume never enters twice.
     if (episode?.enteredAt !== undefined && isSwitchingStop(e.error)) endEntry($, episode, e.error)
@@ -3154,6 +3246,9 @@ export const register: Register = on => {
   on('turn.start', async ($, e, next) => {
     openTurns.add(e.turnId)
     if (e.agentId === undefined) {
+      // A main turn that begins ends the countdown's need for a key: a person's prompt cancels it (reading R3x), and the
+      // own continue's resent turn is the countdown done.
+      disarmOwnContinue($, 'a main turn began')
       const ep = episode
       // The refresh nudge's own turn is no entry (council B2): the resume stays owed and the held switch stands.
       if (ep?.nudgedAt !== undefined && isCarryOnInFlight && carryOnText === NUDGE_TEXT && e.text.includes(NUDGE_TEXT)) {
@@ -3168,6 +3263,7 @@ export const register: Register = on => {
         // unless it went asUser: the carry-on's own turn is the one whose text holds the carry-on's.
         const isCarryOnTurn = isCarryOnInFlight && carryOnText !== undefined && e.text.includes(carryOnText)
         ep.before = { carryOn: isCarryOnInFlight ? carryOnRefusals : undefined, isLimitStopLast: limitStopAfter === mainTurns, isCarryOnTurn }
+        if (isCarryOnTurn) carryOnTurn = { turnId: e.turnId, stoppedId: ep.tried.at(-1) }
         void debug($, `resume entry: ${isCarryOnTurn ? "the carry-on's own turn" : 'another turn'}`)
       }
       mainTurns += 1
@@ -3183,6 +3279,12 @@ export const register: Register = on => {
   on('turn.complete', async ($, e, next) => {
     const wasOpen = openTurns.delete(e.turnId)
     const ep = episode
+    const carried = carryOnTurn
+    if (carried !== undefined && e.turnId === carried.turnId) {
+      carryOnTurn = undefined
+      // The mod's own carry-on answered: Claude Code's own countdown still stands (reading R6c), so one Escape is owed.
+      if (e.reason === 'answer') await armOwnContinue($, carried.stoppedId)
+    }
     if (e.turnId === nudgeTurnId) {
       nudgeTurnId = undefined
       // The login in use answered the nudge: the work goes on there, and the switch held to leave it goes.
