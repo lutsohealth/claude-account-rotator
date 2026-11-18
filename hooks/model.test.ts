@@ -1998,6 +1998,15 @@ test("row ow: ownContinueResetAt holds the reset of the stopped login's newest s
   ]
   expect(rows.map(([name, v]) => [name, ownContinueResetAt(v, 'a')])).toEqual(rows.map(([name, , reset]) => [name, reset]))
   expect(ownContinueResetAt({ marks: { a: five } }, undefined)).toEqual(undefined)
+  // Codex round 1 MARK_ORIGIN [STOP-IDENTITY-BY-ORDER]: another session can write a newer mark of another window before
+  // the carry-on answers, so the window this stop judged decides, never the marks' order.
+  const later = at + 1
+  const judged: [string, Parameters<typeof ownContinueResetAt>[0], Parameters<typeof ownContinueResetAt>[2], number][] = [
+    ['a weekly stop, a newer 5-hour mark', { weekMarks: { a: week }, marks: { a: { ...five, at: later } } }, 'week', Date.parse(WEEK_END)],
+    ['a Fable stop, a newer week mark', { fableMarks: { a: fable }, weekMarks: { a: { ...week, at: later } } }, 'fable', Date.parse(FABLE_END)],
+    ['a 5-hour stop, a newer Fable mark', { marks: { a: five }, fableMarks: { a: { ...fable, at: later } } }, 'five-hour', Date.parse(LATER)],
+  ]
+  expect(judged.map(([name, v, kind]) => [name, ownContinueResetAt(v, 'a', kind)])).toEqual(judged.map(([name, , , reset]) => [name, reset]))
 })
 
 test('row ow: ownContinueAfterLook re-reads the turns with no await before the key (puma-9arph.71)', () => {
