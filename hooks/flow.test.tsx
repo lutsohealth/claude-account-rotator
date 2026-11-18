@@ -10809,7 +10809,8 @@ for (const [name, during, last] of [
 
 // RULING 6839 b: an arm with no stored reset (the stop's read showed the login spent, so no stop mark was written) ends
 // at the five-hour window's length, the shortest window a stop marks, plus the margin; until then a draft holds the key.
-test('an own-continue arm with no stored reset ends at five hours plus the margin (puma-9arph.80)', async ($, on) => {
+// Five hours of looks: 1.25 s on vox, past the kit's 5 s default on CI's runner.
+test('an own-continue arm with no stored reset ends at five hours plus the margin (puma-9arph.80)', { timeoutMs: 30_000 }, async ($, on) => {
   const w = fresh()
   countdownWorld(on, w)
   const { store, clock } = await loggedWorld(on, w)
