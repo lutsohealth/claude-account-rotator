@@ -4,7 +4,7 @@ import type { On, ProcessRunResult, SessionRateLimit, ToolCallArgs } from 'claud
 import type { StoredRows, View } from '../types'
 
 import { DEFAULT_FOOTER, EMPTY_VIEW, NUDGE_LEAD_MS, NUDGE_TEXT, USAGE_CLAIM_WAIT_MS, USAGE_FORCE_AFTER_MS, USAGE_IDLE_MS, fingerprint, keychainItem, roomColor } from './model'
-import { laterMark, longBar, markFrom, storedLineText } from './model'
+import { OWN_CONTINUE_MARGIN_MS, laterMark, longBar, markFrom, storedLineText } from './model'
 import { REQUEST_POLL_MS, REQUEST_TTL_MS, blockedText } from './model'
 import { PANE_COLUMNS } from './view'
 
@@ -40,6 +40,8 @@ type World = {
   throwing?: string[]
   /** access token -> when its week resets, as its usage body says; `WEEK_RESET` where unset */
   weekResets?: Record<string, string>
+  /** access token -> when its 5-hour window resets, as its usage body says; 12:00Z on the test's day where unset */
+  fiveHourResets?: Record<string, string>
   /** access token -> the HTTP status the profile endpoint fails with, where it fails */
   profileFailing?: Record<string, number>
   /** Access tokens whose profile call throws, as a dropped connection or a refused tunnel does. */
@@ -349,7 +351,7 @@ function world(on: On, w: World, store: Record<string, unknown> | Map<string, un
     if (usage === undefined) return { value: { status: 401, ok: false, headers: {}, text: '' } }
     const [five, week, fable] = usage
     const body = {
-      five_hour: five === null ? null : { utilization: five, resets_at: '2026-10-12T12:00:00Z' },
+      five_hour: five === null ? null : { utilization: five, resets_at: w.fiveHourResets?.[token] ?? '2026-10-12T12:00:00Z' },
       seven_day: week === null ? null : { utilization: week, resets_at: w.weekResets?.[token] ?? WEEK_RESET },
       // A row for another model beside the Fable one, spent: read as Fable's, it would show.
       ...(fable === undefined ? {} : { limits: [limitRow('Sonnet', 100), limitRow('Fable 5.1', fable, w.fableResets)] }),
@@ -10629,6 +10631,49 @@ test('a rejected sign-in arms no own-continue Escape: its stop raises no countdo
   await clock.advance(46_000)
   expect([w.spawned, ownLines(store, w)]).toEqual([[], []])
 })
+
+// puma-9arph.78: the wiring of puma-9arph.77, end to end. Each stop marks its own window, which resets 3 minutes on;
+// another session then stores a newer mark of another window, resetting hours on, before the carry-on answers. The
+// arm holds the reset of the window the stop judged, never that newer mark's: a draft in the box holds the key back,
+// so the look writes the deadline line at the first look at or after that reset plus the 45 s margin.
+const SOON = new Date(NOW + 3 * 60_000).toISOString()
+const LATE_MARK = { pct: 100, resetsAt: new Date(NOW + 4 * HOUR).toISOString(), at: NOW + 40_000 }
+const DEADLINE_LINE = "own continue: disarmed, past the own continue's deadline"
+for (const [kind, said, judged, other] of [
+  ['weekly', "You've hit your weekly limit · resets Nov 10 at 11am", (w: World) => void (w.weekResets = { 'tok-1': SOON }), 'mark:1'],
+  ['Fable', FABLE_HIT_STOP.last_assistant_message, (w: World) => void (w.fableResets = SOON), 'week-mark:1'],
+  ['5-hour (the control)', PLAIN_STOPS[0], (w: World) => void (w.fiveHourResets = { 'tok-1': SOON }), 'fable-mark:1'],
+] as const) {
+  test(`a ${kind} stop arms the own-continue Escape with the reset of the window it judged, over a newer mark of another window (puma-9arph.78)`, async ($, on) => {
+    const w = fresh()
+    countdownWorld(on, w)
+    judged(w)
+    const { store, clock } = await loggedWorld(on, w)
+    // Login 1 is not spent at the stop, so markStop judges a window; login 2 has room on every limit.
+    w.usage['tok-1'] = [60, 40, 50]
+    w.usage['tok-2'] = [10, 30, 10]
+    await start($, clock)
+    await $.turn.start({ text: 'go on', turnId: 'turn-1' })
+    await $.classic.StopFailure({ error: 'rate_limit', last_assistant_message: said })
+    await $.turn.complete({ turnId: 'turn-1', reason: 'error', answer: '', durationMs: 1, isAborted: false })
+    await clock.settle()
+    await clock.advance(36_000)
+    expect(w.submitted).toHaveLength(1)
+    // Another session's stop on login 1, newer than this one's; the minute's merge takes it into the view.
+    store.set(other, LATE_MARK)
+    await clock.advance(25_000)
+    await $.turn.start({ text: w.submitted[0] ?? '', turnId: 'turn-carry' })
+    await $.turn.complete({ turnId: 'turn-carry', reason: 'answer', answer: 'done', durationMs: 1, isAborted: false })
+    await clock.settle()
+    w.draft = 'half a thought'
+    await clock.advance(5 * 60_000)
+    const deadline = Date.parse(SOON) + OWN_CONTINUE_MARGIN_MS
+    const at = stopLogOf(store, w).filter(e => e.what === DEADLINE_LINE).map(e => e.at)
+    expect(w.spawned).toEqual([])
+    expect(at, `${kind}: the arm held no deadline at the judged window's reset (${SOON}); with no line it held none, or the newer mark's`).toHaveLength(1)
+    expect([kind, (at[0] ?? 0) >= deadline && (at[0] ?? 0) < deadline + 15_000]).toEqual([kind, true])
+  })
+}
 
 // puma-9arph.34 acceptance 3(c): a carry-on whose turn dies on the limit again, on the login moved to, moves on and carries on once more.
 test('a carry-on whose turn dies on the usage limit again moves to the next login and carries on once more, the watch judging each stop (puma-9arph.34 3(c))', async ($, on) => {
