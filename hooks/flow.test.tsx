@@ -10666,6 +10666,29 @@ test("a resume that a task notification's turn entered arms the own-continue Esc
   expect(ownLines(store, w)).toEqual(['own continue: armed', 'own continue: Escape (exit 0)'])
 })
 
+// A turn that begins and ends while a look waits on its fill leaves the arm, but that look's reads are stale: it sends
+// no key, and the next look does (RULING 6839 a: no key from a look a turn ran through).
+test("a task notification's turn during the look's fill gets that look no key; the next look sends one (puma-9arph.80)", async ($, on) => {
+  const w = fresh()
+  countdownWorld(on, w)
+  const { store, clock } = await loggedWorld(on, w)
+  await start($, clock)
+  await carryOnAnswers($, clock, w)
+  let release = () => {}
+  w.fillHold = new Promise<void>(resolve => {
+    release = resolve
+  })
+  await clock.advance(16_000)
+  await promptTurn($, 'turn-note', 'task-notification')
+  release()
+  w.fillHold = undefined
+  await clock.settle()
+  expect(w.spawned).toEqual([])
+  expect(ownLines(store, w)).toContain('own continue: no key, a main turn began during the look')
+  await clock.advance(15_000)
+  expect(w.spawned.map(s => s.argv)).toEqual([OWN_ESCAPE])
+})
+
 // A person's prompt that entered the resume cancelled the countdown (R3x): the proven resume arms nothing.
 test("a resume a person's prompt entered arms no own-continue Escape (puma-9arph.80)", async ($, on) => {
   const w = fresh()
