@@ -1925,7 +1925,6 @@ test('row ow: ownContinueHeldBack keys only the states the reading shows safe, a
   const idle: Parameters<typeof ownContinueHeldBack>[0] = {
     isArmed: true,
     isSent: false,
-    mainTurnsSince: 0,
     openTurns: 0,
     isCarryOnQueued: false,
     isSettling: false,
@@ -1950,7 +1949,6 @@ test('row ow: ownContinueHeldBack keys only the states the reading shows safe, a
   const rows: [string, Parameters<typeof ownContinueHeldBack>[0], string][] = [
     ['R0, R7: no carry-on of the mod answered', { ...idle, isArmed: false }, 'no carry-on answered'],
     ['R8: the one key went', { ...idle, isSent: true }, 'Escape sent already'],
-    ["R3x: a main turn began since, a person's or the own continue's", { ...idle, mainTurnsSince: 1 }, 'a main turn began since the carry-on'],
     ['R3, R4: a turn or a tool call running', { ...idle, openTurns: 1 }, 'a turn is open'],
     ['R5: a permission dialog, its turn open', { ...idle, openTurns: 1, fill: { isFilled: false, refusal: 'dialog', text: '' } }, 'a turn is open'],
     ['R5 alone: a dialog holds the keys', { ...idle, fill: { isFilled: false, refusal: 'dialog', text: '' } }, 'the fill was refused: dialog'],
@@ -2013,7 +2011,6 @@ test('row ow: ownContinueAfterLook re-reads the turns with no await before the k
   const look: Parameters<typeof ownContinueAfterLook>[0] = {
     isArmed: true,
     isSent: false,
-    mainTurnsSince: 0,
     openTurns: 0,
     isCarryOnQueued: false,
     isSettling: false,
