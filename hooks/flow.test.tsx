@@ -12910,6 +12910,54 @@ test('a stop that gives up on a hung switch after a press gave up on it leaves t
   expect(slots(w)).toEqual([SLOT3])
 })
 
+/** Refuses every view write that clears `carryDue` once one carry-on has been owed, as an engine that refuses the write. */
+const refuseCarryClear = (on: On) => {
+  const seen = { refused: 0 }
+  let wasOwed = false
+  on('state.set', async (_$, e, next) => {
+    const { key, value } = e as unknown as { key: string; value: View }
+    if (key === 'view' && value.carryDue !== undefined) wasOwed = true
+    if (key === 'view' && wasOwed && value.carryDue === undefined) {
+      seen.refused += 1
+      return { deny: 'state: refused' }
+    }
+    return next(e)
+  })
+  return seen
+}
+
+test('F102-3: the carry-on owed goes though the view write that clears carryDue is refused (puma-9arph.40)', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await loggedWorld(on, w)
+  w.usage['tok-2'] = [100, 30]
+  const seen = refuseCarryClear(on)
+  await start($, clock)
+  w.usage['tok-1'] = [100, 41]
+  await $.classic.StopFailure(PLAIN)
+  await clock.settle()
+  await clock.advance(Date.parse('2026-10-12T12:00:00Z') - clock.now() + 4 * 60_000)
+  expect(seen.refused, 'the clearing write was refused').toBeGreaterThan(0)
+  expect(w.submitted, whats(stopLogOf(store, w)).join(' | ')).toHaveLength(1)
+})
+
+test('F102-3 b: a carry-on sent while the view still holds carryDue is not sent again after the mod boots again (puma-9arph.40)', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await loggedWorld(on, w)
+  w.usage['tok-2'] = [100, 30]
+  refuseCarryClear(on)
+  await start($, clock)
+  w.usage['tok-1'] = [100, 41]
+  await $.classic.StopFailure(PLAIN)
+  await clock.settle()
+  await clock.advance(Date.parse('2026-10-12T12:00:00Z') - clock.now() + 4 * 60_000)
+  const before = w.submitted.length
+  // boot again on the same store, the clock past the time owed. Not a reload: the module keeps its memory (puma-9arph.40
+  // PLAN, T2a and T2b stand in for a reload).
+  await start($, clock)
+  await clock.advance(10 * 60_000)
+  expect([before, w.submitted.length], whats(stopLogOf(store, w)).join(' | ')).toEqual([1, 1])
+})
+
 /** A session whose view survived a hot reload as `surviving`, on two logins both spent, the store a shared one. */
 async function reloadedWorld($: Engine, on: On, surviving: Partial<View>) {
   const w = fresh()
