@@ -14806,7 +14806,10 @@ test('88-B3: a carry-on held for a Connect visit that throws goes once, and a la
   const held = whats(stopLogOf(world.store, world.w)).includes('carry-on held: Claude in Chrome is connecting')
   expect([world.notesRefused(), held], 'the visit took the carry-on, then threw').toEqual([1, true])
   expect(world.w.submitted).toHaveLength(1)
-  // The hold the throw ended is not left for the next visit: that one cut nothing, and sends nothing.
+  // The hold the throw ended is not left for the next visit: that one cut nothing, and sends nothing. The carry-on's turn
+  // starts first, so a second would not wait queued behind it.
+  await $.turn.start({ text: world.w.submitted[0] ?? '', turnId: 'thrown-visit-carry-on' })
+  await settleReal(world.clock)
   const before = world.visits()
   await pane.redraw()
   void pane.press({ key: 'chrome-try-2' })
