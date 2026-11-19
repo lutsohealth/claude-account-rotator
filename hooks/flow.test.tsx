@@ -10695,8 +10695,7 @@ test('puma-9arph.59: a stop whose profile call hangs, its sign-in new since the 
 })
 
 // Review PREFETCH-READ (Codex round 1, RULING 6425): the stop's own read waits on the stored login before
-// either fetch. Its first stage is held open, then let go, so only that one wait hangs: refreshingSoon's read of the
-// same store, later in the stop, stays unbounded on purpose (puma-9arph.57).
+// either fetch. Its first stage is held open, then let go, so only that one wait hangs.
 for (const stage of ['the credential file read (Linux)', 'the keychain marker check (macOS)'] as const) {
   test(`Review PREFETCH-READ: a stop whose own wait on ${stage} hangs times out, so a later main-loop stop is handled (puma-9arph.59)`, async ($, on) => {
     const isLinux = stage.endsWith('(Linux)')
@@ -10723,6 +10722,131 @@ for (const stage of ['the credential file read (Linux)', 'the keychain marker ch
     expect(lines.filter(l => l.startsWith('stop heard:'))).toHaveLength(2)
   })
 }
+
+// ---------------------------------------------------------------- puma-9arph.74: the refresh guard's read of the stored sign-in
+
+/**
+ * Holds every keychain read made while a switch owns the view, until `open()`, as a read that never answers; the
+ * stop's own read and the looks' reads, made with no switch running, answer. `reads` counts the reads it held.
+ */
+const holdGuardRead = (w: World, view: () => View | undefined) => {
+  let release = () => {}
+  const gate = new Promise<void>(resolve => {
+    release = resolve
+  })
+  const held = { reads: 0, open: () => release() }
+  w.beforeKeychain = () => {
+    if (view()?.owner === undefined) return Promise.resolve()
+    held.reads += 1
+    return gate
+  }
+  return held
+}
+
+const stopsHeard = (store: Map<string, unknown>, w: World) => whats(stopLogOf(store, w)).filter(l => l.startsWith('stop heard:'))
+
+test('puma-9arph.74: a stop whose refresh guard read gets no answer holds the switch, and a later stop and the owed-resume look go on', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await loggedWorld(on, w)
+  const view = watchedView(on)
+  await start($, clock)
+  w.usage['tok-1'] = [100, 41]
+  const guard = holdGuardRead(w, view)
+  await $.classic.StopFailure(PLAIN)
+  await clock.settle()
+  await clock.advance(READ_TIMEOUT + 1_000)
+  expect(guard.reads, 'the guard read was made').toBeGreaterThan(0)
+  // HOLD, never free: the switch did not land.
+  expect(w.envSets.map(e => e.value)).not.toContain(SLOT2)
+  expect(view()?.held?.target.id).toBe('2')
+  // The lock is free: a later stop is heard, and the look reaches the refresh nudge's box read (nudgeIfDue), the one
+  // prompt.read of a look while a stop's switch is held.
+  let boxReads = 0
+  w.onPromptRead = () => {
+    boxReads += 1
+  }
+  await $.classic.StopFailure(PLAIN)
+  await clock.settle()
+  await clock.advance(READ_TIMEOUT + 16_000)
+  expect(stopsHeard(store, w)).toHaveLength(2)
+  expect(boxReads, 'the owed-resume look ran').toBeGreaterThan(0)
+  // Once a read answers, the minute's retry lands the switch, once, and carries on once.
+  guard.open()
+  await clock.advance(60_000)
+  await clock.advance(36_000)
+  expect(w.envSets.filter(e => e.value === SLOT2)).toHaveLength(1)
+  expect(w.submitted).toHaveLength(1)
+})
+
+test('puma-9arph.74: a refresh guard read the host refuses sets no hold and ends the stop as before', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await loggedWorld(on, w)
+  const view = watchedView(on)
+  await start($, clock)
+  w.usage['tok-1'] = [100, 41]
+  w.beforeKeychain = () => (view()?.owner === undefined ? Promise.resolve() : Promise.reject(new Error('refused')))
+  await $.classic.StopFailure(PLAIN)
+  await clock.settle()
+  expect(view()?.held).toBeUndefined()
+  expect(view()?.owner).toBeUndefined()
+  expect(w.envSets.map(e => e.value)).not.toContain(SLOT2)
+  expect(whats(stopLogOf(store, w)).filter(l => l.startsWith('stop handling failed'))).toHaveLength(1)
+  // The lock is free: a later stop is heard.
+  await $.classic.StopFailure(PLAIN)
+  await clock.settle()
+  expect(stopsHeard(store, w)).toHaveLength(2)
+})
+
+test('puma-9arph.74: Connect whose refresh guard read gets no answer moves no window and ends, so browser calls go on', async ($, on) => {
+  const w = fresh()
+  w.chrome = { extensions: [SLOT2] }
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [20, 30]
+  w.usage['tok-2'] = [40, 30]
+  const view = watchedView(on)
+  // Every keychain read gets no answer: the guard read Connect makes as the session opens among them.
+  w.beforeKeychain = () => new Promise<void>(() => {})
+  const clock = world(on, w, { ...TWO_LOGINS, 'chrome-account': '2', 'chrome-accounts': ['2'] })
+  await start($, clock)
+  await clock.advance(READ_TIMEOUT + 36_000)
+  expect(slots(w)).not.toContain(SLOT2)
+  expect(view()?.chromeConnecting).toBeUndefined()
+  expect((await $.tool.check({ tool: 'mcp__claude-in-chrome__navigate', input: {} })).decision).toBe('allow')
+})
+
+test('puma-9arph.74: an owed-resume look whose prompt fill gets no answer sends no Escape, and a later stop is heard', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await owedWorld($, on, w)
+  await pastLastRead(clock)
+  await $.classic.StopFailure({ error: 'rate_limit' })
+  await clock.settle()
+  w.fillHold = new Promise<void>(() => {})
+  await clock.advance(36_000 + 16_000)
+  expect(w.fills, 'the look reached its fill').toBeGreaterThan(0)
+  await $.classic.StopFailure({ error: 'rate_limit' })
+  await clock.settle()
+  await clock.advance(READ_TIMEOUT + 1_000)
+  expect(stopsHeard(store, w)).toHaveLength(2)
+  expect(whats(stopLogOf(store, w))).toContain('owed resume: fill got no answer, no key')
+})
+
+test('puma-9arph.74: an own-continue look whose prompt fill gets no answer sends no Escape, and a later stop is heard', async ($, on) => {
+  const w = fresh()
+  countdownWorld(on, w)
+  const { store, clock } = await loggedWorld(on, w)
+  await start($, clock)
+  await carryOnAnswers($, clock, w)
+  w.fillHold = new Promise<void>(() => {})
+  const fillsBefore = w.fills ?? 0
+  await clock.advance(16_000)
+  expect(w.fills ?? 0, 'the look reached its fill').toBeGreaterThan(fillsBefore)
+  await clock.advance(READ_TIMEOUT)
+  await $.classic.StopFailure(PLAIN)
+  await clock.settle()
+  expect(w.spawned).toEqual([])
+  expect(stopsHeard(store, w)).toHaveLength(2)
+})
 
 test('a stop whose handling throws in a local step says so in the stop-log, by the error name alone (puma-9arph.37)', async ($, on) => {
   const w = fresh()
