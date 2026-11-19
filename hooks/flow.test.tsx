@@ -14879,15 +14879,17 @@ async function owedAcrossVisit($: Engine, on: On, from: string, to: string, refu
 }
 
 test('88-C1: a carry-on owed and a stop a Connect visit cut carry on once after it, the debt\'s going first (puma-9arph.88)', async ($, on) => {
-  const { during, sends } = await owedAcrossVisit($, on, '11:58:00', '12:06:00')
+  const { during, sends, log } = await owedAcrossVisit($, on, '11:58:00', '12:06:00')
   expect(during, 'nothing sent, the debt owed, the visit under way, the stop cut by it').toEqual([0, '1', '2', true])
-  expect(sends).toHaveLength(1)
+  const order = [log.indexOf('a login is free: carry-on on 2') >= 0, log.indexOf('carry-on not sent again: one went since the visit') > log.indexOf('a login is free: carry-on on 2')]
+  expect([order, sends.length], 'the debt went, then the visit\'s line stood down').toEqual([[true, true], 1])
 })
 
 test('88-C2: a carry-on owed and a stop a Connect visit cut carry on once after it, the visit\'s own line going first (puma-9arph.88)', async ($, on) => {
-  const { during, sends } = await owedAcrossVisit($, on, '11:58:00', '12:06:30')
+  const { during, sends, log } = await owedAcrossVisit($, on, '11:58:00', '12:06:30')
   expect(during, 'nothing sent, the debt owed, the visit under way, the stop cut by it').toEqual([0, '1', '2', true])
-  expect(sends).toHaveLength(1)
+  const isEnded = log.includes("Claude in Chrome's line carried on since the stop: no carry-on")
+  expect([isEnded, log.includes('a login is free: carry-on on 2'), sends.length], 'the visit\'s line went, then the debt ended unsent').toEqual([true, false, 1])
 })
 
 // RULING 7152: the visit's own line, sent where no login is free, serves no debt: the debt still goes once one frees up.
