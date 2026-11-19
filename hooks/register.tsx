@@ -412,6 +412,7 @@ function notify($: Host, text: string): void {
   try {
     void $.ui.notify(text, { title: TITLE }).catch(error => debug($, `notice failed: ${String(error)}`))
   } catch (error) {
+    // A throw at the call: the test kit's notice only rejects, so no test reaches this catch.
     void debug($, `notice failed: ${String(error)}`)
   }
 }
@@ -722,7 +723,8 @@ function logStop($: Host, what: string): Promise<void> {
       await debug($, `stop-log failed: ${String(error)}`)
     }
   })
-  // Its own catch: whatever the debug line does, the next entry still writes.
+  // Its own catch: whatever the debug line does, the next entry still writes. The test kit's debug line never rejects,
+  // refused by a throw or a deny, so no test reaches this catch.
   stopLogChain = stopLogChain.catch(() => undefined)
   return stopLogChain
 }
@@ -1615,8 +1617,9 @@ async function carryOnWhenFree($: Host): Promise<void> {
   const view = await getView($)
   const now = await $.clock.now()
   // A debt this module holds that the view lacks, its write refused (awaitFreeLogin's, or the held branch's below), is
-  // written again, so a reload after this tick still owes it.
-  if (view.carryDue === undefined && due !== undefined) {
+  // written again, so a reload after this tick still owes it. A view still holding an older debt, ended and marked in the
+  // store, lacks this one too: the newer debt stands in its place, as this module owes one carry-on at a time.
+  if (due !== undefined && (view.carryDue === undefined || view.carryDue.owedAt !== due.owedAt)) {
     await writeCarryDue($, due).catch(error => debug($, `carry-on owed not written again: ${String(error)}`))
   }
   // Connect holds the session on the extension's login: the carry-on stays owed and goes at the first tick after.
@@ -1776,7 +1779,12 @@ function carryOnAfterSettle($: Host, owed: CarryOn): void {
   armedCarryOns += 1
   $.clock.after(SETTLE_MS, () => {
     armedCarryOns -= 1
-    if (moves === mark) void carryOn($, owed.need).catch(error => debug($, `carry-on failed: ${String(error)}`))
+    // A Connect visit holds the session: it carries the turn on once it ends, as for a stop it cut, though its move counts
+    // as another switch since. A Fable carry-on held so goes as the mod's own line.
+    if (isConnectingChrome) {
+      isCutByVisit = true
+      void logStop($, 'carry-on held: Claude in Chrome is connecting')
+    } else if (moves === mark) void carryOn($, owed.need).catch(error => debug($, `carry-on failed: ${String(error)}`))
     else void logStop($, 'carry-on skipped: another switch since')
   })
   // Not awaited: a caller sets carriedFor in the same tick, so a second stop cannot arm a second carry-on meanwhile.
@@ -2851,6 +2859,13 @@ function connectChrome($: Host, isQuiet = false, tryId?: string): Promise<Chrome
     let done: { target: Account; answer: ChromeAnswer; isVisit: boolean } | undefined
     try {
       done = await connectingChrome($, isQuiet, tryId)
+    } catch (error) {
+      // A visit that throws still carries on, once, what it cut or what a settling switch held for it: nothing else will.
+      if (isCutByVisit) {
+        isCutByVisit = false
+        void sendCarryOn($, { text: CONTINUE }).catch(e => debug($, `carry-on failed: ${String(e)}`))
+      }
+      throw error
     } finally {
       isConnectingChrome = false
       await setView($, v => ({ ...v, chromeConnecting: undefined }))

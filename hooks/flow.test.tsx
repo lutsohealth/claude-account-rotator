@@ -14631,3 +14631,191 @@ test('87-B3: a carry-on owed that a press ends during a clear that lands, the re
   expect(views.readsRefused(), 'the read after the clear was refused').toBe(1)
   expect([views.view()?.carryDue, w.submitted.length]).toEqual([undefined, 0])
 })
+
+// ---------------------------------------------------------------- puma-9arph.88: a newer debt, and the carry-on around a Connect visit
+
+test('88-A: a newer carry-on owed whose first write is refused, the view holding an older ended one, is written into the view (puma-9arph.88)', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await loggedWorld(on, w)
+  let last: View | undefined
+  let isClearRefused = false
+  let isNewerRefused = false
+  let refusedOwedAt: number | undefined
+  let spent: string[] = []
+  on('state.get', async (_$, e, next) => {
+    const read = await next(e)
+    if (e.plugin !== 'account-rotator' || e.key !== 'view' || spent.length === 0 || read.value === undefined) return read
+    const view = read.value.value as View
+    const health = Object.fromEntries(spent.map(id => [id, { kind: 'login-needed', why: 'sign-in rejected' } as const]))
+    return { value: { ...read.value, value: { ...view, health: { ...view.health, ...health } } } }
+  })
+  on('state.set', async (_$, e, next) => {
+    const { key, value } = e as unknown as { key: string; value: View }
+    if (key !== 'view') return next(e)
+    const isClear = value.carryDue === undefined && last?.carryDue !== undefined
+    const isNewer = value.carryDue !== undefined && last?.carryDue !== undefined && value.carryDue.owedAt !== last.carryDue.owedAt
+    if (isClear && isClearRefused) return { deny: 'state: refused' } as unknown as Awaited<ReturnType<typeof next>>
+    if (isNewer && isNewerRefused) {
+      isNewerRefused = false
+      refusedOwedAt = value.carryDue?.owedAt
+      return { deny: 'state: refused' } as unknown as Awaited<ReturnType<typeof next>>
+    }
+    last = value
+    return next(e)
+  })
+  w.usage['tok-2'] = [100, 30]
+  await start($, clock)
+  w.usage['tok-1'] = [100, 41]
+  await $.classic.StopFailure(PLAIN)
+  await clock.settle()
+  const older = last?.carryDue
+  // The older debt's carry-on goes while every clear is refused: the store marks it ended, the view keeps it.
+  isClearRefused = true
+  await pastOwed(clock)
+  const ended = [w.submitted.length, carryEndedOf(store, w)?.owedAt === older?.owedAt, last?.carryDue?.owedAt === older?.owedAt]
+  // A newer stop with no login left: its first write into the view is refused.
+  w.usage['tok-1'] = [100, 100]
+  w.usage['tok-2'] = [100, 100]
+  isNewerRefused = true
+  spent = ['2']
+  await clock.advance(60_000)
+  await $.classic.StopFailure(PLAIN)
+  await settleReal(clock)
+  const owedLines = whats(stopLogOf(store, w)).filter(x => x.startsWith('no login left')).length
+  expect([ended, owedLines, typeof refusedOwedAt], 'the older debt ended and kept in the view, the newer one refused').toEqual([[1, true, true], 2, 'number'])
+  await untilTick(clock)
+  // A reload's boot owes the debt the view holds: the newer one now, which the store's mark of the older does not end.
+  expect(last?.carryDue?.owedAt).toBe(refusedOwedAt)
+})
+
+/**
+ * Connect visits from here on: a world on two logins, or three, Claude in Chrome's extension on login 1, whose view writes
+ * `state.set` sees; `atVisitEnd()` is how many carry-ons were submitted when the first visit's write ended it (a trial
+ * no browser answers connects again as the extension's account, a second visit), `visits()` how many began;
+ * `refuseNote()` refuses the next write that notes what Chrome answered as login 2, so the visit throws after its wait,
+ * and `holdNote()` holds that write until the release it answers, so the visit stays open past its wait.
+ */
+async function chromeVisitWorld($: Engine, on: On, isThree = false) {
+  const w = fresh()
+  w.chrome = { extensions: [''] }
+  if (isThree) {
+    w.keychain[await keychainItem(SLOT3)] = blob('tok-3')
+    w.usage['tok-3'] = [10, 30]
+  }
+  const { store, clock } = await loggedWorld(on, w, { ...(isThree ? THREE_LOGINS : {}), 'chrome-account': '1' })
+  let last: View | undefined
+  let atVisitEnd: number | undefined
+  let isNoteRefused = false
+  let notesRefused = 0
+  let noteHold: Promise<void> | undefined
+  let visits = 0
+  on('state.set', async (_$, e, next) => {
+    const { key, value } = e as unknown as { key: string; value: View }
+    if (key !== 'view') return next(e)
+    const isNote = value.chrome?.as === '2' && last?.chrome?.as !== '2'
+    if (isNote && isNoteRefused) {
+      isNoteRefused = false
+      notesRefused += 1
+      return { deny: 'state: refused' } as unknown as Awaited<ReturnType<typeof next>>
+    }
+    if (isNote && noteHold !== undefined) {
+      const gate = noteHold
+      noteHold = undefined
+      await gate
+    }
+    if (last?.chromeConnecting === undefined && value.chromeConnecting !== undefined) visits += 1
+    if (last?.chromeConnecting !== undefined && value.chromeConnecting === undefined) atVisitEnd ??= w.submitted.length
+    last = value
+    return next(e)
+  })
+  await start($, clock)
+  return {
+    w,
+    store,
+    clock,
+    last: () => last,
+    atVisitEnd: () => atVisitEnd,
+    visits: () => visits,
+    refuseNote: () => {
+      isNoteRefused = true
+    },
+    notesRefused: () => notesRefused,
+    holdNote: () => {
+      let release = () => {}
+      noteHold = new Promise<void>(resolve => {
+        release = resolve
+      })
+      return release
+    },
+  }
+}
+
+/** A usage-limit stop on login 1 that moves to login 2 and arms its carry-on, then the pane open on Chrome's other accounts. */
+async function stopThenPane($: Engine, world: Awaited<ReturnType<typeof chromeVisitWorld>>) {
+  world.w.usage['tok-1'] = [100, 41]
+  await $.classic.StopFailure(PLAIN)
+  await settleReal(world.clock)
+  const armed = [world.last()?.activeId, whats(stopLogOf(world.store, world.w)).includes('carry-on armed')]
+  const pane = await mountPane($)
+  await pane.press({ key: 'chrome-others' })
+  await settleReal(world.clock)
+  await pane.redraw()
+  return { pane, armed }
+}
+
+test('88-B1: a stop\'s carry-on armed before a Connect visit that does not move waits out the visit, and goes once after it (puma-9arph.88)', async ($, on) => {
+  const world = await chromeVisitWorld($, on)
+  const { pane, armed } = await stopThenPane($, world)
+  // The visit's note of what Chrome answered waits, so the visit is still open when the carry-on's timer fires.
+  const release = world.holdNote()
+  void pane.press({ key: 'chrome-try-2' })
+  await settleReal(world.clock)
+  await world.clock.advance(60_000)
+  await settleReal(world.clock)
+  const during = [world.last()?.chromeConnecting, world.w.submitted.length]
+  release()
+  await settleReal(world.clock)
+  await world.clock.advance(2 * 60_000)
+  await settleReal(world.clock)
+  await pane.unmount()
+  expect(armed, 'the carry-on armed on login 2').toEqual(['2', true])
+  expect([during, world.atVisitEnd(), world.w.submitted.length]).toEqual([['2', 0], 0, 1])
+})
+
+test('88-B2: a stop\'s carry-on armed before a Connect visit that moves is not lost: it goes once after the visit (puma-9arph.88)', async ($, on) => {
+  const world = await chromeVisitWorld($, on, true)
+  const { pane, armed } = await stopThenPane($, world)
+  void pane.press({ key: 'chrome-try-3' })
+  await settleReal(world.clock)
+  const during = world.last()?.chromeConnecting
+  await world.clock.advance(2 * 60_000)
+  await settleReal(world.clock)
+  await pane.unmount()
+  expect([armed, during], 'the carry-on armed on login 2, a visit to login 3 under way').toEqual([['2', true], '3'])
+  expect([world.atVisitEnd(), world.w.submitted.length]).toEqual([0, 1])
+})
+
+test('88-B3: a carry-on held for a Connect visit that throws goes once, and a later visit sends none (puma-9arph.88)', async ($, on) => {
+  const world = await chromeVisitWorld($, on)
+  const { pane } = await stopThenPane($, world)
+  world.refuseNote()
+  void pane.press({ key: 'chrome-try-2' })
+  await settleReal(world.clock)
+  await world.clock.advance(2 * 60_000)
+  await settleReal(world.clock)
+  const held = whats(stopLogOf(world.store, world.w)).includes('carry-on held: Claude in Chrome is connecting')
+  expect([world.notesRefused(), held], 'the visit took the carry-on, then threw').toEqual([1, true])
+  expect(world.w.submitted).toHaveLength(1)
+  // The hold the throw ended is not left for the next visit: that one cut nothing, and sends nothing. The carry-on's turn
+  // starts first, so a second would not wait queued behind it.
+  await $.turn.start({ text: world.w.submitted[0] ?? '', turnId: 'thrown-visit-carry-on' })
+  await settleReal(world.clock)
+  const before = world.visits()
+  await pane.redraw()
+  void pane.press({ key: 'chrome-try-2' })
+  await settleReal(world.clock)
+  await world.clock.advance(2 * 60_000)
+  await settleReal(world.clock)
+  await pane.unmount()
+  expect([world.visits() > before, world.w.submitted.length], 'a later visit began, and sent nothing').toEqual([true, 1])
+})
