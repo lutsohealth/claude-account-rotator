@@ -10797,6 +10797,33 @@ test('puma-9arph.74: a refresh guard read the host refuses sets no hold and ends
   expect(stopsHeard(store, w)).toHaveLength(2)
 })
 
+test('puma-9arph.74: a held switch whose minute retry finds the guard read refused keeps its hold, and lands once a read answers', async ($, on) => {
+  const w = fresh()
+  // Inside the refresh guard, and far enough from the expiry that no refresh nudge is due in the test.
+  w.keychain['Claude Code-credentials'] = blob('tok-1', NOW + 7 * 60_000)
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [20, 30]
+  w.usage['tok-2'] = [10, 30]
+  const clock = world(on, w, new Map<string, unknown>(Object.entries(TWO_LOGINS)))
+  const view = watchedView(on)
+  await start($, clock)
+  w.usage['tok-1'] = [100, 41]
+  await $.classic.StopFailure(PLAIN)
+  await clock.settle()
+  expect(view()?.held?.target.id).toBe('2')
+  w.beforeKeychain = () => (view()?.owner === undefined ? Promise.resolve() : Promise.reject(new Error('refused')))
+  await clock.advance(60_000)
+  // The refusal reaches the minute's catch: the hold stands, the switch is let go, and nothing moved.
+  expect([view()?.held?.target.id, view()?.owner, slots(w)]).toEqual(['2', undefined, []])
+  expect((w.logged ?? []).filter(l => l.includes('held switch retry failed'))).toHaveLength(1)
+  w.beforeKeychain = undefined
+  refresh(w)
+  await clock.advance(60_000)
+  await clock.advance(36_000)
+  expect(slots(w)).toEqual([SLOT2])
+  expect(w.submitted).toHaveLength(1)
+})
+
 test('puma-9arph.74: Connect whose refresh guard read gets no answer moves no window and ends, so browser calls go on', async ($, on) => {
   const w = fresh()
   w.chrome = { extensions: [SLOT2] }
