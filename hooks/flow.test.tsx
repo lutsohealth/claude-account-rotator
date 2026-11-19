@@ -14301,6 +14301,7 @@ test('86-B1: a carry-on owed whose first view write is refused is written into t
 })
 
 test('86-B3: a carry-on owed whose write after /clear is refused is written into the view again at the next tick (puma-9arph.86)', async ($, on) => {
+  on('classic.SessionStart', () => ({}))
   const { clock, views } = await owedWithRefusals($, on)
   expect(views.view()?.carryDue?.from, 'the debt is in the view before /clear').toBe('1')
   // rebindSession's one view write, which puts the debt back after the reset, is refused.
@@ -14321,4 +14322,37 @@ test('86-C1: a carry-on owed whose submit rejects after a refused clear is marke
   await pastOwed(clock)
   expect(seen.refused, 'the clearing write was refused').toBeGreaterThan(0)
   expect([w.submitted.length, carryEndedOf(store, w), debugLines(w, 'carry-on once a login is free failed').length]).toEqual([1, { owedAt: seen.owed?.owedAt }, 1])
+})
+
+test('86-A1: a carry-on owed waits while a Connect visit runs, and goes once at the first tick after it (puma-9arph.86)', async ($, on) => {
+  const w = fresh()
+  w.chrome = { extensions: [''] }
+  const { store, clock } = await loggedWorld(on, w, { 'chrome-account': '1' })
+  const view = watchedView(on)
+  w.usage['tok-2'] = [100, 30]
+  await start($, clock)
+  w.usage['tok-1'] = [100, 41]
+  await $.classic.StopFailure(PLAIN)
+  await clock.settle()
+  // The visit's move waits at its slot write, so Connect holds the session through the time owed and its grace.
+  let endVisit = () => {}
+  const visit = new Promise<void>(resolve => {
+    endVisit = resolve
+  })
+  w.beforeEnv = () => visit
+  w.chrome.extensions.push(SLOT2)
+  const pane = await mountPane($)
+  await pane.press({ key: 'chrome-others' })
+  await clock.settle()
+  await pane.redraw()
+  void pane.press({ key: 'chrome-try-2' })
+  // A held slot write keeps the kit's settle waiting: settle on real time instead, as the late-landing tests do.
+  await settleReal(clock)
+  await clock.advance(Date.parse('2026-10-12T12:06:00Z') - clock.now())
+  const during = [w.submitted.length, view()?.carryDue?.from]
+  endVisit()
+  await settleReal(clock)
+  await clock.advance(10 * 60_000)
+  await pane.unmount()
+  expect([during, w.submitted.length, whats(stopLogOf(store, w)).filter(isOwedCarryOnLine).length]).toEqual([[0, '1'], 1, 1])
 })
