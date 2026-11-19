@@ -307,6 +307,8 @@ let nudgeTurnId: string | undefined
 let isCarryOnInFlight = false
 /** The latest carry-on submission: an older one's late refusal clears nothing of a newer one. */
 let carryOnSubmits = 0
+/** The carry-on sendCarryOn turned away while one was queued, and the submission it waits on: the newest one stands. */
+let turnedAway: { prompt: { text: string; asUser?: true }; submit: number } | undefined
 /** The text of the carry-on last submitted: a main turn whose text holds it is the carry-on's own. */
 let carryOnText: string | undefined
 /** Counts carry-ons refused or dropped: a give-back revives a carry-on only while this has not moved since its turn began. */
@@ -2111,10 +2113,18 @@ async function carryOn($: Host, need?: Need, own?: string): Promise<void> {
  * Submits a carry-on, one at a time, and logs its answer: it resolves once the prompt entered and its turn started, or
  * was queued behind a running one. After a usage-limit stop Claude Code shows a menu that holds a submitted prompt
  * queued, and no mod call closes it: the owed-resume look (lookOwed) frees it with an Escape.
+ *
+ * One turned away while another is queued waits on that one (puma-9arph.91): where the engine drops or refuses it while
+ * it is still the latest and still queued, the one turned away goes once in its place. Once: a submit of its own that is
+ * dropped too keeps nothing, so a further one needs a new turn-away. Nothing goes where the queued one went through or
+ * anything since cleared the queue: a main turn began, the stop found no login left, the episode ended. A Connect visit
+ * open then takes it, and sends its own line in its place, the mod's even for a Fable line kept as your words. Not fixed:
+ * a drop after a visit's finally and before its move back lands sends at once (puma-9arph.89).
  */
 async function sendCarryOn($: Host, prompt: { text: string; asUser?: true }): Promise<void> {
   if (isCarryOnInFlight) {
     if (carryOnText === NUDGE_TEXT && episode !== undefined) episode.isCarryOnHeldBack = true
+    else turnedAway = { prompt, submit: carryOnSubmits }
     void logStop($, 'carry-on not sent again: one is queued')
     return
   }
@@ -2122,15 +2132,31 @@ async function sendCarryOn($: Host, prompt: { text: string; asUser?: true }): Pr
   carryOnText = prompt.text
   const submit = (carryOnSubmits += 1)
   void logStop($, 'carry-on queued')
+  // Read and started in one synchronous run with the refusal it answers, before any await: a turn may begin at the next.
+  const sendTurnedAway = (isQueued: boolean) => {
+    const away = turnedAway?.submit === submit ? turnedAway : undefined
+    if (away === undefined) return
+    turnedAway = undefined
+    if (!isQueued) return
+    if (isConnectingChrome) {
+      isCutByVisit = true
+      void logStop($, 'carry-on held: Claude in Chrome is connecting')
+      return
+    }
+    void logStop($, 'carry-on sent in place of the one queued')
+    void sendCarryOn($, away.prompt).catch(error => debug($, `carry-on failed: ${String(error)}`))
+  }
   let answer: Awaited<ReturnType<Host['prompt']['submit']>>
   try {
     answer = await $.prompt.submit(prompt)
   } catch (error) {
     const isLatest = submit === carryOnSubmits
+    const isQueued = isLatest && isCarryOnInFlight
     if (isLatest) {
       isCarryOnInFlight = false
       carryOnRefusals += 1
     }
+    sendTurnedAway(isQueued)
     if (isLatest && prompt.text === NUDGE_TEXT && episode !== undefined) carryOnAfterNudge($, episode, false)
     throw error
   }
@@ -2140,10 +2166,12 @@ async function sendCarryOn($: Host, prompt: { text: string; asUser?: true }): Pr
   }
   // The engine's own refusal (a Stop stands, a host's limit): said in debug, with its reason, and not tried again.
   const isLatest = submit === carryOnSubmits
+  const isQueued = isLatest && isCarryOnInFlight
   if (isLatest) {
     isCarryOnInFlight = false
     carryOnRefusals += 1
   }
+  sendTurnedAway(isQueued)
   await debug($, `carry-on dropped: ${answer.drop}`)
   void logStop($, 'carry-on drop')
   if (isLatest && prompt.text === NUDGE_TEXT && episode !== undefined) carryOnAfterNudge($, episode, false)
