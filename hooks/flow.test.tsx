@@ -13041,6 +13041,13 @@ test('a reload whose view holds a debt with no ended mark sends it once (puma-9a
   expect(w.submitted).toHaveLength(1)
 })
 
+// Codex round 1 F2: the start's sweep deletes a mark after 7 days, so a debt owed before then is owed no more at a reload.
+test('a reload whose view holds a debt owed over 7 days ago owes it no more, its mark swept or not (puma-9arph.40)', async ($, on) => {
+  const { w, clock } = await reloadedWorld($, on, survivingDebt({ owedAt: NOW - 8 * 24 * 3600_000 }))
+  await pastOwed(clock)
+  expect(w.submitted).toEqual([])
+})
+
 test('a reload whose debt has no owedAt is sent once though the store holds a mark with no owedAt (puma-9arph.40)', async ($, on) => {
   const { w, clock } = await reloadedWorld($, on, survivingDebt({}), { [`carry-ended:${RELOADED_MARK}`]: {} })
   await pastOwed(clock)
