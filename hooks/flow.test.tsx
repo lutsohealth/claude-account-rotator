@@ -76,6 +76,8 @@ type World = {
   loginEmail?: string
   /** How the store refuses the `store-id` key: its write, or its read and its write. */
   storeIdFails?: 'write' | 'read'
+  /** The store refuses the read of every key that starts with this. */
+  storeReadFails?: string
   /** puma-9arph.26: the text of the mod's own bin/account-rotator-claude, as `$.fs.read` finds it under the plugin's folder. */
   ownLauncher?: string
   /** puma-9arph.26: every chmod, test, mv and rm the mod ran, as typed. */
@@ -224,7 +226,10 @@ const ran = (exitCode: number, stdout: string): ProcessRunResult => ({
 
 /** `$.store` over `entries`, which the test writes mid-run as another session on the Mac would. */
 function sharedStore(on: On, entries: Map<string, unknown>, w: World): void {
-  on('store.get', (_$, e) => (e.key === 'store-id' && w.storeIdFails === 'read' ? { deny: 'store: refused' } : { value: entries.get(e.key) }))
+  on('store.get', (_$, e) => {
+    const isRefused = (e.key === 'store-id' && w.storeIdFails === 'read') || (w.storeReadFails !== undefined && e.key.startsWith(w.storeReadFails))
+    return isRefused ? { deny: 'store: refused' } : { value: entries.get(e.key) }
+  })
   on('store.set', (_$, e) => {
     if (e.key === 'store-id' && w.storeIdFails !== undefined) return { deny: 'store: refused' }
     w.onStoreSet?.(e.key, e.value)
@@ -12910,10 +12915,323 @@ test('a stop that gives up on a hung switch after a press gave up on it leaves t
   expect(slots(w)).toEqual([SLOT3])
 })
 
-/** A session whose view survived a hot reload as `surviving`, on two logins both spent, the store a shared one. */
-async function reloadedWorld($: Engine, on: On, surviving: Partial<View>) {
+/** A state write as a test reads it, and a step around the rest of its handling: the kit takes one handler an event. */
+type StateWrite = { key: string; value: View }
+type Around = (e: StateWrite, inner: (e: StateWrite) => Promise<unknown>) => Promise<unknown>
+
+/**
+ * Refuses every view write that clears `carryDue` once one carry-on has been owed, as an engine that refuses the write.
+ * `owed` is the debt the view was last written to hold.
+ */
+const carryClearRefusal = () => {
+  const seen: { refused: number; owed?: View['carryDue'] } = { refused: 0 }
+  let wasOwed = false
+  const around: Around = async (e, inner) => {
+    const { key, value } = e
+    if (key === 'view' && value.carryDue !== undefined) {
+      wasOwed = true
+      seen.owed = value.carryDue
+    }
+    if (key === 'view' && wasOwed && value.carryDue === undefined) {
+      seen.refused += 1
+      return { deny: 'state: refused' }
+    }
+    return inner(e)
+  }
+  return { seen, around }
+}
+
+/** carryClearRefusal as the test's handler of state.set, `outer` (when given) running around it. */
+const refuseCarryClear = (on: On, outer?: Around) => {
+  const { seen, around } = carryClearRefusal()
+  on('state.set', async (_$, e, next) => {
+    const inner = (x: StateWrite) => around(x, y => next(y as unknown as typeof e))
+    const write = e as unknown as StateWrite
+    return (await (outer === undefined ? inner(write) : outer(write, inner))) as Awaited<ReturnType<typeof next>>
+  })
+  return seen
+}
+
+test('F102-3: the carry-on owed goes though the view write that clears carryDue is refused (puma-9arph.40)', async ($, on) => {
   const w = fresh()
   const { store, clock } = await loggedWorld(on, w)
+  w.usage['tok-2'] = [100, 30]
+  const seen = refuseCarryClear(on)
+  await start($, clock)
+  w.usage['tok-1'] = [100, 41]
+  await $.classic.StopFailure(PLAIN)
+  await clock.settle()
+  await clock.advance(Date.parse('2026-10-12T12:00:00Z') - clock.now() + 4 * 60_000)
+  expect(seen.refused, 'the clearing write was refused').toBeGreaterThan(0)
+  expect(w.submitted, whats(stopLogOf(store, w)).join(' | ')).toHaveLength(1)
+})
+
+test('F102-3 b: a carry-on sent while the view still holds carryDue is not sent again after the mod boots again (puma-9arph.40)', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await loggedWorld(on, w)
+  w.usage['tok-2'] = [100, 30]
+  refuseCarryClear(on)
+  await start($, clock)
+  w.usage['tok-1'] = [100, 41]
+  await $.classic.StopFailure(PLAIN)
+  await clock.settle()
+  await clock.advance(Date.parse('2026-10-12T12:00:00Z') - clock.now() + 4 * 60_000)
+  const before = w.submitted.length
+  // boot again on the same store, the clock past the time owed. Not a reload: the module keeps its memory (puma-9arph.40
+  // PLAN, T2a and T2b stand in for a reload).
+  await start($, clock)
+  await clock.advance(10 * 60_000)
+  expect([before, w.submitted.length], whats(stopLogOf(store, w)).join(' | ')).toEqual([1, 1])
+})
+
+// ---------------------------------------------------------------- puma-9arph.40: a debt ended while its view clear is refused
+
+const OWED_AT = Date.parse('2026-10-12T09:30:00Z')
+const RELOADED_MARK = 'session-reloaded'
+/** The store's mark of the carry-on owed this session ended though its view kept it, as the debt it names. */
+const carryEndedOf = (store: Map<string, unknown>, w: World) => {
+  const mark = store.get(`carry-ended:${w.otherEnv.ACCOUNT_ROTATOR_SESSION}`) as { owedAt?: number } | undefined
+  return mark === undefined ? undefined : { owedAt: mark.owedAt }
+}
+const carryEndedKeys = (store: Map<string, unknown>) => [...store.keys()].filter(k => k.startsWith('carry-ended:'))
+/** Past login 1's reset at 12:00 and the grace after it: a carry-on owed for 12:00 has gone by then. */
+const pastOwed = (clock: MockClock) => clock.advance(Date.parse('2026-10-12T12:00:00Z') - clock.now() + 10 * 60_000)
+
+/**
+ * Every login spent, every view write clearing carryDue refused, then a usage-limit stop on login 1: one carry-on owed at
+ * 12:00. `outer` runs around the refusal; `setup` adds the test's own handlers of other events before the start.
+ */
+async function refusedOwedWorld($: Engine, on: On, w = fresh(), { outer, setup }: { outer?: Around; setup?: () => void } = {}) {
+  const { store, clock } = await loggedWorld(on, w)
+  w.usage['tok-2'] = [100, 30]
+  const seen = refuseCarryClear(on, outer)
+  setup?.()
+  await start($, clock)
+  w.usage['tok-1'] = [100, 41]
+  await $.classic.StopFailure(PLAIN)
+  await clock.settle()
+  return { w, store, clock, seen }
+}
+
+/** A view that survived a reload holding the carry-on owed at 12:00 on login 1, owed at OWED_AT, under RELOADED_MARK. */
+const survivingDebt = (owed: { owedAt?: number } = { owedAt: OWED_AT }): Partial<View> => ({
+  carryDue: { at: Date.parse('2026-10-12T12:00:00Z'), from: '1', ...owed },
+  sessionMark: RELOADED_MARK,
+})
+
+test('a carry-on sent while its view clear is refused leaves the ended mark in the store (puma-9arph.40)', async ($, on) => {
+  const { w, store, clock, seen } = await refusedOwedWorld($, on)
+  await pastOwed(clock)
+  expect(typeof seen.owed?.owedAt, 'the debt names when it was owed').toBe('number')
+  expect([w.submitted.length, carryEndedOf(store, w), carryEndedKeys(store).length]).toEqual([1, { owedAt: seen.owed?.owedAt }, 1])
+  // The mark says when the debt ended, which the sweep ages it from: at the carry-on, after the time owed.
+  const { endedAt } = store.get(`carry-ended:${w.otherEnv.ACCOUNT_ROTATOR_SESSION}`) as { endedAt?: number }
+  expect((endedAt ?? 0) >= Date.parse('2026-10-12T12:00:00Z')).toBe(true)
+})
+
+test('a reload whose view still holds a debt the store marks ended owes nothing (puma-9arph.40)', async ($, on) => {
+  // Counts the view writes that clear carryDue: the first write after the reload still holds it.
+  let clears = 0
+  const counting: Around = (e, inner) => {
+    if (e.key === 'view' && e.value.carryDue === undefined) clears += 1
+    return inner(e)
+  }
+  const { w, clock } = await reloadedWorld($, on, survivingDebt(), { [`carry-ended:${RELOADED_MARK}`]: { owedAt: OWED_AT } }, counting)
+  await pastOwed(clock)
+  expect([w.submitted.length, clears > 0, w.otherEnv.ACCOUNT_ROTATOR_SESSION]).toEqual([0, true, RELOADED_MARK])
+})
+
+test('a reload whose view holds a debt with no ended mark sends it once (puma-9arph.40)', async ($, on) => {
+  const { w, clock } = await reloadedWorld($, on, survivingDebt())
+  await pastOwed(clock)
+  expect(w.submitted).toHaveLength(1)
+})
+
+// Codex round 2 F3: boot's clear of a debt the store marks ended spares a newer debt a stop wrote meanwhile.
+test('a reload\'s clear of a marked debt spares a newer debt written just before it lands (puma-9arph.40)', async ($, on) => {
+  const newer = { at: Date.parse('2026-10-12T12:00:00Z'), from: '1', owedAt: OWED_AT + 60_000 }
+  let isArmed = true
+  let held: View['carryDue']
+  const racing: Around = async (e, inner) => {
+    if (isArmed && e.key === 'view' && e.value.carryDue === undefined) {
+      isArmed = false
+      // A stop's write of its own debt lands first, as one that comes during boot's read of the mark.
+      await inner({ ...e, value: { ...e.value, carryDue: newer } })
+    }
+    const result = await inner(e)
+    if (e.key === 'view' && !(typeof result === 'object' && result !== null && 'deny' in result)) held = e.value.carryDue
+    return result
+  }
+  await reloadedWorld($, on, survivingDebt(), { [`carry-ended:${RELOADED_MARK}`]: { owedAt: OWED_AT } }, racing)
+  expect([isArmed, held?.owedAt]).toEqual([false, newer.owedAt])
+})
+
+// RULING 7129: no path drops a debt nobody ended (P1), and the mark outlives the debt's end, not its start (P2).
+const DAY_MS = 24 * 3600_000
+
+test('a reload keeps a debt owed 8 days ago that nobody ended, its reset tomorrow (puma-9arph.40)', async ($, on) => {
+  const owedAt = NOW - 8 * DAY_MS
+  let held: View['carryDue']
+  const observe: Around = async (e, inner) => {
+    const result = await inner(e)
+    if (e.key === 'view' && !(typeof result === 'object' && result !== null && 'deny' in result)) held = e.value.carryDue
+    return result
+  }
+  await reloadedWorld($, on, { ...survivingDebt({ owedAt }), carryDue: { at: NOW + DAY_MS, from: '1', owedAt } }, {}, observe)
+  expect(held?.owedAt, 'a debt nobody ended survives boot').toBe(owedAt)
+})
+
+test('a reload sends a debt owed 8 days ago that nobody ended, though the ended mark cannot be read (puma-9arph.40)', async ($, on) => {
+  const w = fresh()
+  w.storeReadFails = 'carry-ended:'
+  const { clock } = await reloadedWorld($, on, survivingDebt({ owedAt: NOW - 8 * DAY_MS }), {}, undefined, w)
+  await pastOwed(clock)
+  expect(w.submitted).toHaveLength(1)
+})
+
+test('the mark of a debt owed 6.9 days before it ended outlives the start\'s sweep a day after the end, so a reload sends nothing (puma-9arph.40)', async ($, on) => {
+  const endedAt = NOW - DAY_MS
+  const owedAt = endedAt - 6.9 * DAY_MS
+  const key = `carry-ended:${RELOADED_MARK}`
+  const { w, store, clock } = await reloadedWorld($, on, survivingDebt({ owedAt }), { [key]: { owedAt, endedAt } })
+  await pastOwed(clock)
+  // The start's sweep ran in this boot: the mark it kept is what the next reload reads.
+  expect([w.submitted.length, store.get(key)]).toEqual([0, { owedAt, endedAt }])
+})
+
+test('a reload whose debt has no owedAt is sent once though the store holds a mark with no owedAt (puma-9arph.40)', async ($, on) => {
+  const { w, clock } = await reloadedWorld($, on, survivingDebt({}), { [`carry-ended:${RELOADED_MARK}`]: {} })
+  await pastOwed(clock)
+  expect(w.submitted).toHaveLength(1)
+})
+
+test('a reload whose marked debt\'s clear is refused again owes nothing and boots on (puma-9arph.40)', async ($, on) => {
+  const { seen, around } = carryClearRefusal()
+  const { w, clock } = await reloadedWorld($, on, survivingDebt(), { [`carry-ended:${RELOADED_MARK}`]: { owedAt: OWED_AT } }, around)
+  await pastOwed(clock)
+  expect([seen.refused > 0, w.submitted.length, (w.logged ?? []).filter(line => line.includes('start failed'))]).toEqual([true, 0, []])
+})
+
+test('a switch that ends the carry-on owed, its view clear refused, leaves the ended mark (puma-9arph.40)', async ($, on) => {
+  const { w, store, clock, seen } = await refusedOwedWorld($, on)
+  const pane = await mountPane($)
+  await pane.press({ key: 'use-2' })
+  await clock.settle()
+  await pane.unmount()
+  expect([w.envSets.at(-1)?.value, seen.refused > 0, carryEndedOf(store, w)]).toEqual([SLOT2, true, { owedAt: seen.owed?.owedAt }])
+})
+
+test('Use now pressed during a refused clearing write ends the carry-on owed and leaves the ended mark (puma-9arph.40)', async ($, on) => {
+  let isArmed = false
+  let switchToTwo = async () => {}
+  const pressing: Around = async (e, inner) => {
+    const isClearing = isArmed && e.key === 'view' && e.value.carryDue === undefined
+    if (isClearing) isArmed = false
+    const result = await inner(e)
+    if (isClearing) await switchToTwo()
+    return result
+  }
+  const { w, store, clock, seen } = await refusedOwedWorld($, on, fresh(), { outer: pressing })
+  const pane = await mountPane($)
+  switchToTwo = async () => {
+    await pane.press({ key: 'use-2' })
+  }
+  isArmed = true
+  await clock.advance(Date.parse('2026-10-12T12:04:00Z') - clock.now())
+  expect([isArmed, w.envSets.at(-1)?.value]).toEqual([false, SLOT2])
+  await clock.advance(10 * 60_000)
+  await pane.unmount()
+  expect([w.submitted.length, carryEndedOf(store, w)]).toEqual([0, { owedAt: seen.owed?.owedAt }])
+})
+
+test('a refused clear, then the held branch, leaves the debt owed with no ended mark for a reload to read (puma-9arph.40)', async ($, on) => {
+  // After the first refused clear, the view reads login 1 as needing a sign-in until the next view write, which the
+  // held branch makes: shouldLeave sends it there. That write keeps the view's own health, and reads the mark then.
+  let isSpentRead = false
+  let isDone = false
+  let health: View['health'] = {}
+  let markAtHeld: unknown = 'never held'
+  const shared: { store?: Map<string, unknown>; w?: World } = {}
+  const holding: Around = async (e, inner) => {
+    if (e.key !== 'view' || isDone) return inner(e)
+    if (isSpentRead && e.value.carryDue !== undefined) {
+      isSpentRead = false
+      isDone = true
+      markAtHeld = shared.store?.get(`carry-ended:${shared.w?.otherEnv.ACCOUNT_ROTATOR_SESSION}`)
+      return inner({ ...e, value: { ...e.value, health } })
+    }
+    const result = await inner(e)
+    if (e.value.carryDue === undefined && typeof result === 'object' && result !== null && 'deny' in result) isSpentRead = true
+    return result
+  }
+  const setup = () =>
+    on('state.get', async (_$, e, next) => {
+      const read = await next(e)
+      if (!isSpentRead || e.plugin !== 'account-rotator' || e.key !== 'view' || read.value === undefined) return read
+      const view = read.value.value as View
+      health = view.health
+      return { value: { ...read.value, value: { ...view, health: { ...view.health, '1': { kind: 'login-needed', why: 'sign-in rejected' } } } } }
+    })
+  const { w, store, clock, seen } = await refusedOwedWorld($, on, fresh(), { outer: holding, setup })
+  shared.store = store
+  shared.w = w
+  await pastOwed(clock)
+  const held = whats(stopLogOf(store, w)).filter(what => what === 'carry-on held: the login moved')
+  expect([held.length, isDone, markAtHeld, w.submitted.length, carryEndedOf(store, w)]).toEqual([1, true, undefined, 1, { owedAt: seen.owed?.owedAt }])
+})
+
+test('the start\'s sweep deletes an ended mark that ended over 7 days ago or is unreadable, and keeps one owed long ago that ended since (puma-9arph.40)', async ($, on) => {
+  const w = fresh()
+  const day = DAY_MS
+  const { store, clock } = await loggedWorld(on, w, {
+    'carry-ended:old': { owedAt: NOW - 9 * day, endedAt: NOW - 8 * day },
+    'carry-ended:new': { owedAt: NOW - 9 * day, endedAt: NOW - day },
+    'carry-ended:bad': 'no mark',
+  })
+  await start($, clock)
+  expect(carryEndedKeys(store)).toEqual(['carry-ended:new'])
+})
+
+test('a refused ended-mark write still sends the carry-on once (puma-9arph.40)', async ($, on) => {
+  const w = fresh()
+  w.onStoreSet = key => {
+    if (key.startsWith('carry-ended:')) throw new Error('store: refused')
+  }
+  const { store, clock } = await refusedOwedWorld($, on, w)
+  await pastOwed(clock)
+  expect([w.submitted.length, carryEndedKeys(store)]).toEqual([1, []])
+})
+
+test('a main turn since the stop, its view clear refused, ends the carry-on owed and leaves the ended mark (puma-9arph.40)', async ($, on) => {
+  const { w, store, clock, seen } = await refusedOwedWorld($, on)
+  await $.turn.start({ text: 'go on', turnId: 'turn-own-continue' })
+  await pastOwed(clock)
+  const lines = whats(stopLogOf(store, w)).filter(what => what === 'a turn ran since the stop: no carry-on')
+  expect([lines.length, w.submitted.length, carryEndedOf(store, w)]).toEqual([1, 0, { owedAt: seen.owed?.owedAt }])
+})
+
+test('a reload whose ended mark cannot be read owes the debt once more and boots on (puma-9arph.40)', async ($, on) => {
+  const w = fresh()
+  w.storeReadFails = 'carry-ended:'
+  const { clock } = await reloadedWorld($, on, survivingDebt(), { [`carry-ended:${RELOADED_MARK}`]: { owedAt: OWED_AT } }, undefined, w)
+  await pastOwed(clock)
+  expect([w.submitted.length, (w.logged ?? []).filter(line => line.includes('start failed'))]).toEqual([1, []])
+})
+
+test('with no session mark a refused clear still sends the carry-on once and writes no ended mark (puma-9arph.40)', async ($, on) => {
+  const w = fresh()
+  w.refuseMark = true
+  const { store, clock } = await refusedOwedWorld($, on, w)
+  await pastOwed(clock)
+  expect([w.submitted.length, carryEndedKeys(store)]).toEqual([1, []])
+})
+
+/**
+ * A session whose view survived a hot reload as `surviving`, on two logins both spent, the store a shared one seeded by
+ * `extra`; `around` runs around each state write.
+ */
+async function reloadedWorld($: Engine, on: On, surviving: Partial<View>, extra: Record<string, unknown> = {}, around?: Around, w = fresh()) {
+  const { store, clock } = await loggedWorld(on, w, extra)
   w.usage['tok-1'] = [100, 41]
   w.usage['tok-2'] = [100, 30]
   let isReloaded = true
@@ -12924,7 +13242,8 @@ async function reloadedWorld($: Engine, on: On, surviving: Partial<View>) {
   })
   on('state.set', async (_$, e, next) => {
     if ((e as unknown as { key: string }).key === 'view') isReloaded = false
-    return next(e)
+    if (around === undefined) return next(e)
+    return (await around(e as unknown as StateWrite, x => next(x as unknown as typeof e))) as Awaited<ReturnType<typeof next>>
   })
   await start($, clock)
   return { w, store, clock }
