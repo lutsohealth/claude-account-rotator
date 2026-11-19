@@ -14336,6 +14336,14 @@ test('86-B1: a carry-on owed whose first view write is refused is written into t
   expect(views.view()?.carryDue?.from).toBe('1')
 })
 
+test('86-B4: a carry-on owed whose write into the view again is refused too says so, stays owed, and is written at the tick after (puma-9arph.86)', async ($, on) => {
+  const { clock, views, w } = await owedWithRefusals($, on, v => v.refuse(2))
+  await untilTick(clock)
+  expect([views.refused(), views.view()?.carryDue, debugLines(w, 'carry-on owed not written again').length]).toEqual([2, undefined, 1])
+  await untilTick(clock)
+  expect(views.view()?.carryDue?.from).toBe('1')
+})
+
 // A guard, green with no write-again: the refused write leaves the view unbound, and isBound, at the next tick's
 // maybeRotate, runs rebindSession again, the debt included.
 test('86-B3: a carry-on owed whose write after /clear is refused is back in the view at the next tick, as the rebind runs again (puma-9arph.86)', async ($, on) => {
