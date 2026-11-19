@@ -14631,3 +14631,231 @@ test('87-B3: a carry-on owed that a press ends during a clear that lands, the re
   expect(views.readsRefused(), 'the read after the clear was refused').toBe(1)
   expect([views.view()?.carryDue, w.submitted.length]).toEqual([undefined, 0])
 })
+
+// ---------------------------------------------------------------- puma-9arph.88: a newer debt, and the carry-on around a Connect visit
+
+test('88-A: a newer carry-on owed whose first write is refused, the view holding an older ended one, is written into the view (puma-9arph.88)', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await loggedWorld(on, w)
+  let last: View | undefined
+  let isClearRefused = false
+  let isNewerRefused = false
+  let refusedOwedAt: number | undefined
+  let spent: string[] = []
+  on('state.get', async (_$, e, next) => {
+    const read = await next(e)
+    if (e.plugin !== 'account-rotator' || e.key !== 'view' || spent.length === 0 || read.value === undefined) return read
+    const view = read.value.value as View
+    const health = Object.fromEntries(spent.map(id => [id, { kind: 'login-needed', why: 'sign-in rejected' } as const]))
+    return { value: { ...read.value, value: { ...view, health: { ...view.health, ...health } } } }
+  })
+  on('state.set', async (_$, e, next) => {
+    const { key, value } = e as unknown as { key: string; value: View }
+    if (key !== 'view') return next(e)
+    const isClear = value.carryDue === undefined && last?.carryDue !== undefined
+    const isNewer = value.carryDue !== undefined && last?.carryDue !== undefined && value.carryDue.owedAt !== last.carryDue.owedAt
+    if (isClear && isClearRefused) return { deny: 'state: refused' } as unknown as Awaited<ReturnType<typeof next>>
+    if (isNewer && isNewerRefused) {
+      isNewerRefused = false
+      refusedOwedAt = value.carryDue?.owedAt
+      return { deny: 'state: refused' } as unknown as Awaited<ReturnType<typeof next>>
+    }
+    last = value
+    return next(e)
+  })
+  w.usage['tok-2'] = [100, 30]
+  await start($, clock)
+  w.usage['tok-1'] = [100, 41]
+  await $.classic.StopFailure(PLAIN)
+  await clock.settle()
+  const older = last?.carryDue
+  // The older debt's carry-on goes while every clear is refused: the store marks it ended, the view keeps it.
+  isClearRefused = true
+  await pastOwed(clock)
+  const ended = [w.submitted.length, carryEndedOf(store, w)?.owedAt === older?.owedAt, last?.carryDue?.owedAt === older?.owedAt]
+  // A newer stop with no login left: its first write into the view is refused.
+  w.usage['tok-1'] = [100, 100]
+  w.usage['tok-2'] = [100, 100]
+  isNewerRefused = true
+  spent = ['2']
+  await clock.advance(60_000)
+  await $.classic.StopFailure(PLAIN)
+  await settleReal(clock)
+  const owedLines = whats(stopLogOf(store, w)).filter(x => x.startsWith('no login left')).length
+  expect([ended, owedLines, typeof refusedOwedAt], 'the older debt ended and kept in the view, the newer one refused').toEqual([[1, true, true], 2, 'number'])
+  await untilTick(clock)
+  // A reload's boot owes the debt the view holds: the newer one now, which the store's mark of the older does not end.
+  expect(last?.carryDue?.owedAt).toBe(refusedOwedAt)
+})
+
+/**
+ * Connect visits from here on: a world on two logins, or three, Claude in Chrome's extension on login 1, whose view writes
+ * `state.set` sees; `atVisitEnd()` is how many carry-ons were submitted when a visit's write ended it, `refuseNote()`
+ * refuses the next write that notes what Chrome answered as login 2, so the visit throws after its wait.
+ */
+async function visitWorld($: Engine, on: On, isThree = false) {
+  const w = fresh()
+  w.chrome = { extensions: [''] }
+  if (isThree) {
+    w.keychain[await keychainItem(SLOT3)] = blob('tok-3')
+    w.usage['tok-3'] = [10, 30]
+  }
+  const { store, clock } = await loggedWorld(on, w, { ...(isThree ? THREE_LOGINS : {}), 'chrome-account': '1' })
+  let last: View | undefined
+  let atVisitEnd: number | undefined
+  let isNoteRefused = false
+  let notesRefused = 0
+  on('state.set', async (_$, e, next) => {
+    const { key, value } = e as unknown as { key: string; value: View }
+    if (key !== 'view') return next(e)
+    if (isNoteRefused && value.chrome?.as === '2' && last?.chrome?.as !== '2') {
+      isNoteRefused = false
+      notesRefused += 1
+      return { deny: 'state: refused' } as unknown as Awaited<ReturnType<typeof next>>
+    }
+    if (last?.chromeConnecting !== undefined && value.chromeConnecting === undefined) atVisitEnd = w.submitted.length
+    last = value
+    return next(e)
+  })
+  await start($, clock)
+  return {
+    w,
+    store,
+    clock,
+    last: () => last,
+    atVisitEnd: () => atVisitEnd,
+    refuseNote: () => {
+      isNoteRefused = true
+    },
+    notesRefused: () => notesRefused,
+  }
+}
+
+/** A usage-limit stop on login 1 that moves to login 2 and arms its carry-on, then the pane open on Chrome's other accounts. */
+async function stopThenPane($: Engine, world: Awaited<ReturnType<typeof visitWorld>>) {
+  world.w.usage['tok-1'] = [100, 41]
+  await $.classic.StopFailure(PLAIN)
+  await settleReal(world.clock)
+  const armed = [world.last()?.activeId, whats(stopLogOf(world.store, world.w)).includes('carry-on armed')]
+  const pane = await mountPane($)
+  await pane.press({ key: 'chrome-others' })
+  await settleReal(world.clock)
+  await pane.redraw()
+  return { pane, armed }
+}
+
+test('88-B1: a stop\'s carry-on armed before a Connect visit that does not move waits out the visit, and goes once after it (puma-9arph.88)', async ($, on) => {
+  const world = await visitWorld($, on)
+  const { pane, armed } = await stopThenPane($, world)
+  void pane.press({ key: 'chrome-try-2' })
+  await settleReal(world.clock)
+  const during = world.last()?.chromeConnecting
+  await world.clock.advance(2 * 60_000)
+  await settleReal(world.clock)
+  await pane.unmount()
+  expect([armed, during], 'the carry-on armed on login 2, a visit as login 2 under way').toEqual([['2', true], '2'])
+  expect([world.atVisitEnd(), world.w.submitted.length]).toEqual([0, 1])
+})
+
+test('88-B2: a stop\'s carry-on armed before a Connect visit that moves is not lost: it goes once after the visit (puma-9arph.88)', async ($, on) => {
+  const world = await visitWorld($, on, true)
+  const { pane, armed } = await stopThenPane($, world)
+  void pane.press({ key: 'chrome-try-3' })
+  await settleReal(world.clock)
+  const during = world.last()?.chromeConnecting
+  await world.clock.advance(2 * 60_000)
+  await settleReal(world.clock)
+  await pane.unmount()
+  expect([armed, during], 'the carry-on armed on login 2, a visit to login 3 under way').toEqual([['2', true], '3'])
+  expect([world.atVisitEnd(), world.w.submitted.length]).toEqual([0, 1])
+})
+
+test('88-B3: a carry-on held for a Connect visit that throws goes once, and a later visit sends none (puma-9arph.88)', async ($, on) => {
+  const world = await visitWorld($, on)
+  const { pane } = await stopThenPane($, world)
+  world.refuseNote()
+  void pane.press({ key: 'chrome-try-2' })
+  await settleReal(world.clock)
+  await world.clock.advance(2 * 60_000)
+  await settleReal(world.clock)
+  const held = whats(stopLogOf(world.store, world.w)).includes('carry-on held: Claude in Chrome is connecting')
+  expect([world.notesRefused(), held], 'the visit took the carry-on, then threw').toEqual([1, true])
+  expect(world.w.submitted).toHaveLength(1)
+  // The hold the throw ended is not left for the next visit: that one cut nothing, and sends nothing.
+  await pane.redraw()
+  void pane.press({ key: 'chrome-try-2' })
+  await settleReal(world.clock)
+  await world.clock.advance(2 * 60_000)
+  await settleReal(world.clock)
+  await pane.unmount()
+  expect(world.w.submitted).toHaveLength(1)
+})
+
+/**
+ * Every login spent, a carry-on owed at 12:00, and a Connect visit to login 2 held from `from` to `to` with a usage-limit
+ * stop on login 1 two minutes into it, which the visit cuts. Then every carry-on submitted enters, as Claude Code starts
+ * its turn, until 12:25. Answers the staging seen during the visit and each submit as its time and login.
+ */
+async function owedAcrossVisit($: Engine, on: On, from: string, to: string) {
+  const w = fresh()
+  w.chrome = { extensions: [''] }
+  const { store, clock } = await loggedWorld(on, w, { 'chrome-account': '1' })
+  const view = watchedView(on)
+  w.usage['tok-2'] = [100, 30]
+  await start($, clock)
+  w.usage['tok-1'] = [100, 41]
+  await $.classic.StopFailure(PLAIN)
+  await clock.settle()
+  await clock.advance(Date.parse(`2026-10-12T${from}Z`) - clock.now())
+  let endVisit = () => {}
+  const visit = new Promise<void>(resolve => {
+    endVisit = resolve
+  })
+  w.beforeEnv = () => visit
+  w.chrome.extensions.push(SLOT2)
+  const pane = await mountPane($)
+  await pane.press({ key: 'chrome-others' })
+  await clock.settle()
+  await pane.redraw()
+  void pane.press({ key: 'chrome-try-2' })
+  await settleReal(clock)
+  await clock.advance(2 * 60_000)
+  void $.classic.StopFailure(PLAIN)
+  await settleReal(clock)
+  const log = whats(stopLogOf(store, w))
+  const during = [w.submitted.length, view()?.carryDue?.from, view()?.chromeConnecting, log.includes('stayed: Claude in Chrome is connecting')]
+  await clock.advance(Date.parse(`2026-10-12T${to}Z`) - clock.now())
+  endVisit()
+  await settleReal(clock)
+  const sends: string[] = []
+  while (clock.now() < Date.parse('2026-10-12T12:25:00Z')) {
+    await clock.advance(10_000)
+    await clock.settle()
+    while (sends.length < w.submitted.length) {
+      sends.push(`${new Date(clock.now()).toISOString().slice(11, 19)} on ${view()?.activeId}`)
+      await $.turn.start({ text: w.submitted[sends.length - 1] ?? '', turnId: `owed-across-visit-${sends.length}` })
+      await clock.settle()
+    }
+  }
+  await pane.unmount()
+  return { during, sends }
+}
+
+test('88-C1: a carry-on owed and a stop a Connect visit cut carry on once after it, the debt\'s going first (puma-9arph.88)', async ($, on) => {
+  const { during, sends } = await owedAcrossVisit($, on, '11:58:00', '12:06:00')
+  expect(during, 'nothing sent, the debt owed, the visit under way, the stop cut by it').toEqual([0, '1', '2', true])
+  expect(sends).toHaveLength(1)
+})
+
+test('88-C2: a carry-on owed and a stop a Connect visit cut carry on once after it, the visit\'s own line going first (puma-9arph.88)', async ($, on) => {
+  const { during, sends } = await owedAcrossVisit($, on, '11:58:00', '12:06:30')
+  expect(during, 'nothing sent, the debt owed, the visit under way, the stop cut by it').toEqual([0, '1', '2', true])
+  expect(sends).toHaveLength(1)
+})
+
+// RULING 7152: the visit's own line, sent where no login is free, serves no debt: the debt still goes once one frees up.
+test('88-C3: a carry-on owed still goes once a login frees up after a Connect visit\'s own line went on a spent login (puma-9arph.88)', async ($, on) => {
+  const { during, sends } = await owedAcrossVisit($, on, '11:50:00', '11:55:00')
+  expect(during, 'nothing sent, the debt owed, the visit under way, the stop cut by it').toEqual([0, '1', '2', true])
+  expect([sends.filter(s => s < '12:00').length, sends.filter(s => s >= '12:00').length]).toEqual([1, 1])
+})
