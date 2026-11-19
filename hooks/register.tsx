@@ -246,6 +246,8 @@ let clearedFor: number | undefined
  * by the first such stop, with no await between its read and its write, so a second stop adds no notice and no retry.
  */
 let due: { at?: number; from?: string; turns?: number } | undefined
+/** How many switches ended the carry-on owed (switchNow): one landing while carryOnWhenFree writes is not undone by it. */
+let dueEndings = 0
 /** The turns open now, the main loop's and every agent's or teammate's, by id: a key sent while one runs would answer its dialog. */
 const openTurns = new Set<string>()
 /** The main loop's turns started this session, and how many had started at the last usage-limit stop: equal while its modal can stand. */
@@ -1595,11 +1597,14 @@ async function carryOnWhenFree($: Host): Promise<void> {
   // Another tick may have taken it during the reads: the check and the clear go with no await between.
   if (due === undefined) return
   const owed = due
+  const endings = dueEndings
   due = undefined
   await setView($, v => ({ ...v, carryDue: undefined }))
   // A turn or a switch can come during that write: the decision is made from what stands after it.
   const after = await getView($)
   if (after.activeId !== view.activeId || shouldLeave(after, now)) {
+    // A switch that ended what is owed moved it: nothing stays owed.
+    if (dueEndings !== endings) return
     // The login moved meanwhile: the carry-on stays owed, decided again at the next tick.
     if (due === undefined) due = owed
     const held = due
@@ -1825,15 +1830,23 @@ async function switchNow($: Host, token: number, target: Account, why: string, i
     if (!(await writeSwitch($, mine, v => ({ ...v, provisionalStop: undefined })))) return givenUp()
   } else if (!(await undoProvisionalStop($, mine))) return givenUp()
   const now = await $.clock.now()
+  // A switch that carries on, or one a person asked for, ends the carry-on owed once a login frees up. The tick's own
+  // rotation (it carries nothing) and Connect's visit (quiet) leave it owed: carryOnWhenFree sends it after them.
+  const isDueEnded = owed !== undefined || (!isRotation && !isQuiet)
   // Published only after the slot write landed, and only while it still owns the switch.
   if (!(await writeSwitch($, mine, v => ({
     ...v,
     activeId: target.id,
     pending: { id: target.id, from: v.activeId, since: now },
     removing: undefined,
+    ...(isDueEnded ? { carryDue: undefined } : {}),
   })))) return givenUp()
   movedAt = now
   moves += 1
+  if (isDueEnded) {
+    due = undefined
+    dueEndings += 1
+  }
   // The carry-on is armed and carriedFor set straight after pending's write, with no await between, so a second stop
   // cannot arm a second carry-on; the toast reads the view after them.
   if (carry !== undefined) void logStop($, `moved to ${target.id}`)
