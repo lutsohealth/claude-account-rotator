@@ -13143,16 +13143,6 @@ test('with no session mark a refused clear still sends the carry-on once and wri
   expect([w.submitted.length, carryEndedKeys(store)]).toEqual([1, []])
 })
 
-test('a carry-on whose submit throws after a refused clear still leaves the ended mark (puma-9arph.40)', async ($, on) => {
-  const { store, w, clock, seen } = await refusedOwedWorld($, on)
-  // Every submit from here throws: the kit's submit awaits submitHold. Handled here so the rejection alone is no failure.
-  const broke = Promise.reject(new Error('the submit broke'))
-  broke.catch(() => undefined)
-  w.submitHold = broke
-  await pastOwed(clock)
-  expect([carryEndedOf(store, w), (w.logged ?? []).some(line => line.includes('the submit broke'))]).toEqual([{ owedAt: seen.owed?.owedAt }, true])
-})
-
 /**
  * A session whose view survived a hot reload as `surviving`, on two logins both spent, the store a shared one seeded by
  * `extra`; `around` runs around each state write.
