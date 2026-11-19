@@ -14823,10 +14823,10 @@ test('88-B3: a carry-on held for a Connect visit that throws goes once, and a la
 /**
  * Every login spent, a carry-on owed at 12:00, and a Connect visit to login 2 held from `from` to `to` with a usage-limit
  * stop on login 1 two minutes into it, which the visit cuts. Then every carry-on submitted enters, as Claude Code starts
- * its turn, until 12:25; with `isFirstRefused` the first submit after the visit is refused and enters nothing. Answers
- * the staging seen during the visit and each submit as its time and login.
+ * its turn, until 12:25; with `refuseFirst` the first submit after the visit throws, or the engine drops it, and it
+ * enters nothing. Answers the staging seen during the visit and each submit as its time and login.
  */
-async function owedAcrossVisit($: Engine, on: On, from: string, to: string, isFirstRefused = false) {
+async function owedAcrossVisit($: Engine, on: On, from: string, to: string, refuseFirst?: 'thrown' | 'dropped') {
   const w = fresh()
   w.chrome = { extensions: [''] }
   const { store, clock } = await loggedWorld(on, w, { 'chrome-account': '1' })
@@ -14855,7 +14855,8 @@ async function owedAcrossVisit($: Engine, on: On, from: string, to: string, isFi
   const log = whats(stopLogOf(store, w))
   const during = [w.submitted.length, view()?.carryDue?.from, view()?.chromeConnecting, log.includes('stayed: Claude in Chrome is connecting')]
   await clock.advance(Date.parse(`2026-10-12T${to}Z`) - clock.now())
-  w.isSubmitThrown = isFirstRefused
+  w.isSubmitThrown = refuseFirst === 'thrown'
+  if (refuseFirst === 'dropped') w.submitDrop = 'a Stop stands'
   endVisit()
   await settleReal(clock)
   const sends: string[] = []
@@ -14864,8 +14865,9 @@ async function owedAcrossVisit($: Engine, on: On, from: string, to: string, isFi
     await clock.settle()
     while (sends.length < w.submitted.length) {
       sends.push(`${new Date(clock.now()).toISOString().slice(11, 19)} on ${view()?.activeId}`)
-      if (w.isSubmitThrown === true) {
+      if (w.isSubmitThrown === true || w.submitDrop !== undefined) {
         w.isSubmitThrown = false
+        w.submitDrop = undefined
         continue
       }
       await $.turn.start({ text: w.submitted[sends.length - 1] ?? '', turnId: `owed-across-visit-${sends.length}` })
@@ -14896,13 +14898,13 @@ test('88-C3: a carry-on owed still goes once a login frees up after a Connect vi
 })
 
 test('88-C4: where the debt\'s carry-on after a Connect visit is refused, the visit\'s own line still goes (puma-9arph.88)', async ($, on) => {
-  const { during, sends, log } = await owedAcrossVisit($, on, '11:58:00', '12:06:00', true)
+  const { during, sends, log } = await owedAcrossVisit($, on, '11:58:00', '12:06:00', 'thrown')
   expect([during, log.includes('a login is free: carry-on on 2')], 'the debt went first, its submit refused').toEqual([[0, '1', '2', true], true])
   expect(sends).toHaveLength(2)
 })
 
-test('88-C5: where the Connect visit\'s own line is refused, the carry-on owed still goes (puma-9arph.88)', async ($, on) => {
-  const { during, sends, log } = await owedAcrossVisit($, on, '11:58:00', '12:06:30', true)
+test('88-C5: where the engine drops the Connect visit\'s own line, the carry-on owed still goes (puma-9arph.88)', async ($, on) => {
+  const { during, sends, log } = await owedAcrossVisit($, on, '11:58:00', '12:06:30', 'dropped')
   expect([during, log.includes("Claude in Chrome's line carried on since the stop: no carry-on")], 'the visit went first, its submit refused').toEqual([[0, '1', '2', true], false])
   expect(sends).toHaveLength(2)
 })
