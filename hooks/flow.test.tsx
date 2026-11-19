@@ -14823,9 +14823,10 @@ test('88-B3: a carry-on held for a Connect visit that throws goes once, and a la
 /**
  * Every login spent, a carry-on owed at 12:00, and a Connect visit to login 2 held from `from` to `to` with a usage-limit
  * stop on login 1 two minutes into it, which the visit cuts. Then every carry-on submitted enters, as Claude Code starts
- * its turn, until 12:25. Answers the staging seen during the visit and each submit as its time and login.
+ * its turn, until 12:25; with `isFirstRefused` the first submit after the visit is refused and enters nothing. Answers
+ * the staging seen during the visit and each submit as its time and login.
  */
-async function owedAcrossVisit($: Engine, on: On, from: string, to: string) {
+async function owedAcrossVisit($: Engine, on: On, from: string, to: string, isFirstRefused = false) {
   const w = fresh()
   w.chrome = { extensions: [''] }
   const { store, clock } = await loggedWorld(on, w, { 'chrome-account': '1' })
@@ -14854,6 +14855,7 @@ async function owedAcrossVisit($: Engine, on: On, from: string, to: string) {
   const log = whats(stopLogOf(store, w))
   const during = [w.submitted.length, view()?.carryDue?.from, view()?.chromeConnecting, log.includes('stayed: Claude in Chrome is connecting')]
   await clock.advance(Date.parse(`2026-10-12T${to}Z`) - clock.now())
+  w.isSubmitThrown = isFirstRefused
   endVisit()
   await settleReal(clock)
   const sends: string[] = []
@@ -14862,6 +14864,10 @@ async function owedAcrossVisit($: Engine, on: On, from: string, to: string) {
     await clock.settle()
     while (sends.length < w.submitted.length) {
       sends.push(`${new Date(clock.now()).toISOString().slice(11, 19)} on ${view()?.activeId}`)
+      if (w.isSubmitThrown === true) {
+        w.isSubmitThrown = false
+        continue
+      }
       await $.turn.start({ text: w.submitted[sends.length - 1] ?? '', turnId: `owed-across-visit-${sends.length}` })
       await clock.settle()
     }
@@ -14887,4 +14893,16 @@ test('88-C3: a carry-on owed still goes once a login frees up after a Connect vi
   const { during, sends } = await owedAcrossVisit($, on, '11:50:00', '11:55:00')
   expect(during, 'nothing sent, the debt owed, the visit under way, the stop cut by it').toEqual([0, '1', '2', true])
   expect([sends.filter(s => s < '12:00').length, sends.filter(s => s >= '12:00').length]).toEqual([1, 1])
+})
+
+test('88-C4: where the debt\'s carry-on after a Connect visit is refused, the visit\'s own line still goes (puma-9arph.88)', async ($, on) => {
+  const { during, sends, log } = await owedAcrossVisit($, on, '11:58:00', '12:06:00', true)
+  expect([during, log.includes('a login is free: carry-on on 2')], 'the debt went first, its submit refused').toEqual([[0, '1', '2', true], true])
+  expect(sends).toHaveLength(2)
+})
+
+test('88-C5: where the Connect visit\'s own line is refused, the carry-on owed still goes (puma-9arph.88)', async ($, on) => {
+  const { during, sends, log } = await owedAcrossVisit($, on, '11:58:00', '12:06:30', true)
+  expect([during, log.includes("Claude in Chrome's line carried on since the stop: no carry-on")], 'the visit went first, its submit refused').toEqual([[0, '1', '2', true], false])
+  expect(sends).toHaveLength(2)
 })
