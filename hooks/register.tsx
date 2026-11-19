@@ -1610,13 +1610,11 @@ async function carryOnWhenFree($: Host): Promise<void> {
   const owed = due
   const endings = dueEndings
   const isCleared = await clearCarryDue($)
-  // Each exit below that ends what is owed calls this: where the view still holds it, a reload's boot then owes it no more.
-  const ended = () => (isCleared ? Promise.resolve() : markCarryEnded($, owed))
   // A turn or a switch can come during that write: the decision is made from what stands after it.
   const after = await getView($)
   if (after.activeId !== view.activeId || shouldLeave(after, now)) {
-    // A switch that ended what is owed moved it: nothing stays owed.
-    if (dueEndings !== endings) return ended()
+    // A switch that ended what is owed moved it: nothing stays owed, and a view that still holds it is marked.
+    if (dueEndings !== endings) return isCleared ? undefined : markCarryEnded($, owed)
     // The login moved meanwhile: the carry-on stays owed, decided again at the next tick.
     if (due === undefined) due = owed
     const held = due
@@ -1624,22 +1622,22 @@ async function carryOnWhenFree($: Host): Promise<void> {
     await setView($, v => ({ ...v, carryDue: held }))
     return
   }
+  // Every exit from here ends what is owed. Where the view still holds it, the store marks it, so a reload's boot owes
+  // it no more; marked before the carry-on goes, so one whose submit throws went all the same.
+  if (!isCleared) await markCarryEnded($, owed)
   const hasTurnRun = isSameLogin && owed.turns !== undefined && mainTurns > owed.turns
   void logStop($, hasTurnRun ? 'a turn ran since the stop: no carry-on' : `a login is free: carry-on on ${view.activeId}`)
-  if (hasTurnRun) return ended()
+  if (hasTurnRun) return
   const since = after.pending?.since
   if (since === undefined || now - since >= SETTLE_MS) {
-    // Marked before the carry-on goes: one whose submit throws went all the same.
-    await ended()
     // Still on the login the stop found spent: nothing switched, so the line says its limit reset.
     await carryOn($, undefined, view.activeId === owed.from ? CONTINUE_RESET : undefined)
     return
   }
   // A stop that rode this switch and armed its carry-on during the clearing write above: no second one.
-  if (carriedFor === since) return ended()
+  if (carriedFor === since) return
   carryOnAfterSettle($, {})
   carriedFor = since
-  return ended()
 }
 
 /**
