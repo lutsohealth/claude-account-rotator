@@ -14420,13 +14420,14 @@ test('86-A1: a carry-on owed waits while a Connect visit runs, and goes once at 
   // A held slot write keeps the kit's settle waiting: settle on real time instead, as the late-landing tests do.
   await settleReal(clock)
   await clock.advance(Date.parse('2026-10-12T12:06:00Z') - clock.now())
-  // The staging took: the visit to login 2 is still under way.
-  const during = [w.submitted.length, view()?.carryDue?.from, view()?.chromeConnecting]
+  // The staging took: the visit to login 2 is still under way. The ticks during it touch nothing: no clear, no hold.
+  const isHeldLine = (what: string) => what === 'carry-on held: the login moved'
+  const during = [w.submitted.length, view()?.carryDue?.from, view()?.chromeConnecting, whats(stopLogOf(store, w)).filter(isHeldLine).length]
   endVisit()
   await settleReal(clock)
   await clock.advance(10 * 60_000)
   await pane.unmount()
-  expect([during, w.submitted.length, whats(stopLogOf(store, w)).filter(isOwedCarryOnLine).length]).toEqual([[0, '1', '2'], 1, 1])
+  expect([during, w.submitted.length, whats(stopLogOf(store, w)).filter(isOwedCarryOnLine).length]).toEqual([[0, '1', '2', 0], 1, 1])
 })
 
 // RULING 7135 R3: a visit that begins after the tick's visit check, while the clearing write is held.
