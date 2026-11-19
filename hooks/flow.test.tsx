@@ -10841,9 +10841,10 @@ test('puma-9arph.74: an own-continue look whose prompt fill gets no answer sends
   const fillsBefore = w.fills ?? 0
   await clock.advance(16_000)
   expect(w.fills ?? 0, 'the look reached its fill').toBeGreaterThan(fillsBefore)
-  await clock.advance(READ_TIMEOUT)
   await $.classic.StopFailure(PLAIN)
   await clock.settle()
+  // Each look's fill waits up to the bound, the stop behind it.
+  await clock.advance(READ_TIMEOUT + 1_000)
   expect(w.spawned).toEqual([])
   expect(stopsHeard(store, w)).toHaveLength(2)
 })
@@ -11858,23 +11859,30 @@ test('C1: the carry-on\'s own turn, framed by Claude Code, that dies on a limit 
 })
 
 // Review M403 B: a look whose fill has not answered holds the lock, and every later look skips its tick.
-test('row d: a look while another look holds the lock does nothing', async ($, on) => {
+// A look's own fill is bounded (puma-9arph.74), so a later stop holds the lock here: its slot write, which the engine
+// answers with no bound of the mod's own, waits across the looks' ticks.
+test('row d: a look while a stop holds the lock does nothing', async ($, on) => {
   const w = fresh()
   const { clock } = await owedWorld($, on, w)
-  let release = () => {}
-  w.fillHold = new Promise<void>(resolve => {
-    release = resolve
-  })
   await $.classic.StopFailure({ error: 'rate_limit' })
   await clock.settle()
   await clock.advance(36_000 + 15_000)
-  expect(w.fills).toBe(1)
+  const before = w.fills ?? 0
+  expect(before).toBeGreaterThan(0)
+  let release = () => {}
+  w.beforeEnv = () =>
+    new Promise<void>(resolve => {
+      release = resolve
+    })
+  await $.classic.StopFailure({ error: 'rate_limit' })
+  await clock.settle()
   await clock.advance(30_000)
-  expect(w.fills).toBe(1)
+  expect(w.fills ?? 0).toBe(before)
+  w.beforeEnv = undefined
   release()
   await clock.settle()
-  await clock.advance(15_000)
-  expect(w.fills).toBe(2)
+  await clock.advance(36_000 + 15_000)
+  expect(w.fills ?? 0).toBeGreaterThan(before)
 })
 
 // Review M403 E: a look that throws says so in the stop-log, once an episode.
@@ -12302,7 +12310,8 @@ async function gatedRetry($: Engine, on: On, w: World) {
     return gate
   }
   await $.turn.start({ text: NUDGE_TEXT, turnId: 'turn-nudge' })
-  await clock.advance(60_000)
+  // Past the minute's retry (45 s on) and inside its read's bound, READ_TIMEOUT_MS (puma-9arph.74).
+  await clock.advance(50_000)
   expect([isGated, view()?.owner !== undefined, view()?.held?.target.id]).toEqual([true, true, '2'])
   return { view, store, clock, open }
 }
@@ -12349,6 +12358,9 @@ test('row v: an authentication_failed after a nudge whose retry lands the switch
 test('a use of the login in use while the held switch\'s retry owns the switch is refused and says a switch is running', async ($, on) => {
   const w = fresh()
   const { view, store, clock, open } = await gatedRetry($, on, w)
+  // Each later retry's read waits too: the minute's tick runs the retry, then the request, inside that read's bound
+  // (puma-9arph.74).
+  w.beforeKeychain = () => (view()?.owner === undefined ? Promise.resolve() : new Promise<void>(() => {}))
   w.files[`${REQUESTS}/${N1}.json`] = useRequest(N1, '1', store.get('store-id'), clock.now(), ownMark(w))
   await untilTick(clock)
   const answer = resultOf(w, N1)
