@@ -13041,6 +13041,25 @@ test('a reload whose view holds a debt with no ended mark sends it once (puma-9a
   expect(w.submitted).toHaveLength(1)
 })
 
+// Codex round 2 F3: boot's clear of a debt the store marks ended spares a newer debt a stop wrote meanwhile.
+test('a reload\'s clear of a marked debt spares a newer debt written just before it lands (puma-9arph.40)', async ($, on) => {
+  const newer = { at: Date.parse('2026-10-12T12:00:00Z'), from: '1', owedAt: OWED_AT + 60_000 }
+  let isArmed = true
+  let held: View['carryDue']
+  const racing: Around = async (e, inner) => {
+    if (isArmed && e.key === 'view' && e.value.carryDue === undefined) {
+      isArmed = false
+      // A stop's write of its own debt lands first, as one that comes during boot's read of the mark.
+      await inner({ ...e, value: { ...e.value, carryDue: newer } })
+    }
+    const result = await inner(e)
+    if (e.key === 'view' && !(typeof result === 'object' && result !== null && 'deny' in result)) held = e.value.carryDue
+    return result
+  }
+  await reloadedWorld($, on, survivingDebt(), { [`carry-ended:${RELOADED_MARK}`]: { owedAt: OWED_AT } }, racing)
+  expect([isArmed, held?.owedAt]).toEqual([false, newer.owedAt])
+})
+
 // Codex round 1 F2: the start's sweep deletes a mark after 7 days, so a debt owed before then is owed no more at a reload.
 test('a reload whose view holds a debt owed over 7 days ago owes it no more, its mark swept or not (puma-9arph.40)', async ($, on) => {
   const { w, clock } = await reloadedWorld($, on, survivingDebt({ owedAt: NOW - 8 * 24 * 3600_000 }))
