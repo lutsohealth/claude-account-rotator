@@ -148,6 +148,10 @@ type World = {
   toasts: string[]
   /** What the mod sent through `ui.notify`, the terminal's own notice. */
   notices: string[]
+  /** While set, a notice answers only once it settles: a notice the terminal never answers holds whatever waits on it. */
+  notifyHold?: Promise<void>
+  /** The terminal refuses every notice, which the mod meets as a rejection. */
+  isNotifyRefused?: boolean
   /** When the Fable week the usage endpoint lists resets; `FABLE_RESET` where unset. */
   fableResets?: string
   /** The session's environment beyond USER and HOME. */
@@ -446,7 +450,8 @@ function world(on: On, w: World, store: Record<string, unknown> | Map<string, un
   })
   on('ui.notify', (_$, e) => {
     w.notices.push(e.text)
-    return { value: { isSent: true, channel: 'iterm2' } }
+    const answer = w.isNotifyRefused === true ? { deny: 'notify: refused' } : { value: { isSent: true, channel: 'iterm2' } as const }
+    return w.notifyHold === undefined ? answer : w.notifyHold.then(() => answer)
   })
   on('ui.open', (_$, e) => {
     if (!w.panes.includes(e.id)) w.panes.push(e.id)
@@ -14017,5 +14022,211 @@ for (const [name, setup] of BAD_TEMPORARY) {
     const { w } = await launcherWorld($, on, OLD_LAUNCHER, setup)
     const isMoved = (w.fileCommands ?? []).some(command => command.startsWith('mv '))
     expect([w.files[COPY], kept(w), isMoved, debugLines(w, 'launcher copy not refreshed').length]).toEqual([OLD_LAUNCHER, [COPY], false, 1])
+  })
+}
+
+// ---------------------------------------------------------------- puma-9arph.85: a terminal notice holds no stop and ends none
+
+/** An answer the terminal never gives. */
+const NEVER_ANSWERED = new Promise<void>(() => {})
+const POLICY_NOTICE = /^Can't switch accounts in this session/
+const LOCKOUT_NOTICE = /needs a sign-in/
+const STAY_NOTICE = /\/usage-credits/
+const STUCK_NOTICE = /is near its limit, and this window can't switch accounts/
+const NO_LOGIN_NOTICE = /carries on by itself once one frees up\.$/
+
+/**
+ * After a stop whose notice waits, 20 s and a second stop: how many stops the stop-log heard, and whether the owed
+ * resume's look wrote a line. The second stop's `stop heard` line and the look both wait for the stop path's lock, which
+ * only the first stop's path holds.
+ */
+async function secondStopAndLook($: Engine, clock: MockClock, store: Map<string, unknown>, w: World): Promise<[number, boolean]> {
+  await clock.settle()
+  await clock.advance(20_000)
+  await $.classic.StopFailure({ error: 'rate_limit' })
+  await clock.settle()
+  const lines = whats(stopLogOf(store, w))
+  return [lines.filter(x => x.startsWith('stop heard')).length, lines.some(x => x.startsWith('owed resume'))]
+}
+
+const sent = (w: World, notice: RegExp) => w.notices.some(t => notice.test(t))
+
+test('H1: a policy refusal\'s notice that gets no answer holds no later stop and no look (puma-9arph.85)', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await loggedWorld(on, w)
+  await start($, clock)
+  w.refuseEnv = true
+  w.notifyHold = NEVER_ANSWERED
+  w.usage['tok-1'] = [100, 41]
+  await $.classic.StopFailure({ error: 'rate_limit' })
+  const counts = await secondStopAndLook($, clock, store, w)
+  expect([sent(w, POLICY_NOTICE), ...counts]).toEqual([true, 2, true])
+})
+
+test('H2: a rejected sign-in\'s notice that gets no answer holds no later stop (puma-9arph.85)', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await loggedWorld(on, w)
+  await start($, clock)
+  w.notifyHold = NEVER_ANSWERED
+  await $.classic.StopFailure({ error: 'authentication_failed' })
+  const [heard] = await secondStopAndLook($, clock, store, w)
+  expect([sent(w, LOCKOUT_NOTICE), heard]).toEqual([true, 2])
+})
+
+test('H3: a Fable stop that stays, its notice unanswered, holds no later stop and no look (puma-9arph.85)', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await loggedWorld(on, w, { 'rotate-to': 'off' })
+  await start($, clock)
+  w.notifyHold = NEVER_ANSWERED
+  await $.classic.StopFailure(FABLE_STOP)
+  const counts = await secondStopAndLook($, clock, store, w)
+  expect([sent(w, STAY_NOTICE), ...counts]).toEqual([true, 2, true])
+})
+
+test('H4: a window that can\'t switch, its stuck notice unanswered at a stop, holds no later stop and no look (puma-9arph.85)', async ($, on) => {
+  const w = fresh()
+  w.refuseEnv = true
+  const { store, clock } = await loggedWorld(on, w)
+  await start($, clock)
+  // At the start the login in use has room: nothing stuck is told yet.
+  expect(sent(w, STUCK_NOTICE)).toBe(false)
+  w.notifyHold = NEVER_ANSWERED
+  w.usage['tok-1'] = [100, 41]
+  await $.classic.StopFailure({ error: 'rate_limit' })
+  const counts = await secondStopAndLook($, clock, store, w)
+  expect([sent(w, STUCK_NOTICE), ...counts]).toEqual([true, 2, true])
+})
+
+test('H5: a policy refusal\'s notice at the start that gets no answer holds none of the start\'s own checks (puma-9arph.85)', async ($, on) => {
+  const w = fresh()
+  w.refuseEnv = true
+  w.notifyHold = NEVER_ANSWERED
+  const { clock } = await loggedWorld(on, w)
+  await start($, clock)
+  // Before the minute's tick: only the start's own check reads the usage.
+  expect([sent(w, POLICY_NOTICE), w.usageCalls.length > 0]).toEqual([true, true])
+})
+
+/** No stop's recovery ended in this world: what the stop hook's catch writes. */
+const isEnded = (store: Map<string, unknown>, w: World) => whats(stopLogOf(store, w)).some(x => x.startsWith('stop handling failed'))
+
+/**
+ * R1, the class: each site where the terminal refuses the notice, in a world of its own. Each answers 'none', or what
+ * the refusal ended there. A site whose notice was never sent is an offender too, so no site passes on a world that
+ * skipped it.
+ */
+const REFUSED_SITES: [string, ($: Engine, on: On) => Promise<string>][] = [
+  [
+    'blocked at a stop: the stop still says it stayed',
+    async ($, on) => {
+      const w = fresh()
+      const { store, clock } = await loggedWorld(on, w)
+      await start($, clock)
+      w.refuseEnv = true
+      w.isNotifyRefused = true
+      w.usage['tok-1'] = [100, 41]
+      await $.classic.StopFailure({ error: 'rate_limit' })
+      await clock.settle()
+      if (!sent(w, POLICY_NOTICE)) return 'notice never sent'
+      if (isEnded(store, w)) return 'stop handling failed'
+      return whats(stopLogOf(store, w)).includes('stayed: switching blocked') ? 'none' : 'no stayed line'
+    },
+  ],
+  [
+    'blocked at the start: the start runs on',
+    async ($, on) => {
+      const w = fresh()
+      w.refuseEnv = true
+      w.isNotifyRefused = true
+      const { clock } = await loggedWorld(on, w)
+      await start($, clock)
+      if (!sent(w, POLICY_NOTICE)) return 'notice never sent'
+      if (debugLines(w, 'start failed').length > 0) return 'start failed'
+      return w.usageCalls.length > 0 ? 'none' : 'the start read no usage'
+    },
+  ],
+  [
+    'announceLockout at a stop: the session still moves and carries on',
+    async ($, on) => {
+      const w = fresh()
+      const { store, clock } = await loggedWorld(on, w)
+      await start($, clock)
+      w.isNotifyRefused = true
+      await $.classic.StopFailure({ error: 'authentication_failed' })
+      await clock.settle()
+      await clock.advance(36_000)
+      if (!sent(w, LOCKOUT_NOTICE)) return 'notice never sent'
+      if (isEnded(store, w)) return 'stop handling failed'
+      return w.submitted.length === 1 ? 'none' : `carry-ons sent: ${w.submitted.length}`
+    },
+  ],
+  [
+    'announceLockout in a check: the check saves no failure',
+    async ($, on) => {
+      const w = fresh()
+      w.isNotifyRefused = true
+      // Login 2 has nothing in the keychain: the start's check finds it needing a sign-in.
+      w.keychain['Claude Code-credentials'] = blob('tok-1')
+      w.usage['tok-1'] = [20, 30]
+      const store = new Map<string, unknown>(Object.entries(TWO_LOGINS))
+      const clock = world(on, w, store)
+      await start($, clock)
+      if (!sent(w, LOCKOUT_NOTICE)) return 'notice never sent'
+      const failed = store.get('check-error:2') as { why?: string } | undefined
+      return failed?.why?.includes('the check failed') === true ? `check error saved: ${failed.why}` : 'none'
+    },
+  ],
+  [
+    'announceStay: the stop ends as it would',
+    async ($, on) => {
+      const w = fresh()
+      const { store, clock } = await loggedWorld(on, w, { 'rotate-to': 'off' })
+      await start($, clock)
+      w.isNotifyRefused = true
+      await $.classic.StopFailure(FABLE_STOP)
+      await clock.settle()
+      if (!sent(w, STAY_NOTICE)) return 'notice never sent'
+      return isEnded(store, w) ? 'stop handling failed' : 'none'
+    },
+  ],
+  [
+    'the stuck notice at a stop: the stop still says it stayed',
+    async ($, on) => {
+      const w = fresh()
+      w.refuseEnv = true
+      const { store, clock } = await loggedWorld(on, w)
+      await start($, clock)
+      w.isNotifyRefused = true
+      w.usage['tok-1'] = [100, 41]
+      await $.classic.StopFailure({ error: 'rate_limit' })
+      await clock.settle()
+      if (!sent(w, STUCK_NOTICE)) return 'notice never sent'
+      if (isEnded(store, w)) return 'stop handling failed'
+      return whats(stopLogOf(store, w)).includes('stayed: switching blocked') ? 'none' : 'no stayed line'
+    },
+  ],
+  [
+    // The kit fails the FILE on a rejection nothing handles ("the file ran to its end"): that row is this site's RED.
+    'awaitFreeLogin, its debug lines refused too: the debt is still owed',
+    async ($, on) => {
+      const w = fresh()
+      const { store, clock } = await loggedWorld(on, w)
+      w.usage['tok-2'] = [100, 41]
+      await start($, clock)
+      w.isNotifyRefused = true
+      w.isLogFailing = () => true
+      w.usage['tok-1'] = [100, 41]
+      await $.classic.StopFailure({ error: 'rate_limit' })
+      await clock.settle()
+      if (!sent(w, NO_LOGIN_NOTICE)) return 'notice never sent'
+      if (isEnded(store, w)) return 'stop handling failed'
+      return whats(stopLogOf(store, w)).some(x => x.startsWith('no login left')) ? 'none' : 'no debt owed'
+    },
+  ],
+]
+
+for (const [site, run] of REFUSED_SITES) {
+  test(`R1: a notice the terminal refuses ends nothing: ${site} (puma-9arph.85)`, async ($, on) => {
+    expect(await run($, on)).toBe('none')
   })
 }
