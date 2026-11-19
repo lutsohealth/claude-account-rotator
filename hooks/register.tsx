@@ -404,6 +404,17 @@ async function writeSwitch($: Host, by: SwitchWriter, fn: (v: View) => View): Pr
 /** Something the person should know that nothing on screen says: a toast, on screen for a while. */
 const tell = ($: Host, text: string) => $.ui.toast(text, { timeoutMs: 8000 })
 const debug = ($: Host, text: string) => $.ui.log(`account-rotator: ${text}`, { to: 'debug' })
+/**
+ * The terminal's own notice, sent and not waited for: one the terminal never answers holds nothing, and one it refuses
+ * ends nothing. Its rejection is caught, and so is a throw at the call.
+ */
+function notify($: Host, text: string): void {
+  try {
+    void $.ui.notify(text, { title: TITLE }).catch(error => debug($, `notice failed: ${String(error)}`))
+  } catch (error) {
+    void debug($, `notice failed: ${String(error)}`)
+  }
+}
 
 function isAccount(value: unknown): value is Account {
   if (typeof value !== 'object' || value === null) return false
@@ -1127,7 +1138,7 @@ async function blocked($: Host): Promise<boolean> {
   await setView($, v => ({ ...v, isSwitchBlocked: true }))
   const text = blockedText(view)
   $.ui.toast(text, { timeoutMs: 15_000 })
-  await $.ui.notify(text, { title: TITLE })
+  notify($, text)
   return true
 }
 
@@ -1149,7 +1160,7 @@ async function checkSwitching($: Host, slot: string): Promise<void> {
 async function announceLockout($: Host, account: Account, why: string): Promise<void> {
   const text = `${claudeAccount(account, (await getView($)).accounts)} needs a sign-in (${why}). Click ⚠${account.id} under the prompt.`
   $.ui.toast(text, { timeoutMs: 8000 })
-  await $.ui.notify(text, { title: TITLE })
+  notify($, text)
 }
 
 /** The reasons a Fable stop left the session where it was that the terminal has been told: each once a session, however many stops follow. */
@@ -1160,7 +1171,7 @@ async function announceStay($: Host): Promise<void> {
   const stay = fableStay(await getView($), await $.clock.now(), isConnectingChrome, untaken)
   if (stay === undefined || toldStays.has(stay.reason)) return
   toldStays.add(stay.reason)
-  await $.ui.notify(stay.text, { title: TITLE })
+  notify($, stay.text)
 }
 
 /**
@@ -1521,7 +1532,7 @@ async function maybeRotate($: Host, need?: Need, carry?: CarryOn): Promise<boole
       await setView($, v => ({ ...v, isStuckTold: true }))
       kept = { ...kept, isStuckTold: true }
       $.ui.toast(stuck, { timeoutMs: 15_000 })
-      await $.ui.notify(stuck, { title: TITLE })
+      notify($, stuck)
     }
     return stays('switching blocked')
   }
@@ -1587,8 +1598,8 @@ function awaitFreeLogin($: Host, view: View, now: number): void {
   void (async () => {
     await setView($, v => ({ ...v, carryDue: owed }))
     $.ui.toast(text, { timeoutMs: 15_000 })
-    await $.ui.notify(text, { title: TITLE })
-  })().catch(error => debug($, `no-login notice failed: ${String(error)}`))
+    notify($, text)
+  })().catch(error => debug($, `carry-on owed not written to the view: ${String(error)}`))
 }
 
 /**
