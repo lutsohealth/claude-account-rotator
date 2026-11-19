@@ -10416,6 +10416,32 @@ test('with every login spent, a later stop that moves to a login freed since end
   expect([w.submitted.length, whats(stopLogOf(store, w)).filter(isOwedCarryOnLine), owedAfter]).toEqual([1, [], undefined])
 })
 
+test('with every login spent, Connect\'s visit to the extension\'s login leaves the carry-on owed: it goes once that login frees up (puma-9arph.84)', async ($, on) => {
+  const w = fresh()
+  w.chrome = { extensions: [''] }
+  const { store, clock } = await loggedWorld(on, w, { 'chrome-account': '1' })
+  const view = watchedView(on)
+  w.usage['tok-2'] = [100, 30]
+  await start($, clock)
+  w.usage['tok-1'] = [100, 41]
+  await $.classic.StopFailure(PLAIN)
+  await clock.settle()
+  // Chrome opens in a second profile, signed in to login 2's account, and the person connects it there.
+  w.chrome.extensions.push(SLOT2)
+  const pane = await mountPane($)
+  await pane.press({ key: 'chrome-others' })
+  await clock.settle()
+  await pane.redraw()
+  await pane.press({ key: 'chrome-try-2' })
+  await clock.settle()
+  await clock.advance(36_000)
+  await pane.unmount()
+  // With login 1 spent, the visit leaves the session on login 2; the carry-on owed stands.
+  expect([w.envSets.at(-1)?.value, view()?.carryDue?.from]).toEqual([SLOT2, '1'])
+  await clock.advance(Date.parse('2026-10-12T12:10:00Z') - clock.now())
+  expect([w.submitted.length, whats(stopLogOf(store, w)).filter(isOwedCarryOnLine)]).toEqual([1, ['a login is free: carry-on on 2']])
+})
+
 test('with every login spent, Use now pressed during the write clearing the carry-on owed ends it: nothing goes there once that login frees up (puma-9arph.84)', async ($, on) => {
   const w = fresh()
   const { store, clock } = await loggedWorld(on, w)
