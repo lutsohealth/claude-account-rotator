@@ -15033,7 +15033,7 @@ async function droppedDuringVisit($: Engine, on: On, end: 'lands' | 'refused') {
 }
 
 for (const end of ['lands', 'refused'] as const) {
-  const what = end === 'lands' ? 'ends goes once, after the visit closes' : "throws goes once, from the visit's catch, before the visit closes"
+  const what = end === 'lands' ? 'ends goes once, after the visit closes' : 'throws goes once, before the visit closes'
   test(`91-D${end === 'lands' ? '1' : '2'}: a carry-on turned away behind a submit dropped during a Connect visit that ${what} (puma-9arph.91)`, async ($, on) => {
     const r = await droppedDuringVisit($, on, end)
     expect([r.first, r.active, r.isTurnedAway], 'the first carry-on held on login 2, the second turned away on login 3').toEqual([['2', 1], '3', true])
