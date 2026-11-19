@@ -14206,21 +14206,23 @@ const REFUSED_SITES: [string, ($: Engine, on: On) => Promise<string>][] = [
     },
   ],
   [
-    // The kit fails the FILE on a rejection nothing handles ("the file ran to its end"): that row is this site's RED.
-    'awaitFreeLogin, its debug lines refused too: the debt is still owed',
+    // A missing catch on the notice fails the FILE instead ("the file ran to its end": the kit's row for a rejection
+    // nothing handles). This row holds where the refusal lands: in the notice's own catch, not the view write's.
+    'awaitFreeLogin: the refusal lands in the notice\'s own catch, not the view write\'s, and the debt is owed',
     async ($, on) => {
       const w = fresh()
       const { store, clock } = await loggedWorld(on, w)
       w.usage['tok-2'] = [100, 41]
       await start($, clock)
       w.isNotifyRefused = true
-      w.isLogFailing = () => true
       w.usage['tok-1'] = [100, 41]
       await $.classic.StopFailure({ error: 'rate_limit' })
       await clock.settle()
       if (!sent(w, NO_LOGIN_NOTICE)) return 'notice never sent'
       if (isEnded(store, w)) return 'stop handling failed'
-      return whats(stopLogOf(store, w)).some(x => x.startsWith('no login left')) ? 'none' : 'no debt owed'
+      if (!whats(stopLogOf(store, w)).some(x => x.startsWith('no login left'))) return 'no debt owed'
+      const caught = (w.logged ?? []).filter(line => line.startsWith('account-rotator: notice failed:')).length
+      return caught === 1 ? 'none' : `notice refusals caught by the notice's own catch: ${caught}`
     },
   ],
 ]
