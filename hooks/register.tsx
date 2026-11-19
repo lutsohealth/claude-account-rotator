@@ -996,9 +996,13 @@ async function noteChromeAccount($: Host, id: string, isSeen: boolean): Promise<
 
 type Stored = { state: 'present'; credential: Credential | undefined } | { state: 'absent' } | { state: 'unreadable'; code: number }
 
-/** A slot's stored login, from the keychain on macOS or its file elsewhere (Linux); the secret stays in this module. */
+/**
+ * A slot's stored login, from the keychain on macOS or its file elsewhere (Linux); the secret stays in this module.
+ * Throws CredentialReadTimedOut once READ_TIMEOUT_MS passes with no answer.
+ */
 async function readStored($: Host, slot: string): Promise<Stored> {
-  return (await $.fs.exists(MACOS_MARKER)) ? readKeychain($, slot) : readCredentialsFile($, slot)
+  const read = (async () => ((await $.fs.exists(MACOS_MARKER)) ? readKeychain($, slot) : readCredentialsFile($, slot)))()
+  return answerWithin($, 'CredentialReadTimedOut', read)
 }
 
 async function readKeychain($: Host, slot: string): Promise<Stored> {
@@ -1338,8 +1342,7 @@ async function checkAccount($: Host, account: Account, gate: UsageGate): Promise
   const now = await $.clock.now()
   let hasFreshFable = false
   if (signingIn === account.id) return hasFreshFable
-  // Bounded here and not in readStored: refreshingSoon's read must hold the move when it cannot answer (puma-9arph.57).
-  const stored = await answerWithin($, 'CredentialReadTimedOut', readStored($, account.slot))
+  const stored = await readStored($, account.slot)
   if (stored.state === 'unreadable') {
     tell($, `Could not read ${claudeAccount(account, (await getView($)).accounts)} from the keychain (exit ${stored.code}); is it locked?`)
     return hasFreshFable
@@ -1631,7 +1634,15 @@ async function carryOnWhenFree($: Host): Promise<void> {
 async function refreshingSoon($: Host, view: View, target: Account, now: number): Promise<Account | undefined> {
   const active = view.accounts.find(a => a.id === view.activeId)
   if (active === undefined || active.id === target.id) return undefined
-  const stored = await readStored($, active.slot)
+  let stored: Stored
+  try {
+    stored = await readStored($, active.slot)
+  } catch (error) {
+    // A read with no answer tells no expiry, so it holds: a switch through the guard can save the old login's token
+    // under the new slot. The minute's retry reads again. A refused read throws, as before (RULING 7121).
+    if (errorName(error) !== 'CredentialReadTimedOut') throw error
+    return active
+  }
   const credential = stored.state === 'present' ? stored.credential : undefined
   // A token that has already run out is refreshed first of all, at the session's next request: the switch waits for it too.
   // A sign-in whose refresh token has run out refreshes nothing, and nor does one already rejected with its token run out:
@@ -2134,7 +2145,15 @@ async function lookOwed($: Host): Promise<void> {
     if (why === 'no Orca pane') tellOnce($, ep, 'pane', 'owed resume: no Orca pane, waits for an Esc')
     if (why === 'Escapes spent') tellOnce($, ep, 'stuck', `owed resume stuck: ${ep.budget} Escapes spent, not entered`)
     if (why !== undefined || look.pane === undefined) return undefined
-    const box = await $.prompt.fill({ text: '', mode: 'append' })
+    // Bounded, as the look holds the lock: a fill with no answer is no key. A rejected fill throws, as before.
+    const box = await answerWithin($, 'PromptFillTimedOut', $.prompt.fill({ text: '', mode: 'append' })).catch(error => {
+      if (errorName(error) !== 'PromptFillTimedOut') throw error
+      return undefined
+    })
+    if (box === undefined) {
+      tellOnce($, ep, 'after fill: no answer', 'owed resume: fill got no answer, no key')
+      return undefined
+    }
     // Every gate the look read before its fill is read again with no await before the key, the fill's answer being the
     // last awaited (puma-9arph.81, Codex round 1 F1): a prompt entering, a move (against the look's own `now`, so a move
     // during the look reads as settling), a hold (from `kept`, which every view write of this session updates), or a turn
@@ -2229,7 +2248,7 @@ async function lookOwnContinue($: Host): Promise<void> {
     look = { ...look, box: { text: box?.text } }
     why = ownContinueHeldBack(look)
     if (why !== undefined) return tellWhy(why)
-    const fill = await $.prompt.fill({ text: '', mode: 'append' }).catch(() => undefined)
+    const fill = await answerWithin($, 'PromptFillTimedOut', $.prompt.fill({ text: '', mode: 'append' })).catch(() => undefined)
     look = { ...look, fill: fill === undefined ? { isFilled: false } : { isFilled: fill.isFilled, refusal: fill.refusal, text: fill.text } }
     why = ownContinueHeldBack(look)
     if (why !== undefined) return tellWhy(why)
@@ -2278,7 +2297,7 @@ async function nudgeIfDue($: Host, ep: Episode, view: View, now: number): Promis
     // The one more waits for the token's expiry, and for a quiet session as the first did.
     if (ep.isRenudged === true || ep.nudge === undefined || now < ep.nudge.expiresAt || !isQuiet) return false
   }
-  const stored = await answerWithin($, 'CredentialReadTimedOut', readStored($, active.slot)).catch(() => undefined)
+  const stored = await readStored($, active.slot).catch(() => undefined)
   const credential = stored?.state === 'present' ? stored.credential : undefined
   const boxText = (await answerWithin($, 'PromptReadTimedOut', $.prompt.read()).catch(() => undefined))?.text
   const why = nudgeHeld({
@@ -2368,7 +2387,7 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
   // through its expiry release. A token that cannot be read or digested is not the same one: the drop below runs.
   if (ep?.nudgedAt !== undefined && error !== 'rate_limit' && view.held !== undefined) {
     if (error === 'authentication_failed' && ep.nudge !== undefined && ep.nudge.expiresAt <= ep.nudge.at) {
-      const stored = await answerWithin($, 'CredentialReadTimedOut', readStored($, active.slot)).catch(() => undefined)
+      const stored = await readStored($, active.slot).catch(() => undefined)
       const credential = stored?.state === 'present' ? stored.credential : undefined
       const isSameExpiry = credential !== undefined && credential.expiresAt === ep.nudge.expiresAt
       const token = isSameExpiry ? await fingerprint(credential.refreshToken ?? credential.accessToken).catch(() => undefined) : undefined
