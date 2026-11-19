@@ -14597,3 +14597,22 @@ test('87-B2: a carry-on owed that a press ends during a refused clear, the read 
   expect([views.clearsRefused() > 0, views.readsRefused(), views.view()?.carryDue !== undefined]).toEqual([true, 1, true])
   expect(carryEndedOf(store, w)).toEqual({ owedAt: views.view()?.carryDue?.owedAt })
 })
+
+test('87-B3: a carry-on owed that a press ends during a clear that lands, the read after it failing, is not owed again (puma-9arph.87)', async ($, on) => {
+  const { clock, views, w } = await owedWithRefusals($, on)
+  views.refuseReadAfterClear()
+  const release = views.holdNext(true)
+  await clock.advance(Date.parse('2026-10-12T12:02:00Z') - clock.now())
+  for (let i = 0; i < 5 && views.held() === 0; i += 1) {
+    await clock.advance(60_000)
+    await settleReal(clock)
+  }
+  const { pane, pressed } = await pressUse2($, clock, w)
+  expect([views.held(), ...pressed], 'the clear is held while the press ends the debt').toEqual([1, true, SLOT2])
+  release()
+  await settleReal(clock)
+  await clock.advance(10 * 60_000)
+  await pane.unmount()
+  expect(views.readsRefused(), 'the read after the clear was refused').toBe(1)
+  expect([views.view()?.carryDue, w.submitted.length]).toEqual([undefined, 0])
+})
