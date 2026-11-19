@@ -14300,7 +14300,9 @@ test('86-B1: a carry-on owed whose first view write is refused is written into t
   expect(views.view()?.carryDue?.from).toBe('1')
 })
 
-test('86-B3: a carry-on owed whose write after /clear is refused is written into the view again at the next tick (puma-9arph.86)', async ($, on) => {
+// A guard, green with no write-again: the refused write leaves the view unbound, and isBound, at the next tick's
+// maybeRotate, runs rebindSession again, the debt included.
+test('86-B3: a carry-on owed whose write after /clear is refused is back in the view at the next tick, as the rebind runs again (puma-9arph.86)', async ($, on) => {
   on('classic.SessionStart', () => ({}))
   const { clock, views } = await owedWithRefusals($, on)
   expect(views.view()?.carryDue?.from, 'the debt is in the view before /clear').toBe('1')
@@ -14334,6 +14336,8 @@ test('86-A1: a carry-on owed waits while a Connect visit runs, and goes once at 
   w.usage['tok-1'] = [100, 41]
   await $.classic.StopFailure(PLAIN)
   await clock.settle()
+  // Close to the time owed before the visit begins: every minute advanced while a slot write is held costs real time.
+  await clock.advance(Date.parse('2026-10-12T11:58:00Z') - clock.now())
   // The visit's move waits at its slot write, so Connect holds the session through the time owed and its grace.
   let endVisit = () => {}
   const visit = new Promise<void>(resolve => {
@@ -14349,10 +14353,11 @@ test('86-A1: a carry-on owed waits while a Connect visit runs, and goes once at 
   // A held slot write keeps the kit's settle waiting: settle on real time instead, as the late-landing tests do.
   await settleReal(clock)
   await clock.advance(Date.parse('2026-10-12T12:06:00Z') - clock.now())
-  const during = [w.submitted.length, view()?.carryDue?.from]
+  // The staging took: the visit to login 2 is still under way.
+  const during = [w.submitted.length, view()?.carryDue?.from, view()?.chromeConnecting]
   endVisit()
   await settleReal(clock)
   await clock.advance(10 * 60_000)
   await pane.unmount()
-  expect([during, w.submitted.length, whats(stopLogOf(store, w)).filter(isOwedCarryOnLine).length]).toEqual([[0, '1'], 1, 1])
+  expect([during, w.submitted.length, whats(stopLogOf(store, w)).filter(isOwedCarryOnLine).length]).toEqual([[0, '1', '2'], 1, 1])
 })
