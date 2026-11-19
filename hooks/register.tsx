@@ -245,7 +245,7 @@ let clearedFor: number | undefined
  * The one carry-on owed after a usage-limit stop found no login to move to, as the view's `carryDue` holds it: set once,
  * by the first such stop, with no await between its read and its write, so a second stop adds no notice and no retry.
  */
-let due: { at?: number; from?: string; turns?: number } | undefined
+let due: { at?: number; from?: string; owedAt?: number; turns?: number } | undefined
 /** How many switches ended the carry-on owed (endDue): one landing while carryOnWhenFree writes is not undone by it. */
 let dueEndings = 0
 /** The turns open now, the main loop's and every agent's or teammate's, by id: a key sent while one runs would answer its dialog. */
@@ -716,12 +716,20 @@ function logStop($: Host, what: string): Promise<void> {
   return stopLogChain
 }
 
-/** Deletes the stop-logs of sessions whose last entry is over a week old, with those that hold none. */
+/**
+ * Deletes the stop-logs of sessions whose last entry is over a week old, with those that hold none, and each session's
+ * carry-on ended mark (markCarryEnded) owed over a week ago or holding no time.
+ */
 async function pruneStopLogs($: Host): Promise<void> {
   const now = await $.clock.now()
-  for (const key of (await $.store.keys()).filter(k => k.startsWith('stop-log:'))) {
+  const keys = await $.store.keys()
+  for (const key of keys.filter(k => k.startsWith('stop-log:'))) {
     const last = stopLogFrom(await $.store.get(key)).at(-1)
     if (last === undefined || now - last.at > STOP_LOG_MAX_AGE_MS) await $.store.delete(key)
+  }
+  for (const key of keys.filter(k => k.startsWith(CARRY_ENDED))) {
+    const owedAt = (await $.store.get(key) as { owedAt?: unknown } | undefined)?.owedAt
+    if (typeof owedAt !== 'number' || now - owedAt > STOP_LOG_MAX_AGE_MS) await $.store.delete(key)
   }
 }
 
@@ -1571,7 +1579,7 @@ async function maybeRotate($: Host, need?: Need, carry?: CarryOn): Promise<boole
 function awaitFreeLogin($: Host, view: View, now: number): void {
   if (due !== undefined) return
   const at = firstFreeAt(view, now, untaken)
-  const owed = at === undefined ? { from: view.activeId } : { at, from: view.activeId }
+  const owed = at === undefined ? { from: view.activeId, owedAt: now } : { at, from: view.activeId, owedAt: now }
   // The main turns so far, held in this module only: a reload drops it, and the carry-on then goes after the grace.
   due = { ...owed, turns: mainTurns }
   void logStop($, `no login left: one carry-on ${at === undefined ? 'once a login frees up' : `at ${new Date(at).toISOString()}`}`)
@@ -1601,13 +1609,14 @@ async function carryOnWhenFree($: Host): Promise<void> {
   if (due === undefined) return
   const owed = due
   const endings = dueEndings
-  due = undefined
-  await setView($, v => ({ ...v, carryDue: undefined }))
+  const isCleared = await clearCarryDue($)
+  // Each exit below that ends what is owed calls this: where the view still holds it, a reload's boot then owes it no more.
+  const ended = () => (isCleared ? Promise.resolve() : markCarryEnded($, owed))
   // A turn or a switch can come during that write: the decision is made from what stands after it.
   const after = await getView($)
   if (after.activeId !== view.activeId || shouldLeave(after, now)) {
     // A switch that ended what is owed moved it: nothing stays owed.
-    if (dueEndings !== endings) return
+    if (dueEndings !== endings) return ended()
     // The login moved meanwhile: the carry-on stays owed, decided again at the next tick.
     if (due === undefined) due = owed
     const held = due
@@ -1617,17 +1626,62 @@ async function carryOnWhenFree($: Host): Promise<void> {
   }
   const hasTurnRun = isSameLogin && owed.turns !== undefined && mainTurns > owed.turns
   void logStop($, hasTurnRun ? 'a turn ran since the stop: no carry-on' : `a login is free: carry-on on ${view.activeId}`)
-  if (hasTurnRun) return
+  if (hasTurnRun) return ended()
   const since = after.pending?.since
   if (since === undefined || now - since >= SETTLE_MS) {
+    // Marked before the carry-on goes: one whose submit throws went all the same.
+    await ended()
     // Still on the login the stop found spent: nothing switched, so the line says its limit reset.
     await carryOn($, undefined, view.activeId === owed.from ? CONTINUE_RESET : undefined)
     return
   }
   // A stop that rode this switch and armed its carry-on during the clearing write above: no second one.
-  if (carriedFor === since) return
+  if (carriedFor === since) return ended()
   carryOnAfterSettle($, {})
   carriedFor = since
+  return ended()
+}
+
+/**
+ * Clears the carry-on owed, in this module at once and then in the view. Answers whether the view write went: one
+ * refused leaves the view holding it, which its caller marks ended (markCarryEnded) once it ends it.
+ */
+async function clearCarryDue($: Host): Promise<boolean> {
+  due = undefined
+  try {
+    await setView($, v => ({ ...v, carryDue: undefined }))
+    return true
+  } catch (error) {
+    await debug($, `carry-on owed not cleared: ${String(error)}`)
+    return false
+  }
+}
+
+/** What the store keeps per session: when the carry-on owed was owed that this module ended though its view kept it. */
+const CARRY_ENDED = 'carry-ended:'
+
+/**
+ * Marks the carry-on owed as ended under `carry-ended:<session mark>`, so a reload's boot does not owe it again while the
+ * view still holds it. One with no `owedAt` (an older version of the mod owed it) is never marked: nothing names it.
+ * Never fails its caller: a refused write, or no session mark, leaves a reload owing it once more.
+ */
+async function markCarryEnded($: Host, owed: { owedAt?: number }): Promise<void> {
+  if (owed.owedAt === undefined) return
+  try {
+    const mark = (await getView($)).sessionMark ?? kept.mark
+    if (mark === undefined) return
+    await $.store.set(`${CARRY_ENDED}${mark}`, { owedAt: owed.owedAt })
+  } catch (error) {
+    await debug($, `carry-on end not marked: ${String(error)}`)
+  }
+}
+
+/** When the carry-on owed was owed that `mark`'s session ended though its view kept it; undefined where none is marked. */
+async function carryEndedAt($: Host, mark: string | undefined): Promise<number | undefined> {
+  if (mark === undefined) return undefined
+  const marked = await $.store.get(`${CARRY_ENDED}${mark}`).catch(() => undefined)
+  const owedAt = (marked as { owedAt?: unknown } | undefined)?.owedAt
+  return typeof owedAt === 'number' ? owedAt : undefined
 }
 
 /** The login in use, when its token refreshes too soon for the refresh guard to let the session leave it for `target`. */
@@ -1813,8 +1867,8 @@ function endDue($: Host, carry: CarryOn | undefined, isRotation: boolean, isQuie
   // Counted even while carryOnWhenFree's clearing write runs, with `due` already cleared, so that write keeps it ended.
   dueEndings += 1
   if (due === undefined) return
-  due = undefined
-  void setView($, v => ({ ...v, carryDue: undefined })).catch(error => debug($, `carry-on owed not cleared: ${String(error)}`))
+  const owed = due
+  void clearCarryDue($).then(isCleared => (isCleared ? undefined : markCarryEnded($, owed)))
 }
 
 /** The switch that owns the session by `token`: every write that names the switch applies only while it still owns it. */
@@ -3312,7 +3366,15 @@ async function boot($: Host, isInteractive: boolean): Promise<void> {
   if (survived.isBound === true && survived.isStuckTold !== undefined) kept = { ...kept, isStuckTold: survived.isStuckTold }
   // So does a carry-on owed once a login frees up: the tick, armed again by the reload, sends it. The reload zeroed the
   // count of main turns, so the grace counts from here: a turn after the reload shows Claude Code carried on by itself.
-  if (survived.isBound === true && survived.carryDue !== undefined && due === undefined) due = { ...survived.carryDue, turns: mainTurns }
+  // One this session ended though the view kept it, which the store marks by when it was owed, is cleared again instead.
+  const survivedDue = survived.carryDue
+  if (survived.isBound === true && survivedDue !== undefined && due === undefined) {
+    const endedAt = survivedDue.owedAt === undefined ? undefined : await carryEndedAt($, survived.sessionMark)
+    const isEnded = endedAt !== undefined && endedAt === survivedDue.owedAt
+    // A stop during that read owes its own: it stands, and nothing is cleared or restored over it.
+    if (due === undefined && isEnded) await clearCarryDue($)
+    else if (due === undefined) due = { ...survivedDue, turns: mainTurns }
+  }
   // Terminal.app is the terminal that names itself so and draws block characters from its font.
   const hasFontBlocks = (await $.env.get('TERM_PROGRAM')) === 'Apple_Terminal'
   kept = { ...kept, hasFontBlocks }

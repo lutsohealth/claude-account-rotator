@@ -228,8 +228,8 @@ export type View = {
   hasOlderWriter?: boolean
   /** This session only: it was told that the login in use is spent and the session can't leave it. */
   isStuckTold?: boolean
-  /** This session only: a usage-limit stop found no login to move to, so it carries on by itself at `at`, when the first login frees up; with no `at`, once one does. `from` is the login in use at the stop. */
-  carryDue?: { at?: number; from?: string }
+  /** This session only: a usage-limit stop found no login to move to, so it carries on by itself at `at`, when the first login frees up; with no `at`, once one does. `from` is the login in use at the stop; `owedAt`, when it was owed, names it among the debts this session's store marks ended. */
+  carryDue?: { at?: number; from?: string; owedAt?: number }
   /**
    * The account the Chrome extension is signed in to, the only one it answers:
    * picked in the pane, or learned when Claude in Chrome paired; kept across sessions.
