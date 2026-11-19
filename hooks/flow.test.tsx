@@ -14239,26 +14239,49 @@ for (const [site, run] of REFUSED_SITES) {
 // ---------------------------------------------------------------- puma-9arph.86: a debt the view lacks, and a Connect visit
 
 /**
- * The test's one handler of state.get and state.set. `refuse(n)` refuses the next n view writes that set carryDue, as an
- * engine that refuses the write; `clear()` makes reads find the default view until the mod writes it, as /clear does;
- * `view()` is what a read finds.
+ * The test's one handler of state.get and state.set. `refuse(n)` refuses the next n view writes that put carryDue into a
+ * view that lacks it, as an engine that refuses the write; `clear()` makes reads find the default view until the mod writes it, as /clear does;
+ * `spendAfterClear()` makes every read after the next write that clears carryDue find login 1 needing a sign-in, so the
+ * check after that write finds it spent; `holdNext()` holds the next such write that puts carryDue in, `holdNext(true)` the
+ * next that clears it, until the release it answers is called; `view()` is what a read finds.
  */
 function carrySetRefusal(on: On) {
   let toRefuse = 0
   let refused = 0
   let isCleared = false
+  let isSpentArmed = false
+  let isSpent = false
+  let hold: Promise<void> | undefined
+  let isHoldClear = false
+  let held = 0
   let last: View | undefined
   on('state.get', async (_$, e, next) => {
     const read = await next(e)
-    if (!isCleared || e.plugin !== 'account-rotator' || e.key !== 'view') return read
-    return { value: { value: EMPTY_VIEW, version: read.value?.version ?? 0 } }
+    if (e.plugin !== 'account-rotator' || e.key !== 'view') return read
+    if (isCleared) return { value: { value: EMPTY_VIEW, version: read.value?.version ?? 0 } }
+    if (!isSpent || read.value === undefined) return read
+    const view = read.value.value as View
+    return { value: { ...read.value, value: { ...view, health: { ...view.health, '1': { kind: 'login-needed', why: 'sign-in rejected' } } } } }
   })
   on('state.set', async (_$, e, next) => {
     const { key, value } = e as unknown as { key: string; value: View }
-    if (key === 'view' && value.carryDue !== undefined && toRefuse > 0) {
+    // A write that puts carryDue into a view that lacks it: every other view write spreads the view, the debt included.
+    const isPut = key === 'view' && value.carryDue !== undefined && (isCleared ? EMPTY_VIEW : last)?.carryDue === undefined
+    if (isPut && toRefuse > 0) {
       toRefuse -= 1
       refused += 1
       return { deny: 'state: refused' } as unknown as Awaited<ReturnType<typeof next>>
+    }
+    const isClear = key === 'view' && value.carryDue === undefined && (isCleared ? EMPTY_VIEW : last)?.carryDue !== undefined
+    if (hold !== undefined && (isHoldClear ? isClear : isPut)) {
+      const gate = hold
+      hold = undefined
+      held += 1
+      await gate
+    }
+    if (key === 'view' && isSpentArmed && value.carryDue === undefined && last?.carryDue !== undefined) {
+      isSpentArmed = false
+      isSpent = true
     }
     if (key === 'view') {
       isCleared = false
@@ -14274,6 +14297,18 @@ function carrySetRefusal(on: On) {
     clear: () => {
       isCleared = true
     },
+    spendAfterClear: () => {
+      isSpentArmed = true
+    },
+    holdNext: (isClearHeld = false) => {
+      isHoldClear = isClearHeld
+      let release = () => {}
+      hold = new Promise<void>(resolve => {
+        release = resolve
+      })
+      return release
+    },
+    held: () => held,
     view: () => (isCleared ? EMPTY_VIEW : last),
   }
 }
@@ -14312,6 +14347,37 @@ test('86-B3: a carry-on owed whose write after /clear is refused is back in the 
   expect([views.refused(), views.view()?.carryDue]).toEqual([1, undefined])
   await untilTick(clock)
   expect(views.view()?.carryDue?.from).toBe('1')
+})
+
+test('86-B2: a carry-on owed whose held write is refused, the login spent again after the clearing write, is written into the view again at the next tick (puma-9arph.86)', async ($, on) => {
+  const { store, clock, views, w } = await owedWithRefusals($, on)
+  views.spendAfterClear()
+  // The held branch's write, the next that puts the debt back into the view, is refused.
+  views.refuse(1)
+  const isHeld = () => whats(stopLogOf(store, w)).includes('carry-on held: the login moved')
+  await clock.advance(Date.parse('2026-10-12T12:02:00Z') - clock.now())
+  for (let i = 0; i < 5 && !isHeld(); i += 1) await untilTick(clock)
+  // The staging took: the clearing write landed, the login read spent after it, and the held write was refused.
+  expect([isHeld(), views.refused(), views.view()?.carryDue, w.submitted.length]).toEqual([true, 1, undefined, 0])
+  await untilTick(clock)
+  expect(views.view()?.carryDue?.from).toBe('1')
+})
+
+// RULING 7135 R2: the write-again is held in the engine's write, the debt is ended meanwhile, then the write lands.
+test('86-E1: a carry-on owed that a press ends while its write into the view again is held is not left in the view (puma-9arph.86)', async ($, on) => {
+  const { clock, views, w } = await owedWithRefusals($, on, v => v.refuse(1))
+  const release = views.holdNext()
+  await untilTick(clock)
+  await settleReal(clock)
+  expect(views.held(), 'the write-again is held').toBe(1)
+  const pane = await mountPane($)
+  void pane.press({ key: 'use-2' })
+  await settleReal(clock)
+  release()
+  await settleReal(clock)
+  await clock.advance(Date.parse('2026-10-12T12:00:00Z') - clock.now() + 10 * 60_000)
+  await pane.unmount()
+  expect([w.envSets.at(-1)?.value, views.view()?.carryDue, w.submitted.length]).toEqual([SLOT2, undefined, 0])
 })
 
 // It pins today's behaviour (no code for it, RULING 7135 R4): the store marks the debt ended before the submit, so a
@@ -14360,4 +14426,44 @@ test('86-A1: a carry-on owed waits while a Connect visit runs, and goes once at 
   await clock.advance(10 * 60_000)
   await pane.unmount()
   expect([during, w.submitted.length, whats(stopLogOf(store, w)).filter(isOwedCarryOnLine).length]).toEqual([[0, '1', '2'], 1, 1])
+})
+
+// RULING 7135 R3: a visit that begins after the tick's visit check, while the clearing write is held.
+test('86-A2: a carry-on owed whose clearing write is held while a Connect visit begins waits out the visit, and goes once after it (puma-9arph.86)', async ($, on) => {
+  const w = fresh()
+  w.chrome = { extensions: [''] }
+  const { clock } = await loggedWorld(on, w, { 'chrome-account': '1' })
+  const views = carrySetRefusal(on)
+  w.usage['tok-2'] = [100, 30]
+  await start($, clock)
+  w.usage['tok-1'] = [100, 41]
+  await $.classic.StopFailure(PLAIN)
+  await clock.settle()
+  await clock.advance(Date.parse('2026-10-12T12:02:00Z') - clock.now())
+  w.chrome.extensions.push(SLOT2)
+  const pane = await mountPane($)
+  await pane.press({ key: 'chrome-others' })
+  await clock.settle()
+  await pane.redraw()
+  let endVisit = () => {}
+  const visit = new Promise<void>(resolve => {
+    endVisit = resolve
+  })
+  w.beforeEnv = () => visit
+  const releaseClear = views.holdNext(true)
+  for (let i = 0; i < 5 && views.held() === 0; i += 1) {
+    await clock.advance(60_000)
+    await settleReal(clock)
+  }
+  void pane.press({ key: 'chrome-try-2' })
+  await settleReal(clock)
+  releaseClear()
+  await settleReal(clock)
+  // The staging took: the clearing write was held, and the visit to login 2 is under way.
+  const during = [views.held(), w.submitted.length, views.view()?.chromeConnecting]
+  endVisit()
+  await settleReal(clock)
+  await clock.advance(10 * 60_000)
+  await pane.unmount()
+  expect([during, w.submitted.length]).toEqual([[1, 0, '2'], 1])
 })
