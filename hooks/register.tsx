@@ -718,7 +718,7 @@ function logStop($: Host, what: string): Promise<void> {
 
 /**
  * Deletes the stop-logs of sessions whose last entry is over a week old, with those that hold none, and each session's
- * carry-on ended mark (markCarryEnded) owed over a week ago or holding no time.
+ * carry-on ended mark (markCarryEnded) that ended over a week ago or holds no time.
  */
 async function pruneStopLogs($: Host): Promise<void> {
   const now = await $.clock.now()
@@ -728,8 +728,8 @@ async function pruneStopLogs($: Host): Promise<void> {
     if (last === undefined || now - last.at > STOP_LOG_MAX_AGE_MS) await $.store.delete(key)
   }
   for (const key of keys.filter(k => k.startsWith(CARRY_ENDED))) {
-    const owedAt = (await $.store.get(key) as { owedAt?: unknown } | undefined)?.owedAt
-    if (typeof owedAt !== 'number' || now - owedAt > STOP_LOG_MAX_AGE_MS) await $.store.delete(key)
+    const endedAt = (await $.store.get(key) as { endedAt?: unknown } | undefined)?.endedAt
+    if (typeof endedAt !== 'number' || now - endedAt > STOP_LOG_MAX_AGE_MS) await $.store.delete(key)
   }
 }
 
@@ -1668,14 +1668,15 @@ async function markCarryEnded($: Host, owed: { owedAt?: number }): Promise<void>
   try {
     const mark = (await getView($)).sessionMark ?? kept.mark
     if (mark === undefined) return
-    await $.store.set(`${CARRY_ENDED}${mark}`, { owedAt: owed.owedAt })
+    // When it ended, which the start's sweep ages the mark from: a debt can be owed for a week before it ends.
+    await $.store.set(`${CARRY_ENDED}${mark}`, { owedAt: owed.owedAt, endedAt: await $.clock.now() })
   } catch (error) {
     await debug($, `carry-on end not marked: ${String(error)}`)
   }
 }
 
 /** When the carry-on owed was owed that `mark`'s session ended though its view kept it; undefined where none is marked. */
-async function carryEndedAt($: Host, mark: string | undefined): Promise<number | undefined> {
+async function markedOwedAt($: Host, mark: string | undefined): Promise<number | undefined> {
   if (mark === undefined) return undefined
   const marked = await $.store.get(`${CARRY_ENDED}${mark}`).catch(() => undefined)
   const owedAt = (marked as { owedAt?: unknown } | undefined)?.owedAt
@@ -3367,10 +3368,8 @@ async function boot($: Host, isInteractive: boolean): Promise<void> {
   // One this session ended though the view kept it, which the store marks by when it was owed, is cleared again instead.
   const survivedDue = survived.carryDue
   if (survived.isBound === true && survivedDue !== undefined && due === undefined) {
-    const endedAt = survivedDue.owedAt === undefined ? undefined : await carryEndedAt($, survived.sessionMark)
-    // One owed longer ago than the start's sweep keeps a mark (pruneStopLogs) is owed no more, its mark gone or not.
-    const isStale = survivedDue.owedAt !== undefined && (await $.clock.now()) - survivedDue.owedAt > STOP_LOG_MAX_AGE_MS
-    const isEnded = isStale || (endedAt !== undefined && endedAt === survivedDue.owedAt)
+    const marked = survivedDue.owedAt === undefined ? undefined : await markedOwedAt($, survived.sessionMark)
+    const isEnded = marked !== undefined && marked === survivedDue.owedAt
     // A stop during that read owes its own: it stands, and nothing is cleared or restored over it. The view is cleared
     // only while it still holds the debt examined, so a stop's own debt written meanwhile stands there too.
     const examined = survivedDue.owedAt
