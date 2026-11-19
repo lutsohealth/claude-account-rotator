@@ -2,6 +2,75 @@
 
 What each version of the account rotator changed. To get each one as Claude Code starts, turn on auto-update: in `/plugin`, open **Marketplaces**, pick **claude-account-rotator** and choose **Enable auto-update**. To update by hand, run `claude plugin marketplace update claude-account-rotator`, then `claude plugin update account-rotator@claude-account-rotator`, and start a new session.
 
+## 0.5.49-lutso.1 - 2026-11-18
+
+- **After a usage-limit stop, the Escape that closes the limit menu waits while a prompt is entering, a switch settles or a switch is held**: the look that presses it holds its key while a prompt is still entering, and once its fill of the prompt box answers it reads all three again just before the key, so no Escape goes while any of them holds. The stop log names each reason once a stop (`owed resume: no key, a prompt began entering during the fill`, `... the switch moved during the fill`, `... a switch was held during the fill`) (#141, puma-9arph.81). Proven by tests alone: no stand-in run and no real stop read it, and the flow tests cannot draw the fill's own dialog answer, so no flow test sees that Escape go or held.
+- **Not fixed yet**: the switch's own read of the stored sign-in has no 10-second bound (puma-9arph.74); a stop's rejected-sign-in mark is not bound to the token it saw, so a later token's expiry can let a held switch go (puma-9arph.69); a reload of the mod's code during a stop drops the carry-on it owes and the Esc for the limit menu (puma-9arph.66); the minute's retry of a held switch can hold it again after a drop, and its landing can carry on a second time after the first carry-on entered (puma-9arph.67); the Escape that cancels Claude Code's own continue reads once, before its waits, whether a switch is held, and not again just before its key; the two Escapes read their conditions again in code of their own, so a fix to one does not reach the other.
+
+## 0.5.48-lutso.1 - 2026-11-18
+
+- **After a usage-limit stop the work carries on once, also when a background agent's turn comes first**: the Escape that cancels Claude Code's own continue was dropped when a background agent's notification began a turn after the carry-on, and was never armed when such a turn entered the resume, so the work carried on a second time at the old account's reset. The wait for that Escape now starts once the stop's resume answers, whichever turn entered it, and only your own prompt, a new stop, the key or its deadline ends it. No key goes while any prompt is still entering, and the prompt box and the other conditions are read again just before the key (#139, puma-9arph.80). Read in a stand-in at the merged head: a weekly stop whose carry-on a background agent's turn followed carried on once, the Escape going 8 seconds after that turn; not read: a Fable stop, and any stop on a real login.
+- **Not fixed yet**: the switch's own read of the stored sign-in has no 10-second bound (puma-9arph.57); a stop's rejected-sign-in mark is not bound to the token it saw, so a later token's expiry can let a held switch go (puma-9arph.69); a reload of the mod's code during a stop drops the carry-on it owes and the Esc for the limit menu (puma-9arph.66); the minute's retry of a held switch can hold it again after a drop, and its landing can carry on a second time after the first carry-on entered (puma-9arph.67); the Escape that closes the limit menu does not read again, just before its key, whether a prompt is entering, a switch settles or a switch is held (puma-9arph.81).
+
+## 0.5.47-lutso.1 - 2026-11-18
+
+- **After a weekly or a Fable stop, the Escape that cancels Claude Code's own continue has a deadline**: the reset of the window the stop judged, plus 45 seconds. Past it the mod sends no key (`own continue: disarmed, past the own continue's deadline` in the stop log). Such a stop marks only its own window, and the deadline read only the 5-hour mark, so after a weekly or a Fable stop it had none (#136, puma-9arph.77). A flow test pins that reset for a weekly, a Fable and a 5-hour stop (#137, puma-9arph.78). Read on Claude Code 2.1.327 in a stand-in at the merged head (puma-9arph.55): a weekly stop with a draft in the box wrote the deadline line 55 seconds after the week's reset, and a weekly stop whose resume entered by a background agent's turn armed no Escape; not read: a Fable stop, a stop where the Escape goes, and any stop on a real login.
+- **Not fixed yet**: the switch's own read of the stored sign-in has no 10-second bound (puma-9arph.57); a reload of the mod's code during a stop drops the carry-on it owes and the Esc for the limit menu (puma-9arph.66); the minute's retry of a held switch can hold it again after a drop, and its landing can carry on a second time after the first carry-on entered (puma-9arph.67).
+
+## 0.5.46-lutso.1 - 2026-11-18
+
+- **After a usage-limit stop the work carries on once, not twice**: Claude Code arms its own continue at the old account's reset ("Continuing automatically · Esc to cancel"), and the mod's carry-on did not stop it, so the work carried on a second time at that reset. Once the carry-on's own turn answers, the mod presses one Escape in its Orca pane, only with no turn running, the prompt box empty and that countdown on screen (`own continue` in the stop log) (#134, puma-9arph.71). Read on Claude Code 2.1.327 in a stand-in: a 5-hour stop, a weekly stop near and far from its reset, and a Fable stop near its reset each carried on once; not read: a Fable stop far from its reset, and any stop on a real login (puma-9arph.75). Outside Orca, with a draft in the box, or after a reload of the mod's code, the countdown still continues once more.
+- **Not fixed yet**: the switch's own read of the stored sign-in has no 10-second bound; a stop's rejected-sign-in mark is not bound to the token it saw, so a later token's expiry can let a held switch go (puma-9arph.69); a reload of the mod's code during a stop drops the carry-on it owes and the Esc for the limit menu (puma-9arph.66); the minute's retry of a held switch can hold it again after a drop, and can move the session after `account use` ended the hold while no switch ran (puma-9arph.67); after a weekly or Fable stop that Escape has no deadline, as the stop marks the week and not the 5-hour window the deadline reads (puma-9arph.77).
+
+## 0.5.45-lutso.1 - 2026-11-17
+
+- **`account-rotator account use` on the account in use says so when a running switch keeps the session's held switch**: it used to answer that the session already uses that account and exit 0, while the switch could still move the session. It now says a switch is running that may move it, and exits 4: run it again in a minute (#132, puma-9arph.68).
+- **Not fixed yet**: the switch's own read of the stored sign-in has no 10-second bound; a stop's rejected-sign-in mark is not bound to the token it saw, so a later token's expiry can let a held switch go (puma-9arph.69); a reload of the mod's code during a stop drops the carry-on it owes and the Esc for the limit menu (puma-9arph.66); the minute's retry of a held switch can hold it again after a drop, and can move the session after `account use` ended the hold while no switch ran (puma-9arph.67).
+
+## 0.5.44-lutso.1 - 2026-11-17
+
+- **A switch held for a token refresh no longer waits hours while no turn runs**: with the prompt box empty, the session sends one line of its own on the account in use 4 minutes before that token runs out. The request refreshes the token, the turn stops on the limit, and that stop lands the switch and carries on (`refresh nudge` in the stop log). A token that runs out unrefreshed gets one more line, never a third, and a draft in the box holds the switch until you send it or clear the box. At the token's expiry, only a rejected sign-in the stop itself saw, or a refresh, lets the held switch go; a check's mark does not (#129, #130; puma-9arph.57, .65, .32, .64).
+- **Not fixed yet**: the switch's own read of the stored sign-in has no 10-second bound; a stop's rejected-sign-in mark is not bound to the token it saw, so a later token's expiry can let a held switch go (puma-9arph.69); a reload of the mod's code during a stop drops the carry-on it owes and the Esc for the limit menu (puma-9arph.66); the minute's retry of a held switch can hold it again after a drop (puma-9arph.67); **Use now** on the login in use can clear a held switch while a switch runs (puma-9arph.68).
+
+## 0.5.43-lutso.1 - 2026-11-17
+
+- **A read that hangs while a stop is handled no longer holds a later stop and the resume**: a stop's own read of the account, its stored sign-in, its usage or its profile, with no answer in 10 seconds counts as a failed read. The stop still marks the account, moves and carries on, and the stop log names the read that timed out (`stop read failed: UsageReadTimedOut`, `ProfileReadTimedOut` or `CredentialReadTimedOut`). Every usage and profile read, the scheduled check's too, ends at the same 10 seconds (#127, puma-9arph.59).
+- **Not fixed yet**: the switch's own read of the stored sign-in, made to see whether the token in use refreshes soon, still has no bound of the mod's own; a stop's switch held for a token refresh, with no turn running, can land after the bound (puma-9arph.57).
+
+## 0.5.42-lutso.1 - 2026-11-17
+
+- **A resume another turn interrupts or fails is acted on again, and the carry-on goes out once**: when a turn that is not the carry-on's own enters the resume and is then interrupted, fails or dies on a limit, the mod looks again and frees the waiting carry-on, and the new stop's switch sends no second one. The carry-on's own turn is told by its text inside the frame Claude Code puts around a plugin's prompt, so when it dies on a limit the next login gets a carry-on of its own. A carry-on refused or dropped while another turn runs is not brought back. The stop log says how each such entry ended (`resume ended`) (#125, puma-9arph.60).
+- **Not fixed yet**: a usage or profile read that hangs while a stop is handled holds a later stop and the resume (puma-9arph.59); a stop's switch held for a token refresh, with no turn running, can land after the bound (puma-9arph.57). A prompt you type that holds the carry-on's whole text reads as the carry-on's own turn: if it is interrupted, the waiting carry-on waits for you. An interrupted carry-on turn, and the look again after an interrupted entry, are proven by tests alone.
+
+## 0.5.41-lutso.1 - 2026-11-17
+
+- **After a usage-limit stop the session moves to a login read lately and carries on with no person**: the mod moves first to a login whose usage read is under 35 minutes old and shows room, then to one read earlier, one never read, and last one spent, never to one this stop's recovery already died on. Every 15 seconds it looks whether the carry-on still waits under Claude Code's limit menu with no turn of any agent running, and presses Escape in the session's own Orca pane so the resume enters, also when another agent's turn was open at the stop. The stop log names each step (#123, puma-9arph.54).
+- **Not fixed yet**: a resume whose entering turn ends in an error is not acted on again and waits for you (puma-9arph.60); a usage or profile read that hangs while a stop is handled holds a later stop and the resume (puma-9arph.59); a stop's switch held for a token refresh, with no turn running, can land after the bound (puma-9arph.57). The look again after an entry that is interrupted is proven by a test alone.
+
+## 0.5.40-lutso.1 - 2026-11-17
+
+- **A Fable stop is read as the Fable week in every wording Claude Code uses**: Claude Code 2.1.325 and later says "hit your Fable limit", where the mod knew only "reached your Fable limit", so such a stop marked the login's whole week spent and moved the session without looking for a login with Fable room. It now moves to a login with Fable room, marks only the Fable week and says so in the stop log, as it did before (#121, puma-9arph.56).
+
+## 0.5.39-lutso.1 - 2026-11-17
+
+- **The mod keeps an installed launcher copy current**: at a session's start it replaces `~/.claude/accounts/bin/claude` with the mod's own `bin/account-rotator-claude` when their bytes differ, through a temporary file that it reads back and tests for execute before the rename. It never makes a copy where none stands and never replaces a link; a failure leaves the old copy and is one debug line (#119, puma-9arph.26).
+
+## 0.5.38-lutso.1 - 2026-11-17
+
+- **A plain `claude` with no launch pick says on stderr when Claude Code's own login reads not signed in**: where the launcher starts `claude` on that login for want of a pick, one more line names the login as not signed in and says to type `/login`, so a start with no login says why. The `claude` still starts (#116, puma-9arph.50).
+- **The signal tests pass when a gate starts with `&`**: such a gate runs with SIGINT ignored, so the tests now give themselves the default SIGINT (#117, puma-9arph.44).
+
+## 0.5.37-lutso.1 - 2026-11-16
+
+- **A login Claude Code does not count as signed in says ⚠ sign in needed, and New on passes it over**: each check asks Claude Code (`claude auth status`) whether the login is signed in, so `account-rotator-launch` and the launcher no longer start new sessions on a login whose sign-in Claude Code no longer counts, until it is signed in again (#114, puma-9arph.48).
+
+## 0.5.36-lutso.1 - 2026-11-16
+
+- **A login whose sign-in Claude Code rejected stays passed over by New on** until a new sign-in or a usage read that works, so `account-rotator-launch` and the launcher no longer start new sessions on it (#110, puma-9arph.42).
+- **Two switches never run at once.** While one runs, a rotation that carries nothing starts none, a stop's move rides it and carries on once, and a press or a Claude in Chrome visit waits for it, at most 30 seconds, then takes the switch over. The session's login follows the footer again within a minute, and where that write fails, the footer names the account the session is on (#108, puma-9arph.38, .39 and .41).
+- **A switch made as a session starts keeps the session on the account the footer shows**: the start's own check, landing after the switch, no longer puts the session back on the account it started on (#109, puma-9arph.41).
+- **After a rejected sign-in the mod presses no Escape**: only a usage-limit stop, which raises Claude Code's limit menu, arms it (#111, puma-9arph.36).
+
 ## 0.5.35-lutso.1 - 2026-11-16
 
 - **A usage-limit stop whose own read of the account fails still moves the session and carries on**: a usage or profile call left unanswered, or a store write refused, no longer drops the stop. The account is marked, the session moves and carries on, and the stop-log says `stop read failed`. A fault in Claude Code's own store or hooks outside that read still ends the recovery, and the stop-log says `stop handling failed`.

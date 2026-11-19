@@ -145,7 +145,7 @@ export type Need = 'fable'
 
 /** Whether the last message of a turn that died on a limit says the limit was the Fable week: the fallback when the usage read does not show it. */
 export function isFableStop(text: string | undefined): boolean {
-  return /reached your Fable limit/.test(text ?? '')
+  return /your Fable limit/.test(text ?? '')
 }
 
 /** Whether the last message of a turn that died on a limit says the limit was the session's, the 5-hour window. */
@@ -156,6 +156,16 @@ export function isSessionStop(text: string | undefined): boolean {
 /** Whether the last message of a turn that died on a limit says the limit was the week. */
 export function isWeeklyStop(text: string | undefined): boolean {
   return /hit your weekly limit/.test(text ?? '')
+}
+
+/** Which limit a stop's last message names, in markStop's order: a message naming two limits is the first of them here. */
+export type Wording = 'none' | 'fable' | 'session' | 'weekly' | 'unknown'
+
+export function wordingClass(said: string | undefined): Wording {
+  if (said === undefined || said === '') return 'none'
+  if (isFableStop(said)) return 'fable'
+  if (isSessionStop(said)) return 'session'
+  return isWeeklyStop(said) ? 'weekly' : 'unknown'
 }
 
 export function shouldLeave(view: View, now: number, need?: Need): boolean {
@@ -204,17 +214,23 @@ export function pickTarget(view: View, now: number, need?: Need): Account | unde
   const unreadTried = open.filter(a => isUnread(view, a) && view.checkErrors?.[a.id]?.isUsageRead === true)
   const fableRead = isFable ? known.filter(a => view.readings[a.id]?.fable !== undefined) : []
   const ready = [fableRead, known, unreadTried].find(tier => tier.length > 0) ?? []
+  return firstByRotateTo(view, ready, view.readings, now, need)
+}
+
+/** The first of `ready` by the `rotateTo` rule, judged on `readings`: the most room, the soonest reset, or the list's order after the login in use. */
+function firstByRotateTo(view: View, ready: Account[], readings: Readonly<Record<string, Reading | undefined>>, now: number, need?: Need): Account | undefined {
+  const isFable = need === 'fable'
   // A login with no 5-hour window serves what its week has left.
-  const available = (a: Account) => availableNow(view.readings[a.id], now, view.weekLeave) ?? roomLeft(view.readings[a.id]?.sevenDay, now) ?? 100
-  const fableRoom = (a: Account) => 100 - (windowPct(view.readings[a.id]?.fable, now) ?? 0)
+  const available = (a: Account) => availableNow(readings[a.id], now, view.weekLeave) ?? roomLeft(readings[a.id]?.sevenDay, now) ?? 100
+  const fableRoom = (a: Account) => 100 - (windowPct(readings[a.id]?.fable, now) ?? 0)
   const byRoom = (a: Account, b: Account) => (isFable && fableRoom(a) !== fableRoom(b) ? fableRoom(b) - fableRoom(a) : available(b) - available(a))
   switch (view.rotateTo) {
     case 'room':
     case 'off':
-      return ready.sort(byRoom)[0]
+      return [...ready].sort(byRoom)[0]
     case 'reset': {
-      const reset = (a: Account) => resetOf(view.readings[a.id], now)
-      return ready.sort((a, b) => (reset(a) === reset(b) ? byRoom(a, b) : reset(a) < reset(b) ? -1 : 1))[0]
+      const reset = (a: Account) => resetOf(readings[a.id], now)
+      return [...ready].sort((a, b) => (reset(a) === reset(b) ? byRoom(a, b) : reset(a) < reset(b) ? -1 : 1))[0]
     }
     case 'order': {
       const at = view.accounts.findIndex(a => a.id === view.activeId)
@@ -222,6 +238,75 @@ export function pickTarget(view: View, now: number, need?: Need): Account | unde
       return after.find(a => ready.includes(a))
     }
   }
+}
+
+/** How old a login's own read may be and still show its room after a stop: the shared schedule reads an idle login every 30 minutes, so an older read means one failed or was skipped. */
+export const FRESH_READ_MS = 35 * 60_000
+
+/** The class a login takes after a usage-limit stop, tried in this order. */
+export type StopTier = 'fresh' | 'stale' | 'unread' | 'spent-old'
+const STOP_TIERS: readonly StopTier[] = ['fresh', 'stale', 'unread', 'spent-old']
+
+/** Whether a stop's mark on a login, any session's, still stands. */
+const isMarked = (view: View, id: string, now: number): boolean =>
+  [view.marks?.[id], view.weekMarks?.[id], view.fableMarks?.[id]].some(m => m !== undefined && Date.parse(m.resetsAt) > now)
+
+/**
+ * When a spent login has room again for `need`, epoch ms: the latest reset of what spends it, judged on `r`, its own
+ * read (a 5-hour window at its limit, a week at its leave threshold, a spent Fable week for the Fable week) and on the
+ * stop marks in force (a Fable mark for the Fable week only). Where none of them names a reset to come, resetOf's.
+ */
+function freesAt(view: View, id: string, r: Reading | undefined, now: number, need?: Need): number {
+  const isFable = need === 'fable'
+  const spending = [
+    (windowPct(r?.fiveHour, now) ?? 0) >= LEAVE_FIVE_HOUR ? r?.fiveHour : undefined,
+    isWeekSpent(r, now, view.weekLeave) ? r?.sevenDay : undefined,
+    isFable && isFableSpent(r, now) ? r?.fable : undefined,
+    view.marks?.[id],
+    view.weekMarks?.[id],
+    isFable ? view.fableMarks?.[id] : undefined,
+  ]
+  // A spending window with no reset to parse frees at no known time: after every one that does.
+  const resets = spending.flatMap(w => (w === undefined ? [] : [Date.parse(w.resetsAt ?? '')])).map(at => (Number.isNaN(at) ? Infinity : at)).filter(at => at > now)
+  return resets.length > 0 ? Math.max(...resets) : resetOf(r, now)
+}
+
+/**
+ * The login a session moves to after a usage-limit stop, judged on each login's own stored read (`raw`, no marks
+ * folded in), counted by the 5-hour limit setting: one with a fresh read and room first, then a stale read with room,
+ * then no read, then one marked or read spent, the one that frees first for the need first (freesAt). A fresh read that shows the login spent counts
+ * as its try. Never one in `tried` (the logins this stop's episode already died on), one in `untaken`, one whose health
+ * is not ok, or one with no read whose check failed before a profile call named its sign-in. The first tier with a
+ * login in it answers; inside it, for the Fable week, a login whose read lists that week with room comes first.
+ */
+export function pickAfterStop(view: View, raw: Readonly<Record<string, Reading | undefined>>, now: number, need: Need | undefined, tried: readonly string[], untaken: ReadonlySet<string>): { account: Account; tier: StopTier; readAgeMs?: number } | undefined {
+  const isFable = need === 'fable'
+  const counts: Record<string, Reading | undefined> = {}
+  for (const a of view.accounts) counts[a.id] = raw[a.id] && counted(raw[a.id] as Reading, view.fiveHourLimit, now)
+  const hasRoom = (r: Reading) => !isSpent(r, now, view.weekLeave) && !(isFable && isFableSpent(r, now))
+  const tierOf = (a: Account): StopTier | undefined => {
+    if (isMarked(view, a.id, now)) return 'spent-old'
+    const r = counts[a.id]
+    const error = view.checkErrors?.[a.id]
+    if (r === undefined) return error === undefined || error.isUsageRead === true ? 'unread' : undefined
+    const isFresh = now - r.at <= FRESH_READ_MS && !(error !== undefined && error.at > r.at)
+    if (isFresh) return hasRoom(r) ? 'fresh' : undefined
+    return hasRoom(r) ? 'stale' : 'spent-old'
+  }
+  const open = view.accounts.filter(a => a.id !== view.activeId && !tried.includes(a.id) && !untaken.has(a.id) && view.health[a.id]?.kind === 'ok')
+  for (const tier of STOP_TIERS) {
+    const ready = open.filter(a => tierOf(a) === tier)
+    if (ready.length === 0) continue
+    const account =
+      tier === 'spent-old'
+        ? [...ready].sort((a, b) => Math.sign(freesAt(view, a.id, counts[a.id], now, need) - freesAt(view, b.id, counts[b.id], now, need)) || 0)[0]
+        : (isFable ? firstByRotateTo(view, ready.filter(a => counts[a.id]?.fable !== undefined && !isFableSpent(counts[a.id], now)), counts, now, need) : undefined) ??
+          firstByRotateTo(view, ready, counts, now, need)
+    if (account === undefined) continue
+    const read = raw[account.id]
+    return read === undefined ? { account, tier } : { account, tier, readAgeMs: now - read.at }
+  }
+  return undefined
 }
 
 /** Whether a login has room on every limit it reports: none of its windows, the Fable week among them, is at 100%. */
@@ -289,7 +374,7 @@ export function nextReset(view: View, now: number, need?: Need): number | undefi
  * soonest login answering. Unlike nextReset it never names a reset that frees no login. A login that needs a sign-in,
  * one in `skip`, one not spent now, and one with no reset time known answer nothing.
  */
-export function freesAt(view: View, now: number, skip: ReadonlySet<string> = new Set()): number | undefined {
+export function firstFreeAt(view: View, now: number, skip: ReadonlySet<string> = new Set()): number | undefined {
   const times = view.accounts.flatMap(a => {
     const r = view.readings[a.id]
     if (view.health[a.id]?.kind !== 'ok' || skip.has(a.id) || !isSpent(r, now, view.weekLeave)) return []
@@ -305,7 +390,7 @@ export function freesAt(view: View, now: number, skip: ReadonlySet<string> = new
 
 /** What to say when every login is near its limit: when the first one frees up, where that is known. */
 export function limitNotice(view: View, now: number, skip: ReadonlySet<string> = new Set()): string {
-  const at = freesAt(view, now, skip)
+  const at = firstFreeAt(view, now, skip)
   return `Every Claude account is near its limit${at === undefined ? '' : `; the next frees up ${untilText(at, now)}`}.`
 }
 
@@ -612,9 +697,32 @@ export const TOKEN_LIVE_MARGIN_MS = 60_000
 /** Why a login needs a sign-in once Claude Code rejected it, at a stop or at a usage read. */
 export const SIGN_IN_REJECTED = 'sign-in rejected'
 
+/** Why a login needs a sign-in when it holds none: nothing stored, or nothing Claude Code counts as logged in. */
+export const NOT_SIGNED_IN = 'not signed in'
+
+/** What `claude auth status` said of a slot: logged in, not logged in, or nothing a check may act on. */
+export type SignInRead = 'in' | 'out' | 'unknown'
+
+/**
+ * What `claude auth status` said of a slot, by its documented exit code and authMethod
+ * (https://code.claude.com/docs/en/cli-reference): exit 0 is logged in; exit 1 with authMethod 'none' is not. Any
+ * other answer, a timeout's or one that is not JSON, says nothing.
+ */
+export function signInFromStatus(exitCode: number | null, stdout: string): SignInRead {
+  if (exitCode === 0) return 'in'
+  if (exitCode !== 1) return 'unknown'
+  try {
+    const parsed: unknown = JSON.parse(stdout)
+    const isNone = typeof parsed === 'object' && parsed !== null && (parsed as { authMethod?: unknown }).authMethod === 'none'
+    return isNone ? 'out' : 'unknown'
+  } catch {
+    return 'unknown'
+  }
+}
+
 /** A login's health from its stored credential alone. */
 export function healthOf(cred: Credential | undefined, now: number): Health {
-  if (cred === undefined) return { kind: 'login-needed', why: 'not signed in' }
+  if (cred === undefined) return { kind: 'login-needed', why: NOT_SIGNED_IN }
   if (cred.refreshTokenExpiresAt !== undefined && cred.refreshTokenExpiresAt <= now) {
     return { kind: 'login-needed', why: 'sign-in expired' }
   }
@@ -1547,22 +1655,271 @@ export function slotNumber(slot: string, home: string): string | undefined {
  */
 export const raisesLimitModal = (error: string): boolean => error === 'rate_limit'
 
+/** The least time between two Escapes of one stop's episode. */
+export const ESCAPE_GAP_MS = 30_000
+
+/** What the owed-resume look knows when it weighs an Escape; `fill` is the engine's answer to an empty fill, asked last. */
+export type EscapeLook = {
+  isCarryOnInFlight: boolean
+  isLimitStopLast: boolean
+  openTurns: number
+  /** A prompt's hooks still run, its turn not begun, whoever sent it. */
+  isPromptEntering?: boolean
+  isSettling: boolean
+  isHeld: boolean
+  /** The carry-on in flight is the refresh nudge's: a held switch holds back every Escape but its. */
+  isNudge?: boolean
+  escapes: number
+  budget: number
+  /** Since the episode's last Escape; undefined before its first. */
+  sinceEscapeMs?: number
+  pane?: string
+  fill?: { refusal?: string }
+}
+
 /**
- * Why a carry-on still queued gets no Escape, else undefined. The key goes only after a usage-limit stop with no
- * main-loop turn begun since, with no turn open in any loop, while the engine refuses a fill with its own 'dialog'
- * (a hook's refusal carries no cause, so it proves no dialog), and in an Orca pane. Without `fill`, only what the
- * session knows without asking.
+ * Why a carry-on still queued gets no Escape, else undefined. The key goes only for a carry-on in flight after a
+ * usage-limit stop with no main-loop turn begun since, with no turn open in any loop, the switch settled and none held,
+ * within the episode's budget and ESCAPE_GAP_MS after its last, in an Orca pane, while the engine refuses a fill with its
+ * own 'dialog' (a hook's refusal carries no cause, so it proves no dialog). Without `fill`, what the session knows
+ * without asking.
  */
-export function escapeHeldBack(s: { isLimitStopLast: boolean; openTurns: number; fill?: { refusal?: string; pane?: string } }): string | undefined {
+export function escapeHeldBack(s: EscapeLook): string | undefined {
+  if (!s.isCarryOnInFlight) return 'no carry-on in flight'
   if (!s.isLimitStopLast) return 'no limit stop before it'
   if (s.openTurns > 0) return 'a turn is open'
+  if (s.isPromptEntering === true) return 'a prompt is entering'
+  if (s.isSettling) return 'the switch is settling'
+  if (s.isHeld && s.isNudge !== true) return 'a switch is held'
+  if (s.escapes >= s.budget) return 'Escapes spent'
+  if (s.sinceEscapeMs !== undefined && s.sinceEscapeMs < ESCAPE_GAP_MS) return 'too soon after the last Escape'
+  if (!s.pane) return 'no Orca pane'
   if (s.fill === undefined) return undefined
-  if (s.fill.refusal !== 'dialog') return 'no dialog holds it'
-  return s.fill.pane ? undefined : 'no Orca pane'
+  return s.fill.refusal === 'dialog' ? undefined : 'no dialog holds it'
+}
+
+/**
+ * How long before the token in use expires a held stop's switch sends the refresh nudge: a request refreshes the token
+ * first inside Claude Code's margin, read on Claude Code 2.1.326 between 265 and 333 s (puma-9arph.57 B1), less a minute.
+ */
+export const NUDGE_LEAD_MS = 240_000
+
+/** The refresh nudge's own line: it neither holds nor is held in the carry-on's, so the turn check tells them apart. */
+export const NUDGE_TEXT = 'The account-rotator plugin is checking the sign-in before it moves this session. No reply is needed.'
+
+/** What the owed-resume look knows when it weighs the refresh nudge. */
+export type NudgeLook = {
+  hasHeldCarry: boolean
+  isNudged: boolean
+  isLimitStopLast: boolean
+  openTurns: number
+  isCarryOnQueued: boolean
+  isBoxEmpty: boolean
+  /** The stored token of the login in use can refresh. */
+  isTokenOk: boolean
+  expiresInMs?: number
+}
+
+/**
+ * Why no refresh nudge goes, else undefined. It goes once an episode, for a stop's switch the refresh guard holds, with
+ * no turn begun since the stop and none open, no carry-on queued or armed, the prompt box empty, and the token in use
+ * able to refresh and due within NUDGE_LEAD_MS: its request makes Claude Code refresh that token, and the stop it dies
+ * on lands the held switch through the unchanged guard.
+ */
+export function nudgeHeld(s: NudgeLook): string | undefined {
+  if (!s.hasHeldCarry) return 'no stop switch held'
+  if (s.isNudged) return 'nudged already'
+  if (!s.isLimitStopLast) return 'no limit stop before it'
+  if (s.openTurns > 0) return 'a turn is open'
+  if (s.isCarryOnQueued) return 'a carry-on is queued'
+  if (!s.isBoxEmpty) return 'the prompt box holds a draft'
+  if (!s.isTokenOk || s.expiresInMs === undefined) return 'the token cannot refresh'
+  return s.expiresInMs > NUDGE_LEAD_MS ? 'the token is not due' : undefined
+}
+
+/**
+ * Whether the prompt box counts as empty: it is, or it holds exactly one of the mod's own lines (`own`: the nudge's, the
+ * carry-on's, the kept Fable line), which a queued carry-on can leave there. A box the read could not show is not free.
+ */
+export function isBoxFree(text: string | undefined, own: readonly (string | undefined)[]): boolean {
+  return text !== undefined && (text === '' || own.includes(text))
+}
+
+/**
+ * Whether the one more nudge is due: none went yet, and the token in use is still the one the first was sent for (the
+ * same digest, `firstToken`, and the same expiry, `firstExpiresAt`: an expiry alone tells no token), now run out, so a
+ * request on it refreshes it first.
+ */
+export function renudgeDue(s: {
+  isRenudged: boolean
+  firstExpiresAt: number | undefined
+  expiresAt: number | undefined
+  firstToken: string | undefined
+  token: string | undefined
+  now: number
+}): boolean {
+  const isSameToken = s.firstToken !== undefined && s.token === s.firstToken
+  return !s.isRenudged && isSameToken && s.firstExpiresAt !== undefined && s.expiresAt === s.firstExpiresAt && s.expiresAt <= s.now
+}
+
+/**
+ * What the session knows again right after the fill, read with no await before the key: the turns, the carry-on and the
+ * episode, and every gate the look read before its fill (a prompt entering, the switch settling, a switch held).
+ */
+export type AfterFill = {
+  openTurns: number
+  isLimitStopLast: boolean
+  isCarryOnInFlight: boolean
+  isSameEpisode: boolean
+  isPromptEntering: boolean
+  isSettling: boolean
+  isHeld: boolean
+}
+
+/**
+ * The look's decision once the fill answered `refusal`: why no Escape goes (a gate the look read before its fill and
+ * finds closed after it, escapeHeldBack's reasons, or a turn, an entry or an episode's end during the fill), or the
+ * episode's Escape count and last-Escape time after the one that goes now. The gates read again come first, so the
+ * stop-log names them whatever the fill answered.
+ */
+export function escapeAfterFill(look: EscapeLook, refusal: string | undefined, after: AfterFill, now: number): { why: string } | { escapes: number; lastEscapeAt: number } {
+  if (after.isPromptEntering) return { why: 'a prompt began entering during the fill' }
+  if (after.isSettling) return { why: 'the switch moved during the fill' }
+  if (after.isHeld && look.isNudge !== true) return { why: 'a switch was held during the fill' }
+  const why = escapeHeldBack({ ...look, fill: { refusal } })
+  if (why !== undefined) return { why }
+  if (!after.isSameEpisode) return { why: 'the episode ended during the fill' }
+  if (after.openTurns > 0) return { why: 'a turn began during the fill' }
+  if (!after.isLimitStopLast) return { why: 'a main-loop turn began during the fill' }
+  if (!after.isCarryOnInFlight) return { why: 'the carry-on entered during the fill' }
+  return { escapes: look.escapes + 1, lastEscapeAt: now }
 }
 
 /** One Escape to the Orca pane `pane`, by Orca's CLI: a fixed argv, run with no shell. */
 export const escapeArgv = (pane: string): string[] => ['orca', 'terminal', 'send', '--terminal', pane, '--text', '\u001b', '--json']
+
+/** One read of the Orca pane `pane` as it renders, by Orca's CLI: a fixed argv, run with no shell. */
+export const screenArgv = (pane: string): string[] => ['orca', 'terminal', 'read', '--terminal', pane, '--screen', '--json']
+
+/**
+ * How long after the stopped login's reset the own-continue Escape may still go. Claude Code's own continue went 60 to
+ * 90 s after the reset (puma-9arph.71, readings R0, R2, R6c), and a key that lands on the turn it starts aborts it (R3).
+ */
+export const OWN_CONTINUE_MARGIN_MS = 45_000
+
+/** The window a usage-limit stop judged spent: a 5-hour stop writes mark, a weekly stop week-mark, a Fable stop fable-mark. */
+export type StopWindow = 'five-hour' | 'week' | 'fable'
+
+/**
+ * The reset the own-continue arm holds for the stopped login, epoch ms: that of the mark of the window this stop judged;
+ * where no window is known, that of its newest stop mark. Another session may write a newer mark of another window
+ * before the carry-on answers, so a known window decides, never the marks' order. Undefined where no such mark is
+ * stored or its reset does not parse.
+ */
+export function ownContinueResetAt(view: Pick<View, 'marks' | 'weekMarks' | 'fableMarks'>, stoppedId: string | undefined, judged?: StopWindow): number | undefined {
+  if (stoppedId === undefined) return undefined
+  const byWindow = { 'five-hour': view.marks?.[stoppedId], week: view.weekMarks?.[stoppedId], fable: view.fableMarks?.[stoppedId] }
+  const marks = judged === undefined ? Object.values(byWindow) : [byWindow[judged]]
+  const newest = marks.reduce<Mark | undefined>((best, m) => (m !== undefined && (best === undefined || m.at > best.at) ? m : best), undefined)
+  const reset = Date.parse(newest?.resetsAt ?? '')
+  return Number.isNaN(reset) ? undefined : reset
+}
+
+/**
+ * What the own-continue look knows when it weighs its Escape. `box` (the box as read), `fill` (the engine's answer to
+ * an empty fill) and `screen` (the pane as rendered) are asked in that order, each undefined until asked; an answer
+ * that never came is `{ text: undefined }` or `{ lines: undefined }`.
+ */
+export type OwnContinueLook = {
+  isArmed: boolean
+  isSent: boolean
+  openTurns: number
+  /** A prompt of any origin submitted and not yet entered: its hooks run, its turn has not started. */
+  isPromptEntering: boolean
+  isCarryOnQueued: boolean
+  isSettling: boolean
+  isHeld: boolean
+  isPanelShown: boolean
+  now: number
+  /** The stopped login's reset; undefined where none is stored, and then no time holds the key back. */
+  resetAt?: number
+  pane?: string
+  box?: { text?: string }
+  fill?: { isFilled: boolean; refusal?: string; text?: string }
+  screen?: { lines?: readonly string[] }
+}
+
+/**
+ * Why the Escape that cancels Claude Code's own continue does not go, else undefined (puma-9arph.71). After a usage-limit
+ * stop the mod switches and carries on, but Claude Code's own countdown still stands and continues again at the old
+ * login's reset (reading R6c); one Escape at an idle, empty prompt cancels it and loses nothing (R1, R6). The key goes
+ * once, after the stop's resume answered (a person's prompt since ends the arm: puma-9arph.80), with no turn open in
+ * any loop, no prompt entering, no carry-on queued, the switch settled and none held, the accounts panel closed, before the stopped
+ * login's reset plus OWN_CONTINUE_MARGIN_MS, in an Orca pane, the box empty as read and as filled, and the countdown's
+ * footer on screen.
+ * A key in a turn, a tool call or a dialog loses work (R3, R4, R5).
+ */
+export function ownContinueHeldBack(s: OwnContinueLook): string | undefined {
+  if (!s.isArmed) return 'no carry-on answered'
+  if (s.isSent) return 'Escape sent already'
+  if (s.openTurns > 0) return 'a turn is open'
+  if (s.isPromptEntering) return 'a prompt is entering'
+  if (s.isCarryOnQueued) return 'a carry-on is queued'
+  if (s.isSettling) return 'the switch is settling'
+  if (s.isHeld) return 'a switch is held'
+  if (s.isPanelShown) return 'the accounts panel is shown'
+  if (s.resetAt !== undefined && s.now >= s.resetAt + OWN_CONTINUE_MARGIN_MS) return "past the own continue's deadline"
+  if (!s.pane) return 'no Orca pane'
+  if (s.box === undefined) return undefined
+  if (s.box.text === undefined) return 'the box is unreadable'
+  if (s.box.text !== '') return 'the prompt box holds a draft'
+  if (s.fill === undefined) return undefined
+  if (!s.fill.isFilled || s.fill.refusal !== undefined) return `the fill was refused: ${s.fill.refusal ?? 'no cause'}`
+  if (s.fill.text === undefined) return 'the fill gave no text'
+  if (s.fill.text !== '') return 'the prompt box holds a draft'
+  if (s.screen === undefined) return undefined
+  if (s.screen.lines === undefined) return 'the screen is unreadable'
+  return isCountdownOnScreen(s.screen.lines) ? undefined : 'no countdown on screen'
+}
+
+/**
+ * The look's decision once every stage answered: why no Escape goes, or that it goes now. `after` is read again with no
+ * await before the key: an arm that ended, or a turn that began, during the look gets no key; `mainTurnsSince` counts
+ * the main turns begun since the look's start.
+ */
+export function ownContinueAfterLook(look: OwnContinueLook, after: { isSameArm: boolean; openTurns: number; mainTurnsSince: number }): { why: string } | { escape: true } {
+  const why = ownContinueHeldBack(look)
+  if (why !== undefined) return { why }
+  if (look.box === undefined || look.fill === undefined || look.screen === undefined) return { why: 'not looked' }
+  if (!after.isSameArm) return { why: 'the arm ended during the look' }
+  if (after.openTurns > 0) return { why: 'a turn began during the look' }
+  if (after.mainTurnsSince > 0) return { why: 'a main turn began during the look' }
+  return { escape: true }
+}
+
+/**
+ * Whether the countdown's footer shows: a line under the prompt box (after the last line that opens with the box's
+ * `❯`) that reads both "Continuing" and "Esc to cancel", as Claude Code draws it (reading R0, R6c). The stop's own line
+ * in the transcript, in lower case, stays after a cancel and is no footer.
+ */
+export function isCountdownOnScreen(lines: readonly string[]): boolean {
+  const box = lines.findLastIndex(line => line.trimStart().startsWith('❯'))
+  return box >= 0 && lines.slice(box + 1).some(line => line.includes('Continuing') && line.includes('Esc to cancel'))
+}
+
+/** The rendered lines of `orca terminal read --screen --json`, only where the answer is the rendered screen. */
+export function screenLinesFrom(stdout: string): string[] | undefined {
+  let terminal: unknown
+  try {
+    terminal = (JSON.parse(stdout) as { result?: { terminal?: unknown } })?.result?.terminal
+  } catch {
+    return undefined
+  }
+  if (typeof terminal !== 'object' || terminal === null) return undefined
+  const { source, tail } = terminal as { source?: unknown; tail?: unknown }
+  if (source !== 'screen' || !Array.isArray(tail) || !tail.every(line => typeof line === 'string')) return undefined
+  return tail as string[]
+}
 
 /**
  * Who writes a field of the view that names the switch (`activeId`, `pending`, `held`, `owner`): the switch or
@@ -1585,5 +1942,10 @@ export function mayWrite(v: View, by: SwitchWriter): boolean {
 /** The requests folder: in the Claude config folder, CLAUDE_CONFIG_DIR or `~/.claude`, as bin/account_rotator_store.py finds it. */
 export function requestsDir(configDir: string | undefined, home: string): string {
   return `${configDir || `${home}/.claude`}/account-rotator-requests`
+}
+
+/** The folder of the launcher copy the README has a person install as `claude`: `accounts/bin` in the Claude config folder. */
+export function launcherCopyDir(configDir: string | undefined, home: string): string {
+  return `${configDir || `${home}/.claude`}/accounts/bin`
 }
 

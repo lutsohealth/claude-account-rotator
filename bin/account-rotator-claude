@@ -10,6 +10,9 @@ PATH with every word as given. It takes no option of its own, so `--help` is cla
 - The pick counts only while a session of the mod wrote the store's rows in the last 60 minutes, never later than now.
 - A pick of Claude Code's own login leaves the variable unset. CLAUDE_CONFIG_DIR is never set.
 - Any fault in these starts claude on Claude Code's own login, with one line on stderr, and never stops a claude.
+- Where claude starts on Claude Code's own login for want of a pick, one more line says so when `claude auth status`
+  reads that login as not signed in (exit 1, authMethod `none`; any other answer is unknown and prints nothing). Only
+  the exit code and authMethod are read, and claude still starts, so `claude /login` stays reachable.
 - It runs the first `claude` on PATH that is not itself (by file identity), then the next where one cannot run, then
   ~/.local/bin/claude; with none, one line on stderr and exit 127.
 """
@@ -19,10 +22,14 @@ from __future__ import annotations
 
 import json
 import os
+import signal
+import subprocess
 import sys
 import time
 
 SLOT_VAR = "CLAUDE_SECURESTORAGE_CONFIG_DIR"
+# The status read costs about 0.11 s; the bound is well above that and under the 2 s a start may wait.
+AUTH_STATUS_TIMEOUT_SECONDS = 1.8
 ROTATOR = "account-rotator@claude-account-rotator"
 STORE_MODULE = "account_rotator_store"
 PICK_FRESH_MINUTES = 60
@@ -123,6 +130,37 @@ def note(why: str) -> None:
     print(f"claude launcher: starting on Claude Code's own login: {why}", file=sys.stderr)
 
 
+def own_login_reads_not_signed_in() -> bool:
+    """True only when `claude auth status` on Claude Code's own login exits 1 with authMethod "none".
+
+    Runs the first claude on PATH that is not this file and can run, `auth status` only, so no session starts. Whatever else
+    happens (exit 0, a timeout, no JSON, another authMethod, no claude to run) is unknown and reads False. The
+    output is parsed here and never leaves this function: only the exit code and authMethod are read.
+    """
+    status = None
+    for target in claude_candidates():  # a claude that cannot run is passed over, as the start passes it over
+        try:
+            status = subprocess.Popen(
+                [target, "auth", "status"], env={**os.environ, SLOT_VAR: ""}, stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True)
+            break
+        except OSError:
+            continue
+    if status is None:
+        return False
+    try:
+        try:
+            answer, _ = status.communicate(timeout=AUTH_STATUS_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            os.killpg(status.pid, signal.SIGKILL)  # the whole group, so a child holding the pipe ends too
+            status.stdout.close()
+            status.wait()
+            return False
+        return status.returncode == 1 and json.loads(answer)["authMethod"] == "none"
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+
+
 def is_this_file(path: str) -> bool:
     """By file identity, so a hard link, a symlink or another spelling of this file is this file."""
     try:
@@ -153,6 +191,8 @@ def main() -> int:
             slot = note(f"the launcher failed ({type(error).__name__}: {error})")
         if slot:
             os.environ[SLOT_VAR] = slot
+        elif slot is None and own_login_reads_not_signed_in():
+            print("claude launcher: Claude Code's own login reads not signed in; type /login in the session to sign in", file=sys.stderr)
     failures = []
     for target in claude_candidates():
         try:

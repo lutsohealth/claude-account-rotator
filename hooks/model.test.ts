@@ -1,16 +1,18 @@
 import { expect, test } from 'claude-code/testing'
 
 import type { Reading, RotateTo, View } from '../types'
-import { weekLeaveFrom, launchOnFrom, pickLaunch, isSessionStop } from './model'
+import { weekLeaveFrom, launchOnFrom, pickLaunch, isSessionStop, isWeeklyStop } from './model'
 import { isSameWeek, whoseWeek } from './model'
 import { companyOf, identityFromStatus, planName } from './model'
 import { laterMark, spentMark, withFableMark } from './model'
 import { EMPTY_VIEW, USAGE_IDLE_MS, fitRow, hasRoom, rowOf, rowsOf, rowText, storedLine, storedLineText } from './model'
 import ROWS_FIXTURE from '../tests/fixtures/rows'
 import { REQUEST_TTL_MS, holdsLogin, isLoginOf, sameLogin, requestFrom, requestsDir, slotNumber } from './model'
-import { escapeArgv, escapeHeldBack, raisesLimitModal } from './model'
+import { ESCAPE_GAP_MS, NUDGE_LEAD_MS, NUDGE_TEXT, escapeAfterFill, escapeArgv, escapeHeldBack, isBoxFree, nudgeHeld, pickAfterStop, raisesLimitModal, renudgeDue } from './model'
 import { mayWrite } from './model'
-import { freesAt, limitNotice } from './model'
+import { firstFreeAt, limitNotice } from './model'
+import { OWN_CONTINUE_MARGIN_MS, isCountdownOnScreen, ownContinueAfterLook, ownContinueHeldBack, ownContinueResetAt, screenLinesFrom } from './model'
+import { signInFromStatus } from './model'
 import { USAGE_BACKOFF_MAX_MS, USAGE_CLAIM_MS, USAGE_CLAIM_WAIT_MS, USAGE_EARLY_MS, WRITER_VERSION, afterUsage, claimDueReads, gatingDue, isUsageDue, mayForceUsage, mayReadSince, renewClaim, retryAfterFrom, usageDueFrom } from './model'
 import { DEFAULT_FOOTER, availableNow, claudeAccount, blockedAdvice, braille, browsersFrom, chromeNote, continueTextFrom, counted, fiveHourLimitFrom, credentialFrom, credentialsFile, fableMark, fableSpentNotice, fableStay, footerStyleFrom, healthOf, identityFromProfile, isFableSpent, isFableStop, isNoBrowser, isPolicyRefusal, keepFable, keychainItem, label, legacyMark, markFrom, nextReset, pickTarget, pie, readingFromUsage, restartSteps, rotateToFrom, shouldLeave, roomColor, stuckText, windowPct, withMark, withWeekMark } from './model'
 
@@ -547,6 +549,27 @@ test('a stop that says the Fable limit was reached is told from any other', () =
   expect(isFableStop(undefined)).toBe(false)
 })
 
+test('a stop that says the Fable limit was hit, as Claude Code 2.1.325 and later words it, is a Fable stop', () => {
+  expect(isFableStop("You've hit your Fable limit · resets Nov 18 at 3pm (Europe/Tallinn)")).toBe(true)
+  expect(["You've hit your weekly limit · resets Nov 10", "You've hit your session limit", "You've hit your 5-hour limit"].map(isFableStop)).toEqual([false, false, false])
+  // The noun is "your Fable limit": a message that only names Fable is not a stop of that limit.
+  expect(isFableStop('Fable is available on your plan.')).toBe(false)
+})
+
+// The wordings of the rate_limit API error records on the host, counted by Claude Code version: the Fable stop says
+// "reached" up to 2.1.322 and "hit" from 2.1.325, and no record joins two limits. Each stop is read as one kind only.
+for (const [said, kinds] of [
+  ["You've reached your Fable limit. Switch to another model to continue.", [true, false, false]],
+  ["You've hit your Fable limit · resets Nov 18 at 3pm", [true, false, false]],
+  ["You've hit your weekly limit · resets Nov 10 at 11am", [false, false, true]],
+  ["You've hit your session limit · resets 3pm", [false, true, false]],
+  ["You've hit your 5-hour limit · resets 3pm", [false, true, false]],
+] as const) {
+  test(`the matchers read "${said}" as [Fable, session, weekly] = ${JSON.stringify(kinds)}`, () => {
+    expect([isFableStop(said), isSessionStop(said), isWeeklyStop(said)]).toEqual(kinds)
+  })
+}
+
 test('on a Fable stop the session leaves a login whose Fable week is spent, and only then', () => {
   const v = view({ '1': [20, 30, 100] })
   expect(shouldLeave(v, NOW)).toBe(false)
@@ -610,23 +633,23 @@ test('the next reset counts the Fable week, which alone can be what is spent', (
 // puma-9arph.35: when the session can carry on after every login is spent.
 test('a login frees up at the latest reset of its own spent windows, the soonest such login answering, never at a reset that frees no login', () => {
   // One spent window a login: the soonest reset of any window is the answer (the bead's letter and this rule agree).
-  expect(freesAt(view({ '1': [100, 30], '2': [100, 40] }), NOW)).toBe(Date.parse(LATER))
+  expect(firstFreeAt(view({ '1': [100, 30], '2': [100, 40] }), NOW)).toBe(Date.parse(LATER))
   // Login 1's 5-hour window resets soonest, but its week stays spent; login 2's week resets before login 1's.
   const both = view({ '1': [100, 100], '2': [20, 100] })
   both.readings['2'] = { ...both.readings['2'], sevenDay: { pct: 100, resetsAt: '2026-10-15T03:00:00Z' }, at: NOW }
   expect(nextReset(both, NOW)).toBe(Date.parse(LATER))
-  expect(freesAt(both, NOW)).toBe(Date.parse('2026-10-15T03:00:00Z'))
+  expect(firstFreeAt(both, NOW)).toBe(Date.parse('2026-10-15T03:00:00Z'))
   // A login that needs a sign-in, or one the session passes over, never frees up by a reset.
   const locked = view({ '1': [20, 100], '2': [100, 30] }, { '2': { kind: 'login-needed', why: 'sign-in rejected' } })
-  expect(freesAt(locked, NOW)).toBe(Date.parse(WEEK_END))
-  expect(freesAt(view({ '1': [20, 100], '2': [100, 30] }), NOW, new Set(['2']))).toBe(Date.parse(WEEK_END))
+  expect(firstFreeAt(locked, NOW)).toBe(Date.parse(WEEK_END))
+  expect(firstFreeAt(view({ '1': [20, 100], '2': [100, 30] }), NOW, new Set(['2']))).toBe(Date.parse(WEEK_END))
   // A spent window with no reset time known frees nothing.
   const unknown = view({ '1': [100, 30] })
   unknown.readings['1'] = { fiveHour: { pct: 100 }, sevenDay: { pct: 30 }, at: NOW }
-  expect(freesAt(unknown, NOW)).toBeUndefined()
+  expect(firstFreeAt(unknown, NOW)).toBeUndefined()
   // A stale row, its reset passed with no read since, is spent no more: no time in the past is ever answered.
-  expect(freesAt(view({ '1': [100, 30], '2': [100, 40] }), Date.parse(LATER))).toBeUndefined()
-  expect(freesAt(view({ '1': [100, 30], '2': [100, 40] }), Date.parse(LATER) + 1)).toBeUndefined()
+  expect(firstFreeAt(view({ '1': [100, 30], '2': [100, 40] }), Date.parse(LATER))).toBeUndefined()
+  expect(firstFreeAt(view({ '1': [100, 30], '2': [100, 40] }), Date.parse(LATER) + 1)).toBeUndefined()
 })
 
 test('the words for every login near its limit name when the first one frees up, and no time where none is known', () => {
@@ -1847,24 +1870,361 @@ test('a slot has a number only as a folder directly under the accounts folder, i
   expect(bad.filter(slot => slotNumber(slot, home) !== undefined)).toEqual([])
 })
 
-// puma-9arph.34 C (RULINGS 6008, 6034): the one Escape a queued carry-on gets goes only when nothing below holds it back.
-test('a queued carry-on gets its Escape only after a limit stop, with no turn open, under the engine\'s own dialog, in an Orca pane', () => {
-  const modal = { isLimitStopLast: raisesLimitModal('rate_limit'), openTurns: 0, fill: { refusal: 'dialog', pane: 'term_a' } }
+// puma-9arph.34 C (RULINGS 6008, 6034), v4 s.3: the look's Escape for a queued carry-on goes only when nothing below holds it back.
+test('row g: with prompts queued under the dialog and no turn, the look\'s Escape releases them and the resume enters', () => {
+  const modal: Parameters<typeof escapeHeldBack>[0] = {
+    isCarryOnInFlight: true,
+    isLimitStopLast: raisesLimitModal('rate_limit'),
+    openTurns: 0,
+    isSettling: false,
+    isHeld: false,
+    escapes: 0,
+    budget: 8,
+    pane: 'term_a',
+    fill: { refusal: 'dialog' },
+  }
+  // Under the engine's own 'dialog' with no turn open in any loop, the key goes.
   expect(escapeHeldBack(modal)).toBeUndefined()
   // Before the fill is asked, only what the session knows without asking.
-  expect(escapeHeldBack({ isLimitStopLast: true, openTurns: 0 })).toBeUndefined()
+  expect(escapeHeldBack({ ...modal, fill: undefined })).toBeUndefined()
   const rows: [string, Parameters<typeof escapeHeldBack>[0], string][] = [
+    ['no carry-on in flight', { ...modal, isCarryOnInFlight: false }, 'no carry-on in flight'],
     ['no limit stop since the last turn began', { ...modal, isLimitStopLast: false }, 'no limit stop before it'],
     // puma-9arph.36: a rejected sign-in raises no modal, so even under the engine's own dialog it gets no key.
     ['a rejected sign-in before it', { ...modal, isLimitStopLast: raisesLimitModal('authentication_failed') }, 'no limit stop before it'],
     ['a turn open in some loop', { ...modal, openTurns: 1 }, 'a turn is open'],
+    ['a switch settling', { ...modal, isSettling: true }, 'the switch is settling'],
+    ['a switch held', { ...modal, isHeld: true }, 'a switch is held'],
     // Review CALL1 [UNPROVEN-DIALOG]: a hook's refusal carries no cause and proves no dialog.
-    ['a refusal with its cause left out', { ...modal, fill: { pane: 'term_a' } }, 'no dialog holds it'],
-    ['a session with no box', { ...modal, fill: { refusal: 'no_composer', pane: 'term_a' } }, 'no dialog holds it'],
-    ['no Orca pane (C4)', { ...modal, fill: { refusal: 'dialog' } }, 'no Orca pane'],
-    ['an empty Orca handle', { ...modal, fill: { refusal: 'dialog', pane: '' } }, 'no Orca pane'],
+    ['a refusal with its cause left out', { ...modal, fill: {} }, 'no dialog holds it'],
+    ['a session with no box', { ...modal, fill: { refusal: 'no_composer' } }, 'no dialog holds it'],
+    ['no Orca pane (C4)', { ...modal, pane: undefined }, 'no Orca pane'],
+    ['an empty Orca handle', { ...modal, pane: '' }, 'no Orca pane'],
   ]
   expect(rows.map(([name, s]) => [name, escapeHeldBack(s)])).toEqual(rows.map(([name, , why]) => [name, why]))
+})
+
+// puma-9arph.57: the refresh nudge's own carry-on goes under a held switch; any other carry-on still waits for it.
+test('row v: a held switch holds back every Escape but the refresh nudge\'s', () => {
+  const look: Parameters<typeof escapeHeldBack>[0] = { isCarryOnInFlight: true, isLimitStopLast: true, openTurns: 0, isSettling: false, isHeld: true, escapes: 0, budget: 10, pane: 'term_a', fill: { refusal: 'dialog' } }
+  expect([escapeHeldBack(look), escapeHeldBack({ ...look, isNudge: true })]).toEqual(['a switch is held', undefined])
+})
+
+// puma-9arph.71: the screens of the reading (Claude Code 2.1.326), the countdown's footer standing and gone.
+const COUNTDOWN_SCREEN = [
+  '⏺ Usage limit reached · continuing automatically at 1:11am · esc to cancel',
+  '──────────',
+  '❯ ',
+  '──────────',
+  '  ⚠ Usage limit reached · limit resets 1:11am',
+  '    Continuing automatically at 1:11am · Esc to cancel',
+  '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+]
+const CANCELLED_SCREEN = [
+  '⏺ Usage limit reached · continuing automatically at 1:11am · esc to cancel',
+  '⏺ Automatic continue cancelled · /rate-limit-options to re-arm',
+  '──────────',
+  '❯ ',
+  '──────────',
+  '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+]
+
+test('row ow: the countdown counts as on screen only by its footer under the prompt box (puma-9arph.71)', () => {
+  const shortly = COUNTDOWN_SCREEN.map(l => l.replace('Continuing automatically at 1:11am', 'Continuing shortly'))
+  // The transcript keeps the stop's own line, in lower case, after a cancel: it is no footer.
+  const footerAbove = ['    Continuing automatically at 1:11am · Esc to cancel', '❯ ', '  ⏵⏵ bypass permissions on']
+  expect([isCountdownOnScreen(COUNTDOWN_SCREEN), isCountdownOnScreen(shortly), isCountdownOnScreen(CANCELLED_SCREEN), isCountdownOnScreen(footerAbove), isCountdownOnScreen([])]).toEqual([true, true, false, false, false])
+})
+
+test('row ow: screenLinesFrom takes only a rendered screen from `orca terminal read --screen --json` (puma-9arph.71)', () => {
+  const json = (terminal: unknown) => JSON.stringify({ result: { terminal } })
+  expect([
+    screenLinesFrom(json({ source: 'screen', tail: ['a', 'b'] })),
+    screenLinesFrom(json({ source: 'stream', tail: ['a'] })),
+    screenLinesFrom(json({ source: 'screen-unavailable', tail: ['a'] })),
+    screenLinesFrom(json({ source: 'screen', tail: 'a' })),
+    screenLinesFrom(json({ source: 'screen', tail: ['a', 2] })),
+    screenLinesFrom('not json'),
+  ]).toEqual([['a', 'b'], undefined, undefined, undefined, undefined, undefined])
+})
+
+// puma-9arph.71 (the reading R0 to R8, RULING 6578): the Escape that cancels Claude Code's own continue goes only at an
+// idle, empty prompt with the countdown's footer on screen, after the mod's own carry-on answered.
+test('row ow: ownContinueHeldBack keys only the states the reading shows safe, and names why for every other', () => {
+  const now = 1_000_000
+  const idle: Parameters<typeof ownContinueHeldBack>[0] = {
+    isArmed: true,
+    isSent: false,
+    openTurns: 0,
+    isPromptEntering: false,
+    isCarryOnQueued: false,
+    isSettling: false,
+    isHeld: false,
+    isPanelShown: false,
+    now,
+    resetAt: now + 60_000,
+    pane: 'term_a',
+    box: { text: '' },
+    fill: { isFilled: true, text: '' },
+    screen: { lines: COUNTDOWN_SCREEN },
+  }
+  // R1, R6: the key goes. Each stage not asked yet holds nothing back: the look asks it next.
+  expect([
+    ownContinueHeldBack(idle),
+    ownContinueHeldBack({ ...idle, screen: undefined }),
+    ownContinueHeldBack({ ...idle, fill: undefined, screen: undefined }),
+    ownContinueHeldBack({ ...idle, box: undefined, fill: undefined, screen: undefined }),
+    ownContinueHeldBack({ ...idle, resetAt: undefined }),
+    ownContinueHeldBack({ ...idle, now: now + 60_000 + OWN_CONTINUE_MARGIN_MS - 1 }),
+  ]).toEqual([undefined, undefined, undefined, undefined, undefined, undefined])
+  const rows: [string, Parameters<typeof ownContinueHeldBack>[0], string][] = [
+    ['R0, R7: no carry-on of the mod answered', { ...idle, isArmed: false }, 'no carry-on answered'],
+    ['R8: the one key went', { ...idle, isSent: true }, 'Escape sent already'],
+    ['R3, R4: a turn or a tool call running', { ...idle, openTurns: 1 }, 'a turn is open'],
+    ['a prompt still entering, any origin (puma-9arph.80 KEY-QUEUED)', { ...idle, isPromptEntering: true }, 'a prompt is entering'],
+    ['R5: a permission dialog, its turn open', { ...idle, openTurns: 1, fill: { isFilled: false, refusal: 'dialog', text: '' } }, 'a turn is open'],
+    ['R5 alone: a dialog holds the keys', { ...idle, fill: { isFilled: false, refusal: 'dialog', text: '' } }, 'the fill was refused: dialog'],
+    ["a hook's refusal, its cause left out", { ...idle, fill: { isFilled: false, text: '' } }, 'the fill was refused: no cause'],
+    ['a session with no box', { ...idle, fill: { isFilled: false, refusal: 'no_composer', text: '' } }, 'the fill was refused: no_composer'],
+    ['a carry-on queued or armed', { ...idle, isCarryOnQueued: true }, 'a carry-on is queued'],
+    ['a switch settling', { ...idle, isSettling: true }, 'the switch is settling'],
+    ['a switch held', { ...idle, isHeld: true }, 'a switch is held'],
+    ['the accounts panel open', { ...idle, isPanelShown: true }, 'the accounts panel is shown'],
+    ['at the reset plus the margin', { ...idle, now: now + 60_000 + OWN_CONTINUE_MARGIN_MS }, "past the own continue's deadline"],
+    ['no Orca pane', { ...idle, pane: undefined }, 'no Orca pane'],
+    ['an empty Orca handle', { ...idle, pane: '' }, 'no Orca pane'],
+    ['a box read with no answer', { ...idle, box: { text: undefined } }, 'the box is unreadable'],
+    ['R2: a draft in the box', { ...idle, box: { text: 'a draft typed by the stand-in' } }, 'the prompt box holds a draft'],
+    ['a draft the fill shows and the read missed', { ...idle, fill: { isFilled: true, text: 'typed meanwhile' } }, 'the prompt box holds a draft'],
+    // Round 1 F1 [UNVERIFIED-EMPTY]: a fill that answers no text proves no empty box.
+    ['an accepted fill with no text', { ...idle, fill: { isFilled: true } }, 'the fill gave no text'],
+    ['a screen read with no answer', { ...idle, screen: { lines: undefined } }, 'the screen is unreadable'],
+    ['R7: no countdown on screen (a cancel, a menu, a picker)', { ...idle, screen: { lines: CANCELLED_SCREEN } }, 'no countdown on screen'],
+  ]
+  expect(rows.map(([name, s]) => [name, ownContinueHeldBack(s)])).toEqual(rows.map(([name, , why]) => [name, why]))
+  // The order: a look that fails at two gates names the earlier.
+  expect([
+    ownContinueHeldBack({ ...idle, isArmed: false, isSent: true }),
+    ownContinueHeldBack({ ...idle, openTurns: 1, box: { text: 'draft' } }),
+    ownContinueHeldBack({ ...idle, pane: undefined, box: { text: 'draft' } }),
+  ]).toEqual(['no carry-on answered', 'a turn is open', 'no Orca pane'])
+})
+
+// puma-9arph.77 (px's reading of puma-9arph.75): a weekly stop writes only week-mark and a Fable stop only fable-mark,
+// so an arm that read mark alone held no deadline after either.
+test("row ow: ownContinueResetAt holds the reset of the stopped login's newest stop mark, whatever window it marks", () => {
+  const at = NOW - HOUR
+  const five = { pct: 100, resetsAt: LATER, at }
+  const week = { pct: 100, resetsAt: WEEK_END, at }
+  const fable = { pct: 100, resetsAt: FABLE_END, at }
+  const rows: [string, Parameters<typeof ownContinueResetAt>[0], number | undefined][] = [
+    ['a 5-hour stop writes mark', { marks: { a: five } }, Date.parse(LATER)],
+    ['a weekly stop writes week-mark only', { weekMarks: { a: week } }, Date.parse(WEEK_END)],
+    ['a Fable stop writes fable-mark only', { fableMarks: { a: fable } }, Date.parse(FABLE_END)],
+    ["an older 5-hour mark beside the stop's week mark", { marks: { a: five }, weekMarks: { a: { ...week, at: at + 1 } } }, Date.parse(WEEK_END)],
+    ["an older Fable mark beside the stop's 5-hour mark", { marks: { a: { ...five, at: at + 1 } }, fableMarks: { a: fable } }, Date.parse(LATER)],
+    ['no mark on the stopped login', { marks: { b: five } }, undefined],
+    ['a mark whose reset does not parse', { marks: { a: { ...five, resetsAt: 'soon' } } }, undefined],
+  ]
+  expect(rows.map(([name, v]) => [name, ownContinueResetAt(v, 'a')])).toEqual(rows.map(([name, , reset]) => [name, reset]))
+  expect(ownContinueResetAt({ marks: { a: five } }, undefined)).toEqual(undefined)
+  // Codex round 1 MARK_ORIGIN [STOP-IDENTITY-BY-ORDER]: another session can write a newer mark of another window before
+  // the carry-on answers, so the window this stop judged decides, never the marks' order.
+  const later = at + 1
+  const judged: [string, Parameters<typeof ownContinueResetAt>[0], Parameters<typeof ownContinueResetAt>[2], number][] = [
+    ['a weekly stop, a newer 5-hour mark', { weekMarks: { a: week }, marks: { a: { ...five, at: later } } }, 'week', Date.parse(WEEK_END)],
+    ['a Fable stop, a newer week mark', { fableMarks: { a: fable }, weekMarks: { a: { ...week, at: later } } }, 'fable', Date.parse(FABLE_END)],
+    ['a 5-hour stop, a newer Fable mark', { marks: { a: five }, fableMarks: { a: { ...fable, at: later } } }, 'five-hour', Date.parse(LATER)],
+  ]
+  expect(judged.map(([name, v, kind]) => [name, ownContinueResetAt(v, 'a', kind)])).toEqual(judged.map(([name, , , reset]) => [name, reset]))
+})
+
+test('row ow: ownContinueAfterLook re-reads the turns with no await before the key (puma-9arph.71)', () => {
+  const look: Parameters<typeof ownContinueAfterLook>[0] = {
+    isArmed: true,
+    isSent: false,
+    openTurns: 0,
+    isPromptEntering: false,
+    isCarryOnQueued: false,
+    isSettling: false,
+    isHeld: false,
+    isPanelShown: false,
+    now: 0,
+    pane: 'term_a',
+    box: { text: '' },
+    fill: { isFilled: true, text: '' },
+    screen: { lines: COUNTDOWN_SCREEN },
+  }
+  const same = { isSameArm: true, openTurns: 0, mainTurnsSince: 0 }
+  expect([
+    ownContinueAfterLook(look, same),
+    ownContinueAfterLook({ ...look, box: { text: 'x' } }, same),
+    ownContinueAfterLook({ ...look, screen: undefined }, same),
+    ownContinueAfterLook(look, { ...same, isSameArm: false }),
+    ownContinueAfterLook(look, { ...same, openTurns: 1 }),
+    ownContinueAfterLook(look, { ...same, mainTurnsSince: 1 }),
+  ]).toEqual([
+    { escape: true },
+    { why: 'the prompt box holds a draft' },
+    { why: 'not looked' },
+    { why: 'the arm ended during the look' },
+    { why: 'a turn began during the look' },
+    { why: 'a main turn began during the look' },
+  ])
+  // Round 1 F1, its class: a stage that answered nothing never reads as empty, so it never keys.
+  expect([
+    ownContinueAfterLook({ ...look, box: { text: undefined } }, same),
+    ownContinueAfterLook({ ...look, fill: { isFilled: true } }, same),
+    ownContinueAfterLook({ ...look, fill: { isFilled: true, text: undefined } }, same),
+    ownContinueAfterLook({ ...look, screen: { lines: undefined } }, same),
+  ].every(act => 'why' in act)).toBe(true)
+  // The first Escape (RULING 6036) is not widened: an accepted fill still gives it no key.
+  expect(escapeHeldBack({ isCarryOnInFlight: true, isLimitStopLast: true, openTurns: 0, isSettling: false, isHeld: false, escapes: 0, budget: 8, pane: 'term_a', fill: {} })).toBe('no dialog holds it')
+})
+
+// puma-9arph.57 (council B1 to B5): one nudge an episode, under a held stop switch, NUDGE_LEAD_MS before the expiry.
+test('row v: nudgeHeld sends only for a held stop switch, no turn, no carry-on, an empty box and a token due within NUDGE_LEAD_MS', () => {
+  const due: Parameters<typeof nudgeHeld>[0] = { hasHeldCarry: true, isNudged: false, isLimitStopLast: true, openTurns: 0, isCarryOnQueued: false, isBoxEmpty: true, isTokenOk: true, expiresInMs: NUDGE_LEAD_MS }
+  expect([NUDGE_LEAD_MS, nudgeHeld(due)]).toEqual([240_000, undefined])
+  const rows: [string, Parameters<typeof nudgeHeld>[0], string][] = [
+    ['no stop switch held', { ...due, hasHeldCarry: false }, 'no stop switch held'],
+    ['nudged already this episode', { ...due, isNudged: true }, 'nudged already'],
+    ['a turn began since the stop', { ...due, isLimitStopLast: false }, 'no limit stop before it'],
+    ['a turn open in some loop', { ...due, openTurns: 1 }, 'a turn is open'],
+    ['a carry-on queued or armed', { ...due, isCarryOnQueued: true }, 'a carry-on is queued'],
+    ['B5: a draft in the box', { ...due, isBoxEmpty: false }, 'the prompt box holds a draft'],
+    ['no token that can refresh', { ...due, isTokenOk: false }, 'the token cannot refresh'],
+    ['no stored token', { ...due, expiresInMs: undefined }, 'the token cannot refresh'],
+    ['1 ms before the lead', { ...due, expiresInMs: NUDGE_LEAD_MS + 1 }, 'the token is not due'],
+  ]
+  expect(rows.map(([name, s]) => [name, nudgeHeld(s)])).toEqual(rows.map(([name, , why]) => [name, why]))
+})
+
+// puma-9arph.65 case B (a): the box counts as empty for the mod's own lines, which a queued carry-on can leave in it.
+test('puma-9arph.65: isBoxFree holds for an empty box and each of the mod\'s own lines, exactly, and for nothing else', () => {
+  const own = [NUDGE_TEXT, 'Continue where you left off.', undefined, 'Go on on Fable-free ground.']
+  const rows: [string, string | undefined, boolean][] = [
+    ['the empty box', '', true],
+    ['the nudge\'s line', NUDGE_TEXT, true],
+    ['the carry-on\'s line', 'Continue where you left off.', true],
+    ['the kept Fable line', 'Go on on Fable-free ground.', true],
+    ['the nudge\'s line, one character more', `${NUDGE_TEXT}.`, false],
+    ['the nudge\'s line, one character less', NUDGE_TEXT.slice(0, -1), false],
+    ['the carry-on\'s line, one character more', 'Continue where you left off. ', false],
+    ['the carry-on\'s line, one character less', 'Continue where you left off', false],
+    ['the kept Fable line, one character more', 'Go on on Fable-free ground.!', false],
+    ['the kept Fable line, one character less', 'Go on on Fable-free ground', false],
+    ['a person\'s text', 'half a thought', false],
+    ['a box the read could not show', undefined, false],
+  ]
+  expect(rows.map(([name, text]) => [name, isBoxFree(text, own)])).toEqual(rows.map(([name, , free]) => [name, free]))
+  // No line kept for Fable: an undefined own line frees nothing, not even an undefined box.
+  expect([isBoxFree(undefined, [undefined]), isBoxFree('', [])]).toEqual([false, true])
+})
+
+// puma-9arph.65 case A: one more nudge once the token it was sent for has run out unrefreshed.
+test('puma-9arph.65: renudgeDue holds once, for the same token past its expiry, and for nothing else', () => {
+  const due: Parameters<typeof renudgeDue>[0] = { isRenudged: false, firstExpiresAt: NOW, expiresAt: NOW, now: NOW, firstToken: 'token-a', token: 'token-a' }
+  expect(renudgeDue(due)).toBe(true)
+  const rows: [string, Parameters<typeof renudgeDue>[0], boolean][] = [
+    ['a replacement token with the same expiry (Review r65 F3)', { ...due, token: 'token-b' }, false],
+    ['no token digest on record for the first nudge', { ...due, firstToken: undefined }, false],
+    ['the second already went', { ...due, isRenudged: true }, false],
+    ['1 ms before the expiry', { ...due, now: NOW - 1 }, false],
+    ['a token refreshed to a later expiry', { ...due, expiresAt: NOW + HOUR, now: NOW + 2 * HOUR }, false],
+    ['no stored token', { ...due, expiresAt: undefined }, false],
+    ['no first nudge on record', { ...due, firstExpiresAt: undefined }, false],
+    ['long past the expiry', { ...due, now: NOW + HOUR }, true],
+  ]
+  expect(rows.map(([name, s]) => [name, renudgeDue(s)])).toEqual(rows.map(([name, , want]) => [name, want]))
+})
+
+test('row k: a carry-on still in flight 30 s after its Escape gets another, within the budget 2 x logins + 2, then stuck', () => {
+  const logins = 3
+  const budget = 2 * logins + 2
+  const look = (escapes: number, sinceEscapeMs: number | undefined): string | undefined =>
+    escapeHeldBack({ isCarryOnInFlight: true, isLimitStopLast: true, openTurns: 0, isSettling: false, isHeld: false, escapes, budget, sinceEscapeMs, pane: 'term_a', fill: { refusal: 'dialog' } })
+  // The gap: 1 ms short of ESCAPE_GAP_MS holds the key, the gap itself lets it go.
+  expect([look(1, ESCAPE_GAP_MS - 1), look(1, ESCAPE_GAP_MS)]).toEqual(['too soon after the last Escape', undefined])
+  // The budget: every Escape up to it goes, one gap apart; the next is 'Escapes spent'.
+  const answers = Array.from({ length: budget + 1 }, (_, spent) => look(spent, spent === 0 ? undefined : ESCAPE_GAP_MS))
+  expect(answers).toEqual([...Array.from({ length: budget }, () => undefined), 'Escapes spent'])
+})
+
+test('row k: the first Escape of an episode goes with lastEscapeAt unset', () => {
+  // No Escape yet: sinceEscapeMs is undefined, and the gap does not hold the first key.
+  expect(escapeHeldBack({ isCarryOnInFlight: true, isLimitStopLast: true, openTurns: 0, isSettling: false, isHeld: false, escapes: 0, budget: 8, sinceEscapeMs: undefined, pane: 'term_a', fill: { refusal: 'dialog' } })).toBeUndefined()
+})
+
+// Review M403 B: the Escape after the fill, the one place that counts it, times it and reads the session again before it.
+test('row k: an Escape after a dialog fill counts one and stamps its time, and a turn, entry or end during the fill sends none', () => {
+  const look = { isCarryOnInFlight: true, isLimitStopLast: true, openTurns: 0, isSettling: false, isHeld: false, escapes: 2, budget: 8, sinceEscapeMs: ESCAPE_GAP_MS, pane: 'term_a' }
+  const still = { openTurns: 0, isLimitStopLast: true, isCarryOnInFlight: true, isSameEpisode: true, isPromptEntering: false, isSettling: false, isHeld: false }
+  const rows: [string, string | undefined, typeof still, ReturnType<typeof escapeAfterFill>][] = [
+    ['a dialog, nothing changed', 'dialog', still, { escapes: 3, lastEscapeAt: NOW }],
+    ['no dialog', undefined, still, { why: 'no dialog holds it' }],
+    ['the episode ended during the fill', 'dialog', { ...still, isSameEpisode: false }, { why: 'the episode ended during the fill' }],
+    ['a turn began during the fill', 'dialog', { ...still, openTurns: 1 }, { why: 'a turn began during the fill' }],
+    ['a main-loop turn began during the fill', 'dialog', { ...still, isLimitStopLast: false }, { why: 'a main-loop turn began during the fill' }],
+    ['the carry-on entered during the fill', 'dialog', { ...still, isCarryOnInFlight: false }, { why: 'the carry-on entered during the fill' }],
+    // puma-9arph.81: the gates the look read before its fill, read again after it; each is named before the fill's answer.
+    ['a prompt began entering during the fill', 'dialog', { ...still, isPromptEntering: true }, { why: 'a prompt began entering during the fill' }],
+    ['the switch moved during the fill', 'dialog', { ...still, isSettling: true }, { why: 'the switch moved during the fill' }],
+    ['a switch was held during the fill', 'dialog', { ...still, isHeld: true }, { why: 'a switch was held during the fill' }],
+    ['a gate read after the fill, named before the fill found no dialog', undefined, { ...still, isHeld: true }, { why: 'a switch was held during the fill' }],
+  ]
+  expect(rows.map(([name, refusal, after]) => [name, escapeAfterFill(look, refusal, after, NOW)])).toEqual(rows.map(([name, , , act]) => [name, act]))
+  // The refresh nudge's own carry-on goes past a held switch, after the fill as before it.
+  expect(escapeAfterFill({ ...look, isHeld: true, isNudge: true }, 'dialog', { ...still, isHeld: true }, NOW)).toEqual({ escapes: 3, lastEscapeAt: NOW })
+})
+
+// puma-9arph.81: a prompt still entering holds the owed Escape, before the fill as after it.
+test('row k2: a prompt still entering holds the owed Escape back', () => {
+  const look = { isCarryOnInFlight: true, isLimitStopLast: true, openTurns: 0, isSettling: false, isHeld: false, escapes: 0, budget: 8, pane: 'term_a' }
+  expect([escapeHeldBack({ ...look, isPromptEntering: true }), escapeHeldBack(look)]).toEqual(['a prompt is entering', undefined])
+})
+
+// v4 s.1, row a: the pick after a stop judges each login on its own stored read, and a read is fresh within FRESH_READ_MS.
+test('row a: the case\'s shape: a week-old reading with a run-out token and a fresh reading with room, the move goes to the fresh one', () => {
+  // Login 1 is in use and spent; login 2, next in the list, was last read a week ago, its windows long reset (so it reads as
+  // room); login 3 was read just now and has room. The tick's pick takes login 2 by order; the pick after a stop takes login 3.
+  const v = view({ '1': [100, 50], '2': [0, 0], '3': [30, 40] }, {}, 'order')
+  v.readings['2'] = { fiveHour: { pct: 100, resetsAt: '2026-10-05T15:00:00Z' }, sevenDay: { pct: 100, resetsAt: '2026-10-05T03:00:00Z' }, at: NOW - 7 * 24 * HOUR }
+  const picked = pickAfterStop(v, v.readings, NOW, undefined, ['1'], new Set())
+  expect([pickTarget(v, NOW)?.id, picked?.account.id, picked?.tier]).toEqual(['2', '3', 'fresh'])
+})
+
+// Review R1 F1: the spent-old tier is ordered by when each login frees for the need, the latest reset of what spends it.
+test('row a: the spent-old tier goes to the login that frees first for the need, not the one whose other window resets first', () => {
+  const at = (hours: number) => new Date(NOW + hours * HOUR).toISOString()
+  // Read two hours ago, so stale: [5-hour pct, its reset in h, week pct, its reset in h, Fable pct, its reset in h].
+  const read = (w: [number, number, number, number, number, number]): Reading => ({
+    fiveHour: { pct: w[0], resetsAt: at(w[1]) },
+    sevenDay: { pct: w[2], resetsAt: at(w[3]) },
+    fable: { pct: w[4], resetsAt: at(w[5]) },
+    at: NOW - 2 * HOUR,
+  })
+  const cases: [string, 'fable' | undefined, Reading, Reading, Partial<View>, string][] = [
+    ['Fable week spent: its reset, not the 5-hour one', 'fable', read([20, 4, 20, 100, 100, 1]), read([20, 1, 20, 100, 100, 2]), {}, '2'],
+    ['week spent: its reset, not the 5-hour one', undefined, read([20, 1, 100, 3, 0, 9]), read([20, 5, 100, 2, 0, 9]), {}, '3'],
+    ['a week mark in force: its reset, not the read\'s 5-hour one', undefined, read([20, 1, 20, 100, 0, 9]), read([20, 5, 100, 3, 0, 9]), { weekMarks: { '2': { pct: 100, resetsAt: at(6), at: NOW } } }, '3'],
+    ['5-hour and week both spent: the later of the two', undefined, read([95, 1, 100, 5, 0, 9]), read([95, 2, 100, 3, 0, 9]), {}, '3'],
+    ['a Fable mark in force, for the Fable week: its reset', 'fable', read([20, 1, 20, 100, 20, 1]), read([20, 5, 20, 100, 100, 3]), { fableMarks: { '2': { pct: 100, resetsAt: at(6), at: NOW } } }, '3'],
+    ['a Fable mark, for no need: it frees nothing, so not its reset', undefined, read([20, 1, 20, 100, 0, 9]), read([20, 5, 100, 3, 0, 9]), { fableMarks: { '2': { pct: 100, resetsAt: at(10), at: NOW } } }, '2'],
+    // Review M403 C: a spending window with no reset known frees at no known time, so after every one that does.
+    ['week spent with no reset known: last, not by its 5-hour reset', undefined, { ...read([20, 1, 100, 0, 0, 9]), sevenDay: { pct: 100 } }, read([20, 5, 100, 3, 0, 9]), {}, '3'],
+  ]
+  const wrong: string[] = []
+  for (const [name, need, second, third, marks, wanted] of cases) {
+    for (const rotateTo of ['room', 'reset', 'order'] as RotateTo[]) {
+      const v: View = { ...view({ '1': [100, 50], '2': [0, 0], '3': [0, 0] }, {}, rotateTo), ...marks }
+      v.readings['2'] = second
+      v.readings['3'] = third
+      const got = pickAfterStop(v, v.readings, NOW, need, ['1'], new Set())
+      if (got?.account.id !== wanted || got?.tier !== 'spent-old') wrong.push(`${name}, ${rotateTo}: wanted ${wanted}, got ${got?.account.id}/${got?.tier}`)
+    }
+  }
+  expect(wrong).toEqual([])
 })
 
 test('the Escape goes to the one pane named, by a fixed argv with no shell (puma-9arph.34 C1)', () => {
@@ -1888,5 +2248,22 @@ for (const [name, view, by, isAllowed] of [
 ] as const) {
   test(`mayWrite: ${name} (puma-9arph.41)`, () => {
     expect(mayWrite({ ...EMPTY_VIEW, ...view } as View, by)).toBe(isAllowed)
+  })
+}
+
+// puma-9arph.48: exit 0 is logged in, exit 1 with authMethod 'none' is not, and nothing else says either
+// (https://code.claude.com/docs/en/cli-reference: 'Exits with code 0 if logged in, 1 if not').
+for (const [name, exitCode, stdout, read] of [
+  ['exit 1, authMethod none', 1, '{"loggedIn":false,"authMethod":"none"}', 'out'],
+  ['exit 0, authMethod claude.ai', 0, '{"loggedIn":true,"authMethod":"claude.ai"}', 'in'],
+  ['exit 0 with authMethod none', 0, '{"authMethod":"none"}', 'in'],
+  ['exit 1, another authMethod', 1, '{"authMethod":"api_key"}', 'unknown'],
+  ['exit 1 with no JSON', 1, '', 'unknown'],
+  ['exit 1 with JSON that is no object', 1, 'null', 'unknown'],
+  ['exit 2', 2, '{"authMethod":"none"}', 'unknown'],
+  ['no exit code, as a timeout gives', null, '{"authMethod":"none"}', 'unknown'],
+] as const) {
+  test(`signInFromStatus: ${name} (puma-9arph.48)`, () => {
+    expect(signInFromStatus(exitCode, stdout)).toBe(read)
   })
 }

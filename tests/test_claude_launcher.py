@@ -27,6 +27,18 @@ echo "config=${{CLAUDE_CONFIG_DIR-{UNSET}}}"
 echo "path=$PATH"
 printf 'args='; for word in "$@"; do printf '%s:%s;' "${{#word}}" "$word"; done; echo
 """
+# The stub for the own login's status read: `claude auth status` logs its argv and the variable's state, then answers
+# with AUTH_EXIT and AUTH_TEXT, or hangs with a child of its own when AUTH_HANG is 1. Any other call is STUB's.
+AUTH_STUB = f"""#!/bin/sh
+if [ "$1" = auth ] && [ "$2" = status ]; then
+  echo "$*|${{{SLOT_VAR}-{UNSET}}}" >> "$AUTH_LOG"
+  [ "$AUTH_HANG" = 1 ] && {{ sleep 30 & wait; }}
+  echo "$AUTH_TEXT"
+  exit "${{AUTH_EXIT:-0}}"
+fi
+""" + STUB.split("\n", 1)[1]
+SIGNED_OUT = {"AUTH_EXIT": "1", "AUTH_TEXT": '{"authMethod":"none"}'}
+NOT_SIGNED_IN = "not signed in"
 # Every option of the launcher's TAKES_ONE, TAKES_MAYBE and TAKES_MANY, named here by hand, so an option dropped
 # from a table is a failing test: each takes the next word as its value, never as a subcommand.
 VALUE_OPTIONS = (
@@ -191,6 +203,91 @@ class SystemLogin(LauncherCase):
         self.assertEqual((seen["slot"], seen["config"]), (UNSET, UNSET))
 
 
+class AuthStubs:
+    """Mixin for a LauncherCase: the stub answers `auth status` and logs each run to a file of the test's folder."""
+
+    def setUp(self) -> None:
+        super().setUp()  # type: ignore[misc]
+        (self.stub_bin / "claude").write_text(AUTH_STUB, encoding="utf-8")
+        self.auth_log = self.tmp / "auth.log"
+
+    def auth_env(self, answer: dict[str, str], hang: bool = False) -> dict[str, str]:
+        return {**answer, "AUTH_LOG": str(self.auth_log), "AUTH_HANG": "1" if hang else "0"}
+
+    def auth_runs(self) -> list[str]:
+        """One `<argv>|<the variable's state>` per run of `claude auth status`."""
+        return self.auth_log.read_text(encoding="utf-8").splitlines() if self.auth_log.exists() else []
+
+
+def lines_naming_the_login(stderr: str) -> list[str]:
+    return [line for line in stderr.splitlines() if NOT_SIGNED_IN in line]
+
+
+class OwnLoginNotSignedIn(AuthStubs, LauncherCase):
+    """No pick stands and Claude Code's own login reads not signed in: one line says so, and claude starts anyway."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.write_store(pick=None, rows_age_minutes=1)
+
+    def test_a_signed_out_own_login_is_named_in_one_line_and_claude_still_starts(self) -> None:
+        seen = self.launch("-p", "reply OK", "--settings", "{}", **self.auth_env(SIGNED_OUT))
+        named = lines_naming_the_login(seen["stderr"])
+        self.assertEqual(len(named), 1, seen["stderr"])
+        self.assertIn("Claude Code's own login", named[0])
+        self.assertIn("starting on Claude Code's own login: no pick stored", seen["stderr"])
+        self.assertEqual(seen["slot"], UNSET)
+        self.assertEqual(words(seen["args"]), ["-p", "reply OK", "--settings", "{}"])
+
+    def test_the_read_is_one_status_run_under_the_empty_variable(self) -> None:
+        self.launch(**self.auth_env(SIGNED_OUT))
+        self.assertEqual(self.auth_runs(), ["auth status|"])
+
+    def test_a_pick_runs_no_status_read(self) -> None:
+        """A pick of a slot, and a pick of the own login: the start pays nothing and prints nothing new."""
+        for pick in (str(self.slot), ""):
+            with self.subTest(pick=pick):
+                self.write_store(pick=pick, rows_age_minutes=1)
+                seen = self.launch(**self.auth_env(SIGNED_OUT))
+                self.assertEqual(lines_naming_the_login(seen["stderr"]), [])
+                self.assertEqual(self.auth_runs(), [])
+
+    def test_every_start_without_a_pick_reads_the_status(self) -> None:
+        cases = {
+            "stale rows": dict(pick=str(self.slot), rows_age_minutes=61),
+            "slot folder gone": dict(pick=str(self.home / "gone"), rows_age_minutes=1),
+            "store does not parse": dict(pick=None, rows_age_minutes=None, raw="{"),
+        }
+        for name, store in cases.items():
+            with self.subTest(name):
+                self.write_store(**store)
+                seen = self.launch(**self.auth_env(SIGNED_OUT))
+                self.assertEqual(len(lines_naming_the_login(seen["stderr"])), 1, seen["stderr"])
+
+    def test_an_answer_that_is_not_the_signed_out_pair_prints_nothing_new(self) -> None:
+        answers = {
+            "signed in": {"AUTH_EXIT": "0", "AUTH_TEXT": '{"authMethod":"claude.ai"}'},
+            "exit 0 whatever it says": {"AUTH_EXIT": "0", "AUTH_TEXT": '{"authMethod":"none"}'},
+            "exit 1 with no JSON": {"AUTH_EXIT": "1", "AUTH_TEXT": "Not logged in"},
+            "exit 1 with another method": {"AUTH_EXIT": "1", "AUTH_TEXT": '{"authMethod":"oauth_token"}'},
+            "exit 2 with the signed-out text": {"AUTH_EXIT": "2", "AUTH_TEXT": '{"authMethod":"none"}'},
+        }
+        for name, answer in answers.items():
+            with self.subTest(name):
+                seen = self.launch("-p", "hi", **self.auth_env(answer))
+                self.assertEqual(lines_naming_the_login(seen["stderr"]), [], seen["stderr"])
+                self.assertIn("starting on Claude Code's own login: no pick stored", seen["stderr"])
+                self.assertEqual(words(seen["args"]), ["-p", "hi"])
+
+    def test_a_status_that_hangs_is_cut_off_and_claude_still_starts(self) -> None:
+        began = time.monotonic()
+        seen = self.launch("-p", "hi", **self.auth_env(SIGNED_OUT, hang=True))
+        self.assertLess(time.monotonic() - began, 4, "the launcher waited past the status read's bound")
+        self.assertEqual(lines_naming_the_login(seen["stderr"]), [], seen["stderr"])
+        self.assertIn("starting on Claude Code's own login: no pick stored", seen["stderr"])
+        self.assertEqual((seen["slot"], words(seen["args"])), (UNSET, ["-p", "hi"]))
+
+
 class InstalledCopy(LauncherCase):
     """The copy a person installs as `claude` in a folder of its own, ahead of the real claude on PATH."""
 
@@ -276,6 +373,30 @@ class InstalledCopy(LauncherCase):
                 (bad / "claude").chmod(0o755)
                 seen = self.launch(launcher=self.copy, path=f"{self.own}:{bad}:{self.stub_bin}:/usr/bin:/bin")
                 self.assertEqual(seen["slot"], str(self.slot))
+
+
+class OwnLoginNotSignedInOnPath(AuthStubs, InstalledCopy):
+    """The installed copy, its folder twice on PATH: the read runs the next claude, once, and never the launcher."""
+
+    def test_the_read_asks_the_next_claude_once_with_its_own_folder_removed(self) -> None:
+        self.write_store(pick=None, rows_age_minutes=1)
+        path = f"{self.own}:{self.own}/:{self.stub_bin}:/usr/bin:/bin"
+        seen = self.launch("--model", "haiku", launcher=self.copy, path=path, **self.auth_env(SIGNED_OUT))
+        self.assertEqual(self.auth_runs(), ["auth status|"])
+        self.assertEqual(len(lines_naming_the_login(seen["stderr"])), 1, seen["stderr"])
+        self.assertEqual((seen["path"], words(seen["args"])), (path, ["--model", "haiku"]))
+
+    def test_a_claude_that_cannot_run_is_passed_over_for_the_read_as_for_the_start(self) -> None:
+        """Codex round 1, F1: the read asks the next claude that starts, as the start itself does."""
+        bad = self.home / "broken"
+        bad.mkdir()
+        (bad / "claude").write_text("#!/no/such/interpreter\n", encoding="utf-8")
+        (bad / "claude").chmod(0o755)
+        self.write_store(pick=None, rows_age_minutes=1)
+        path = f"{self.own}:{bad}:{self.stub_bin}:/usr/bin:/bin"
+        seen = self.launch(launcher=self.copy, path=path, **self.auth_env(SIGNED_OUT))
+        self.assertEqual(self.auth_runs(), ["auth status|"])
+        self.assertEqual(len(lines_naming_the_login(seen["stderr"])), 1, seen["stderr"])
 
 
 if __name__ == "__main__":
