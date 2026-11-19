@@ -12988,8 +12988,11 @@ test('F102-3 b: a carry-on sent while the view still holds carryDue is not sent 
 
 const OWED_AT = Date.parse('2026-10-12T09:30:00Z')
 const RELOADED_MARK = 'session-reloaded'
-/** The store's mark of the carry-on owed this session ended though its view kept it. */
-const carryEndedOf = (store: Map<string, unknown>, w: World) => store.get(`carry-ended:${w.otherEnv.ACCOUNT_ROTATOR_SESSION}`)
+/** The store's mark of the carry-on owed this session ended though its view kept it, as the debt it names. */
+const carryEndedOf = (store: Map<string, unknown>, w: World) => {
+  const mark = store.get(`carry-ended:${w.otherEnv.ACCOUNT_ROTATOR_SESSION}`) as { owedAt?: number } | undefined
+  return mark === undefined ? undefined : { owedAt: mark.owedAt }
+}
 const carryEndedKeys = (store: Map<string, unknown>) => [...store.keys()].filter(k => k.startsWith('carry-ended:'))
 /** Past login 1's reset at 12:00 and the grace after it: a carry-on owed for 12:00 has gone by then. */
 const pastOwed = (clock: MockClock) => clock.advance(Date.parse('2026-10-12T12:00:00Z') - clock.now() + 10 * 60_000)
@@ -13021,6 +13024,9 @@ test('a carry-on sent while its view clear is refused leaves the ended mark in t
   await pastOwed(clock)
   expect(typeof seen.owed?.owedAt, 'the debt names when it was owed').toBe('number')
   expect([w.submitted.length, carryEndedOf(store, w), carryEndedKeys(store).length]).toEqual([1, { owedAt: seen.owed?.owedAt }, 1])
+  // The mark says when the debt ended, which the sweep ages it from: at the carry-on, after the time owed.
+  const { endedAt } = store.get(`carry-ended:${w.otherEnv.ACCOUNT_ROTATOR_SESSION}`) as { endedAt?: number }
+  expect((endedAt ?? 0) >= Date.parse('2026-10-12T12:00:00Z')).toBe(true)
 })
 
 test('a reload whose view still holds a debt the store marks ended owes nothing (puma-9arph.40)', async ($, on) => {
@@ -13060,11 +13066,37 @@ test('a reload\'s clear of a marked debt spares a newer debt written just before
   expect([isArmed, held?.owedAt]).toEqual([false, newer.owedAt])
 })
 
-// Codex round 1 F2: the start's sweep deletes a mark after 7 days, so a debt owed before then is owed no more at a reload.
-test('a reload whose view holds a debt owed over 7 days ago owes it no more, its mark swept or not (puma-9arph.40)', async ($, on) => {
-  const { w, clock } = await reloadedWorld($, on, survivingDebt({ owedAt: NOW - 8 * 24 * 3600_000 }))
+// RULING 7129: no path drops a debt nobody ended (P1), and the mark outlives the debt's end, not its start (P2).
+const DAY_MS = 24 * 3600_000
+
+test('a reload keeps a debt owed 8 days ago that nobody ended, its reset tomorrow (puma-9arph.40)', async ($, on) => {
+  const owedAt = NOW - 8 * DAY_MS
+  let held: View['carryDue']
+  const observe: Around = async (e, inner) => {
+    const result = await inner(e)
+    if (e.key === 'view' && !(typeof result === 'object' && result !== null && 'deny' in result)) held = e.value.carryDue
+    return result
+  }
+  await reloadedWorld($, on, { ...survivingDebt({ owedAt }), carryDue: { at: NOW + DAY_MS, from: '1', owedAt } }, {}, observe)
+  expect(held?.owedAt, 'a debt nobody ended survives boot').toBe(owedAt)
+})
+
+test('a reload sends a debt owed 8 days ago that nobody ended, though the ended mark cannot be read (puma-9arph.40)', async ($, on) => {
+  const w = fresh()
+  w.storeReadFails = 'carry-ended:'
+  const { clock } = await reloadedWorld($, on, survivingDebt({ owedAt: NOW - 8 * DAY_MS }), {}, undefined, w)
   await pastOwed(clock)
-  expect(w.submitted).toEqual([])
+  expect(w.submitted).toHaveLength(1)
+})
+
+test('the mark of a debt owed 6.9 days before it ended outlives the start\'s sweep a day after the end, so a reload sends nothing (puma-9arph.40)', async ($, on) => {
+  const endedAt = NOW - DAY_MS
+  const owedAt = endedAt - 6.9 * DAY_MS
+  const key = `carry-ended:${RELOADED_MARK}`
+  const { w, store, clock } = await reloadedWorld($, on, survivingDebt({ owedAt }), { [key]: { owedAt, endedAt } })
+  await pastOwed(clock)
+  // The start's sweep ran in this boot: the mark it kept is what the next reload reads.
+  expect([w.submitted.length, store.get(key)]).toEqual([0, { owedAt, endedAt }])
 })
 
 test('a reload whose debt has no owedAt is sent once though the store holds a mark with no owedAt (puma-9arph.40)', async ($, on) => {
@@ -13148,10 +13180,14 @@ test('a refused clear, then the held branch, leaves the debt owed with no ended 
   expect([held.length, isDone, markAtHeld, w.submitted.length, carryEndedOf(store, w)]).toEqual([1, true, undefined, 1, { owedAt: seen.owed?.owedAt }])
 })
 
-test('the start\'s sweep deletes an ended mark owed over 7 days ago or unreadable, and keeps a newer one (puma-9arph.40)', async ($, on) => {
+test('the start\'s sweep deletes an ended mark that ended over 7 days ago or is unreadable, and keeps one owed long ago that ended since (puma-9arph.40)', async ($, on) => {
   const w = fresh()
-  const day = 24 * 3600_000
-  const { store, clock } = await loggedWorld(on, w, { 'carry-ended:old': { owedAt: NOW - 8 * day }, 'carry-ended:new': { owedAt: NOW - day }, 'carry-ended:bad': 'no mark' })
+  const day = DAY_MS
+  const { store, clock } = await loggedWorld(on, w, {
+    'carry-ended:old': { owedAt: NOW - 9 * day, endedAt: NOW - 8 * day },
+    'carry-ended:new': { owedAt: NOW - 9 * day, endedAt: NOW - day },
+    'carry-ended:bad': 'no mark',
+  })
   await start($, clock)
   expect(carryEndedKeys(store)).toEqual(['carry-ended:new'])
 })
