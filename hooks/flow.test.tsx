@@ -14695,7 +14695,7 @@ test('88-A: a newer carry-on owed whose first write is refused, the view holding
  * `refuseNote()` refuses the next write that notes what Chrome answered as login 2, so the visit throws after its wait,
  * and `holdNote()` holds that write until the release it answers, so the visit stays open past its wait.
  */
-async function visitWorld($: Engine, on: On, isThree = false) {
+async function chromeVisitWorld($: Engine, on: On, isThree = false) {
   const w = fresh()
   w.chrome = { extensions: [''] }
   if (isThree) {
@@ -14751,7 +14751,7 @@ async function visitWorld($: Engine, on: On, isThree = false) {
 }
 
 /** A usage-limit stop on login 1 that moves to login 2 and arms its carry-on, then the pane open on Chrome's other accounts. */
-async function stopThenPane($: Engine, world: Awaited<ReturnType<typeof visitWorld>>) {
+async function stopThenPane($: Engine, world: Awaited<ReturnType<typeof chromeVisitWorld>>) {
   world.w.usage['tok-1'] = [100, 41]
   await $.classic.StopFailure(PLAIN)
   await settleReal(world.clock)
@@ -14764,7 +14764,7 @@ async function stopThenPane($: Engine, world: Awaited<ReturnType<typeof visitWor
 }
 
 test('88-B1: a stop\'s carry-on armed before a Connect visit that does not move waits out the visit, and goes once after it (puma-9arph.88)', async ($, on) => {
-  const world = await visitWorld($, on)
+  const world = await chromeVisitWorld($, on)
   const { pane, armed } = await stopThenPane($, world)
   // The visit's note of what Chrome answered waits, so the visit is still open when the carry-on's timer fires.
   const release = world.holdNote()
@@ -14783,7 +14783,7 @@ test('88-B1: a stop\'s carry-on armed before a Connect visit that does not move 
 })
 
 test('88-B2: a stop\'s carry-on armed before a Connect visit that moves is not lost: it goes once after the visit (puma-9arph.88)', async ($, on) => {
-  const world = await visitWorld($, on, true)
+  const world = await chromeVisitWorld($, on, true)
   const { pane, armed } = await stopThenPane($, world)
   void pane.press({ key: 'chrome-try-3' })
   await settleReal(world.clock)
@@ -14796,7 +14796,7 @@ test('88-B2: a stop\'s carry-on armed before a Connect visit that moves is not l
 })
 
 test('88-B3: a carry-on held for a Connect visit that throws goes once, and a later visit sends none (puma-9arph.88)', async ($, on) => {
-  const world = await visitWorld($, on)
+  const world = await chromeVisitWorld($, on)
   const { pane } = await stopThenPane($, world)
   world.refuseNote()
   void pane.press({ key: 'chrome-try-2' })
