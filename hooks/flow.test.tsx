@@ -14241,8 +14241,8 @@ for (const [site, run] of REFUSED_SITES) {
 /**
  * The test's one handler of state.get and state.set. `refuse(n)` refuses the next n view writes that put carryDue into a
  * view that lacks it, as an engine that refuses the write; `clear()` makes reads find the default view until the mod writes it, as /clear does;
- * `spendAfterClear()` makes every read after the next write that clears carryDue find login 1 needing a sign-in, so the
- * check after that write finds it spent; `holdNext()` holds the next such write that puts carryDue in, `holdNext(true)` the
+ * `spendAfterClear()` makes every read after the next write that clears carryDue find logins 1 and 2 needing a sign-in,
+ * so the check after that write, and every tick after, finds no login to carry on; `holdNext()` holds the next such write that puts carryDue in, `holdNext(true)` the
  * next that clears it, until the release it answers is called; `view()` is what a read finds.
  */
 function carrySetRefusal(on: On) {
@@ -14261,7 +14261,8 @@ function carrySetRefusal(on: On) {
     if (isCleared) return { value: { value: EMPTY_VIEW, version: read.value?.version ?? 0 } }
     if (!isSpent || read.value === undefined) return read
     const view = read.value.value as View
-    return { value: { ...read.value, value: { ...view, health: { ...view.health, '1': { kind: 'login-needed', why: 'sign-in rejected' } } } } }
+    const rejected = { kind: 'login-needed', why: 'sign-in rejected' } as const
+    return { value: { ...read.value, value: { ...view, health: { ...view.health, '1': rejected, '2': rejected } } } }
   })
   on('state.set', async (_$, e, next) => {
     const { key, value } = e as unknown as { key: string; value: View }
