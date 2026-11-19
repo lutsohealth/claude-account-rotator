@@ -3371,9 +3371,14 @@ async function boot($: Host, isInteractive: boolean): Promise<void> {
     // One owed longer ago than the start's sweep keeps a mark (pruneStopLogs) is owed no more, its mark gone or not.
     const isStale = survivedDue.owedAt !== undefined && (await $.clock.now()) - survivedDue.owedAt > STOP_LOG_MAX_AGE_MS
     const isEnded = isStale || (endedAt !== undefined && endedAt === survivedDue.owedAt)
-    // A stop during that read owes its own: it stands, and nothing is cleared or restored over it.
-    if (due === undefined && isEnded) await clearCarryDue($)
-    else if (due === undefined) due = { ...survivedDue, turns: mainTurns }
+    // A stop during that read owes its own: it stands, and nothing is cleared or restored over it. The view is cleared
+    // only while it still holds the debt examined, so a stop's own debt written meanwhile stands there too.
+    const examined = survivedDue.owedAt
+    if (due === undefined && isEnded) {
+      await setView($, v => (v.carryDue?.owedAt === examined ? { ...v, carryDue: undefined } : v)).catch(error =>
+        debug($, `carry-on owed not cleared: ${String(error)}`),
+      )
+    } else if (due === undefined) due = { ...survivedDue, turns: mainTurns }
   }
   // Terminal.app is the terminal that names itself so and draws block characters from its font.
   const hasFontBlocks = (await $.env.get('TERM_PROGRAM')) === 'Apple_Terminal'
