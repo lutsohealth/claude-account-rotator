@@ -1781,7 +1781,6 @@ async function retryHeld($: Host): Promise<void> {
  */
 function carryOnAfterSettle($: Host, owed: CarryOn): void {
   const mark = moves
-  const visitMark = visitCarriedAt
   armedCarryOns += 1
   $.clock.after(SETTLE_MS, () => {
     armedCarryOns -= 1
@@ -1790,8 +1789,7 @@ function carryOnAfterSettle($: Host, owed: CarryOn): void {
     if (isConnectingChrome) {
       isCutByVisit = true
       void logStop($, 'carry-on held: Claude in Chrome is connecting')
-    } else if (visitCarriedAt !== visitMark) void logStop($, "carry-on skipped: Claude in Chrome's line carried on since")
-    else if (moves === mark) void carryOn($, owed.need).catch(error => debug($, `carry-on failed: ${String(error)}`))
+    } else if (moves === mark) void carryOn($, owed.need).catch(error => debug($, `carry-on failed: ${String(error)}`))
     else void logStop($, 'carry-on skipped: another switch since')
   })
   // Not awaited: a caller sets carriedFor in the same tick, so a second stop cannot arm a second carry-on meanwhile.
