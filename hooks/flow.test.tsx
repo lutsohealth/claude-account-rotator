@@ -14690,7 +14690,8 @@ test('88-A: a newer carry-on owed whose first write is refused, the view holding
 
 /**
  * Connect visits from here on: a world on two logins, or three, Claude in Chrome's extension on login 1, whose view writes
- * `state.set` sees; `atVisitEnd()` is how many carry-ons were submitted when a visit's write ended it, `refuseNote()`
+ * `state.set` sees; `atVisitEnd()` is how many carry-ons were submitted when the first visit's write ended it (a trial
+ * no browser answers connects again as the extension's account, a second visit), `refuseNote()`
  * refuses the next write that notes what Chrome answered as login 2, so the visit throws after its wait.
  */
 async function visitWorld($: Engine, on: On, isThree = false) {
@@ -14713,7 +14714,7 @@ async function visitWorld($: Engine, on: On, isThree = false) {
       notesRefused += 1
       return { deny: 'state: refused' } as unknown as Awaited<ReturnType<typeof next>>
     }
-    if (last?.chromeConnecting !== undefined && value.chromeConnecting === undefined) atVisitEnd = w.submitted.length
+    if (last?.chromeConnecting !== undefined && value.chromeConnecting === undefined) atVisitEnd ??= w.submitted.length
     last = value
     return next(e)
   })

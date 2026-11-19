@@ -412,6 +412,7 @@ function notify($: Host, text: string): void {
   try {
     void $.ui.notify(text, { title: TITLE }).catch(error => debug($, `notice failed: ${String(error)}`))
   } catch (error) {
+    // A throw at the call: the test kit's notice only rejects, so no test reaches this catch.
     void debug($, `notice failed: ${String(error)}`)
   }
 }
@@ -722,7 +723,8 @@ function logStop($: Host, what: string): Promise<void> {
       await debug($, `stop-log failed: ${String(error)}`)
     }
   })
-  // Its own catch: whatever the debug line does, the next entry still writes.
+  // Its own catch: whatever the debug line does, the next entry still writes. The test kit's debug line never rejects,
+  // refused by a throw or a deny, so no test reaches this catch.
   stopLogChain = stopLogChain.catch(() => undefined)
   return stopLogChain
 }
@@ -1615,8 +1617,9 @@ async function carryOnWhenFree($: Host): Promise<void> {
   const view = await getView($)
   const now = await $.clock.now()
   // A debt this module holds that the view lacks, its write refused (awaitFreeLogin's, or the held branch's below), is
-  // written again, so a reload after this tick still owes it.
-  if (view.carryDue === undefined && due !== undefined) {
+  // written again, so a reload after this tick still owes it. A view still holding an older debt, ended and marked in the
+  // store, lacks this one too: the newer debt stands in its place, as this module owes one carry-on at a time.
+  if (due !== undefined && (view.carryDue === undefined || view.carryDue.owedAt !== due.owedAt)) {
     await writeCarryDue($, due).catch(error => debug($, `carry-on owed not written again: ${String(error)}`))
   }
   // Connect holds the session on the extension's login: the carry-on stays owed and goes at the first tick after.
@@ -1652,8 +1655,13 @@ async function carryOnWhenFree($: Host): Promise<void> {
   // it no more; marked before the carry-on goes, so one whose submit throws went all the same.
   if (!isCleared) await markCarryEnded($, owed)
   const hasTurnRun = isSameLogin && owed.turns !== undefined && mainTurns > owed.turns
-  void logStop($, hasTurnRun ? 'a turn ran since the stop: no carry-on' : `a login is free: carry-on on ${view.activeId}`)
-  if (hasTurnRun) return
+  // Claude in Chrome's own line after a visit, sent since this was owed on a login with room, carried the session on.
+  const hasVisitCarried = visitCarriedAt !== undefined && owed.owedAt !== undefined && visitCarriedAt >= owed.owedAt
+  void logStop(
+    $,
+    hasTurnRun ? 'a turn ran since the stop: no carry-on' : hasVisitCarried ? "Claude in Chrome's line carried on since the stop: no carry-on" : `a login is free: carry-on on ${view.activeId}`,
+  )
+  if (hasTurnRun || hasVisitCarried) return
   const since = after.pending?.since
   if (since === undefined || now - since >= SETTLE_MS) {
     // Still on the login the stop found spent: nothing switched, so the line says its limit reset. A submit that
@@ -1773,10 +1781,17 @@ async function retryHeld($: Host): Promise<void> {
  */
 function carryOnAfterSettle($: Host, owed: CarryOn): void {
   const mark = moves
+  const visitMark = visitCarriedAt
   armedCarryOns += 1
   $.clock.after(SETTLE_MS, () => {
     armedCarryOns -= 1
-    if (moves === mark) void carryOn($, owed.need).catch(error => debug($, `carry-on failed: ${String(error)}`))
+    // A Connect visit holds the session: it carries the turn on once it ends, as for a stop it cut, though its move counts
+    // as another switch since. A Fable carry-on held so goes as the mod's own line.
+    if (isConnectingChrome) {
+      isCutByVisit = true
+      void logStop($, 'carry-on held: Claude in Chrome is connecting')
+    } else if (visitCarriedAt !== visitMark) void logStop($, "carry-on skipped: Claude in Chrome's line carried on since")
+    else if (moves === mark) void carryOn($, owed.need).catch(error => debug($, `carry-on failed: ${String(error)}`))
     else void logStop($, 'carry-on skipped: another switch since')
   })
   // Not awaited: a caller sets carriedFor in the same tick, so a second stop cannot arm a second carry-on meanwhile.
@@ -2851,23 +2866,54 @@ function connectChrome($: Host, isQuiet = false, tryId?: string): Promise<Chrome
     let done: { target: Account; answer: ChromeAnswer; isVisit: boolean } | undefined
     try {
       done = await connectingChrome($, isQuiet, tryId)
+    } catch (error) {
+      // A visit that throws still carries on, once, what it cut or what a settling switch held for it: nothing else will.
+      if (isCutByVisit) {
+        isCutByVisit = false
+        void sendCarryOn($, { text: CONTINUE }).catch(e => debug($, `carry-on failed: ${String(e)}`))
+      }
+      throw error
     } finally {
       isConnectingChrome = false
       await setView($, v => ({ ...v, chromeConnecting: undefined }))
     }
+    const endedAt = await $.clock.now()
+    const refusals = carryOnRefusals
     const isMoved = (await maybeRotate($)) || done?.isVisit === true
     const isConnected = done?.answer === 'paired' && isChromeAwaited
     const text = isConnected && done !== undefined ? `Claude in Chrome is connected as ${claudeAccount(done.target, (await getView($)).accounts)}. Continue where you left off.` : isCutByVisit ? CONTINUE : undefined
     if (isConnected) isChromeAwaited = false
     isCutByVisit = false
     if (text !== undefined) {
-      const send = () => void sendCarryOn($, { text }).catch(error => debug($, `carry-on failed: ${String(error)}`))
+      const send = () => void sendVisitLine($, text, endedAt, refusals).catch(error => debug($, `carry-on failed: ${String(error)}`))
       // Once the move back lands: until then the turn's requests may go out as the extension's account.
       if (isMoved) $.clock.after(SETTLE_MS, send)
       else send()
     }
     return done?.answer
   })()
+}
+
+/** When Claude in Chrome's own CONTINUE after a visit last went on a login with room (sendVisitLine). */
+let visitCarriedAt: number | undefined
+
+/**
+ * Sends connectChrome's own line after a visit, `endedAt` its end. One carry-on serves a turn the visit cut and a wait
+ * for a free login both: CONTINUE does not go where carryOn went since the visit ended and no carry-on was refused since
+ * `refusals`. Gone on a login with room, it marks visitCarriedAt, which ends that wait unsent; gone on a spent login, it
+ * ends nothing, and the wait still goes once a login frees up.
+ */
+async function sendVisitLine($: Host, text: string, endedAt: number, refusals: number): Promise<void> {
+  const isContinue = text === CONTINUE
+  if (isContinue && carriedOn !== undefined && carriedOn.at >= endedAt && carryOnRefusals === refusals) {
+    void logStop($, 'carry-on not sent again: one went since the visit')
+    return
+  }
+  const view = await getView($)
+  const now = await $.clock.now()
+  const before = carryOnRefusals
+  await sendCarryOn($, { text })
+  if (isContinue && carryOnText === CONTINUE && carryOnRefusals === before && !shouldLeave(view, now)) visitCarriedAt = now
 }
 
 /**
