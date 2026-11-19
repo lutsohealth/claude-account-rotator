@@ -1613,6 +1613,19 @@ async function carryOnWhenFree($: Host): Promise<void> {
   if (due === undefined) return
   const view = await getView($)
   const now = await $.clock.now()
+  // A debt this module holds that the view lacks, its write refused (awaitFreeLogin's, or the held branch's below), is
+  // written again, so a reload after this tick still owes it. Only the same debt still owed: one a switch, a press or
+  // this tick ended or took meanwhile is never written back.
+  if (view.carryDue === undefined && due !== undefined) {
+    const owed = due
+    const { at, from, owedAt } = owed
+    const record = at === undefined ? { from, owedAt } : { at, from, owedAt }
+    await setView($, v => (owed !== undefined && due === owed && v.carryDue === undefined ? { ...v, carryDue: record } : v)).catch(error =>
+      debug($, `carry-on owed not written again: ${String(error)}`),
+    )
+  }
+  // Connect holds the session on the extension's login: the carry-on stays owed and goes at the first tick after.
+  if (isConnectingChrome) return
   if (shouldLeave(view, now)) return
   const isSameLogin = view.activeId === due?.from
   if (isSameLogin && due?.at !== undefined && now < due.at + CARRY_ON_GRACE_MS) return
@@ -1621,9 +1634,9 @@ async function carryOnWhenFree($: Host): Promise<void> {
   const owed = due
   const endings = dueEndings
   const isCleared = await clearCarryDue($)
-  // A turn or a switch can come during that write: the decision is made from what stands after it.
+  // A turn, a switch or a Connect visit can come during that write: the decision is made from what stands after it.
   const after = await getView($)
-  if (after.activeId !== view.activeId || shouldLeave(after, now)) {
+  if (after.activeId !== view.activeId || shouldLeave(after, now) || isConnectingChrome) {
     // A switch that ended what is owed moved it: nothing stays owed, and a view that still holds it is marked.
     if (dueEndings !== endings) return isCleared ? undefined : markCarryEnded($, owed)
     // The login moved meanwhile: the carry-on stays owed, decided again at the next tick.
