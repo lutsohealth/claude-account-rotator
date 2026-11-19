@@ -246,6 +246,8 @@ let clearedFor: number | undefined
  * by the first such stop, with no await between its read and its write, so a second stop adds no notice and no retry.
  */
 let due: { at?: number; from?: string; turns?: number } | undefined
+/** How many switches ended the carry-on owed (endDue): one landing while carryOnWhenFree writes is not undone by it. */
+let dueEndings = 0
 /** The turns open now, the main loop's and every agent's or teammate's, by id: a key sent while one runs would answer its dialog. */
 const openTurns = new Set<string>()
 /** The main loop's turns started this session, and how many had started at the last usage-limit stop: equal while its modal can stand. */
@@ -1595,11 +1597,14 @@ async function carryOnWhenFree($: Host): Promise<void> {
   // Another tick may have taken it during the reads: the check and the clear go with no await between.
   if (due === undefined) return
   const owed = due
+  const endings = dueEndings
   due = undefined
   await setView($, v => ({ ...v, carryDue: undefined }))
   // A turn or a switch can come during that write: the decision is made from what stands after it.
   const after = await getView($)
   if (after.activeId !== view.activeId || shouldLeave(after, now)) {
+    // A switch that ended what is owed moved it: nothing stays owed.
+    if (dueEndings !== endings) return
     // The login moved meanwhile: the carry-on stays owed, decided again at the next tick.
     if (due === undefined) due = owed
     const held = due
@@ -1616,6 +1621,7 @@ async function carryOnWhenFree($: Host): Promise<void> {
     await carryOn($, undefined, view.activeId === owed.from ? CONTINUE_RESET : undefined)
     return
   }
+  // A stop that rode this switch and armed its carry-on during the clearing write above: no second one.
   if (carriedFor === since) return
   carryOnAfterSettle($, {})
   carriedFor = since
@@ -1772,13 +1778,32 @@ async function switchTo($: Host, target: Account, why: string, isQuiet = false, 
       if (since !== undefined && carriedFor !== since && carry !== undefined) {
         carryOnAfterSettle($, carry)
         carriedFor = since
+        // Only a rider that arms its own carry-on ends what is owed: one that arms none leaves it for carryOnWhenFree.
+        endDue($, carry, isRotation, isQuiet)
       }
       return true
     }
     // A waiter claims again, so two released by one switch start one after the other, and one whose target the switch
     // that ran reached starts none.
-    if ((await getView($)).activeId === target.id) return true
+    if ((await getView($)).activeId === target.id) {
+      endDue($, carry, isRotation, isQuiet)
+      return true
+    }
   }
+}
+
+/**
+ * Ends the carry-on owed once a login frees up (awaitFreeLogin) where a move landed for a switch that carries on, or one a
+ * person asked for: switchNow's own, a stop's that rode the switch running, or a press whose login that switch reached.
+ * The tick's own rotation (it carries nothing) and Connect's visit (quiet) leave it owed: carryOnWhenFree sends it after them.
+ */
+function endDue($: Host, carry: CarryOn | undefined, isRotation: boolean, isQuiet: boolean): void {
+  if (carry === undefined && (isRotation || isQuiet)) return
+  // Counted even while carryOnWhenFree's clearing write runs, with `due` already cleared, so that write keeps it ended.
+  dueEndings += 1
+  if (due === undefined) return
+  due = undefined
+  void setView($, v => ({ ...v, carryDue: undefined })).catch(error => debug($, `carry-on owed not cleared: ${String(error)}`))
 }
 
 /** The switch that owns the session by `token`: every write that names the switch applies only while it still owns it. */
@@ -1834,6 +1859,7 @@ async function switchNow($: Host, token: number, target: Account, why: string, i
   })))) return givenUp()
   movedAt = now
   moves += 1
+  endDue($, carry, isRotation, isQuiet)
   // The carry-on is armed and carriedFor set straight after pending's write, with no await between, so a second stop
   // cannot arm a second carry-on; the toast reads the view after them.
   if (carry !== undefined) void logStop($, `moved to ${target.id}`)

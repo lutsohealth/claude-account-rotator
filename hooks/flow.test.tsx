@@ -10358,6 +10358,194 @@ test('with every login spent, a switch to a spent login during the write clearin
   await pane.unmount()
 })
 
+// ---------------------------------------------------------------- puma-9arph.84: a switch ends the carry-on owed
+
+/** The stop-log's line of the carry-on owed once a login frees up, as it goes. */
+const isOwedCarryOnLine = (what: string) => what.startsWith('a login is free: carry-on')
+
+/** Every login spent, then a usage-limit stop on login 1: one carry-on is owed, at 12:00. */
+async function spentAndOwedWorld($: Engine, on: On) {
+  const w = fresh()
+  const { store, clock } = await loggedWorld(on, w)
+  const view = watchedView(on)
+  w.usage['tok-2'] = [100, 30]
+  await start($, clock)
+  w.usage['tok-1'] = [100, 41]
+  await $.classic.StopFailure(PLAIN)
+  await clock.settle()
+  expect([whats(stopLogOf(store, w)).filter(isWaitLine).length, view()?.carryDue?.from]).toEqual([1, '1'])
+  return { w, store, clock, view }
+}
+
+test('with every login spent, Use now pressed on another login ends the carry-on owed: nothing goes into the session once a login frees up (puma-9arph.84)', async ($, on) => {
+  const { w, store, clock, view } = await spentAndOwedWorld($, on)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  await pane.press({ key: 'use-2' })
+  await clock.settle()
+  await pane.unmount()
+  const owedAfter = view()?.carryDue
+  expect(w.envSets.at(-1)?.value).toBe(SLOT2)
+  // Past the time owed and the grace, both logins free: the person moved the session, so nothing is sent.
+  await clock.advance(Date.parse('2026-10-12T12:00:00Z') - clock.now() + 10 * 60_000)
+  expect([w.submitted.length, whats(stopLogOf(store, w)).filter(isOwedCarryOnLine), owedAfter]).toEqual([0, [], undefined])
+})
+
+test('with every login spent, `account use` of another login ends the carry-on owed: nothing goes into the session once a login frees up (puma-9arph.84)', async ($, on) => {
+  const { w, store, clock, view } = await spentAndOwedWorld($, on)
+  await untilTick(clock)
+  w.files[`${REQUESTS}/${N1}.json`] = useRequest(N1, '2', store.get('store-id'), clock.now(), ownMark(w))
+  await untilTick(clock)
+  const owedAfter = view()?.carryDue
+  expect(resultOf(w, N1)?.activeId).toBe('2')
+  await clock.advance(Date.parse('2026-10-12T12:00:00Z') - clock.now() + 10 * 60_000)
+  expect([w.submitted.length, whats(stopLogOf(store, w)).filter(isOwedCarryOnLine), owedAfter]).toEqual([0, [], undefined])
+})
+
+test('with every login spent, a later stop that moves to a login freed since ends the carry-on owed: its own carry-on is the one that goes (puma-9arph.84)', async ($, on) => {
+  const { w, store, clock, view } = await spentAndOwedWorld($, on)
+  // Between two ticks another session's read finds login 2 with room, and a stop comes before this session's tick moves there.
+  await clock.advance(10 * 60_000 + 30_000)
+  w.usage['tok-2'] = [10, 30]
+  const read = store.get('usage:2') as { fiveHour: { pct: number } }
+  store.set('usage:2', { ...read, fiveHour: { ...read.fiveHour, pct: 10 }, at: clock.now() })
+  await $.classic.StopFailure(PLAIN)
+  await clock.settle()
+  const owedAfter = view()?.carryDue
+  expect(w.envSets.at(-1)?.value).toBe(SLOT2)
+  await clock.advance(Date.parse('2026-10-12T12:10:00Z') - clock.now())
+  expect([w.submitted.length, whats(stopLogOf(store, w)).filter(isOwedCarryOnLine), owedAfter]).toEqual([1, [], undefined])
+})
+
+test('with every login spent, Connect\'s visit to the extension\'s login leaves the carry-on owed: it goes once that login frees up (puma-9arph.84)', async ($, on) => {
+  const w = fresh()
+  w.chrome = { extensions: [''] }
+  const { store, clock } = await loggedWorld(on, w, { 'chrome-account': '1' })
+  const view = watchedView(on)
+  w.usage['tok-2'] = [100, 30]
+  await start($, clock)
+  w.usage['tok-1'] = [100, 41]
+  await $.classic.StopFailure(PLAIN)
+  await clock.settle()
+  // Chrome opens in a second profile, signed in to login 2's account, and the person connects it there.
+  w.chrome.extensions.push(SLOT2)
+  const pane = await mountPane($)
+  await pane.press({ key: 'chrome-others' })
+  await clock.settle()
+  await pane.redraw()
+  await pane.press({ key: 'chrome-try-2' })
+  await clock.settle()
+  await clock.advance(36_000)
+  await pane.unmount()
+  // With login 1 spent, the visit leaves the session on login 2; the carry-on owed stands.
+  expect([w.envSets.at(-1)?.value, view()?.carryDue?.from]).toEqual([SLOT2, '1'])
+  await clock.advance(Date.parse('2026-10-12T12:10:00Z') - clock.now())
+  expect([w.submitted.length, whats(stopLogOf(store, w)).filter(isOwedCarryOnLine)]).toEqual([1, ['a login is free: carry-on on 2']])
+})
+
+test('with every login spent, Use now pressed during the write clearing the carry-on owed ends it: nothing goes there once that login frees up (puma-9arph.84)', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await loggedWorld(on, w)
+  w.usage['tok-1'] = [100, 41]
+  w.usage['tok-2'] = [100, 30]
+  let isArmed = false
+  let switchToTwo = async () => {}
+  on('state.set', async (_$, e, next) => {
+    const { key, value } = e as unknown as { key: string; value: View }
+    const isClearing = isArmed && key === 'view' && value.carryDue === undefined
+    if (isClearing) isArmed = false
+    const result = await next(e)
+    if (isClearing) await switchToTwo()
+    return result
+  })
+  await start($, clock)
+  await $.classic.StopFailure(PLAIN)
+  await clock.settle()
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  switchToTwo = async () => {
+    await pane.press({ key: 'use-2' })
+  }
+  isArmed = true
+  // Login 1's reset and its grace pass: the carry-on owed starts to go, and the press lands during its clearing write.
+  await clock.advance(Date.parse('2026-10-12T12:04:00Z') - clock.now())
+  expect([isArmed, w.envSets.at(-1)?.value]).toEqual([false, SLOT2])
+  // Login 2 is free too since 12:00: the press moved the session there, so nothing is carried on.
+  await clock.advance(10 * 60_000)
+  expect([w.submitted.length, whats(stopLogOf(store, w)).filter(isOwedCarryOnLine)]).toEqual([0, []])
+  await pane.unmount()
+})
+
+test('with every login spent, a second stop that rides the tick\'s own switch to the login freed ends the carry-on owed: its own carry-on, armed once, is the one that goes (puma-9arph.84)', async ($, on) => {
+  const { w, store, clock, open } = await heldTickSwitchWorld($, on)
+  // A second stop picks login 2 and rides the held switch, which lands before the next tick: that tick finds nothing owed.
+  const stop = $.classic.StopFailure(PLAIN)
+  await clock.settle()
+  await clock.advance(5_000)
+  open()
+  await stop
+  await clock.settle()
+  await clock.advance(5 * 60_000)
+  const lines = whats(stopLogOf(store, w))
+  expect(w.envSets.at(-1)?.value).toBe(SLOT2)
+  expect([lines.filter(isOwedCarryOnLine).length, lines.filter(x => x === 'carry-on armed').length, w.submitted.length]).toEqual([0, 1, 1])
+})
+
+/** Every login spent, a stop on login 1, then the tick's own switch to login 2 at its reset, held in its keychain read until `open`. */
+async function heldTickSwitchWorld($: Engine, on: On) {
+  const w = fresh()
+  const { store, clock } = await loggedWorld(on, w)
+  const view = watchedView(on)
+  w.usage['tok-1'] = [40, 100]
+  w.usage['tok-2'] = [100, 30]
+  await start($, clock)
+  await $.classic.StopFailure(PLAIN)
+  await clock.settle()
+  w.failing = { 'tok-2': 429 }
+  let open = () => {}
+  const gate = new Promise<void>(resolve => {
+    open = resolve
+  })
+  let isGated = false
+  w.beforeKeychain = () => {
+    if (isGated || view()?.owner === undefined) return Promise.resolve()
+    isGated = true
+    return gate
+  }
+  await clock.advance(Date.parse('2026-10-12T11:59:30Z') - clock.now())
+  for (let i = 0; i < 3 && !isGated; i += 1) await clock.advance(60_000)
+  expect(isGated).toBe(true)
+  return { w, store, clock, view, open }
+}
+
+test('with every login spent, a second stop that rides the tick\'s own switch, landing 35 s or more before the next tick, ends the carry-on owed: one carry-on goes (puma-9arph.84)', async ($, on) => {
+  const { w, store, clock, open } = await heldTickSwitchWorld($, on)
+  // The next tick comes 30 s on: the stop comes before it and rides the held switch, which lands after it.
+  await clock.advance(25_000)
+  const stop = $.classic.StopFailure(PLAIN)
+  await clock.settle()
+  await clock.advance(15_000)
+  open()
+  await stop
+  await clock.settle()
+  await clock.advance(5 * 60_000)
+  const lines = whats(stopLogOf(store, w))
+  // The second line would be the carry-on owed again, held back here only by the first one still in flight.
+  expect([lines.filter(x => x === 'carry-on queued' || x.startsWith('carry-on not sent again')), lines.filter(isOwedCarryOnLine), w.submitted.length]).toEqual([['carry-on queued'], [], 1])
+})
+
+test('with every login spent, Use now on the login the tick\'s own switch is moving to ends the carry-on owed (puma-9arph.84)', async ($, on) => {
+  const { w, store, clock, view, open } = await heldTickSwitchWorld($, on)
+  const pane = await mountPane($)
+  const pressed = pane.press({ key: 'use-2' })
+  await clock.settle()
+  open()
+  await pressed
+  await clock.settle()
+  const owedAfter = view()?.carryDue
+  await clock.advance(10 * 60_000)
+  expect([w.envSets.at(-1)?.value, w.submitted.length, whats(stopLogOf(store, w)).filter(isOwedCarryOnLine), owedAfter]).toEqual([SLOT2, 0, [], undefined])
+  await pane.unmount()
+})
+
 test('a stop where Claude Code\'s policy refuses switching logs that it stayed for that (puma-9arph.34 B4)', async ($, on) => {
   const w = fresh()
   w.refuseEnv = true
