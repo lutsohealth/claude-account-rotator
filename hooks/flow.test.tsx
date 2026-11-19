@@ -14242,27 +14242,44 @@ for (const [site, run] of REFUSED_SITES) {
  * The test's one handler of state.get and state.set. `refuse(n)` refuses the next n view writes that put carryDue into a
  * view that lacks it, as an engine that refuses the write; `clear()` makes reads find the default view until the mod writes it, as /clear does;
  * `spendAfterClear()` makes every read after the next write that clears carryDue find logins 1 and 2 needing a sign-in,
- * so the check after that write, and every tick after, finds no login to carry on; `holdNext()` holds the next such write that puts carryDue in, `holdNext(true)` the
- * next that clears it, until the release it answers is called; `view()` is what a read finds.
+ * so the check after that write, and every tick after, finds no login to carry on (`spendAfterClear(['1'])`: login 1
+ * alone), and `spend(ids)` sets which read spent from then on; `holdNext()` holds the next such write that puts carryDue in, `holdNext(true)` the
+ * next that clears it, until the release it answers is called; `refuseClears()` refuses every later write that clears
+ * carryDue; `refuseReadAfterClear(gate?)` refuses the first view read after the next write that clears it, landed or
+ * refused, as an engine read that fails, once the gate given settles; `view()` is what a read finds.
  */
 function carrySetRefusal(on: On) {
   let toRefuse = 0
   let refused = 0
   let isCleared = false
   let isSpentArmed = false
-  let isSpent = false
+  let spentIds: string[] = []
+  let spent: string[] = []
   let hold: Promise<void> | undefined
   let isHoldClear = false
   let held = 0
+  let isClearRefused = false
+  let clearsRefused = 0
+  let isReadArmed = false
+  let isReadRefused = false
+  let readsRefused = 0
+  let readGate: Promise<void> | undefined
   let last: View | undefined
   on('state.get', async (_$, e, next) => {
+    if (isReadRefused && e.plugin === 'account-rotator' && e.key === 'view') {
+      isReadRefused = false
+      readsRefused += 1
+      await readGate
+      return { deny: 'state: read refused' } as unknown as Awaited<ReturnType<typeof next>>
+    }
     const read = await next(e)
     if (e.plugin !== 'account-rotator' || e.key !== 'view') return read
     if (isCleared) return { value: { value: EMPTY_VIEW, version: read.value?.version ?? 0 } }
-    if (!isSpent || read.value === undefined) return read
+    if (spent.length === 0 || read.value === undefined) return read
     const view = read.value.value as View
     const rejected = { kind: 'login-needed', why: 'sign-in rejected' } as const
-    return { value: { ...read.value, value: { ...view, health: { ...view.health, '1': rejected, '2': rejected } } } }
+    const health = Object.fromEntries(spent.map(id => [id, rejected]))
+    return { value: { ...read.value, value: { ...view, health: { ...view.health, ...health } } } }
   })
   on('state.set', async (_$, e, next) => {
     const { key, value } = e as unknown as { key: string; value: View }
@@ -14280,15 +14297,30 @@ function carrySetRefusal(on: On) {
       held += 1
       await gate
     }
-    if (key === 'view' && isSpentArmed && value.carryDue === undefined && last?.carryDue !== undefined) {
+    // The read refused is the one after the clear's answer: armed before it, it would refuse the read a released write
+    // makes again first.
+    const armRead = () => {
+      if (isClear && isReadArmed) {
+        isReadArmed = false
+        isReadRefused = true
+      }
+    }
+    if (isClear && isClearRefused) {
+      clearsRefused += 1
+      armRead()
+      return { deny: 'state: refused' } as unknown as Awaited<ReturnType<typeof next>>
+    }
+    if (isClear && isSpentArmed) {
       isSpentArmed = false
-      isSpent = true
+      spent = spentIds
     }
     if (key === 'view') {
       isCleared = false
       last = value
     }
-    return next(e)
+    const result = await next(e)
+    armRead()
+    return result
   })
   return {
     refuse: (n: number) => {
@@ -14298,9 +14330,22 @@ function carrySetRefusal(on: On) {
     clear: () => {
       isCleared = true
     },
-    spendAfterClear: () => {
+    spendAfterClear: (ids = ['1', '2']) => {
       isSpentArmed = true
+      spentIds = ids
     },
+    spend: (ids: string[]) => {
+      spent = ids
+    },
+    refuseClears: () => {
+      isClearRefused = true
+    },
+    clearsRefused: () => clearsRefused,
+    refuseReadAfterClear: (gate?: Promise<void>) => {
+      isReadArmed = true
+      readGate = gate
+    },
+    readsRefused: () => readsRefused,
     holdNext: (isClearHeld = false) => {
       isHoldClear = isClearHeld
       let release = () => {}
@@ -14480,4 +14525,109 @@ test('86-A2: a carry-on owed whose clearing write is held while a Connect visit 
   await clock.advance(10 * 60_000)
   await pane.unmount()
   expect([during, w.submitted.length]).toEqual([[1, 0, '2'], 1])
+})
+
+// ---------------------------------------------------------------- puma-9arph.87: no ended debt written, none lost to a throw
+
+/** Presses Use now on login 2 and settles: answers whether the press finished and the slot the session is on. */
+async function pressUse2($: Engine, clock: MockClock, w: World) {
+  const pane = await mountPane($)
+  let isPressed = false
+  void pane.press({ key: 'use-2' }).then(() => {
+    isPressed = true
+  })
+  await settleReal(clock)
+  return { pane, pressed: [isPressed, w.envSets.at(-1)?.value] }
+}
+
+test('87-A: a carry-on owed that a press ends while awaitFreeLogin\'s first view write is held is not left in the view (puma-9arph.87)', async ($, on) => {
+  let release = () => {}
+  const { clock, views, w } = await owedWithRefusals($, on, v => {
+    release = v.holdNext()
+  })
+  await settleReal(clock)
+  expect(views.held(), 'the first write is held').toBe(1)
+  const { pane, pressed } = await pressUse2($, clock, w)
+  expect(pressed, 'the press ended the debt before the release').toEqual([true, SLOT2])
+  release()
+  await settleReal(clock)
+  await clock.advance(Date.parse('2026-10-12T12:00:00Z') - clock.now() + 10 * 60_000)
+  await pane.unmount()
+  expect([views.view()?.carryDue, w.submitted.length]).toEqual([undefined, 0])
+})
+
+test('87-A2: a carry-on owed that a press ends while the held branch\'s write is held is not left in the view (puma-9arph.87)', async ($, on) => {
+  const { store, clock, views, w } = await owedWithRefusals($, on)
+  // Both logins read spent after the clearing write, so the tick holds the debt and nothing rotates.
+  views.spendAfterClear()
+  const release = views.holdNext()
+  await clock.advance(Date.parse('2026-10-12T12:02:00Z') - clock.now())
+  for (let i = 0; i < 5 && views.held() === 0; i += 1) {
+    await clock.advance(60_000)
+    await settleReal(clock)
+  }
+  const isHeld = whats(stopLogOf(store, w)).includes('carry-on held: the login moved')
+  expect([views.held(), isHeld], 'the held branch\'s write is held').toEqual([1, true])
+  // Login 1 alone reads spent from here, so the pane offers Use now on login 2; no tick runs before the press.
+  views.spend(['1'])
+  const { pane, pressed } = await pressUse2($, clock, w)
+  expect(pressed, 'the press ended the debt before the release').toEqual([true, SLOT2])
+  release()
+  await settleReal(clock)
+  await clock.advance(10 * 60_000)
+  await pane.unmount()
+  expect([views.view()?.carryDue, w.submitted.length]).toEqual([undefined, 0])
+})
+
+test('87-B: a carry-on owed whose view read after the clear fails stays owed, and goes at a later tick (puma-9arph.87)', async ($, on) => {
+  const { clock, views, w } = await owedWithRefusals($, on)
+  views.refuseReadAfterClear()
+  await pastOwed(clock)
+  // The staging took: the one read after the clear was refused, and the tick's catch said so.
+  expect([views.readsRefused(), debugLines(w, 'carry-on once a login is free failed').length]).toEqual([1, 1])
+  expect(w.submitted).toHaveLength(1)
+})
+
+test('87-B2: a carry-on owed that a press ends during a refused clear, the read after it failing too, is marked ended (puma-9arph.87)', async ($, on) => {
+  const { store, clock, views, w } = await owedWithRefusals($, on)
+  views.refuseClears()
+  views.refuseReadAfterClear()
+  const release = views.holdNext(true)
+  await clock.advance(Date.parse('2026-10-12T12:02:00Z') - clock.now())
+  for (let i = 0; i < 5 && views.held() === 0; i += 1) {
+    await clock.advance(60_000)
+    await settleReal(clock)
+  }
+  const { pane, pressed } = await pressUse2($, clock, w)
+  expect([views.held(), ...pressed], 'the clear is held while the press ends the debt').toEqual([1, true, SLOT2])
+  release()
+  await settleReal(clock)
+  await pane.unmount()
+  // The staging took: the clear was refused, the read after it too, and the view still holds the ended debt.
+  expect([views.clearsRefused() > 0, views.readsRefused(), views.view()?.carryDue !== undefined]).toEqual([true, 1, true])
+  expect(carryEndedOf(store, w)).toEqual({ owedAt: views.view()?.carryDue?.owedAt })
+})
+
+test('87-B3: a carry-on owed that a press ends during a clear that lands, the read after it failing, is not owed again (puma-9arph.87)', async ($, on) => {
+  const { clock, views, w } = await owedWithRefusals($, on)
+  // The read after the clear waits until the press has ended the debt, then fails.
+  let release = () => {}
+  views.refuseReadAfterClear(
+    new Promise<void>(resolve => {
+      release = resolve
+    }),
+  )
+  await clock.advance(Date.parse('2026-10-12T12:02:00Z') - clock.now())
+  for (let i = 0; i < 5 && views.readsRefused() === 0; i += 1) {
+    await clock.advance(60_000)
+    await settleReal(clock)
+  }
+  const { pane, pressed } = await pressUse2($, clock, w)
+  expect([views.view()?.carryDue, ...pressed], 'the clear landed, and the press ended the debt').toEqual([undefined, true, SLOT2])
+  release()
+  await settleReal(clock)
+  await clock.advance(10 * 60_000)
+  await pane.unmount()
+  expect(views.readsRefused(), 'the read after the clear was refused').toBe(1)
+  expect([views.view()?.carryDue, w.submitted.length]).toEqual([undefined, 0])
 })

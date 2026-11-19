@@ -1593,10 +1593,11 @@ function awaitFreeLogin($: Host, view: View, now: number): void {
   const owed = at === undefined ? { from: view.activeId, owedAt: now } : { at, from: view.activeId, owedAt: now }
   // The main turns so far, held in this module only: a reload drops it, and the carry-on then goes after the grace.
   due = { ...owed, turns: mainTurns }
+  const debt = due
   void logStop($, `no login left: one carry-on ${at === undefined ? 'once a login frees up' : `at ${new Date(at).toISOString()}`}`)
   const text = `${limitNotice(view, now, untaken)} This session carries on by itself once one frees up.`
   void (async () => {
-    await setView($, v => ({ ...v, carryDue: owed }))
+    await writeCarryDue($, debt)
     $.ui.toast(text, { timeoutMs: 15_000 })
     notify($, text)
   })().catch(error => debug($, `carry-on owed not written to the view: ${String(error)}`))
@@ -1614,15 +1615,9 @@ async function carryOnWhenFree($: Host): Promise<void> {
   const view = await getView($)
   const now = await $.clock.now()
   // A debt this module holds that the view lacks, its write refused (awaitFreeLogin's, or the held branch's below), is
-  // written again, so a reload after this tick still owes it. Only the same debt still owed: one a switch, a press or
-  // this tick ended or took meanwhile is never written back.
+  // written again, so a reload after this tick still owes it.
   if (view.carryDue === undefined && due !== undefined) {
-    const owed = due
-    const { at, from, owedAt } = owed
-    const record = at === undefined ? { from, owedAt } : { at, from, owedAt }
-    await setView($, v => (owed !== undefined && due === owed && v.carryDue === undefined ? { ...v, carryDue: record } : v)).catch(error =>
-      debug($, `carry-on owed not written again: ${String(error)}`),
-    )
+    await writeCarryDue($, due).catch(error => debug($, `carry-on owed not written again: ${String(error)}`))
   }
   // Connect holds the session on the extension's login: the carry-on stays owed and goes at the first tick after.
   if (isConnectingChrome) return
@@ -1635,7 +1630,14 @@ async function carryOnWhenFree($: Host): Promise<void> {
   const endings = dueEndings
   const isCleared = await clearCarryDue($)
   // A turn, a switch or a Connect visit can come during that write: the decision is made from what stands after it.
-  const after = await getView($)
+  const after = await getView($).catch(async error => {
+    // Nothing was decided: what was owed stays owed, so the next tick writes it into the view again, unless a switch
+    // ended it during the clear, which marks it where the view still holds it, as below. A newer debt a stop set
+    // meanwhile stands instead, as in the held branch: this module owes one carry-on at a time.
+    if (dueEndings !== endings && !isCleared) await markCarryEnded($, owed)
+    else if (due === undefined && dueEndings === endings) due = owed
+    throw error
+  })
   if (after.activeId !== view.activeId || shouldLeave(after, now) || isConnectingChrome) {
     // A switch that ended what is owed moved it: nothing stays owed, and a view that still holds it is marked.
     if (dueEndings !== endings) return isCleared ? undefined : markCarryEnded($, owed)
@@ -1643,7 +1645,7 @@ async function carryOnWhenFree($: Host): Promise<void> {
     if (due === undefined) due = owed
     const held = due
     void logStop($, 'carry-on held: the login moved')
-    await setView($, v => ({ ...v, carryDue: held }))
+    await writeCarryDue($, held)
     return
   }
   // Every exit from here ends what is owed. Where the view still holds it, the store marks it, so a reload's boot owes
@@ -1664,6 +1666,16 @@ async function carryOnWhenFree($: Host): Promise<void> {
   if (carriedFor === since) return
   carryOnAfterSettle($, {})
   carriedFor = since
+}
+
+/**
+ * Writes the carry-on owed into the view, only while this module still owes that same debt: one a switch, a press or a
+ * tick ended or took meanwhile is never written back. The record leaves out the main turns, which only this module keeps.
+ */
+async function writeCarryDue($: Host, debt: NonNullable<typeof due>): Promise<void> {
+  const { at, from, owedAt } = debt
+  const record = at === undefined ? { from, owedAt } : { at, from, owedAt }
+  await setView($, v => (due === debt ? { ...v, carryDue: record } : v))
 }
 
 /**
