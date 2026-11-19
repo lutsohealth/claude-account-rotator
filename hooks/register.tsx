@@ -1654,7 +1654,8 @@ async function carryOnWhenFree($: Host): Promise<void> {
   if (hasTurnRun) return
   const since = after.pending?.since
   if (since === undefined || now - since >= SETTLE_MS) {
-    // Still on the login the stop found spent: nothing switched, so the line says its limit reset.
+    // Still on the login the stop found spent: nothing switched, so the line says its limit reset. A submit that
+    // rejects sends nothing and is not tried again: what was owed is ended and marked above.
     await carryOn($, undefined, view.activeId === owed.from ? CONTINUE_RESET : undefined)
     return
   }
