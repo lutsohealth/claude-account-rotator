@@ -122,6 +122,8 @@ type World = {
   submitDrop?: string
   /** While set, a submit stays queued until it settles, as under Claude Code's limit modal: it answers once the prompt enters. */
   submitHold?: Promise<void>
+  /** The submit hook throws: the kit skips it and the mod's `$.prompt.submit` rejects (puma-9arph.86). */
+  isSubmitThrown?: boolean
   /** A hook keeps the mod's fill out of the box, so the fill answers isFilled false with no cause. */
   isFillRefused?: boolean
   /** How many fills the mod made; while `fillHold` is set, a fill answers only once it settles; `isFillThrown` makes a fill throw. */
@@ -409,6 +411,7 @@ function world(on: On, w: World, store: Record<string, unknown> | Map<string, un
   on('prompt.submit', async (_$, e) => {
     w.submitted.push(e.text)
     w.asUser.push(e.origin.kind === 'plugin' && e.origin.asUser === true)
+    if (w.isSubmitThrown === true) throw new Error('the submit broke')
     await w.submitHold
     if (w.submitDrop !== undefined) return { drop: w.submitDrop }
     return { text: e.text }
@@ -14232,3 +14235,67 @@ for (const [site, run] of REFUSED_SITES) {
     expect(await run($, on)).toBe('none')
   })
 }
+
+// ---------------------------------------------------------------- puma-9arph.86: a debt the view lacks, and a Connect visit
+
+/**
+ * The test's one handler of state.get and state.set. `refuse(n)` refuses the next n view writes that set carryDue, as an
+ * engine that refuses the write; `clear()` makes reads find the default view until the mod writes it, as /clear does;
+ * `view()` is what a read finds.
+ */
+function carrySetRefusal(on: On) {
+  let toRefuse = 0
+  let refused = 0
+  let isCleared = false
+  let last: View | undefined
+  on('state.get', async (_$, e, next) => {
+    const read = await next(e)
+    if (!isCleared || e.plugin !== 'account-rotator' || e.key !== 'view') return read
+    return { value: { value: EMPTY_VIEW, version: read.value?.version ?? 0 } }
+  })
+  on('state.set', async (_$, e, next) => {
+    const { key, value } = e as unknown as { key: string; value: View }
+    if (key === 'view' && value.carryDue !== undefined && toRefuse > 0) {
+      toRefuse -= 1
+      refused += 1
+      return { deny: 'state: refused' } as unknown as Awaited<ReturnType<typeof next>>
+    }
+    if (key === 'view') {
+      isCleared = false
+      last = value
+    }
+    return next(e)
+  })
+  return {
+    refuse: (n: number) => {
+      toRefuse = n
+    },
+    refused: () => refused,
+    clear: () => {
+      isCleared = true
+    },
+    view: () => (isCleared ? EMPTY_VIEW : last),
+  }
+}
+
+/** Every login spent and a usage-limit stop on login 1: one carry-on owed at 12:00. `before` runs just before the stop. */
+async function owedWithRefusals($: Engine, on: On, before?: (views: ReturnType<typeof carrySetRefusal>) => void) {
+  const w = fresh()
+  const { store, clock } = await loggedWorld(on, w)
+  const views = carrySetRefusal(on)
+  w.usage['tok-2'] = [100, 30]
+  await start($, clock)
+  w.usage['tok-1'] = [100, 41]
+  before?.(views)
+  await $.classic.StopFailure(PLAIN)
+  await clock.settle()
+  return { w, store, clock, views }
+}
+
+test('86-B1: a carry-on owed whose first view write is refused is written into the view again at the next tick (puma-9arph.86)', async ($, on) => {
+  const { store, clock, views, w } = await owedWithRefusals($, on, v => v.refuse(1))
+  // The staging took: a debt is owed, and its one view write was refused.
+  expect([whats(stopLogOf(store, w)).some(x => x.startsWith('no login left')), views.refused(), views.view()?.carryDue]).toEqual([true, 1, undefined])
+  await untilTick(clock)
+  expect(views.view()?.carryDue?.from).toBe('1')
+})
