@@ -1632,7 +1632,8 @@ async function carryOnWhenFree($: Host): Promise<void> {
   // A turn, a switch or a Connect visit can come during that write: the decision is made from what stands after it.
   const after = await getView($).catch(async error => {
     // Nothing was decided: what was owed stays owed, so the next tick writes it into the view again, unless a switch
-    // ended it during the clear, which marks it where the view still holds it, as below.
+    // ended it during the clear, which marks it where the view still holds it, as below. A newer debt a stop set
+    // meanwhile stands instead, as in the held branch: this module owes one carry-on at a time.
     if (dueEndings !== endings && !isCleared) await markCarryEnded($, owed)
     else if (due === undefined && dueEndings === endings) due = owed
     throw error
