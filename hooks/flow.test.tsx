@@ -14310,3 +14310,15 @@ test('86-B3: a carry-on owed whose write after /clear is refused is written into
   await untilTick(clock)
   expect(views.view()?.carryDue?.from).toBe('1')
 })
+
+// It pins today's behaviour (no code for it, RULING 7135 R4): the store marks the debt ended before the submit, so a
+// reload sends no second (puma-9arph.40's reload tests hold that half); the submit's rejection reaches the tick's catch,
+// and nothing is tried again. Its RED: the mark written after the carry-on, not before.
+test('86-C1: a carry-on owed whose submit rejects after a refused clear is marked ended, logged, and not tried again (puma-9arph.86)', async ($, on) => {
+  const w = fresh()
+  w.isSubmitThrown = true
+  const { store, clock, seen } = await refusedOwedWorld($, on, w)
+  await pastOwed(clock)
+  expect(seen.refused, 'the clearing write was refused').toBeGreaterThan(0)
+  expect([w.submitted.length, carryEndedOf(store, w), debugLines(w, 'carry-on once a login is free failed').length]).toEqual([1, { owedAt: seen.owed?.owedAt }, 1])
+})
