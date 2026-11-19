@@ -2907,11 +2907,13 @@ async function sendVisitLine($: Host, text: string, endedAt: number, refusals: n
     void logStop($, 'carry-on not sent again: one went since the visit')
     return
   }
-  const view = await getView($)
-  const now = await $.clock.now()
   const before = carryOnRefusals
   await sendCarryOn($, { text })
-  if (isContinue && carryOnText === CONTINUE && carryOnRefusals === before && !shouldLeave(view, now)) visitCarriedAt = now
+  if (!isContinue || carryOnText !== CONTINUE || carryOnRefusals !== before) return
+  // Read after the send: a read that fails costs no carry-on, it only leaves the wait owed.
+  const view = await getView($).catch(error => void debug($, `carry-on after a visit not marked: ${String(error)}`))
+  const now = await $.clock.now()
+  if (view !== undefined && !shouldLeave(view, now)) visitCarriedAt = now
 }
 
 /**
