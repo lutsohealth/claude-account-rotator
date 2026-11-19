@@ -76,6 +76,8 @@ type World = {
   loginEmail?: string
   /** How the store refuses the `store-id` key: its write, or its read and its write. */
   storeIdFails?: 'write' | 'read'
+  /** The store refuses the read of every key that starts with this. */
+  storeReadFails?: string
   /** puma-9arph.26: the text of the mod's own bin/account-rotator-claude, as `$.fs.read` finds it under the plugin's folder. */
   ownLauncher?: string
   /** puma-9arph.26: every chmod, test, mv and rm the mod ran, as typed. */
@@ -224,7 +226,10 @@ const ran = (exitCode: number, stdout: string): ProcessRunResult => ({
 
 /** `$.store` over `entries`, which the test writes mid-run as another session on the Mac would. */
 function sharedStore(on: On, entries: Map<string, unknown>, w: World): void {
-  on('store.get', (_$, e) => (e.key === 'store-id' && w.storeIdFails === 'read' ? { deny: 'store: refused' } : { value: entries.get(e.key) }))
+  on('store.get', (_$, e) => {
+    const isRefused = (e.key === 'store-id' && w.storeIdFails === 'read') || (w.storeReadFails !== undefined && e.key.startsWith(w.storeReadFails))
+    return isRefused ? { deny: 'store: refused' } : { value: entries.get(e.key) }
+  })
   on('store.set', (_$, e) => {
     if (e.key === 'store-id' && w.storeIdFails !== undefined) return { deny: 'store: refused' }
     w.onStoreSet?.(e.key, e.value)
@@ -13135,6 +13140,22 @@ test('a refused ended-mark write still sends the carry-on once (puma-9arph.40)',
   expect([w.submitted.length, carryEndedKeys(store)]).toEqual([1, []])
 })
 
+test('a main turn since the stop, its view clear refused, ends the carry-on owed and leaves the ended mark (puma-9arph.40)', async ($, on) => {
+  const { w, store, clock, seen } = await refusedOwedWorld($, on)
+  await $.turn.start({ text: 'go on', turnId: 'turn-own-continue' })
+  await pastOwed(clock)
+  const lines = whats(stopLogOf(store, w)).filter(what => what === 'a turn ran since the stop: no carry-on')
+  expect([lines.length, w.submitted.length, carryEndedOf(store, w)]).toEqual([1, 0, { owedAt: seen.owed?.owedAt }])
+})
+
+test('a reload whose ended mark cannot be read owes the debt once more and boots on (puma-9arph.40)', async ($, on) => {
+  const w = fresh()
+  w.storeReadFails = 'carry-ended:'
+  const { clock } = await reloadedWorld($, on, survivingDebt(), { [`carry-ended:${RELOADED_MARK}`]: { owedAt: OWED_AT } }, undefined, w)
+  await pastOwed(clock)
+  expect([w.submitted.length, (w.logged ?? []).filter(line => line.includes('start failed'))]).toEqual([1, []])
+})
+
 test('with no session mark a refused clear still sends the carry-on once and writes no ended mark (puma-9arph.40)', async ($, on) => {
   const w = fresh()
   w.refuseMark = true
@@ -13147,8 +13168,7 @@ test('with no session mark a refused clear still sends the carry-on once and wri
  * A session whose view survived a hot reload as `surviving`, on two logins both spent, the store a shared one seeded by
  * `extra`; `around` runs around each state write.
  */
-async function reloadedWorld($: Engine, on: On, surviving: Partial<View>, extra: Record<string, unknown> = {}, around?: Around) {
-  const w = fresh()
+async function reloadedWorld($: Engine, on: On, surviving: Partial<View>, extra: Record<string, unknown> = {}, around?: Around, w = fresh()) {
   const { store, clock } = await loggedWorld(on, w, extra)
   w.usage['tok-1'] = [100, 41]
   w.usage['tok-2'] = [100, 30]
