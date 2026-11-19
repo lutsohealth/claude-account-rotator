@@ -14819,3 +14819,170 @@ test('88-B3: a carry-on held for a Connect visit that throws goes once, and a la
   await pane.unmount()
   expect([world.visits() > before, world.w.submitted.length], 'a later visit began, and sent nothing').toEqual([true, 1])
 })
+
+/**
+ * puma-9arph.91: the engine answers the next submit late, as `answer` says (drop, reject or take it), and only that one:
+ * every later submit goes through at once. Returns what lets the late answer go. The kit reads `submitHold` and
+ * `submitDrop` after it counts the submit, so the count names the one held.
+ */
+function answerNextLate(w: World, answer: 'drop' | 'reject' | 'resolve'): () => void {
+  const nth = w.submitted.length + 1
+  let settle = () => {}
+  const held = new Promise<void>((resolve, reject) => {
+    settle = answer === 'reject' ? () => reject(new Error('submission refused')) : resolve
+  })
+  held.catch(() => undefined)
+  Object.defineProperty(w, 'submitHold', { configurable: true, get: () => (w.submitted.length === nth ? held : undefined) })
+  Object.defineProperty(w, 'submitDrop', { configurable: true, get: () => (answer === 'drop' && w.submitted.length === nth ? 'a Stop stands' : undefined) })
+  return settle
+}
+
+/**
+ * puma-9arph.91: a debt owed, a Connect visit a second stop cuts, then the debt's carry-on submitted at the free time and
+ * answered late, past the visit's own line, which sendCarryOn turns away as one is queued (the staging of 88-L).
+ */
+async function heldBehindQueued($: Engine, on: On, answer: 'drop' | 'reject' | 'resolve') {
+  const w = fresh()
+  w.chrome = { extensions: [''] }
+  const { store, clock } = await loggedWorld(on, w, { 'chrome-account': '1' })
+  w.usage['tok-2'] = [100, 30]
+  await start($, clock)
+  w.usage['tok-1'] = [100, 41]
+  await $.classic.StopFailure(PLAIN)
+  await clock.settle()
+  await clock.advance(Date.parse('2026-10-12T11:58:00Z') - clock.now())
+  let endVisit = () => {}
+  const visit = new Promise<void>(resolve => {
+    endVisit = resolve
+  })
+  w.beforeEnv = () => visit
+  w.chrome.extensions.push(SLOT2)
+  const pane = await mountPane($)
+  await pane.press({ key: 'chrome-others' })
+  await clock.settle()
+  await pane.redraw()
+  void pane.press({ key: 'chrome-try-2' })
+  await settleReal(clock)
+  await clock.advance(2 * 60_000)
+  void $.classic.StopFailure(PLAIN)
+  await settleReal(clock)
+  await clock.advance(Date.parse('2026-10-12T12:06:00Z') - clock.now())
+  const settle = answerNextLate(w, answer)
+  w.beforeEnv = undefined
+  endVisit()
+  await settleReal(clock)
+  for (let i = 0; i < 12; i += 1) {
+    await clock.advance(10_000)
+    await settleReal(clock)
+  }
+  const heldSubmits = w.submitted.length
+  const isTurnedAway = whats(stopLogOf(store, w)).includes('carry-on not sent again: one is queued')
+  settle()
+  await settleReal(clock)
+  return { w, store, clock, pane, heldSubmits, isTurnedAway }
+}
+
+/** Ten minutes of ticks, with no stop, switch or visit. */
+async function tenMinutes(clock: MockClock): Promise<void> {
+  for (let i = 0; i < 60; i += 1) {
+    await clock.advance(10_000)
+    await clock.settle()
+  }
+}
+
+for (const answer of ['drop', 'reject'] as const) {
+  test(`91-${answer === 'drop' ? 'A' : 'B'}: a carry-on turned away behind a queued submit the engine then ${answer === 'drop' ? 'drops' : 'refuses'} is sent once in its place (puma-9arph.91)`, async ($, on) => {
+    const r = await heldBehindQueued($, on, answer)
+    await tenMinutes(r.clock)
+    await r.pane.unmount()
+    expect([r.heldSubmits, r.isTurnedAway], 'one submit held, the visit line turned away behind it').toEqual([1, true])
+    const log = whats(stopLogOf(r.store, r.w))
+    expect([r.w.submitted.length, log.at(-1)]).toEqual([2, 'carry-on resolved'])
+  })
+}
+
+test('91-C: a carry-on turned away behind a queued submit that goes through is not sent again (puma-9arph.91)', async ($, on) => {
+  const r = await heldBehindQueued($, on, 'resolve')
+  // The queued one's turn starts, so a second submit would not hide behind it as queued.
+  await $.turn.start({ text: r.w.submitted[0] ?? '', turnId: '91-C-carry-on' })
+  await tenMinutes(r.clock)
+  await r.pane.unmount()
+  expect([r.heldSubmits, r.isTurnedAway]).toEqual([1, true])
+  expect(r.w.submitted).toHaveLength(1)
+})
+
+/**
+ * puma-9arph.91: a stop on login 1 moves to login 2 and its carry-on goes, answered late; a second stop moves on to login
+ * 3, and its carry-on is turned away behind the first. Then a Connect trial on login 3, which moves nothing, its note
+ * of what Chrome answered held, so the visit is open when the first submit is dropped. `end` is how that note ends.
+ */
+async function droppedDuringVisit($: Engine, on: On, end: 'lands' | 'refused') {
+  const w = fresh()
+  w.chrome = { extensions: [''] }
+  w.keychain[await keychainItem(SLOT3)] = blob('tok-3')
+  w.usage['tok-3'] = [10, 30]
+  const { store, clock } = await loggedWorld(on, w, { ...THREE_LOGINS, 'chrome-account': '1' })
+  let last: View | undefined
+  let noteHold: Promise<void> | undefined
+  let isNoteRefused = false
+  let noteEnd: 'lands' | 'refused' | undefined
+  on('state.set', async (_$, e, next) => {
+    const { key, value } = e as unknown as { key: string; value: View }
+    if (key !== 'view') return next(e)
+    if (value.chrome?.as === '3' && last?.chrome?.as !== '3' && noteHold !== undefined) {
+      const gate = noteHold
+      noteHold = undefined
+      await gate
+      noteEnd = isNoteRefused ? 'refused' : 'lands'
+      if (isNoteRefused) return { deny: 'state: refused' } as unknown as Awaited<ReturnType<typeof next>>
+    }
+    last = value
+    return next(e)
+  })
+  await start($, clock)
+  w.usage['tok-1'] = [100, 41]
+  const settle = answerNextLate(w, 'drop')
+  await $.classic.StopFailure(PLAIN)
+  await settleReal(clock)
+  await clock.advance(36_000)
+  await settleReal(clock)
+  const first = [last?.activeId, w.submitted.length]
+  w.usage['tok-2'] = [100, 41]
+  await $.classic.StopFailure(PLAIN)
+  await settleReal(clock)
+  await clock.advance(36_000)
+  await settleReal(clock)
+  const isTurnedAway = whats(stopLogOf(store, w)).includes('carry-on not sent again: one is queued')
+  const pane = await mountPane($)
+  await pane.press({ key: 'chrome-others' })
+  await settleReal(clock)
+  await pane.redraw()
+  let release = () => {}
+  noteHold = new Promise<void>(resolve => {
+    release = resolve
+  })
+  void pane.press({ key: 'chrome-try-3' })
+  await settleReal(clock)
+  settle()
+  await settleReal(clock)
+  await clock.advance(60_000)
+  await settleReal(clock)
+  const during = [last?.chromeConnecting, w.submitted.length]
+  isNoteRefused = end === 'refused'
+  release()
+  await settleReal(clock)
+  await clock.advance(2 * 60_000)
+  await settleReal(clock)
+  await pane.unmount()
+  return { w, store, first, active: last?.activeId, isTurnedAway, during, noteEnd, isConnecting: last?.chromeConnecting !== undefined }
+}
+
+for (const end of ['lands', 'refused'] as const) {
+  test(`91-D${end === 'lands' ? '1' : '2'}: a carry-on turned away behind a submit dropped during a Connect visit that ${end === 'lands' ? 'ends' : 'throws'} goes once, after the visit (puma-9arph.91)`, async ($, on) => {
+    const r = await droppedDuringVisit($, on, end)
+    expect([r.first, r.active, r.isTurnedAway], 'the first carry-on held on login 2, the second turned away on login 3').toEqual([['2', 1], '3', true])
+    // The held note landed, or was refused so the visit threw; either way the visit is over.
+    expect([r.noteEnd, r.isConnecting], 'how the visit ended').toEqual([end, false])
+    expect([r.during, r.w.submitted.length], 'none during the visit, one after it').toEqual([['3', 1], 2])
+  })
+}
