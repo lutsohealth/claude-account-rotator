@@ -14299,3 +14299,14 @@ test('86-B1: a carry-on owed whose first view write is refused is written into t
   await untilTick(clock)
   expect(views.view()?.carryDue?.from).toBe('1')
 })
+
+test('86-B3: a carry-on owed whose write after /clear is refused is written into the view again at the next tick (puma-9arph.86)', async ($, on) => {
+  const { clock, views } = await owedWithRefusals($, on)
+  expect(views.view()?.carryDue?.from, 'the debt is in the view before /clear').toBe('1')
+  // rebindSession's one view write, which puts the debt back after the reset, is refused.
+  views.refuse(1)
+  await clearSession($, clock, views.clear)
+  expect([views.refused(), views.view()?.carryDue]).toEqual([1, undefined])
+  await untilTick(clock)
+  expect(views.view()?.carryDue?.from).toBe('1')
+})
