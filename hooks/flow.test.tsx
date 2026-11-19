@@ -14380,8 +14380,12 @@ test('86-E1: a carry-on owed that a press ends while its write into the view aga
   await settleReal(clock)
   expect(views.held(), 'the write-again is held').toBe(1)
   const pane = await mountPane($)
-  void pane.press({ key: 'use-2' })
+  let isPressed = false
+  void pane.press({ key: 'use-2' }).then(() => {
+    isPressed = true
+  })
   await settleReal(clock)
+  expect([isPressed, w.envSets.at(-1)?.value], 'the press ended the debt before the release').toEqual([true, SLOT2])
   release()
   await settleReal(clock)
   await clock.advance(Date.parse('2026-10-12T12:00:00Z') - clock.now() + 10 * 60_000)
