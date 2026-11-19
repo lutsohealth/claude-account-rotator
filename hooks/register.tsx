@@ -3368,7 +3368,9 @@ async function boot($: Host, isInteractive: boolean): Promise<void> {
   const survivedDue = survived.carryDue
   if (survived.isBound === true && survivedDue !== undefined && due === undefined) {
     const endedAt = survivedDue.owedAt === undefined ? undefined : await carryEndedAt($, survived.sessionMark)
-    const isEnded = endedAt !== undefined && endedAt === survivedDue.owedAt
+    // One owed longer ago than the start's sweep keeps a mark (pruneStopLogs) is owed no more, its mark gone or not.
+    const isStale = survivedDue.owedAt !== undefined && (await $.clock.now()) - survivedDue.owedAt > STOP_LOG_MAX_AGE_MS
+    const isEnded = isStale || (endedAt !== undefined && endedAt === survivedDue.owedAt)
     // A stop during that read owes its own: it stands, and nothing is cleared or restored over it.
     if (due === undefined && isEnded) await clearCarryDue($)
     else if (due === undefined) due = { ...survivedDue, turns: mainTurns }
