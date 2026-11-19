@@ -14954,6 +14954,8 @@ async function turnedAwayOnThree($: Engine, on: On) {
   w.usage['tok-3'] = [10, 30]
   const { store, clock } = await loggedWorld(on, w, { ...THREE_LOGINS, 'chrome-account': '1' })
   const note: { hold?: Promise<void>; isRefused: boolean; end?: 'lands' | 'refused' } = { isRefused: false }
+  // Each visit's end as `<account it connected>@<login in use>:<submits gone by then>`.
+  const visitEnds: string[] = []
   let last: View | undefined
   on('state.set', async (_$, e, next) => {
     const { key, value } = e as unknown as { key: string; value: View }
@@ -14965,6 +14967,7 @@ async function turnedAwayOnThree($: Engine, on: On) {
       note.end = note.isRefused ? 'refused' : 'lands'
       if (note.isRefused) return { deny: 'state: refused' } as unknown as Awaited<ReturnType<typeof next>>
     }
+    if (last?.chromeConnecting !== undefined && value.chromeConnecting === undefined) visitEnds.push(`${last.chromeConnecting}@${value.activeId}:${w.submitted.length}`)
     last = value
     return next(e)
   })
@@ -14982,7 +14985,7 @@ async function turnedAwayOnThree($: Engine, on: On) {
   await clock.advance(36_000)
   await settleReal(clock)
   const isTurnedAway = whats(stopLogOf(store, w)).includes('carry-on not sent again: one is queued')
-  return { w, store, clock, settle, note, first, isTurnedAway, last: () => last }
+  return { w, store, clock, settle, note, visitEnds, first, isTurnedAway, last: () => last }
 }
 
 test('91-E: a carry-on turned away behind a queued submit is not sent where a stop with no login left owes the carry-on before the drop (puma-9arph.91)', async ($, on) => {
@@ -15004,7 +15007,7 @@ test('91-E: a carry-on turned away behind a queued submit is not sent where a st
  * what Chrome answered held, so the visit is open when the first submit is dropped. `end` is how that note ends.
  */
 async function droppedDuringVisit($: Engine, on: On, end: 'lands' | 'refused') {
-  const { w, store, clock, settle, note, first, isTurnedAway, last } = await turnedAwayOnThree($, on)
+  const { w, store, clock, settle, note, visitEnds, first, isTurnedAway, last } = await turnedAwayOnThree($, on)
   const pane = await mountPane($)
   await pane.press({ key: 'chrome-others' })
   await settleReal(clock)
@@ -15026,17 +15029,21 @@ async function droppedDuringVisit($: Engine, on: On, end: 'lands' | 'refused') {
   await clock.advance(2 * 60_000)
   await settleReal(clock)
   await pane.unmount()
-  return { w, store, first, active: last()?.activeId, isTurnedAway, during, noteEnd: note.end, isConnecting: last()?.chromeConnecting !== undefined }
+  return { w, store, first, active: last()?.activeId, isTurnedAway, during, noteEnd: note.end, isConnecting: last()?.chromeConnecting !== undefined, visitEnds }
 }
 
 for (const end of ['lands', 'refused'] as const) {
-  test(`91-D${end === 'lands' ? '1' : '2'}: a carry-on turned away behind a submit dropped during a Connect visit that ${end === 'lands' ? 'ends' : 'throws'} goes once, after the visit (puma-9arph.91)`, async ($, on) => {
+  const what = end === 'lands' ? 'ends goes once, after the visit closes' : "throws goes once, from the visit's catch, before the visit closes"
+  test(`91-D${end === 'lands' ? '1' : '2'}: a carry-on turned away behind a submit dropped during a Connect visit that ${what} (puma-9arph.91)`, async ($, on) => {
     const r = await droppedDuringVisit($, on, end)
     expect([r.first, r.active, r.isTurnedAway], 'the first carry-on held on login 2, the second turned away on login 3').toEqual([['2', 1], '3', true])
     // The held note landed, or was refused so the visit threw; either way the visit is over.
     expect([r.noteEnd, r.isConnecting], 'how the visit ended').toEqual([end, false])
     // No browser answered as login 3: a paired visit would send its own connected line, whatever was turned away.
     expect(r.w.submitted.some(text => text.startsWith('Claude in Chrome is connected')), 'the visit paired').toBe(false)
-    expect([r.during, r.w.submitted.length], 'none during the visit, one after it').toEqual([['3', 1], 2])
+    expect([r.during, r.w.submitted.length], 'none while the visit waits, one in all').toEqual([['3', 1], 2])
+    // Where the visit to login 3 (which moves nothing) ends: on login 3, with the carry-on gone by then only where the
+    // visit threw, as connectChrome's catch sends before its finally. puma-9arph.89 moves that send: this line then changes.
+    expect(r.visitEnds.filter(at => at.startsWith('3@')), 'the visit\'s end against the send').toEqual([end === 'lands' ? '3@3:1' : '3@3:2'])
   })
 }
