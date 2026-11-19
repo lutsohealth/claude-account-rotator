@@ -1778,8 +1778,9 @@ async function switchTo($: Host, target: Account, why: string, isQuiet = false, 
       if (since !== undefined && carriedFor !== since && carry !== undefined) {
         carryOnAfterSettle($, carry)
         carriedFor = since
+        // Only a rider that arms its own carry-on ends what is owed: one that arms none leaves it for carryOnWhenFree.
+        endDue($, carry, isRotation, isQuiet)
       }
-      endDue($, carry, isRotation, isQuiet)
       return true
     }
     // A waiter claims again, so two released by one switch start one after the other, and one whose target the switch
