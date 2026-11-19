@@ -246,7 +246,7 @@ let clearedFor: number | undefined
  * by the first such stop, with no await between its read and its write, so a second stop adds no notice and no retry.
  */
 let due: { at?: number; from?: string; turns?: number } | undefined
-/** How many switches ended the carry-on owed (switchNow): one landing while carryOnWhenFree writes is not undone by it. */
+/** How many switches ended the carry-on owed (endDue): one landing while carryOnWhenFree writes is not undone by it. */
 let dueEndings = 0
 /** The turns open now, the main loop's and every agent's or teammate's, by id: a key sent while one runs would answer its dialog. */
 const openTurns = new Set<string>()
@@ -1621,6 +1621,7 @@ async function carryOnWhenFree($: Host): Promise<void> {
     await carryOn($, undefined, view.activeId === owed.from ? CONTINUE_RESET : undefined)
     return
   }
+  // A stop that rode this switch and armed its carry-on during the clearing write above: no second one.
   if (carriedFor === since) return
   carryOnAfterSettle($, {})
   carriedFor = since
@@ -1778,12 +1779,30 @@ async function switchTo($: Host, target: Account, why: string, isQuiet = false, 
         carryOnAfterSettle($, carry)
         carriedFor = since
       }
+      endDue($, carry, isRotation, isQuiet)
       return true
     }
     // A waiter claims again, so two released by one switch start one after the other, and one whose target the switch
     // that ran reached starts none.
-    if ((await getView($)).activeId === target.id) return true
+    if ((await getView($)).activeId === target.id) {
+      endDue($, carry, isRotation, isQuiet)
+      return true
+    }
   }
+}
+
+/**
+ * Ends the carry-on owed once a login frees up (awaitFreeLogin) where a move landed for a switch that carries on, or one a
+ * person asked for: switchNow's own, a stop's that rode the switch running, or a press whose login that switch reached.
+ * The tick's own rotation (it carries nothing) and Connect's visit (quiet) leave it owed: carryOnWhenFree sends it after them.
+ */
+function endDue($: Host, carry: CarryOn | undefined, isRotation: boolean, isQuiet: boolean): void {
+  if (carry === undefined && (isRotation || isQuiet)) return
+  // Counted even while carryOnWhenFree's clearing write runs, with `due` already cleared, so that write keeps it ended.
+  dueEndings += 1
+  if (due === undefined) return
+  due = undefined
+  void setView($, v => ({ ...v, carryDue: undefined })).catch(error => debug($, `carry-on owed not cleared: ${String(error)}`))
 }
 
 /** The switch that owns the session by `token`: every write that names the switch applies only while it still owns it. */
@@ -1830,23 +1849,16 @@ async function switchNow($: Host, token: number, target: Account, why: string, i
     if (!(await writeSwitch($, mine, v => ({ ...v, provisionalStop: undefined })))) return givenUp()
   } else if (!(await undoProvisionalStop($, mine))) return givenUp()
   const now = await $.clock.now()
-  // A switch that carries on, or one a person asked for, ends the carry-on owed once a login frees up. The tick's own
-  // rotation (it carries nothing) and Connect's visit (quiet) leave it owed: carryOnWhenFree sends it after them.
-  const isDueEnded = owed !== undefined || (!isRotation && !isQuiet)
   // Published only after the slot write landed, and only while it still owns the switch.
   if (!(await writeSwitch($, mine, v => ({
     ...v,
     activeId: target.id,
     pending: { id: target.id, from: v.activeId, since: now },
     removing: undefined,
-    ...(isDueEnded ? { carryDue: undefined } : {}),
   })))) return givenUp()
   movedAt = now
   moves += 1
-  if (isDueEnded) {
-    due = undefined
-    dueEndings += 1
-  }
+  endDue($, carry, isRotation, isQuiet)
   // The carry-on is armed and carriedFor set straight after pending's write, with no await between, so a second stop
   // cannot arm a second carry-on; the toast reads the view after them.
   if (carry !== undefined) void logStop($, `moved to ${target.id}`)

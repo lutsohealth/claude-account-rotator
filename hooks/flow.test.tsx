@@ -10474,40 +10474,19 @@ test('with every login spent, Use now pressed during the write clearing the carr
   await pane.unmount()
 })
 
-test('with every login spent, a second stop that rides the tick\'s own switch to the login freed sends one carry-on, armed once (puma-9arph.84)', async ($, on) => {
-  const w = fresh()
-  const { store, clock } = await loggedWorld(on, w)
-  const view = watchedView(on)
-  w.usage['tok-1'] = [40, 100]
-  w.usage['tok-2'] = [100, 30]
-  await start($, clock)
-  await $.classic.StopFailure(PLAIN)
-  await clock.settle()
-  w.failing = { 'tok-2': 429 }
-  let open = () => {}
-  const gate = new Promise<void>(resolve => {
-    open = resolve
-  })
-  let isGated = false
-  w.beforeKeychain = () => {
-    if (isGated || view()?.owner === undefined) return Promise.resolve()
-    isGated = true
-    return gate
-  }
-  // At login 2's reset the tick's own switch there waits in its keychain read; a second stop picks login 2 and rides it.
-  await clock.advance(Date.parse('2026-10-12T11:59:30Z') - clock.now())
-  for (let i = 0; i < 3 && !isGated; i += 1) await clock.advance(60_000)
+test('with every login spent, a second stop that rides the tick\'s own switch to the login freed ends the carry-on owed: its own carry-on, armed once, is the one that goes (puma-9arph.84)', async ($, on) => {
+  const { w, store, clock, open } = await heldTickSwitchWorld($, on)
+  // A second stop picks login 2 and rides the held switch, which lands before the next tick: that tick finds nothing owed.
   const stop = $.classic.StopFailure(PLAIN)
   await clock.settle()
-  // It lands before the next tick, whose carry-on owed then finds the rider's carry-on armed for that switch.
   await clock.advance(5_000)
   open()
   await stop
   await clock.settle()
   await clock.advance(5 * 60_000)
   const lines = whats(stopLogOf(store, w))
-  expect([isGated, w.envSets.at(-1)?.value]).toEqual([true, SLOT2])
-  expect([lines.filter(isOwedCarryOnLine).length, lines.filter(x => x === 'carry-on armed').length, w.submitted.length]).toEqual([1, 1, 1])
+  expect(w.envSets.at(-1)?.value).toBe(SLOT2)
+  expect([lines.filter(isOwedCarryOnLine).length, lines.filter(x => x === 'carry-on armed').length, w.submitted.length]).toEqual([0, 1, 1])
 })
 
 /** Every login spent, a stop on login 1, then the tick's own switch to login 2 at its reset, held in its keychain read until `open`. */
@@ -10537,7 +10516,7 @@ async function heldTickSwitchWorld($: Engine, on: On) {
   return { w, store, clock, view, open }
 }
 
-test('REVIEW R1 a riding stop landing 35 s or more before the next tick sends one carry-on', async ($, on) => {
+test('with every login spent, a second stop that rides the tick\'s own switch, landing 35 s or more before the next tick, ends the carry-on owed: one carry-on goes (puma-9arph.84)', async ($, on) => {
   const { w, store, clock, open } = await heldTickSwitchWorld($, on)
   // The next tick comes 30 s on: the stop comes before it and rides the held switch, which lands after it.
   await clock.advance(25_000)
@@ -10549,10 +10528,11 @@ test('REVIEW R1 a riding stop landing 35 s or more before the next tick sends on
   await clock.settle()
   await clock.advance(5 * 60_000)
   const lines = whats(stopLogOf(store, w))
-  expect([lines.filter(x => x === 'carry-on queued' || x.startsWith('carry-on not sent again')), w.submitted.length, lines]).toEqual([['carry-on queued'], 1])
+  // The second line would be the carry-on owed again, held back here only by the first one still in flight.
+  expect([lines.filter(x => x === 'carry-on queued' || x.startsWith('carry-on not sent again')), lines.filter(isOwedCarryOnLine), w.submitted.length]).toEqual([['carry-on queued'], [], 1])
 })
 
-test('REVIEW R2 Use now on the login the tick is switching to ends the carry-on owed', async ($, on) => {
+test('with every login spent, Use now on the login the tick\'s own switch is moving to ends the carry-on owed (puma-9arph.84)', async ($, on) => {
   const { w, store, clock, view, open } = await heldTickSwitchWorld($, on)
   const pane = await mountPane($)
   const pressed = pane.press({ key: 'use-2' })
