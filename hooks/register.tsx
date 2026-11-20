@@ -2944,9 +2944,11 @@ function connectChrome($: Host, isQuiet = false, tryId?: string): Promise<Chrome
     // nudge, or a carry-on the engine dropped is no evidence (puma-9arph.100). After that clean answer, an older submit
     // that never answers keeps it looking each minute for good.
     // A refusal or drop of the submit that was the latest when it answered lets it go. Else it goes, even where that
-    // makes two. A line sendCarryOn turns away behind a queued one looks again each minute while it stands turned away;
-    // once that one's drop or refusal has cleared it with nothing submitted since, the look runs again, a main turn
-    // between them or not (puma-9arph.101). Where the queued one answers clean, the line stands turned away until another
+    // makes two. The backup line alone looks again (puma-9arph.101). Turned away behind a queued one, it looks each
+    // minute while it stands turned away; once that one's drop or refusal has cleared it with nothing submitted since,
+    // the look runs again, a main turn between them or not. Its own submit dropped or refused while the latest, it looks
+    // once more after every submit has its answer, that refusal not counted as the latest's. A line held back behind the
+    // refresh nudge looks no more: carryOnAfterNudge carries the turn on. Where the queued one answers clean, the line stands turned away until another
     // turn-away replaces it or the mod's code reloads, its timer looking each minute and sending nothing. The connected
     // line is never held. Not fixed: after a switch that carries nothing ends what is owed (a
     // press), the line can go inside that switch's settle (the class of puma-9arph.93).
@@ -2955,6 +2957,9 @@ function connectChrome($: Host, isQuiet = false, tryId?: string): Promise<Chrome
         ? { turns: mainTurns, submits: carryOnSubmits, nudges: nudgeSubmits, refusals: carryOnRefusals, answers: carryOnAnswers }
         : undefined
     let isWaitLogged = false
+    // Set once the backup line's own submit was dropped or refused: its one look more, with that refusal not counted.
+    let isResent = false
+    let ownRefusals = 0
     if (text !== undefined) {
       const wait = () => {
         if (!isWaitLogged) void logStop($, 'carry-on waits on the one owed')
@@ -2964,7 +2969,7 @@ function connectChrome($: Host, isQuiet = false, tryId?: string): Promise<Chrome
       const send = (): void => {
         if (owedAtEnd !== undefined) {
           if (due !== undefined || armedCarryOns > 0) return wait()
-          if (carryOnRefusals === owedAtEnd.refusals) {
+          if (carryOnRefusals - ownRefusals === owedAtEnd.refusals) {
             // A submit still waiting on its answer can yet be dropped, after its turn began: the line waits for it.
             const isWorkSent = carryOnSubmits - nudgeSubmits > owedAtEnd.submits - owedAtEnd.nudges
             const unanswered = carryOnSubmits - carryOnAnswers
@@ -2986,13 +2991,28 @@ function connectChrome($: Host, isQuiet = false, tryId?: string): Promise<Chrome
         }
         const line = { text }
         const submitsAt = carryOnSubmits
-        void sendCarryOn($, line).catch(error => debug($, `carry-on failed: ${String(error)}`))
+        const refusalsAt = carryOnRefusals
+        const sent = sendCarryOn($, line)
+        void sent.catch(error => debug($, `carry-on failed: ${String(error)}`))
+        if (owedAtEnd === undefined) return
         const again = (): void => {
           if (turnedAway?.prompt === line) return void $.clock.after(OWED_LINE_LOOK_MS, again)
           if (carryOnSubmits > submitsAt) return
           send()
         }
-        $.clock.after(OWED_LINE_LOOK_MS, again)
+        if (turnedAway?.prompt === line) return void $.clock.after(OWED_LINE_LOOK_MS, again)
+        if (isResent) return
+        const answered = (): void => {
+          if (carryOnRefusals === refusalsAt) return
+          isResent = true
+          ownRefusals += 1
+          const look = (): void => {
+            if (carryOnAnswers !== carryOnSubmits) return void $.clock.after(OWED_LINE_LOOK_MS, look)
+            send()
+          }
+          $.clock.after(OWED_LINE_LOOK_MS, look)
+        }
+        void sent.then(answered, answered)
       }
       // Once the move back lands: until then the turn's requests may go out as the extension's account.
       if (isMoved) $.clock.after(SETTLE_MS, send)
