@@ -8639,6 +8639,11 @@ for (const command of WATCHED_COMMANDS) {
   })
 }
 
+// An emptied list registers no test above, so nothing else would fail.
+test('the watch is tried with at least one command shape', () => {
+  expect(WATCHED_COMMANDS.length).toBeGreaterThan(0)
+})
+
 // Review C12-R2 C12-BOUNDARY (Codex) [WATCH-BOUNDARY] -> [WATCH-IS-NOT-THE-MINUTE].
 // A test for each kind of request, each its own run of the beats up to the deadline, which are the proof.
 for (const [nonce, make] of [['deadline-use01', useRequest], ['deadline-sel01', selectRequest]] as const) {
