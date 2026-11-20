@@ -15792,3 +15792,193 @@ test('90-N: a person\'s turn after a Connect visit, the carry-on owed unanswered
   expect([isCut, owed], 'the visit cut the stop; the carry-on owed went once before the drop').toEqual([true, 1])
   expect(w.submitted.length - 1, 'carry-ons that went and were not dropped').toBe(1)
 })
+
+const at95 = (hms: string) => Date.parse(`2026-10-12T${hms}Z`)
+
+/**
+ * puma-9arph.95: a Connect visit to login 2 from 10:04, cut by a stop at 10:06, ending at 10:09; `beforeEnd` runs just
+ * before its end. Answers the pane and whether the visit cut the stop.
+ */
+async function cutVisit95($: Engine, w: World, store: Map<string, unknown>, clock: MockClock, beforeEnd = async () => {}) {
+  await clock.advance(at95('10:04:00') - clock.now())
+  let endVisit = () => {}
+  const visit = new Promise<void>(resolve => {
+    endVisit = resolve
+  })
+  w.beforeEnv = () => visit
+  w.chrome?.extensions.push(SLOT2)
+  const pane = await mountPane($)
+  await pane.press({ key: 'chrome-others' })
+  await clock.settle()
+  await pane.redraw()
+  void pane.press({ key: 'chrome-try-2' })
+  await settleReal(clock)
+  await clock.advance(2 * 60_000)
+  await $.turn.start({ text: 'a turn the limit stops', turnId: '95-cut-turn' })
+  void $.classic.StopFailure(PLAIN)
+  await settleReal(clock)
+  await $.turn.complete({ turnId: '95-cut-turn', reason: 'error', answer: '', durationMs: 1, isAborted: false })
+  await clock.settle()
+  const isCut = whats(stopLogOf(store, w)).includes('stayed: Claude in Chrome is connecting')
+  await clock.advance(at95('10:09:00') - clock.now())
+  await beforeEnd()
+  w.beforeEnv = undefined
+  endVisit()
+  await settleReal(clock)
+  return { pane, isCut }
+}
+
+/**
+ * puma-9arph.95 F1: every login's 5-hour window resets at 10:20. A stop on login 1 moves to login 3, and that carry-on's
+ * submit never answers (its turn never starts). A stop on login 3 owes one carry-on at 10:20. The visit (cutVisit95)
+ * ends with it owed, and a person's turn begins at 10:12. `press`: Use now on login 1 at 10:15 ends the debt with no
+ * carry-on. `zero`: the debt's own submit at 10:20 stays queued, the old submit answers, then the engine drops the
+ * queued one. Answers the carry-ons after the visit's end that were not dropped.
+ */
+async function oldSubmitVisit95($: Engine, on: On, ending: 'press' | 'zero') {
+  const w = fresh()
+  w.chrome = { extensions: [''] }
+  w.keychain[await keychainItem(SLOT3)] = blob('tok-3')
+  w.usage['tok-3'] = [10, 30]
+  w.fiveHourResets = { 'tok-1': '2026-10-12T10:20:00Z', 'tok-2': '2026-10-12T10:20:00Z', 'tok-3': '2026-10-12T10:20:00Z' }
+  const { store, clock } = await loggedWorld(on, w, { ...THREE_LOGINS, 'chrome-account': '1' })
+  w.usage['tok-2'] = [100, 30]
+  await start($, clock)
+  const answerOld = answerNextLate(w, 'resolve')
+  w.usage['tok-1'] = [100, 41]
+  await $.classic.StopFailure(PLAIN)
+  await settleReal(clock)
+  await steps90(clock, 60_000)
+  const old = w.submitted.length
+  // The person's turn on login 3 takes that one out of flight; it stops too, and no login is left.
+  w.usage['tok-3'] = [100, 30]
+  await $.turn.start({ text: 'a turn on login 3', turnId: '95-on-3' })
+  await $.classic.StopFailure(PLAIN)
+  await $.turn.complete({ turnId: '95-on-3', reason: 'error', answer: '', durationMs: 1, isAborted: false })
+  await settleReal(clock)
+  const { pane, isCut } = await cutVisit95($, w, store, clock)
+  const atEnd = w.submitted.length
+  await steps90(clock, 3 * 60_000, 60_000)
+  await $.turn.start({ text: 'a prompt of the person', turnId: '95-person' })
+  await clock.settle()
+  const dropOwed = ending === 'zero' ? answerNextLate(w, 'drop') : () => {}
+  const owedAt = w.submitted.length + 1
+  let isPressed = false
+  let looks = 0
+  let started = w.submitted.length
+  while (clock.now() < at95(ending === 'zero' ? '10:24:00' : '10:21:00')) {
+    await clock.advance(clock.now() < at95('10:19:00') ? 60_000 : 10_000)
+    await clock.settle()
+    if (ending === 'press' && !isPressed && clock.now() >= at95('10:15:00')) {
+      isPressed = true
+      await pane.redraw()
+      void pane.press({ key: 'use-1' })
+      await settleReal(clock)
+    }
+    if (ending === 'zero' && w.submitted.length >= owedAt) {
+      looks += 1
+      if (looks === 3 || looks === 15) {
+        if (looks === 3) answerOld()
+        else dropOwed()
+        await settleReal(clock)
+      }
+    }
+    while (started < w.submitted.length) {
+      started += 1
+      // The debt's own submit stays queued until its drop: its turn never starts.
+      if (ending === 'zero' && started === owedAt) continue
+      await $.turn.start({ text: w.submitted[started - 1] ?? '', turnId: `95-${started}` })
+      await clock.settle()
+    }
+  }
+  await pane.unmount()
+  const dropped = ending === 'zero' && looks >= 15 ? 1 : 0
+  return { old, isCut, notDropped: w.submitted.length - atEnd - dropped }
+}
+
+test('90-O: a submit that never answers, then a Connect visit with a carry-on owed, a person\'s turn and a press that ends the debt: the line still goes (puma-9arph.95)', async ($, on) => {
+  const r = await oldSubmitVisit95($, on, 'press')
+  expect([r.old, r.isCut], 'one submit never answers; the visit cut the stop').toEqual([1, true])
+  expect(r.notDropped, 'carry-ons after the visit ended').toBe(1)
+})
+
+test('90-P: a submit out at a Connect visit\'s end answers while the carry-on owed is queued, which then drops: the line still goes (puma-9arph.95)', async ($, on) => {
+  const r = await oldSubmitVisit95($, on, 'zero')
+  expect([r.old, r.isCut], 'one submit out at the visit end; the visit cut the stop').toEqual([1, true])
+  expect(r.notDropped, 'carry-ons after the visit ended that were not dropped').toBe(1)
+})
+
+test('90-Q: a refresh nudge after a Connect visit, its held switch dropped, the debt ended by a press: one carry-on of the work still goes (puma-9arph.95)', async ($, on) => {
+  const w = fresh()
+  w.chrome = { extensions: [''] }
+  w.keychain[await keychainItem(SLOT3)] = blob('tok-3')
+  w.usage['tok-3'] = [10, 30]
+  w.fiveHourResets = { 'tok-1': '2026-10-12T10:12:00Z', 'tok-2': '2026-10-12T10:20:00Z', 'tok-3': '2026-10-12T10:20:00Z' }
+  const { store, clock } = await loggedWorld(on, w, { ...THREE_LOGINS, 'chrome-account': '1' })
+  // The owed-resume look, under whose lock the nudge goes, runs only with an Orca pane for its Escape.
+  w.env.ORCA_TERMINAL_HANDLE = 'term_test-pane'
+  on('process.spawn', async function* (_$, e) {
+    w.spawned.push(e)
+    yield* []
+    return { value: { code: 0, signal: null } }
+  })
+  const view = watchedView(on)
+  w.usage['tok-2'] = [100, 30]
+  await start($, clock)
+  // A stop on login 1 moves to login 3 and carries on; that turn stops on login 3 too: one carry-on owed at 10:12.
+  w.usage['tok-1'] = [100, 41]
+  await $.classic.StopFailure(PLAIN)
+  await settleReal(clock)
+  await steps90(clock, 60_000)
+  w.usage['tok-3'] = [100, 30]
+  await $.turn.start({ text: w.submitted[0] ?? '', turnId: '95-Q-carry' })
+  await $.classic.StopFailure(PLAIN)
+  await $.turn.complete({ turnId: '95-Q-carry', reason: 'error', answer: '', durationMs: 1, isAborted: false })
+  await settleReal(clock)
+  // The session stays on login 2 after the visit; its token expires at 10:16, so the guard holds a switch from it.
+  const { pane, isCut } = await cutVisit95($, w, store, clock, async () => {
+    w.keychain[await keychainItem(SLOT2)] = blob('tok-2', at95('10:16:00'))
+  })
+  const atEnd = w.submitted.length
+  let phase = 'visit ended'
+  let started = w.submitted.length
+  while (clock.now() < at95('10:19:00')) {
+    await clock.advance(10_000)
+    await clock.settle()
+    // Login 1 frees at 10:12: a stop at 10:13 finds it, and the refresh guard holds that switch.
+    if (phase === 'visit ended' && clock.now() >= at95('10:13:00')) {
+      phase = 'stopped'
+      await $.classic.StopFailure(PLAIN)
+      await settleReal(clock)
+    }
+    while (started < w.submitted.length) {
+      started += 1
+      const text = w.submitted[started - 1] ?? ''
+      await $.turn.start({ text, turnId: `95-Q-${started}` })
+      // The nudge's turn ends with no answer (the person stops it): an answer would drop the hold and carry on.
+      if (text === NUDGE_TEXT) await $.turn.complete({ turnId: `95-Q-${started}`, reason: 'aborted', answer: '', durationMs: 1, isAborted: true })
+      await clock.settle()
+      if (text === NUDGE_TEXT && phase === 'stopped') {
+        phase = 'nudged'
+        await pane.redraw()
+        await pane.press({ key: 'rotate-to-off' })
+        await settleReal(clock)
+      }
+    }
+    // Rotation off: the minute's retry drops the held switch. The token refreshed, a press on login 1 ends the debt.
+    if (phase === 'nudged' && view()?.held === undefined) {
+      phase = 'dropped'
+      w.keychain[await keychainItem(SLOT2)] = blob('tok-2', NOW + 8 * HOUR)
+    }
+    if (phase === 'dropped' && clock.now() >= at95('10:17:00')) {
+      phase = 'pressed'
+      await pane.redraw()
+      void pane.press({ key: 'use-1' })
+      await settleReal(clock)
+    }
+  }
+  await pane.unmount()
+  const after = w.submitted.slice(atEnd)
+  expect(after.filter(text => text !== NUDGE_TEXT), 'carry-ons of the work after the visit ended').toHaveLength(1)
+  expect([isCut, after.includes(NUDGE_TEXT), phase], 'the visit cut the stop; the nudge went; the debt ended by the press').toEqual([true, true, 'pressed'])
+})
