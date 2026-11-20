@@ -2960,8 +2960,9 @@ function connectChrome($: Host, isQuiet = false, tryId?: string): Promise<Chrome
         ? { turns: mainTurns, submits: carryOnSubmits, nudges: nudgeSubmits, refusals: carryOnRefusals, answers: carryOnAnswers }
         : undefined
     let isWaitLogged = false
-    // The backup line's own drops and refusals in this visit, and those that raised carryOnRefusals as the latest.
-    let failures = 0
+    // The backup line's own answers in this visit (a second, not clean, ends its look), and its refusals that raised
+    // carryOnRefusals as the latest.
+    let ownAnswers = 0
     let ownRefusals = 0
     if (text !== undefined) {
       const wait = () => {
@@ -3009,17 +3010,17 @@ function connectChrome($: Host, isQuiet = false, tryId?: string): Promise<Chrome
         }
         const lineAt = carryOnSubmits
         if (lineAt === submitsAt) return
-        let isFailed = false
-        const failed = (): void => {
-          isFailed = true
-          failures += 1
+        let isAnswered = false
+        const answered = (): void => {
+          isAnswered = true
+          ownAnswers += 1
           if (carryOnRefusals > refusalsAt && carryOnSubmits === lineAt) ownRefusals += 1
         }
-        void sent.then(() => (workAnsweredClean >= lineAt ? undefined : failed()), failed)
+        void sent.then(answered, answered)
         const look = (): void => {
           if (workAnsweredClean >= lineAt) return
-          if (!isFailed) return void $.clock.after(OWED_LINE_LOOK_MS, look)
-          if (failures >= 2) return
+          if (!isAnswered) return void $.clock.after(OWED_LINE_LOOK_MS, look)
+          if (ownAnswers >= 2) return
           if (carryOnAnswers !== carryOnSubmits && carryOnRefusals - ownRefusals <= refusalsAt) return void $.clock.after(OWED_LINE_LOOK_MS, look)
           send()
         }
