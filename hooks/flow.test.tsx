@@ -16430,7 +16430,7 @@ async function g1dWorld101($: Engine, on: On, s1End: 'drop' | 'clean', isLineDro
 
 test('90-ZA: a submit out at a Connect visit\'s end answers after the owed one\'s turn started, the line sent then is dropped, then the owed one drops: the line goes again (puma-9arph.101)', async ($, on) => {
   const r = await g1dWorld101($, on, 'drop')
-  expect([r.isCut, r.isS1Started, r.isS0Answered, r.dropped.length > 0 && r.dropped[0] > r.s1], 'the visit cut the stop; the owed one went and its turn started; the old one answered; the line sent early was dropped').toEqual([true, true, true, true])
+  expect([r.isCut, r.isS1Started, r.isS0Answered, (r.dropped[0] ?? 0) > r.s1], 'the visit cut the stop; the owed one went and its turn started; the old one answered; the line sent early was dropped').toEqual([true, true, true, true])
   // The one that went through is the visit's line, sent again after the owed one dropped, and it answered.
   expect([r.through.map(t => t.n > r.s1 && r.dropped.every(d => d < t.n)), /switched to another of your Claude accounts/.test(r.through[0]?.text ?? ''), r.log.lastIndexOf('carry-on resolved') > r.log.lastIndexOf('carry-on drop')], 'the line, after the drops, answered').toEqual([[true], true, true])
 })
