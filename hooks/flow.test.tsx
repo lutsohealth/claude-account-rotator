@@ -8611,7 +8611,7 @@ const onCountingLooks = (on: On, count: { looks: number }): On =>
 async function looksPastTheTtl($: Engine, w: World, clock: MockClock, count: { looks: number }, command: string): Promise<number> {
   const call = bashCall($, w, command)
   await beat(clock)
-  await clock.advance(REQUEST_TTL_MS + 60_000)
+  await clock.advance(REQUEST_TTL_MS + 2 * REQUEST_POLL_MS)
   await clock.settle()
   count.looks = 0
   for (let i = 0; i < 40; i += 1) await beat(clock)
@@ -8621,24 +8621,35 @@ async function looksPastTheTtl($: Engine, w: World, clock: MockClock, count: { l
   return looks
 }
 
-test('no command shape holds the watch past the time a request lasts', { timeoutMs: 120_000 }, async ($, on) => {
-  const count = { looks: 0 }
-  const { w, clock } = await selectWorld($, onCountingLooks(on, count))
-  const commands = ['tail -f /var/log/account-rotator.log', 'cd ~/Projects/claude-account-rotator && npm run dev', 'account-rotator account use --account 2; sleep 36000']
-  const offenders: string[] = []
-  for (const command of commands) {
-    const looks = await looksPastTheTtl($, w, clock, count, command)
-    if (looks >= 5) offenders.push(`${command}: ${looks} looks in 40 beats`)
-  }
-  expect(commands.length).toBeGreaterThan(0)
-  expect(offenders, `commands the watch polls for without end; bound watchRequests by REQUEST_TTL_MS: ${offenders.join('; ')}`).toEqual([])
+// A test for each command, each its own run of one REQUEST_TTL_MS of beats: the beats up to the deadline are the proof,
+// so they stay, and a command's run no longer waits behind the others'.
+const WATCHED_COMMANDS = ['tail -f /var/log/account-rotator.log', 'cd ~/Projects/claude-account-rotator && npm run dev', 'account-rotator account use --account 2; sleep 36000']
+for (const command of WATCHED_COMMANDS) {
+  test(`no command shape holds the watch past the time a request lasts: ${command}`, { timeoutMs: 120_000 }, async ($, on) => {
+    const count = { looks: 0 }
+    const { w, clock } = await selectWorld($, onCountingLooks(on, count))
+    const commands = [command]
+    const offenders: string[] = []
+    for (const shape of commands) {
+      const looks = await looksPastTheTtl($, w, clock, count, shape)
+      if (looks >= 5) offenders.push(`${shape}: ${looks} looks in 40 beats`)
+    }
+    expect(commands.length).toBeGreaterThan(0)
+    expect(offenders, `commands the watch polls for without end; bound watchRequests by REQUEST_TTL_MS: ${offenders.join('; ')}`).toEqual([])
+  })
+}
+
+// An emptied list registers no test above, so nothing else would fail.
+test('the watch is tried with at least one command shape', () => {
+  expect(WATCHED_COMMANDS.length).toBeGreaterThan(0)
 })
 
 // Review C12-R2 C12-BOUNDARY (Codex) [WATCH-BOUNDARY] -> [WATCH-IS-NOT-THE-MINUTE].
-test('a watch takes neither kind of request on its deadline beat', { timeoutMs: 30_000 }, async ($, on) => {
-  const { w, store, clock } = await selectWorld($, on)
-  const offenders: string[] = []
-  for (const [nonce, make] of [['deadline-use01', useRequest], ['deadline-sel01', selectRequest]] as const) {
+// A test for each kind of request, each its own run of the beats up to the deadline, which are the proof.
+for (const [nonce, make] of [['deadline-use01', useRequest], ['deadline-sel01', selectRequest]] as const) {
+  test(`a watch takes neither kind of request on its deadline beat: ${nonce}`, { timeoutMs: 30_000 }, async ($, on) => {
+    const { w, store, clock } = await selectWorld($, on)
+    const offenders: string[] = []
     const call = bashCall($, w, USE_COMMAND)
     await clock.settle()
     await clock.advance(REQUEST_TTL_MS - REQUEST_POLL_MS)
@@ -8647,9 +8658,9 @@ test('a watch takes neither kind of request on its deadline beat', { timeoutMs: 
     await beat(clock)
     if (resultOf(w, nonce)) offenders.push(nonce)
     await call.finish()
-  }
-  expect(offenders, `taken at REQUEST_TTL_MS; check the deadline after the sleep too: ${offenders.join(', ')}`).toEqual([])
-})
+    expect(offenders, `taken at REQUEST_TTL_MS; check the deadline after the sleep too: ${offenders.join(', ')}`).toEqual([])
+  })
+}
 
 test('a finished call must not take any later select or use before the minute', async ($, on) => {
   const { w, store, clock } = await selectWorld($, on)
@@ -14846,13 +14857,15 @@ function answerNextLate(w: World, answer: 'drop' | 'reject' | 'resolve', drops =
 async function heldBehindQueued($: Engine, on: On, answer: 'drop' | 'reject' | 'resolve', drops = 1, meanwhile?: () => Promise<void>) {
   const w = fresh()
   w.chrome = { extensions: [''] }
+  // Both logins free up at 10:20, so the staging below (two minutes short of it, then six minutes past) takes few ticks.
+  w.fiveHourResets = { 'tok-1': '2026-10-12T10:20:00Z', 'tok-2': '2026-10-12T10:20:00Z' }
   const { store, clock } = await loggedWorld(on, w, { 'chrome-account': '1' })
   w.usage['tok-2'] = [100, 30]
   await start($, clock)
   w.usage['tok-1'] = [100, 41]
   await $.classic.StopFailure(PLAIN)
   await clock.settle()
-  await clock.advance(Date.parse('2026-10-12T11:58:00Z') - clock.now())
+  await clock.advance(Date.parse('2026-10-12T10:18:00Z') - clock.now())
   let endVisit = () => {}
   const visit = new Promise<void>(resolve => {
     endVisit = resolve
@@ -14864,24 +14877,24 @@ async function heldBehindQueued($: Engine, on: On, answer: 'drop' | 'reject' | '
   await clock.settle()
   await pane.redraw()
   void pane.press({ key: 'chrome-try-2' })
-  await settleReal(clock)
+  await clock.settle()
   await clock.advance(2 * 60_000)
   void $.classic.StopFailure(PLAIN)
-  await settleReal(clock)
-  await clock.advance(Date.parse('2026-10-12T12:06:00Z') - clock.now())
+  await clock.settle()
+  await clock.advance(Date.parse('2026-10-12T10:26:00Z') - clock.now())
   const settle = answerNextLate(w, answer, drops)
   w.beforeEnv = undefined
   endVisit()
-  await settleReal(clock)
+  await clock.settle()
   for (let i = 0; i < 12; i += 1) {
     await clock.advance(10_000)
-    await settleReal(clock)
+    await clock.settle()
   }
   const heldSubmits = w.submitted.length
   const isTurnedAway = whats(stopLogOf(store, w)).includes('carry-on not sent again: one is queued')
   await meanwhile?.()
   settle()
-  await settleReal(clock)
+  await clock.settle()
   return { w, store, clock, pane, heldSubmits, isTurnedAway }
 }
 
@@ -14975,15 +14988,15 @@ async function turnedAwayOnThree($: Engine, on: On) {
   w.usage['tok-1'] = [100, 41]
   const settle = answerNextLate(w, 'drop')
   await $.classic.StopFailure(PLAIN)
-  await settleReal(clock)
+  await clock.settle()
   await clock.advance(36_000)
-  await settleReal(clock)
+  await clock.settle()
   const first = [last?.activeId, w.submitted.length]
   w.usage['tok-2'] = [100, 41]
   await $.classic.StopFailure(PLAIN)
-  await settleReal(clock)
+  await clock.settle()
   await clock.advance(36_000)
-  await settleReal(clock)
+  await clock.settle()
   const isTurnedAway = whats(stopLogOf(store, w)).includes('carry-on not sent again: one is queued')
   return { w, store, clock, settle, note, visitEnds, first, isTurnedAway, last: () => last }
 }
@@ -14992,12 +15005,12 @@ test('91-E: a carry-on turned away behind a queued submit is not sent where a st
   const r = await turnedAwayOnThree($, on)
   r.w.usage['tok-3'] = [100, 41]
   await $.classic.StopFailure(PLAIN)
-  await settleReal(r.clock)
+  await r.clock.settle()
   const isOwed = whats(stopLogOf(r.store, r.w)).some(what => what.startsWith('no login left'))
   r.settle()
-  await settleReal(r.clock)
+  await r.clock.settle()
   await r.clock.advance(60_000)
-  await settleReal(r.clock)
+  await r.clock.settle()
   expect([r.first, r.last()?.activeId, r.isTurnedAway, isOwed], 'held on 2, turned away on 3, then no login left').toEqual([['2', 1], '3', true, true])
   expect([r.w.submitted.length, r.last()?.carryDue !== undefined], 'nothing sent at the drop, the carry-on owed').toEqual([1, true])
 })
@@ -15010,24 +15023,24 @@ async function droppedDuringVisit($: Engine, on: On, end: 'lands' | 'refused') {
   const { w, store, clock, settle, note, visitEnds, first, isTurnedAway, last } = await turnedAwayOnThree($, on)
   const pane = await mountPane($)
   await pane.press({ key: 'chrome-others' })
-  await settleReal(clock)
+  await clock.settle()
   await pane.redraw()
   let release = () => {}
   note.hold = new Promise<void>(resolve => {
     release = resolve
   })
   void pane.press({ key: 'chrome-try-3' })
-  await settleReal(clock)
+  await clock.settle()
   settle()
-  await settleReal(clock)
+  await clock.settle()
   await clock.advance(60_000)
-  await settleReal(clock)
+  await clock.settle()
   const during = [last()?.chromeConnecting, w.submitted.length]
   note.isRefused = end === 'refused'
   release()
-  await settleReal(clock)
+  await clock.settle()
   await clock.advance(2 * 60_000)
-  await settleReal(clock)
+  await clock.settle()
   await pane.unmount()
   return { w, store, first, active: last()?.activeId, isTurnedAway, during, noteEnd: note.end, isConnecting: last()?.chromeConnecting !== undefined, visitEnds }
 }
