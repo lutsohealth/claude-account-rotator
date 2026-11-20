@@ -16658,3 +16658,111 @@ for (const mode of ['late', 'stuck', 'recount', 'refused', 'row11', 'cleanlate']
     if (mode === 'refused') expect(r.refusalsLogged, 'the line\'s own refusal is in the debug log').toBe(1)
   })
 }
+
+/**
+ * puma-9arph.101: nudgedDebt100's world with the owed S1 refused while it is the latest, 50 s after it went and before
+ * the refresh nudge is due, so the line's gate opens. Then the nudge goes, and its turn is kept from starting for 90 s,
+ * so it stays queued: the line's look in that window is held back behind it. Then the nudge's turn starts and ends as
+ * nudgedDebt100's does, rotation goes off and the hold drops.
+ */
+async function heldWorld101($: Engine, on: On) {
+  const w = fresh()
+  w.chrome = { extensions: [''] }
+  w.keychain[await keychainItem(SLOT3)] = blob('tok-3')
+  w.usage['tok-3'] = [10, 30]
+  w.fiveHourResets = { 'tok-1': '2026-10-12T10:20:00Z', 'tok-2': '2026-10-12T10:20:00Z', 'tok-3': '2026-10-12T10:20:00Z' }
+  const { store, clock } = await loggedWorld(on, w, { ...THREE_LOGINS, 'chrome-account': '1' })
+  w.env.ORCA_TERMINAL_HANDLE = 'term_test-pane'
+  on('process.spawn', async function* (_$, e) {
+    w.spawned.push(e)
+    yield* []
+    return { value: { code: 0, signal: null } }
+  })
+  const view = watchedView(on)
+  w.usage['tok-2'] = [100, 30]
+  await start($, clock)
+  w.usage['tok-1'] = [100, 41]
+  await $.classic.StopFailure(PLAIN)
+  await settleReal(clock)
+  await steps90(clock, 60_000)
+  w.usage['tok-3'] = [100, 30]
+  await $.turn.start({ text: w.submitted[0] ?? '', turnId: 'hw-carry' })
+  await $.classic.StopFailure(PLAIN)
+  await $.turn.complete({ turnId: 'hw-carry', reason: 'error', answer: '', durationMs: 1, isAborted: false })
+  await settleReal(clock)
+  const { pane, isCut } = await cutVisit95($, w, store, clock)
+  const atEnd = w.submitted.length
+  await steps90(clock, 3 * 60_000, 60_000)
+  await $.turn.start({ text: 'a prompt of the person', turnId: 'hw-person-1' })
+  await $.turn.complete({ turnId: 'hw-person-1', reason: 'answer', answer: 'done', durationMs: 1, isAborted: false })
+  await clock.settle()
+  const s1 = w.submitted.length + 1
+  let endS1 = () => {}
+  const heldS1 = new Promise<void>((_resolve, reject) => {
+    endS1 = () => reject(new Error('submission refused'))
+  })
+  heldS1.catch(() => undefined)
+  Object.defineProperty(w, 'submitHold', { configurable: true, get: () => (w.submitted.length === s1 ? heldS1 : undefined) })
+  let phase = 'owed'
+  let sentAt = 0
+  let nudgeAt = 0
+  let nudgeN = 0
+  let started = w.submitted.length
+  while (clock.now() < at95('10:32:00')) {
+    await clock.advance(10_000)
+    await clock.settle()
+    if (phase === 'owed' && w.submitted.length >= s1) {
+      phase = 'S1 sent'
+      sentAt = clock.now()
+      started = Math.max(started, s1)
+      w.usage['tok-2'] = [100, 30]
+      w.fiveHourResets = { ...w.fiveHourResets, 'tok-2': '2026-10-12T15:20:00Z' }
+      w.keychain[await keychainItem(SLOT2)] = blob('tok-2', clock.now() + 5 * 60_000)
+      await $.turn.start({ text: 'a second prompt of the person', turnId: 'hw-person-2' })
+      await $.classic.StopFailure(PLAIN)
+      await $.turn.complete({ turnId: 'hw-person-2', reason: 'error', answer: '', durationMs: 1, isAborted: false })
+      await settleReal(clock)
+    }
+    if (phase === 'S1 sent' && clock.now() >= sentAt + 50_000) {
+      phase = 'S1 refused'
+      endS1()
+      await settleReal(clock)
+    }
+    while (started < w.submitted.length) {
+      const n = started + 1
+      const text = w.submitted[n - 1] ?? ''
+      if (text === NUDGE_TEXT && nudgeN === 0) {
+        nudgeN = n
+        nudgeAt = clock.now()
+      }
+      if (n === nudgeN && clock.now() < nudgeAt + 90_000) break
+      started = n
+      if (n === s1) continue
+      await $.turn.start({ text, turnId: `hw-${n}` })
+      if (text === NUDGE_TEXT) await $.turn.complete({ turnId: `hw-${n}`, reason: 'aborted', answer: '', durationMs: 1, isAborted: true })
+      else await $.turn.complete({ turnId: `hw-${n}`, reason: 'answer', answer: 'done', durationMs: 1, isAborted: false })
+      await clock.settle()
+      if (text === NUDGE_TEXT && phase !== 'rotation off') {
+        phase = 'rotation off'
+        await pane.redraw()
+        await pane.press({ key: 'rotate-to-off' })
+        await settleReal(clock)
+      }
+    }
+    if (phase === 'rotation off' && view()?.held === undefined) {
+      phase = 'hold dropped'
+      w.keychain[await keychainItem(SLOT2)] = blob('tok-2', NOW + 8 * HOUR)
+    }
+  }
+  await pane.unmount()
+  const log = whats(stopLogOf(store, w))
+  const through = w.submitted.map((text, i) => ({ n: i + 1, text })).filter(({ n, text }) => n > atEnd && n !== s1 && text !== NUDGE_TEXT)
+  return { isCut, s1, nudgeN, phase, through, heldBack: log.filter(what => what === 'carry-on not sent again: one is queued').length }
+}
+
+test('90-ZL: the line held back behind a queued refresh nudge looks no more: the nudge\'s end carries the turn on, once (puma-9arph.101)', async ($, on) => {
+  const r = await heldWorld101($, on)
+  expect([r.isCut, r.nudgeN > r.s1, r.phase], 'the visit cut the stop; the nudge went after the owed one; the hold dropped').toEqual([true, true, 'hold dropped'])
+  // One carry-on of the work went, and the line was held back once: it did not look again behind the nudge.
+  expect([r.through.length, /switched to another of your Claude accounts/.test(r.through[0]?.text ?? ''), r.heldBack], 'one carry-on through; the line held back once').toEqual([1, true, 1])
+})
