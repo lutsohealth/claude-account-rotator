@@ -15512,7 +15512,7 @@ async function lateDrop90($: Engine, on: On, end: string): Promise<number> {
   const before = w.submitted.length
   while (w.submitted.length === before && clock.now() < Date.parse('2026-10-12T12:04:00Z')) {
     await clock.advance(10_000)
-    await settleReal(clock)
+    await clock.settle()
   }
   expect(w.submitted.length, 'the carry-on owed went once login 2 freed').toBe(before + 1)
   await $.turn.start({ text: w.submitted.at(-1) ?? '', turnId: '90-late-owed-line' })
