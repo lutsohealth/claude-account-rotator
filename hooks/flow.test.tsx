@@ -15833,9 +15833,10 @@ async function cutVisit95($: Engine, w: World, store: Map<string, unknown>, cloc
  * submit never answers (its turn never starts). A stop on login 3 owes one carry-on at 10:20. The visit (cutVisit95)
  * ends with it owed, and a person's turn begins at 10:12. `press`: Use now on login 1 at 10:15 ends the debt with no
  * carry-on. `zero`: the debt's own submit at 10:20 stays queued, the old submit answers, then the engine drops the
- * queued one. Answers the carry-ons after the visit's end that were not dropped.
+ * queued one. `turned`: as `zero`, and the queued one's own turn starts after the line has looked, before the drop.
+ * Answers the carry-ons after the visit's end that were not dropped.
  */
-async function oldSubmitVisit95($: Engine, on: On, ending: 'press' | 'zero') {
+async function oldSubmitVisit95($: Engine, on: On, ending: 'press' | 'zero' | 'turned') {
   const w = fresh()
   w.chrome = { extensions: [''] }
   w.keychain[await keychainItem(SLOT3)] = blob('tok-3')
@@ -15861,12 +15862,13 @@ async function oldSubmitVisit95($: Engine, on: On, ending: 'press' | 'zero') {
   await steps90(clock, 3 * 60_000, 60_000)
   await $.turn.start({ text: 'a prompt of the person', turnId: '95-person' })
   await clock.settle()
-  const dropOwed = ending === 'zero' ? answerNextLate(w, 'drop') : () => {}
+  const isQueuedOwed = ending !== 'press'
+  const dropOwed = isQueuedOwed ? answerNextLate(w, 'drop') : () => {}
   const owedAt = w.submitted.length + 1
   let isPressed = false
   let looks = 0
   let started = w.submitted.length
-  while (clock.now() < at95(ending === 'zero' ? '10:24:00' : '10:21:00')) {
+  while (clock.now() < at95(isQueuedOwed ? '10:24:00' : '10:21:00')) {
     await clock.advance(clock.now() < at95('10:19:00') ? 60_000 : 10_000)
     await clock.settle()
     if (ending === 'press' && !isPressed && clock.now() >= at95('10:15:00')) {
@@ -15875,24 +15877,29 @@ async function oldSubmitVisit95($: Engine, on: On, ending: 'press' | 'zero') {
       void pane.press({ key: 'use-1' })
       await settleReal(clock)
     }
-    if (ending === 'zero' && w.submitted.length >= owedAt) {
+    if (isQueuedOwed && w.submitted.length >= owedAt) {
       looks += 1
       if (looks === 3 || looks === 15) {
         if (looks === 3) answerOld()
         else dropOwed()
         await settleReal(clock)
       }
+      // After the line's look at 10:21:10: the queued one's own turn starts.
+      if (looks === 10 && ending === 'turned') {
+        await $.turn.start({ text: w.submitted[owedAt - 1] ?? '', turnId: '95-owed' })
+        await clock.settle()
+      }
     }
     while (started < w.submitted.length) {
       started += 1
-      // The debt's own submit stays queued until its drop: its turn never starts.
-      if (ending === 'zero' && started === owedAt) continue
+      // The debt's own submit stays queued (`zero`) or starts its turn above (`turned`).
+      if (isQueuedOwed && started === owedAt) continue
       await $.turn.start({ text: w.submitted[started - 1] ?? '', turnId: `95-${started}` })
       await clock.settle()
     }
   }
   await pane.unmount()
-  const dropped = ending === 'zero' && looks >= 15 ? 1 : 0
+  const dropped = isQueuedOwed && looks >= 15 ? 1 : 0
   return { old, isCut, notDropped: w.submitted.length - atEnd - dropped }
 }
 
@@ -15904,6 +15911,12 @@ test('90-O: a submit that never answers, then a Connect visit with a carry-on ow
 
 test('90-P: a submit out at a Connect visit\'s end answers while the carry-on owed is queued, which then drops: the line still goes (puma-9arph.95)', async ($, on) => {
   const r = await oldSubmitVisit95($, on, 'zero')
+  expect([r.old, r.isCut], 'one submit out at the visit end; the visit cut the stop').toEqual([1, true])
+  expect(r.notDropped, 'carry-ons after the visit ended that were not dropped').toBe(1)
+})
+
+test('90-R: a submit out at a Connect visit\'s end answers while the carry-on owed is queued, whose own turn starts and then drops: the line still goes (puma-9arph.95)', async ($, on) => {
+  const r = await oldSubmitVisit95($, on, 'turned')
   expect([r.old, r.isCut], 'one submit out at the visit end; the visit cut the stop').toEqual([1, true])
   expect(r.notDropped, 'carry-ons after the visit ended that were not dropped').toBe(1)
 })
