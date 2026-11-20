@@ -2928,10 +2928,12 @@ function connectChrome($: Host, isQuiet = false, tryId?: string): Promise<Chrome
     if (isConnected) isChromeAwaited = false
     isCutByVisit = false
     // A carry-on owed for a free login carries the turn this visit cut on (puma-9arph.90): the visit's own line is its
-    // backup only. It waits while that one is owed or armed or any submit waits on its answer, and stands down once a
-    // main turn began and nothing was dropped or refused since; else it goes. The connected line is never held. Not fixed: after a switch that carries
-    // nothing ends what is owed (a press), the line can go inside that switch's settle (the class of puma-9arph.93).
-    const owedAtEnd = !isConnected && due !== undefined ? { turns: mainTurns, refusals: carryOnRefusals } : undefined
+    // backup only. It waits while that one is owed or armed, and while a submit waits on its answer after a main turn
+    // began. It stands down only once a carry-on went since, every submit answered and none dropped or refused: a main
+    // turn alone is no evidence. Else it goes, even where that makes two. The connected line is never held. Not fixed:
+    // after a switch that carries nothing ends what is owed (a press), the line can go inside that switch's settle (the
+    // class of puma-9arph.93).
+    const owedAtEnd = !isConnected && due !== undefined ? { turns: mainTurns, submits: carryOnSubmits, refusals: carryOnRefusals } : undefined
     let isWaitLogged = false
     if (text !== undefined) {
       const wait = () => {
@@ -2940,20 +2942,23 @@ function connectChrome($: Host, isQuiet = false, tryId?: string): Promise<Chrome
         $.clock.after(OWED_LINE_LOOK_MS, send)
       }
       const send = (): void => {
-        // A visit begun since takes it, as for a stop it cuts: nothing goes while one is open.
+        if (owedAtEnd !== undefined) {
+          if (due !== undefined || armedCarryOns > 0) return wait()
+          if (carryOnRefusals === owedAtEnd.refusals) {
+            // A submit still waiting on its answer can yet be dropped, after its turn began: the line waits for it.
+            if (mainTurns > owedAtEnd.turns && carryOnAnswers !== carryOnSubmits) return wait()
+            if (carryOnSubmits > owedAtEnd.submits && carryOnAnswers === carryOnSubmits) {
+              void logStop($, 'carry-on not sent: the one owed went')
+              return
+            }
+          }
+        }
+        // A visit begun since takes it, as for a stop it cuts: nothing goes while one is open. It comes after the
+        // stand-down, so a visit that cut nothing does not send a line the carry-on owed already made needless.
         if (isConnectingChrome) {
           isCutByVisit = true
           void logStop($, 'carry-on held: Claude in Chrome is connecting')
           return
-        }
-        if (owedAtEnd !== undefined) {
-          if (due !== undefined || armedCarryOns > 0) return wait()
-          if (mainTurns > owedAtEnd.turns && carryOnRefusals === owedAtEnd.refusals) {
-            // A submit still waiting on its answer can yet be dropped, after its turn began: the line waits for it.
-            if (carryOnAnswers !== carryOnSubmits) return wait()
-            void logStop($, 'carry-on not sent: the one owed went')
-            return
-          }
         }
         void sendCarryOn($, { text }).catch(error => debug($, `carry-on failed: ${String(error)}`))
       }
