@@ -15308,7 +15308,8 @@ test('89-I: a stop during the wait after a thrown Connect visit that moved carri
 
 /**
  * puma-9arph.89 (Codex round 1, PairedTailRead): a browser call that found no browser connects Claude in Chrome as login
- * 2, which pairs; every view read after the visit's close is refused, and with `isCloseRefused` the close too.
+ * 2, which pairs; every view read after the visit's close is refused, and with `isCloseRefused` the close too. The
+ * tail's maybeRotate reads the view first, so these tests also hold its catch: either catch removed, nothing is sent.
  */
 async function pairedTailUnread($: Engine, on: On, isCloseRefused: boolean) {
   const w = fresh()
