@@ -2928,11 +2928,12 @@ function connectChrome($: Host, isQuiet = false, tryId?: string): Promise<Chrome
     if (isConnected) isChromeAwaited = false
     isCutByVisit = false
     // A carry-on owed for a free login carries the turn this visit cut on (puma-9arph.90): the visit's own line is its
-    // backup only. It waits while that one is owed or armed, and while a submit waits on its answer after a main turn
-    // began. It stands down only once a carry-on went since, every submit answered and none dropped or refused: a main
-    // turn alone is no evidence. Else it goes, even where that makes two. The connected line is never held. Not fixed:
-    // after a switch that carries nothing ends what is owed (a press), the line can go inside that switch's settle (the
-    // class of puma-9arph.93).
+    // backup only. It waits while that one is owed or armed, and, once a main turn began, while any submit of the session
+    // waits on its answer. It stands down only once a carry-on was submitted since and every submit of the session is
+    // answered: a main turn alone is no evidence. A refusal or drop of the submit that was the latest when it answered
+    // lets it go. Else it goes, even where that makes two. The connected line is never held. Not fixed: after a switch
+    // that carries nothing ends what is owed (a press), the line can go inside that switch's settle (the class of
+    // puma-9arph.93).
     const owedAtEnd = !isConnected && due !== undefined ? { turns: mainTurns, submits: carryOnSubmits, refusals: carryOnRefusals } : undefined
     let isWaitLogged = false
     if (text !== undefined) {
