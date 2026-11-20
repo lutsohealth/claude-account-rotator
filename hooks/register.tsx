@@ -2937,10 +2937,10 @@ function connectChrome($: Host, isQuiet = false, tryId?: string): Promise<Chrome
     // refresh nudge was submitted since the visit's end, while any submit of the session waits on its answer. With none
     // submitted since, an older submit that never answers holds nothing (puma-9arph.95). It stands down only once such a
     // carry-on was submitted since and every submit of the session is answered: a main turn alone, or the nudge, is no
-    // evidence. An older submit that never answers, after the one owed went, keeps it looking each minute for good. A refusal or drop of the submit that was the latest when it
-    // answered lets it go. Else it goes, even where that makes two. The connected line is never held. Not fixed: after a
-    // switch that carries nothing ends what is owed (a press), the line can go inside that switch's settle (the class of
-    // puma-9arph.93).
+    // evidence. An older submit that never answers, after the one owed went, keeps it looking each minute for good.
+    // A refusal or drop of the submit that was the latest when it answered lets it go. Else it goes, even where that
+    // makes two. The connected line is never held. Not fixed: after a switch that carries nothing ends what is owed (a
+    // press), the line can go inside that switch's settle (the class of puma-9arph.93).
     const owedAtEnd =
       !isConnected && due !== undefined
         ? { turns: mainTurns, submits: carryOnSubmits, nudges: nudgeSubmits, refusals: carryOnRefusals }
