@@ -2880,6 +2880,9 @@ function shouldConnectAtOpen(view: View, now: number): boolean {
  * the browser, or cut by a usage limit on the way. Quiet as the session opens:
  * the pane says how it went. Answers what the browsers did, where it asked them.
  */
+/** How often a visit's line looks again while it waits on a carry-on owed (connectChrome): the tick's own beat. */
+const OWED_LINE_LOOK_MS = 60_000
+
 function connectChrome($: Host, isQuiet = false, tryId?: string): Promise<ChromeAnswer | undefined> {
   if (isConnectingChrome) return Promise.resolve(undefined)
   isConnectingChrome = true
@@ -2920,13 +2923,31 @@ function connectChrome($: Host, isQuiet = false, tryId?: string): Promise<Chrome
     const text = isConnected ? `Claude in Chrome is connected${connectedAs}. Continue where you left off.` : isCutByVisit ? CONTINUE : undefined
     if (isConnected) isChromeAwaited = false
     isCutByVisit = false
+    // A carry-on owed for a free login carries the turn this visit cut on (puma-9arph.90): the visit's own line is its
+    // backup only. It waits while that one is owed or armed, and stands down once a main turn began and nothing was
+    // dropped or refused since; else it goes. The connected line is never held. Not fixed: after a switch that carries
+    // nothing ends what is owed (a press), the line can go inside that switch's settle (the class of puma-9arph.93).
+    const owedAtEnd = !isConnected && due !== undefined ? { turns: mainTurns, refusals: carryOnRefusals } : undefined
+    let isWaitLogged = false
     if (text !== undefined) {
-      const send = () => {
+      const wait = () => {
+        if (!isWaitLogged) void logStop($, 'carry-on waits on the one owed')
+        isWaitLogged = true
+        $.clock.after(OWED_LINE_LOOK_MS, send)
+      }
+      const send = (): void => {
         // A visit begun since takes it, as for a stop it cuts: nothing goes while one is open.
         if (isConnectingChrome) {
           isCutByVisit = true
           void logStop($, 'carry-on held: Claude in Chrome is connecting')
           return
+        }
+        if (owedAtEnd !== undefined) {
+          if (due !== undefined || armedCarryOns > 0) return wait()
+          if (mainTurns > owedAtEnd.turns && carryOnRefusals === owedAtEnd.refusals) {
+            void logStop($, 'carry-on not sent: the one owed went')
+            return
+          }
         }
         void sendCarryOn($, { text }).catch(error => debug($, `carry-on failed: ${String(error)}`))
       }
