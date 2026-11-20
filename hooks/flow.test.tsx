@@ -15357,3 +15357,438 @@ for (const isCloseRefused of [false, true]) {
     expect(w.submitted).toHaveLength(1)
   })
 }
+
+// ---------------------------------------------------------------- puma-9arph.90: one carry-on after a visit that cut a stop
+
+/**
+ * Every login spent and a carry-on owed at 12:00; a Connect visit held from `from` to `to`, to login 2 (or, `isThree`,
+ * to login 3, so its move back lands on login 2, freed by then); its cut turn begins two minutes in and stops on the
+ * limit. Then every submit is tagged `<time> on <login>[+visit]` as the 10 s loop meets it and its turn starts, but for
+ * the first one after the visit with `refuse` (`thrown` or `dropped`), after which `isPersonTurn` begins a person's turn.
+ */
+async function owedVisit90($: Engine, on: On, from: string, to: string, o: { refuse?: 'thrown' | 'dropped'; isPersonTurn?: boolean; isThree?: boolean } = {}) {
+  const w = fresh()
+  w.chrome = { extensions: [''] }
+  if (o.isThree === true) {
+    w.keychain[await keychainItem(SLOT3)] = blob('tok-3')
+    w.usage['tok-3'] = [100, 30]
+  }
+  const { store, clock } = await loggedWorld(on, w, { ...(o.isThree === true ? THREE_LOGINS : {}), 'chrome-account': '1' })
+  const view = watchedView(on)
+  // Each submit is tagged as the kit takes it, before it can throw: the time, the login, and `+visit` while one is open.
+  const sends: string[] = []
+  let isThrown = false
+  Object.defineProperty(w, 'isSubmitThrown', {
+    configurable: true,
+    get: () => {
+      if (sends.length < w.submitted.length) {
+        const v = view()
+        sends.push(`${new Date(clock.now()).toISOString().slice(11, 19)} on ${v?.activeId}${v?.chromeConnecting === undefined ? '' : '+visit'}`)
+      }
+      return isThrown
+    },
+    set: (value: boolean) => {
+      isThrown = value
+    },
+  })
+  w.usage['tok-2'] = [100, 30]
+  await start($, clock)
+  w.usage['tok-1'] = [100, 41]
+  await $.classic.StopFailure(PLAIN)
+  await clock.settle()
+  await clock.advance(Date.parse(`2026-10-12T${from}Z`) - clock.now())
+  let endVisit = () => {}
+  const visit = new Promise<void>(resolve => {
+    endVisit = resolve
+  })
+  w.beforeEnv = () => visit
+  w.chrome.extensions.push(o.isThree === true ? SLOT3 : SLOT2)
+  const pane = await mountPane($)
+  await pane.press({ key: 'chrome-others' })
+  await clock.settle()
+  await pane.redraw()
+  void pane.press({ key: o.isThree === true ? 'chrome-try-3' : 'chrome-try-2' })
+  await settleReal(clock)
+  await clock.advance(2 * 60_000)
+  await $.turn.start({ text: 'a turn the limit stops', turnId: '90-cut-turn' })
+  void $.classic.StopFailure(PLAIN)
+  await settleReal(clock)
+  const isCut = whats(stopLogOf(store, w)).includes('stayed: Claude in Chrome is connecting')
+  await clock.advance(Date.parse(`2026-10-12T${to}Z`) - clock.now())
+  w.isSubmitThrown = o.refuse === 'thrown'
+  if (o.refuse === 'dropped') w.submitDrop = 'a Stop stands'
+  endVisit()
+  await settleReal(clock)
+  let seen = 0
+  while (clock.now() < Date.parse('2026-10-12T12:25:00Z')) {
+    await clock.advance(10_000)
+    await clock.settle()
+    while (seen < w.submitted.length) {
+      seen += 1
+      if (isThrown || w.submitDrop !== undefined) {
+        w.isSubmitThrown = false
+        w.submitDrop = undefined
+        if (o.isPersonTurn === true) await $.turn.start({ text: 'a prompt of the person', turnId: '90-person' })
+        continue
+      }
+      await $.turn.start({ text: w.submitted[seen - 1] ?? '', turnId: `90-${seen}` })
+      await clock.settle()
+    }
+  }
+  await pane.unmount()
+  const log = whats(stopLogOf(store, w))
+  expect([isCut, sends.filter(s => s.endsWith('+visit'))], 'the visit cut the stop, and nothing went while one was open').toEqual([true, []])
+  // The one owed goes by the tick, whose log says so once; the visit's line says nothing before it goes.
+  const owed = log.filter(what => what.startsWith('a login is free: carry-on on')).length
+  return { sends, log, owed, isStoodDown: log.includes('carry-on not sent: the one owed went'), waits: log.filter(what => what === 'carry-on waits on the one owed').length }
+}
+
+test('90-A: a carry-on owed and a stop a Connect visit cut carry on once, the one owed going first (puma-9arph.90)', async ($, on) => {
+  const r = await owedVisit90($, on, '11:58:00', '12:06:00')
+  expect([r.sends.length, r.owed, r.isStoodDown], 'one went, the one owed; the line stood down').toEqual([1, 1, true])
+})
+
+test('90-B: a carry-on owed and a stop a Connect visit cut carry on once, the visit\'s line due first (puma-9arph.90)', async ($, on) => {
+  const r = await owedVisit90($, on, '11:58:00', '12:06:30')
+  expect([r.sends.length, r.waits, r.owed, r.isStoodDown], 'one went, the one owed; the line waited once, then stood down').toEqual([1, 1, 1, true])
+})
+
+test('90-C: a carry-on owed still goes once a login frees up after a Connect visit that ended with none free (puma-9arph.90)', async ($, on) => {
+  const r = await owedVisit90($, on, '11:50:00', '11:55:00')
+  expect([r.sends.filter(s => s >= '12:00').length, r.log.includes('a login is free: carry-on on 2')], 'the one owed went').toEqual([1, true])
+})
+
+test('90-D: a Connect visit that ended with no login free sends nothing on the spent login, and says it waits once (puma-9arph.90)', async ($, on) => {
+  const r = await owedVisit90($, on, '11:50:00', '11:55:00')
+  expect([r.sends.filter(s => s < '12:00'), r.waits]).toEqual([[], 1])
+})
+
+test('90-E: where the carry-on owed is dropped, the Connect visit\'s line goes after it (puma-9arph.90)', async ($, on) => {
+  const r = await owedVisit90($, on, '11:58:00', '12:06:30', { refuse: 'dropped' })
+  expect([r.sends.length, r.log.includes('carry-on drop'), r.owed, r.isStoodDown], 'the one owed, dropped, then the line').toEqual([2, true, 1, false])
+})
+
+test('90-F: where the carry-on owed is dropped and a person\'s turn begins, the Connect visit\'s line still goes (puma-9arph.90)', async ($, on) => {
+  const r = await owedVisit90($, on, '11:58:00', '12:06:30', { refuse: 'dropped', isPersonTurn: true })
+  expect([r.sends.length, r.owed, r.isStoodDown], 'the one owed, dropped, then the line').toEqual([2, 1, false])
+})
+
+test('90-G: where the carry-on owed is refused, the Connect visit\'s line goes after it (puma-9arph.90)', async ($, on) => {
+  const r = await owedVisit90($, on, '11:58:00', '12:06:00', { refuse: 'thrown' })
+  expect([r.sends.length, r.owed, r.isStoodDown], 'the one owed, refused, then the line').toEqual([2, 1, false])
+})
+
+test('90-H: a Connect visit whose move back lands on a login just freed carries on once, not with the one the tick armed too (puma-9arph.90)', async ($, on) => {
+  const r = await owedVisit90($, on, '11:58:00', '12:06:00', { isThree: true })
+  expect([r.log.includes('carry-on armed'), r.sends.length, r.owed, r.isStoodDown], 'one went, the one the tick armed; the line stood down').toEqual([true, 1, 1, true])
+})
+
+/**
+ * puma-9arph.90 (Codex round 1, LATE_REFUSAL): every login spent, a Connect visit to login 3 that a stop cuts ends at
+ * `end`, before login 2 frees; the carry-on owed goes once it frees, its own turn starts, and only then does the engine
+ * drop it. Answers how many submits went in all.
+ */
+async function lateDrop90($: Engine, on: On, end: string): Promise<number> {
+  const w = fresh()
+  w.chrome = { extensions: [''] }
+  w.keychain[await keychainItem(SLOT3)] = blob('tok-3')
+  w.usage['tok-3'] = [100, 30]
+  const { clock } = await loggedWorld(on, w, { ...THREE_LOGINS, 'chrome-account': '1' })
+  w.usage['tok-2'] = [100, 30]
+  await start($, clock)
+  w.usage['tok-1'] = [100, 41]
+  await $.classic.StopFailure(PLAIN)
+  await clock.settle()
+  const endAt = Date.parse(`2026-10-12T${end}Z`)
+  await clock.advance(endAt - 5 * 60_000 - clock.now())
+  let releaseVisit = () => {}
+  const visit = new Promise<void>(resolve => {
+    releaseVisit = resolve
+  })
+  w.beforeEnv = () => visit
+  w.chrome.extensions.push(SLOT3)
+  const pane = await mountPane($)
+  await pane.press({ key: 'chrome-others' })
+  await clock.settle()
+  await pane.redraw()
+  void pane.press({ key: 'chrome-try-3' })
+  await settleReal(clock)
+  await clock.advance(2 * 60_000)
+  await $.turn.start({ text: 'a turn the limit stops', turnId: '90-late-cut' })
+  void $.classic.StopFailure(PLAIN)
+  await settleReal(clock)
+  await clock.advance(endAt - clock.now())
+  w.beforeEnv = undefined
+  releaseVisit()
+  await settleReal(clock)
+  await clock.advance(40_000)
+  await settleReal(clock)
+  // The base sent the visit's line by here: its turn starts.
+  if (w.submitted.length > 0) await $.turn.start({ text: w.submitted[0] ?? '', turnId: '90-early-visit-line' })
+  const dropLate = answerNextLate(w, 'drop')
+  const before = w.submitted.length
+  while (w.submitted.length === before && clock.now() < Date.parse('2026-10-12T12:04:00Z')) {
+    await clock.advance(10_000)
+    await clock.settle()
+  }
+  expect(w.submitted.length, 'the carry-on owed went once login 2 freed').toBe(before + 1)
+  await $.turn.start({ text: w.submitted.at(-1) ?? '', turnId: '90-late-owed-line' })
+  await clock.advance(2 * 60_000)
+  await settleReal(clock)
+  dropLate()
+  await settleReal(clock)
+  await clock.advance(2 * 60_000)
+  await settleReal(clock)
+  await pane.unmount()
+  return w.submitted.length
+}
+
+for (const end of ['11:55:00', '11:56:00']) {
+  test(`90-${end === '11:55:00' ? 'I' : 'J'}: a carry-on owed dropped after its turn began, a Connect visit ending ${end} before, still leaves the visit's line to go (puma-9arph.90)`, async ($, on) => {
+    expect(await lateDrop90($, on, end), 'the one owed, dropped late, and the line').toBe(2)
+  })
+}
+
+/** The view as last written, and a hold on the write that opens a Connect visit (one state.set handler per test). */
+function views90(on: On) {
+  let last: View | undefined
+  let openHold: Promise<void> | undefined
+  let opened = 0
+  on('state.set', async (_$, e, next) => {
+    const { key, value } = e as unknown as { key: string; value: View }
+    if (key !== 'view') return next(e)
+    const isOpen = last?.chromeConnecting === undefined && value.chromeConnecting !== undefined
+    last = value
+    if (isOpen) {
+      opened += 1
+      const gate = openHold
+      openHold = undefined
+      if (gate !== undefined) await gate
+    }
+    return next(e)
+  })
+  return {
+    opened: () => opened,
+    holdOpen: () => {
+      let release = () => {}
+      openHold = new Promise<void>(resolve => {
+        release = resolve
+      })
+      return release
+    },
+  }
+}
+
+async function steps90(clock: MockClock, ms: number, step = 10_000): Promise<void> {
+  const until = clock.now() + ms
+  while (clock.now() < until) {
+    await clock.advance(step)
+    await clock.settle()
+  }
+}
+
+/** Each submit's turn starts as the 10 s loop meets it, for `ms`. */
+async function turnsFor90($: Engine, clock: MockClock, w: World, ms: number): Promise<void> {
+  let started = w.submitted.length
+  const until = clock.now() + ms
+  while (clock.now() < until) {
+    await clock.advance(10_000)
+    await clock.settle()
+    if (w.submitted.length > started) {
+      started = w.submitted.length
+      await $.turn.start({ text: w.submitted.at(-1) ?? '', turnId: `90-turn-${started}` })
+      await clock.settle()
+    }
+  }
+}
+
+/**
+ * owedVisit90's first half: every login spent and a carry-on owed at 12:00, a Connect visit to login 2 held open from
+ * 11:58 and cut by a stop two minutes in. Answers the pane, what ends the visit, and whether the visit cut the stop.
+ */
+async function owedVisitStart90($: Engine, w: World, store: Map<string, unknown>, clock: MockClock) {
+  w.usage['tok-2'] = [100, 30]
+  await start($, clock)
+  w.usage['tok-1'] = [100, 41]
+  await $.classic.StopFailure(PLAIN)
+  await clock.settle()
+  await clock.advance(Date.parse('2026-10-12T11:58:00Z') - clock.now())
+  let endVisit = () => {}
+  const visit = new Promise<void>(resolve => {
+    endVisit = resolve
+  })
+  w.beforeEnv = () => visit
+  w.chrome?.extensions.push(SLOT2)
+  const pane = await mountPane($)
+  await pane.press({ key: 'chrome-others' })
+  await clock.settle()
+  await pane.redraw()
+  void pane.press({ key: 'chrome-try-2' })
+  await settleReal(clock)
+  await clock.advance(2 * 60_000)
+  await $.turn.start({ text: 'a turn the limit stops', turnId: '90-start-cut' })
+  void $.classic.StopFailure(PLAIN)
+  await settleReal(clock)
+  const isCut = whats(stopLogOf(store, w)).includes('stayed: Claude in Chrome is connecting')
+  await clock.advance(Date.parse('2026-10-12T12:06:30Z') - clock.now())
+  w.beforeEnv = undefined
+  return { pane, endVisit, isCut }
+}
+
+test('90-K: a person\'s turn begun after the tick cleared the carry-on owed and before its submit, that submit dropped: the Connect visit\'s line still goes (puma-9arph.90)', async ($, on) => {
+  const w = fresh()
+  w.chrome = { extensions: [''] }
+  const { store, clock } = await loggedWorld(on, w, { 'chrome-account': '1' })
+  views90(on)
+  // Holds carryOnWhenFree's read after its clear: the first view read without the debt after one that held it.
+  let sawDue = false
+  let isArmed = false
+  let isHeld = false
+  let release = () => {}
+  const gate = new Promise<void>(resolve => {
+    release = resolve
+  })
+  on('state.get', async (_$, e, next) => {
+    const read = await next(e)
+    if (e.plugin !== 'account-rotator' || e.key !== 'view') return read
+    const v = read.value?.value as View | undefined
+    if (v === undefined) return read
+    if (v.carryDue !== undefined) sawDue = true
+    else if (isArmed && sawDue && !isHeld) {
+      isHeld = true
+      await gate
+    }
+    return read
+  })
+  const { pane, endVisit, isCut } = await owedVisitStart90($, w, store, clock)
+  isArmed = true
+  endVisit()
+  await settleReal(clock)
+  while (!isHeld && clock.now() < Date.parse('2026-10-12T12:10:00Z')) await steps90(clock, 5_000, 5_000)
+  await $.turn.start({ text: 'a prompt of the person', turnId: '90-K-person' })
+  // The line looks at least once while the read is held.
+  await steps90(clock, 70_000)
+  w.submitDrop = 'a Stop stands'
+  const before = w.submitted.length
+  release()
+  await settleReal(clock)
+  // The carry-on owed is armed after the read and goes SETTLE_MS later.
+  await steps90(clock, 40_000)
+  const dropped = w.submitted.length - before
+  w.submitDrop = undefined
+  await steps90(clock, 60_000)
+  await pane.unmount()
+  expect([isCut, isHeld], 'the visit cut the stop; the read after the clear was held').toEqual([true, true])
+  expect(w.submitted.length - dropped, 'carry-ons that went and were not dropped').toBe(1)
+})
+
+test('90-L: a later Connect visit open as the line looks again, after the carry-on owed went and its turn began, sends no second line (puma-9arph.90)', async ($, on) => {
+  const w = fresh()
+  w.chrome = { extensions: [''] }
+  const { store, clock } = await loggedWorld(on, w, { 'chrome-account': '1' })
+  const views = views90(on)
+  const { pane, endVisit, isCut } = await owedVisitStart90($, w, store, clock)
+  endVisit()
+  await settleReal(clock)
+  while (w.submitted.length === 0 && clock.now() < Date.parse('2026-10-12T12:10:00Z')) await steps90(clock, 1_000, 1_000)
+  await $.turn.start({ text: w.submitted[0] ?? '', turnId: '90-L-owed' })
+  await clock.settle()
+  // A later visit: the reconnect a browser tool starts where Claude in Chrome answers as no browser's account (91-C), with
+  // no browser answering at all, so it ends unconnected and cut nothing; its opening write held past the line's look.
+  const before = views.opened()
+  const releaseOpen = views.holdOpen()
+  if (w.chrome !== undefined) {
+    w.chrome.as = 'a slot no browser answers as'
+    w.chrome.extensions = []
+  }
+  const browsing = browse($, 'navigate', { url: 'https://example.com' })
+  await settleReal(clock)
+  const isOpen = views.opened() > before
+  await steps90(clock, 2 * 60_000)
+  releaseOpen()
+  await settleReal(clock)
+  await turnsFor90($, clock, w, 4 * 60_000)
+  await pane.unmount()
+  await browsing
+  expect([isCut, isOpen], 'the first visit cut the stop; a second visit opened after the owed one went').toEqual([true, true])
+  expect(w.submitted, 'one carry-on in all').toHaveLength(1)
+})
+
+test('90-M: after a carry-on submit that throws, a later Connect visit with a carry-on owed stands its line down once that one went (puma-9arph.90)', async ($, on) => {
+  const w = fresh()
+  w.chrome = { extensions: [''] }
+  w.keychain[await keychainItem(SLOT3)] = blob('tok-3')
+  w.usage['tok-3'] = [100, 30]
+  w.fiveHourResets = { 'tok-2': '2026-10-12T12:30:00Z', 'tok-3': '2026-10-12T12:30:00Z' }
+  const { store, clock } = await loggedWorld(on, w, { ...THREE_LOGINS, 'chrome-account': '1' })
+  views90(on)
+  await start($, clock)
+  // A stop on login 1 moves to login 2 and arms its carry-on, whose submit throws: answered, as sendCarryOn's catch counts.
+  w.isSubmitThrown = true
+  w.usage['tok-1'] = [100, 41]
+  await $.classic.StopFailure(PLAIN)
+  await settleReal(clock)
+  await steps90(clock, 60_000)
+  w.isSubmitThrown = false
+  const thrown = w.submitted.length
+  // Login 2 spent too, its window resetting after login 1's: a stop there owes a carry-on for 12:00 on login 1.
+  w.usage['tok-2'] = [100, 30]
+  await $.turn.start({ text: 'a turn on login 2', turnId: '90-M-on-2' })
+  await $.classic.StopFailure(PLAIN)
+  await settleReal(clock)
+  await clock.advance(Date.parse('2026-10-12T11:58:00Z') - clock.now())
+  let endVisit = () => {}
+  const visit = new Promise<void>(resolve => {
+    endVisit = resolve
+  })
+  w.beforeEnv = () => visit
+  w.chrome.extensions.push(SLOT3)
+  const pane = await mountPane($)
+  await pane.press({ key: 'chrome-others' })
+  await clock.settle()
+  await pane.redraw()
+  void pane.press({ key: 'chrome-try-3' })
+  await settleReal(clock)
+  await clock.advance(2 * 60_000)
+  await $.turn.start({ text: 'a turn the limit stops', turnId: '90-M-cut' })
+  void $.classic.StopFailure(PLAIN)
+  await settleReal(clock)
+  const isCut = whats(stopLogOf(store, w)).includes('stayed: Claude in Chrome is connecting')
+  await clock.advance(Date.parse('2026-10-12T12:06:00Z') - clock.now())
+  w.beforeEnv = undefined
+  endVisit()
+  await settleReal(clock)
+  await turnsFor90($, clock, w, 6 * 60_000)
+  await pane.unmount()
+  const log = whats(stopLogOf(store, w))
+  expect([thrown, isCut], 'one submit threw; the visit cut the stop').toEqual([1, true])
+  expect([w.submitted.length - thrown, log.includes('carry-on not sent: the one owed went')]).toEqual([1, true])
+})
+
+test('90-N: a person\'s turn after a Connect visit, the carry-on owed unanswered as the line looks, its own turn begun, then dropped: the line still goes (puma-9arph.90)', async ($, on) => {
+  const w = fresh()
+  w.chrome = { extensions: [''] }
+  const { store, clock } = await loggedWorld(on, w, { 'chrome-account': '1' })
+  views90(on)
+  const { pane, endVisit, isCut } = await owedVisitStart90($, w, store, clock)
+  endVisit()
+  await settleReal(clock)
+  // Once the visit's end is read and the line has looked once, a person's turn begins.
+  await steps90(clock, 40_000)
+  await $.turn.start({ text: 'a prompt of the person', turnId: '90-N-person' })
+  await clock.settle()
+  // The carry-on owed goes, its answer held; the line looks at least once while it is out.
+  const dropLate = answerNextLate(w, 'drop')
+  while (w.submitted.length === 0 && clock.now() < Date.parse('2026-10-12T12:10:00Z')) await steps90(clock, 1_000, 1_000)
+  const owed = w.submitted.length
+  await steps90(clock, 2 * 60_000)
+  // Its own turn begins, then the engine drops it.
+  await $.turn.start({ text: w.submitted[0] ?? '', turnId: '90-N-owed' })
+  await clock.settle()
+  dropLate()
+  await settleReal(clock)
+  await turnsFor90($, clock, w, 4 * 60_000)
+  await pane.unmount()
+  expect([isCut, owed], 'the visit cut the stop; the carry-on owed went once before the drop').toEqual([true, 1])
+  expect(w.submitted.length - 1, 'carry-ons that went and were not dropped').toBe(1)
+})
