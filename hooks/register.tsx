@@ -2946,8 +2946,11 @@ function connectChrome($: Host, isQuiet = false, tryId?: string): Promise<Chrome
     // A refusal or drop of the submit that was the latest when it answered lets it go. Else it goes, even where that
     // makes two. The backup line alone looks again (puma-9arph.101). Turned away behind a queued one, it looks each
     // minute while it stands turned away; once that one's drop or refusal has cleared it with nothing submitted since,
-    // the look runs again, a main turn between them or not. Its own submit dropped or refused while the latest, it looks
-    // once more after every submit has its answer, that refusal not counted as the latest's. A line held back behind the
+    // the look runs again, a main turn between them or not. Submitted, it is done only once it, or a carry-on of the work
+    // after it, was answered clean: its own drop or refusal is no evidence. After one, it looks each minute until every
+    // submit has its answer or a refusal not its own moved, then runs the look again with every gate; a second ends it.
+    // Its refusal counts as its own only where nothing was submitted since: where a line went in its place first, the
+    // gate reads it as the latest's, and the line can go next to that one (D-LATEST). A line held back behind the
     // refresh nudge looks no more: carryOnAfterNudge carries the turn on. Where the queued one answers clean, the line stands turned away until another
     // turn-away replaces it or the mod's code reloads, its timer looking each minute and sending nothing. The connected
     // line is never held. Not fixed: after a switch that carries nothing ends what is owed (a
@@ -2957,8 +2960,8 @@ function connectChrome($: Host, isQuiet = false, tryId?: string): Promise<Chrome
         ? { turns: mainTurns, submits: carryOnSubmits, nudges: nudgeSubmits, refusals: carryOnRefusals, answers: carryOnAnswers }
         : undefined
     let isWaitLogged = false
-    // Set once the backup line's own submit was dropped or refused: its one look more, with that refusal not counted.
-    let isResent = false
+    // The backup line's own drops and refusals in this visit, and those that raised carryOnRefusals as the latest.
+    let failures = 0
     let ownRefusals = 0
     if (text !== undefined) {
       const wait = () => {
@@ -2995,24 +2998,32 @@ function connectChrome($: Host, isQuiet = false, tryId?: string): Promise<Chrome
         const sent = sendCarryOn($, line)
         void sent.catch(error => debug($, `carry-on failed: ${String(error)}`))
         if (owedAtEnd === undefined) return
-        const again = (): void => {
-          if (turnedAway?.prompt === line) return void $.clock.after(OWED_LINE_LOOK_MS, again)
-          if (carryOnSubmits > submitsAt) return
-          send()
-        }
-        if (turnedAway?.prompt === line) return void $.clock.after(OWED_LINE_LOOK_MS, again)
-        if (isResent) return
-        const answered = (): void => {
-          if (carryOnRefusals === refusalsAt) return
-          isResent = true
-          ownRefusals += 1
-          const look = (): void => {
-            if (carryOnAnswers !== carryOnSubmits) return void $.clock.after(OWED_LINE_LOOK_MS, look)
+        // What sendCarryOn did with it is read before its first await: turned it away, held it back or submitted it.
+        if (turnedAway?.prompt === line) {
+          const away = (): void => {
+            if (turnedAway?.prompt === line) return void $.clock.after(OWED_LINE_LOOK_MS, away)
+            if (carryOnSubmits > submitsAt) return
             send()
           }
-          $.clock.after(OWED_LINE_LOOK_MS, look)
+          return void $.clock.after(OWED_LINE_LOOK_MS, away)
         }
-        void sent.then(answered, answered)
+        const lineAt = carryOnSubmits
+        if (lineAt === submitsAt) return
+        let isFailed = false
+        const failed = (): void => {
+          isFailed = true
+          failures += 1
+          if (carryOnRefusals > refusalsAt && carryOnSubmits === lineAt) ownRefusals += 1
+        }
+        void sent.then(() => (workAnsweredClean >= lineAt ? undefined : failed()), failed)
+        const look = (): void => {
+          if (workAnsweredClean >= lineAt) return
+          if (!isFailed) return void $.clock.after(OWED_LINE_LOOK_MS, look)
+          if (failures >= 2) return
+          if (carryOnAnswers !== carryOnSubmits && carryOnRefusals - ownRefusals <= refusalsAt) return void $.clock.after(OWED_LINE_LOOK_MS, look)
+          send()
+        }
+        $.clock.after(OWED_LINE_LOOK_MS, look)
       }
       // Once the move back lands: until then the turn's requests may go out as the extension's account.
       if (isMoved) $.clock.after(SETTLE_MS, send)
