@@ -15184,6 +15184,8 @@ test('89-H: a carry-on a visit that moves held is not sent during the visit Use 
   // No browser answers as login 3: Claude in Chrome connects again as login 1, a second visit, during the first's wait.
   await r.minutes(3)
   await r.pane.unmount()
+  // The second visit was open at the first's send: it took the carry-on, and sent it after it ended.
+  expect(r.log(), 'held for the second visit').toContain('carry-on held: Claude in Chrome is connecting')
   expect(r.k.sends.slice(r.before), 'one, on login 2, with no visit open').toEqual(['2'])
 })
 
@@ -15303,3 +15305,54 @@ test('89-I: a stop during the wait after a thrown Connect visit that moved carri
   const sends = r.k.sends.slice(r.before)
   expect([isStopped, sends.length >= 1 && sends.length <= 2, sends.filter(at => at.startsWith('3'))], 'a stop after the close, 1 or 2 sent, none on 3').toEqual([true, true, []])
 })
+
+/**
+ * puma-9arph.89 (Codex round 1, PairedTailRead): a browser call that found no browser connects Claude in Chrome as login
+ * 2, which pairs; every view read after the visit's close is refused, and with `isCloseRefused` the close too.
+ */
+async function pairedTailUnread($: Engine, on: On, isCloseRefused: boolean) {
+  const w = fresh()
+  w.chrome = { extensions: [SLOT2] }
+  await spentTwo(w)
+  const spent = { fiveHour: { pct: 100, resetsAt: '2026-10-12T12:00:00Z' }, at: NOW - 60_000, by: '2', v: 1, src: 'body' }
+  const clock = world(on, w, { ...TWO_LOGINS, 'chrome-account': '2', 'chrome-accounts': ['2'], 'usage:2': spent })
+  let last: View | undefined
+  let isWatched = false
+  let isClosed = false
+  let isReadRefused = false
+  on('state.set', async (_$, e, next) => {
+    const { key, value } = e as unknown as { key: string; value: View }
+    if (key !== 'view') return next(e)
+    const isClose = isWatched && last?.chromeConnecting !== undefined && value.chromeConnecting === undefined
+    if (isClose) {
+      isClosed = true
+      if (isCloseRefused) {
+        isReadRefused = true
+        return { deny: 'state: close refused' } as unknown as Awaited<ReturnType<typeof next>>
+      }
+    }
+    const written = await next(e)
+    last = value
+    if (isClose) isReadRefused = true
+    return written
+  })
+  on('state.get', (_$, e, next) => (isReadRefused && e.key === 'view' ? ({ deny: 'state: read refused' } as unknown as ReturnType<typeof next>) : next(e)))
+  await start($, clock)
+  await clock.advance(36_000)
+  isWatched = true
+  await browse($, 'navigate', { url: 'https://example.com' })
+  for (let i = 0; i < 3; i += 1) {
+    await clock.settle()
+    await clock.advance(36_000)
+  }
+  await clock.settle()
+  return { w, isClosed }
+}
+
+for (const isCloseRefused of [false, true]) {
+  test(`89-${isCloseRefused ? 'K' : 'J'}: a paired Connect visit carries on once where the view read after its close${isCloseRefused ? ', and its close,' : ''} is refused (puma-9arph.89)`, async ($, on) => {
+    const { w, isClosed } = await pairedTailUnread($, on, isCloseRefused)
+    expect([isClosed, w.chromeAsked.includes(SLOT2)], 'the visit to login 2 asked there and closed').toEqual([true, true])
+    expect(w.submitted).toHaveLength(1)
+  })
+}

@@ -2119,7 +2119,7 @@ async function carryOn($: Host, need?: Need, own?: string): Promise<void> {
  * dropped too keeps nothing, so a further one needs a new turn-away. Nothing goes where the queued one went through or
  * anything since cleared the queue: a main turn began, the stop found no login left, the episode ended. A Connect visit
  * open then takes it, and sends its own line in its place, the mod's even for a Fable line kept as your words. Not fixed:
- * a drop after a visit's finally and before its move back settles sends at once (puma-9arph.89).
+ * a drop after a visit's finally and before its move back settles sends at once (puma-9arph.93).
  */
 async function sendCarryOn($: Host, prompt: { text: string; asUser?: true }): Promise<void> {
   if (isCarryOnInFlight) {
@@ -2908,7 +2908,16 @@ function connectChrome($: Host, isQuiet = false, tryId?: string): Promise<Chrome
     }
     const isMoved = isRotated || moves !== movesBefore
     const isConnected = done?.answer === 'paired' && isChromeAwaited
-    const text = isConnected && done !== undefined ? `Claude in Chrome is connected as ${claudeAccount(done.target, (await getView($)).accounts)}. Continue where you left off.` : isCutByVisit ? CONTINUE : undefined
+    // Where the view read fails, the line names no account: a line without it still carries the turn on.
+    let connectedAs = ''
+    if (isConnected && done !== undefined) {
+      try {
+        connectedAs = ` as ${claudeAccount(done.target, (await getView($)).accounts)}`
+      } catch (error) {
+        failure ??= { error }
+      }
+    }
+    const text = isConnected ? `Claude in Chrome is connected${connectedAs}. Continue where you left off.` : isCutByVisit ? CONTINUE : undefined
     if (isConnected) isChromeAwaited = false
     isCutByVisit = false
     if (text !== undefined) {
