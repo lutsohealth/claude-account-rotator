@@ -15438,7 +15438,7 @@ test('90-B: a carry-on owed and a stop a Connect visit cut carry on once, the vi
 
 test('90-C: a carry-on owed still goes once a login frees up after a Connect visit that ended with none free (puma-9arph.90)', async ($, on) => {
   const r = await owedVisit90($, on, '11:50:00', '11:55:00')
-  expect(r.sends.filter(s => s >= '12:00')).toHaveLength(1)
+  expect([r.sends.filter(s => s >= '12:00').length, r.log.includes('a login is free: carry-on on 2')], 'the one owed went').toEqual([1, true])
 })
 
 test('90-D: a Connect visit that ended with no login free sends nothing on the spent login, and says it waits once (puma-9arph.90)', async ($, on) => {
@@ -15465,3 +15465,69 @@ test('90-H: a Connect visit whose move back lands on a login just freed carries 
   const r = await owedVisit90($, on, '11:58:00', '12:06:00', { isThree: true })
   expect([r.log.includes('carry-on armed'), r.sends.length]).toEqual([true, 1])
 })
+
+/**
+ * puma-9arph.90 (Codex round 1, LATE_REFUSAL): every login spent, a Connect visit to login 3 that a stop cuts ends at
+ * `end`, before login 2 frees; the carry-on owed goes once it frees, its own turn starts, and only then does the engine
+ * drop it. Answers how many submits went in all.
+ */
+async function lateDrop90($: Engine, on: On, end: string): Promise<number> {
+  const w = fresh()
+  w.chrome = { extensions: [''] }
+  w.keychain[await keychainItem(SLOT3)] = blob('tok-3')
+  w.usage['tok-3'] = [100, 30]
+  const { clock } = await loggedWorld(on, w, { ...THREE_LOGINS, 'chrome-account': '1' })
+  w.usage['tok-2'] = [100, 30]
+  await start($, clock)
+  w.usage['tok-1'] = [100, 41]
+  await $.classic.StopFailure(PLAIN)
+  await clock.settle()
+  const endAt = Date.parse(`2026-10-12T${end}Z`)
+  await clock.advance(endAt - 5 * 60_000 - clock.now())
+  let releaseVisit = () => {}
+  const visit = new Promise<void>(resolve => {
+    releaseVisit = resolve
+  })
+  w.beforeEnv = () => visit
+  w.chrome.extensions.push(SLOT3)
+  const pane = await mountPane($)
+  await pane.press({ key: 'chrome-others' })
+  await clock.settle()
+  await pane.redraw()
+  void pane.press({ key: 'chrome-try-3' })
+  await settleReal(clock)
+  await clock.advance(2 * 60_000)
+  await $.turn.start({ text: 'a turn the limit stops', turnId: '90-late-cut' })
+  void $.classic.StopFailure(PLAIN)
+  await settleReal(clock)
+  await clock.advance(endAt - clock.now())
+  w.beforeEnv = undefined
+  releaseVisit()
+  await settleReal(clock)
+  await clock.advance(40_000)
+  await settleReal(clock)
+  // The base sent the visit's line by here: its turn starts.
+  if (w.submitted.length > 0) await $.turn.start({ text: w.submitted[0] ?? '', turnId: '90-early-visit-line' })
+  const dropLate = answerNextLate(w, 'drop')
+  const before = w.submitted.length
+  while (w.submitted.length === before && clock.now() < Date.parse('2026-10-12T12:04:00Z')) {
+    await clock.advance(10_000)
+    await settleReal(clock)
+  }
+  expect(w.submitted.length, 'the carry-on owed went once login 2 freed').toBe(before + 1)
+  await $.turn.start({ text: w.submitted.at(-1) ?? '', turnId: '90-late-owed-line' })
+  await clock.advance(2 * 60_000)
+  await settleReal(clock)
+  dropLate()
+  await settleReal(clock)
+  await clock.advance(2 * 60_000)
+  await settleReal(clock)
+  await pane.unmount()
+  return w.submitted.length
+}
+
+for (const end of ['11:55:00', '11:56:00']) {
+  test(`90-${end === '11:55:00' ? 'I' : 'J'}: a carry-on owed dropped after its turn began, a Connect visit ending ${end} before, still leaves the visit's line to go (puma-9arph.90)`, async ($, on) => {
+    expect(await lateDrop90($, on, end)).toBeGreaterThanOrEqual(2)
+  })
+}
