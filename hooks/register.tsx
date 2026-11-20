@@ -2875,6 +2875,9 @@ function shouldConnectAtOpen(view: View, now: number): boolean {
   )
 }
 
+/** How often a visit's line looks again while it waits on a carry-on owed (connectChrome): the tick's own beat. */
+const OWED_LINE_LOOK_MS = 60_000
+
 /**
  * Connect: visits the account the Chrome extension is signed in to, or one
  * tried for it, as Claude Code connects Claude in Chrome with the sign-in the
@@ -2884,9 +2887,6 @@ function shouldConnectAtOpen(view: View, now: number): boolean {
  * the browser, or cut by a usage limit on the way. Quiet as the session opens:
  * the pane says how it went. Answers what the browsers did, where it asked them.
  */
-/** How often a visit's line looks again while it waits on a carry-on owed (connectChrome): the tick's own beat. */
-const OWED_LINE_LOOK_MS = 60_000
-
 function connectChrome($: Host, isQuiet = false, tryId?: string): Promise<ChromeAnswer | undefined> {
   if (isConnectingChrome) return Promise.resolve(undefined)
   isConnectingChrome = true
