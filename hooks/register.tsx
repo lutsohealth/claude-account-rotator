@@ -313,6 +313,8 @@ let turnedAway: { prompt: { text: string; asUser?: true }; submit: number } | un
 let carryOnText: string | undefined
 /** Counts carry-ons refused or dropped: a give-back revives a carry-on only while this has not moved since its turn began. */
 let carryOnRefusals = 0
+/** Counts carry-on submissions answered, any way: one fewer than carryOnSubmits while a submit waits on its answer. */
+let carryOnAnswers = 0
 /** Carry-ons armed and not yet due: the look says nothing is queued only while none is. */
 let armedCarryOns = 0
 /**
@@ -2150,6 +2152,7 @@ async function sendCarryOn($: Host, prompt: { text: string; asUser?: true }): Pr
   try {
     answer = await $.prompt.submit(prompt)
   } catch (error) {
+    carryOnAnswers += 1
     const isLatest = submit === carryOnSubmits
     const isQueued = isLatest && isCarryOnInFlight
     if (isLatest) {
@@ -2160,6 +2163,7 @@ async function sendCarryOn($: Host, prompt: { text: string; asUser?: true }): Pr
     if (isLatest && prompt.text === NUDGE_TEXT && episode !== undefined) carryOnAfterNudge($, episode, false)
     throw error
   }
+  carryOnAnswers += 1
   if (answer.drop === undefined) {
     void logStop($, 'carry-on resolved')
     return
@@ -2924,8 +2928,8 @@ function connectChrome($: Host, isQuiet = false, tryId?: string): Promise<Chrome
     if (isConnected) isChromeAwaited = false
     isCutByVisit = false
     // A carry-on owed for a free login carries the turn this visit cut on (puma-9arph.90): the visit's own line is its
-    // backup only. It waits while that one is owed or armed, and stands down once a main turn began and nothing was
-    // dropped or refused since; else it goes. The connected line is never held. Not fixed: after a switch that carries
+    // backup only. It waits while that one is owed or armed or any submit waits on its answer, and stands down once a
+    // main turn began and nothing was dropped or refused since; else it goes. The connected line is never held. Not fixed: after a switch that carries
     // nothing ends what is owed (a press), the line can go inside that switch's settle (the class of puma-9arph.93).
     const owedAtEnd = !isConnected && due !== undefined ? { turns: mainTurns, refusals: carryOnRefusals } : undefined
     let isWaitLogged = false
@@ -2945,6 +2949,8 @@ function connectChrome($: Host, isQuiet = false, tryId?: string): Promise<Chrome
         if (owedAtEnd !== undefined) {
           if (due !== undefined || armedCarryOns > 0) return wait()
           if (mainTurns > owedAtEnd.turns && carryOnRefusals === owedAtEnd.refusals) {
+            // A submit still waiting on its answer can yet be dropped, after its turn began: the line waits for it.
+            if (carryOnAnswers !== carryOnSubmits) return wait()
             void logStop($, 'carry-on not sent: the one owed went')
             return
           }
