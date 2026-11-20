@@ -15829,27 +15829,57 @@ async function cutVisit95($: Engine, w: World, store: Map<string, unknown>, cloc
 }
 
 /**
+ * puma-9arph.95: the refresh nudge goes on login 1 while the first stop's switch is held; its turn ends with no answer,
+ * the token refreshes and the held switch lands. Answers the hold on that switch's carry-on, set before it goes.
+ */
+async function nudgeFirst95($: Engine, w: World, clock: MockClock) {
+  while (!w.submitted.includes(NUDGE_TEXT) && clock.now() < at95('10:02:00')) {
+    await clock.advance(10_000)
+    await clock.settle()
+  }
+  await $.turn.start({ text: NUDGE_TEXT, turnId: '95-nudge' })
+  await $.turn.complete({ turnId: '95-nudge', reason: 'aborted', answer: '', durationMs: 1, isAborted: true })
+  await clock.settle()
+  const answerOld = answerNextLate(w, 'resolve')
+  w.keychain['Claude Code-credentials'] = blob('tok-1', NOW + 8 * HOUR)
+  await steps90(clock, 60_000)
+  return answerOld
+}
+
+/**
  * puma-9arph.95 F1: every login's 5-hour window resets at 10:20. A stop on login 1 moves to login 3, and that carry-on's
  * submit never answers (its turn never starts). A stop on login 3 owes one carry-on at 10:20. The visit (cutVisit95)
  * ends with it owed, and a person's turn begins at 10:12. `press`: Use now on login 1 at 10:15 ends the debt with no
  * carry-on. `zero`: the debt's own submit at 10:20 stays queued, the old submit answers, then the engine drops the
  * queued one. `turned`: as `zero`, and the queued one's own turn starts after the line has looked, before the drop.
  * `quiet`: as `zero` with no person's turn, and the old submit answers before the line's first look after the debt's
- * own submit goes. Answers the carry-ons after the visit's end that were not dropped.
+ * own submit goes. `isNudgedFirst`: the first stop's switch is held and the refresh nudge goes first (nudgeFirst95).
+ * Answers the carry-ons after the visit's end that were not dropped.
  */
-async function oldSubmitVisit95($: Engine, on: On, ending: 'press' | 'zero' | 'turned' | 'quiet') {
+async function oldSubmitVisit95($: Engine, on: On, ending: 'press' | 'zero' | 'turned' | 'quiet', isNudgedFirst = false) {
   const w = fresh()
   w.chrome = { extensions: [''] }
   w.keychain[await keychainItem(SLOT3)] = blob('tok-3')
   w.usage['tok-3'] = [10, 30]
   w.fiveHourResets = { 'tok-1': '2026-10-12T10:20:00Z', 'tok-2': '2026-10-12T10:20:00Z', 'tok-3': '2026-10-12T10:20:00Z' }
   const { store, clock } = await loggedWorld(on, w, { ...THREE_LOGINS, 'chrome-account': '1' })
+  if (isNudgedFirst) {
+    // Login 1's token refreshes at 10:05, so the guard holds the first stop's switch; the nudge's look needs a pane.
+    w.keychain['Claude Code-credentials'] = blob('tok-1', at95('10:05:00'))
+    w.env.ORCA_TERMINAL_HANDLE = 'term_test-pane'
+    on('process.spawn', async function* (_$, e) {
+      w.spawned.push(e)
+      yield* []
+      return { value: { code: 0, signal: null } }
+    })
+  }
   w.usage['tok-2'] = [100, 30]
   await start($, clock)
-  const answerOld = answerNextLate(w, 'resolve')
+  let answerOld = isNudgedFirst ? () => {} : answerNextLate(w, 'resolve')
   w.usage['tok-1'] = [100, 41]
   await $.classic.StopFailure(PLAIN)
   await settleReal(clock)
+  if (isNudgedFirst) answerOld = await nudgeFirst95($, w, clock)
   await steps90(clock, 60_000)
   const old = w.submitted.length
   // The person's turn on login 3 takes that one out of flight; it stops too, and no login is left.
@@ -15928,6 +15958,12 @@ test('90-R: a submit out at a Connect visit\'s end answers while the carry-on ow
 test('90-S: a submit out at a Connect visit\'s end answers after the carry-on owed goes, with no main turn since, and the queued one drops: the line still goes (puma-9arph.95)', async ($, on) => {
   const r = await oldSubmitVisit95($, on, 'quiet')
   expect([r.old, r.isCut], 'one submit out at the visit end; the visit cut the stop').toEqual([1, true])
+  expect(r.notDropped, 'carry-ons after the visit ended that were not dropped').toBe(1)
+})
+
+test('90-T: a refresh nudge earlier in the session, then 90-R\'s world: the line still goes (puma-9arph.95)', async ($, on) => {
+  const r = await oldSubmitVisit95($, on, 'turned', true)
+  expect([r.old, r.isCut], 'the nudge and one submit out at the visit end; the visit cut the stop').toEqual([2, true])
   expect(r.notDropped, 'carry-ons after the visit ended that were not dropped').toBe(1)
 })
 
