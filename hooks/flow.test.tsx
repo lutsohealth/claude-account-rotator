@@ -14946,8 +14946,8 @@ test('91-F: a Connect visit\'s line turned away behind a queued submit, then a m
   expect([r.heldSubmits, r.isTurnedAway]).toEqual([1, true])
   // A person's turn does not discharge a dropped carry-on owed (90-F's rule): the visit's line, turned away, then cleared
   // by the drop, is the second submit, after that drop.
-  const order = [log.indexOf('carry-on not sent again: one is queued'), log.indexOf('carry-on drop'), log.lastIndexOf('carry-on queued')]
-  expect([order[0] < order[1] && order[1] < order[2], r.w.submitted.length, log.at(-1)], 'turned away, the drop, then the line').toEqual([true, 2, 'carry-on resolved'])
+  const [away, drop, queued] = [log.indexOf('carry-on not sent again: one is queued'), log.indexOf('carry-on drop'), log.lastIndexOf('carry-on queued')]
+  expect([away < drop && drop < queued, r.w.submitted.length, /switched to another of your Claude accounts/.test(r.w.submitted[1] ?? ''), log.at(-1)], 'turned away, the drop, then the line as the second submit, answered').toEqual([true, 2, true, 'carry-on resolved'])
 })
 
 test('91-G: a carry-on sent in place of a dropped one, and dropped too, is not sent a third time (puma-9arph.91)', async ($, on) => {
@@ -16161,8 +16161,8 @@ async function nudgedDebt100($: Engine, on: On, s1End: 'drop' | 'clean' | 'rejec
   }
   await pane.unmount()
   const nudgeAt = w.submitted.indexOf(NUDGE_TEXT, atEnd) + 1
-  const carried = w.submitted.filter((text, i) => i >= atEnd && text !== NUDGE_TEXT && (s1End === 'clean' || i + 1 !== s1)).length
-  return { isCut, isNudgeAfterS1: nudgeAt > s1, isS1Answered, phase, log: whats(stopLogOf(store, w)), carried }
+  const through = w.submitted.map((text, i) => ({ n: i + 1, text })).filter(({ n, text }) => n > atEnd && text !== NUDGE_TEXT && (s1End === 'clean' || n !== s1))
+  return { isCut, isNudgeAfterS1: nudgeAt > s1, isS1Answered, phase, log: whats(stopLogOf(store, w)), carried: through.length, through, s1 }
 }
 
 test('90-U: the carry-on owed after a Connect visit, dropped once a later refresh nudge went: the line still goes (puma-9arph.100)', async ($, on) => {
@@ -16247,7 +16247,9 @@ test('90-W: a submit out at a Connect visit\'s end answers after the carry-on ow
 test('90-Y: a submit out at a Connect visit\'s end that never answers, then 90-U\'s world: the line still goes (puma-9arph.101)', async ($, on) => {
   const r = await nudgedDebt100($, on, 'drop', { isOldHeld: true, resetAt: '10:14:00', endAt: '10:16:00', minuteUntil: '10:13:00' })
   expect([r.isCut, r.isNudgeAfterS1, r.isS1Answered, r.log.includes('carry-on drop'), r.phase], 'the visit cut the stop; the nudge after the owed one, which dropped; the hold dropped').toEqual([true, true, true, true, 'hold dropped'])
-  expect([r.carried, r.log.lastIndexOf('carry-on resolved') > r.log.lastIndexOf('carry-on drop')], 'carry-ons of the work after the visit ended that went through; the line answered').toEqual([1, true])
+  // The one that went through is the visit's line, after the owed one, and it answered after that one's drop.
+  const line = r.through.map(t => [t.n > r.s1, /switched to another of your Claude accounts/.test(t.text)])
+  expect([line, r.log.lastIndexOf('carry-on resolved') > r.log.lastIndexOf('carry-on drop')], 'the line went through after the owed one; it answered').toEqual([[[true, true]], true])
 })
 
 /**
@@ -16320,14 +16322,154 @@ async function loss2World101($: Engine, on: On, s1End: 'drop' | 'reject') {
     }
   }
   await pane.unmount()
-  const carried = w.submitted.filter((_t, i) => i >= atEnd && i + 1 !== s1).length
-  return { isCut, isS1Sent: w.submitted.length >= s1, isTurnedAway, carried }
+  const through = w.submitted.map((text, i) => ({ n: i + 1, text })).filter(({ n }) => n > atEnd && n !== s1)
+  return { isCut, isS1Sent: w.submitted.length >= s1, isTurnedAway, carried: through.length, through, s1, log: whats(stopLogOf(store, w)) }
 }
 
 for (const s1End of ['drop', 'reject'] as const) {
   test(`90-Z${s1End === 'drop' ? '' : '2'}: the line turned away behind the carry-on owed, a person's turn, then that one ${s1End === 'drop' ? 'dropped' : 'refused'}: the line still goes (puma-9arph.101)`, async ($, on) => {
     const r = await loss2World101($, on, s1End)
     expect([r.isCut, r.isS1Sent, r.isTurnedAway], 'the visit cut the stop; the owed one went; the line turned away behind it').toEqual([true, true, true])
-    expect(r.carried, 'carry-ons of the work after the visit ended that went through').toBe(1)
+    // The one that went through is the visit's line, after the owed one, and its answer is the last word of the log.
+    // Turned away once: while it stands turned away it waits in place, and sends nothing again.
+    const line = r.through.map(t => [t.n > r.s1, /switched to another of your Claude accounts/.test(t.text)])
+    const turnsAway = r.log.filter(what => what === 'carry-on not sent again: one is queued').length
+    expect([line, r.log.lastIndexOf('carry-on resolved') > r.log.lastIndexOf('carry-on queued'), turnsAway], 'the line went through after the owed one; it answered; it was turned away once').toEqual([[[true, true]], true, 1])
   })
 }
+
+/**
+ * puma-9arph.101 LOSS-G1D: a carry-on S0 out at the visit's end (cutVisit95, ending at 10:09 with a carry-on owed at
+ * 10:14), and a person's turn after it. At 10:14 the tick sends the debt's own carry-on S1, held, and its turn starts at
+ * once, so S1 is out of flight and unanswered. At 10:14:30 S0 answers. While S1 is out the engine drops any later submit
+ * at once. At 10:17 S1 answers as `s1End` says. `isLineDroppedAgain`: the first submit after that is dropped too.
+ * Every other submit's turn starts at once.
+ */
+async function g1dWorld101($: Engine, on: On, s1End: 'drop' | 'clean', isLineDroppedAgain = false) {
+  const w = fresh()
+  w.chrome = { extensions: [''] }
+  w.keychain[await keychainItem(SLOT3)] = blob('tok-3')
+  w.usage['tok-3'] = [10, 30]
+  w.fiveHourResets = { 'tok-1': '2026-10-12T10:14:00Z', 'tok-2': '2026-10-12T10:14:00Z', 'tok-3': '2026-10-12T10:14:00Z' }
+  const { store, clock } = await loggedWorld(on, w, { ...THREE_LOGINS, 'chrome-account': '1' })
+  w.usage['tok-2'] = [100, 30]
+  await start($, clock)
+  const answerS0 = answerNextLate(w, 'resolve')
+  w.usage['tok-1'] = [100, 41]
+  await $.classic.StopFailure(PLAIN)
+  await settleReal(clock)
+  await steps90(clock, 60_000)
+  w.usage['tok-3'] = [100, 30]
+  await $.turn.start({ text: w.submitted[0] ?? '', turnId: 'g1d-carry' })
+  await $.classic.StopFailure(PLAIN)
+  await $.turn.complete({ turnId: 'g1d-carry', reason: 'error', answer: '', durationMs: 1, isAborted: false })
+  await settleReal(clock)
+  const { pane, isCut } = await cutVisit95($, w, store, clock)
+  const atEnd = w.submitted.length
+  await $.turn.start({ text: 'a prompt of the person', turnId: 'g1d-person' })
+  await $.turn.complete({ turnId: 'g1d-person', reason: 'answer', answer: 'done', durationMs: 1, isAborted: false })
+  await clock.settle()
+  const s1 = w.submitted.length + 1
+  let isS1Answering = false
+  let isS1Out = true
+  let afterS1: number | undefined
+  let endS1 = () => {}
+  const heldS1 = new Promise<void>(resolve => {
+    endS1 = resolve
+  })
+  const dropped: number[] = []
+  Object.defineProperty(w, 'submitHold', { configurable: true, get: () => (w.submitted.length === s1 ? heldS1 : undefined) })
+  Object.defineProperty(w, 'submitDrop', {
+    configurable: true,
+    get: () => {
+      const n = w.submitted.length
+      if (isS1Answering) return s1End === 'drop' ? 'a Stop stands' : undefined
+      const isEarly = n > s1 && isS1Out
+      if (!isEarly && !(isLineDroppedAgain && n === afterS1)) return undefined
+      if (!dropped.includes(n)) dropped.push(n)
+      return 'a Stop stands'
+    },
+  })
+  let isS1Started = false
+  let isS0Answered = false
+  let started = w.submitted.length
+  while (clock.now() < at95('10:19:30')) {
+    await clock.advance(clock.now() < at95('10:13:30') ? 60_000 : clock.now() < at95('10:15:00') ? 10_000 : 30_000)
+    await clock.settle()
+    if (!isS1Started && w.submitted.length >= s1) {
+      isS1Started = true
+      started = Math.max(started, s1)
+      await $.turn.start({ text: w.submitted[s1 - 1] ?? '', turnId: 'g1d-s1' })
+      await clock.settle()
+    }
+    if (isS1Started && !isS0Answered && clock.now() >= at95('10:14:30')) {
+      isS0Answered = true
+      answerS0()
+      await settleReal(clock)
+    }
+    if (isS0Answered && isS1Out && clock.now() >= at95('10:17:00')) {
+      isS1Answering = true
+      endS1()
+      await settleReal(clock)
+      isS1Answering = false
+      isS1Out = false
+      afterS1 = w.submitted.length + 1
+    }
+    while (started < w.submitted.length) {
+      started += 1
+      if (dropped.includes(started)) continue
+      await $.turn.start({ text: w.submitted[started - 1] ?? '', turnId: `g1d-${started}` })
+      await clock.settle()
+    }
+  }
+  await pane.unmount()
+  const isS1Through = s1End === 'clean'
+  const through = w.submitted.map((text, i) => ({ n: i + 1, text })).filter(({ n }) => n > atEnd && !dropped.includes(n) && (isS1Through || n !== s1))
+  return { isCut, isS1Started, isS0Answered, s1, dropped, sent: w.submitted.length - atEnd, through, log: whats(stopLogOf(store, w)) }
+}
+
+test('90-ZA: a submit out at a Connect visit\'s end answers after the owed one\'s turn started, the line sent then is dropped, then the owed one drops: the line goes again (puma-9arph.101)', async ($, on) => {
+  const r = await g1dWorld101($, on, 'drop')
+  expect([r.isCut, r.isS1Started, r.isS0Answered, r.dropped.length > 0 && r.dropped[0] > r.s1], 'the visit cut the stop; the owed one went and its turn started; the old one answered; the line sent early was dropped').toEqual([true, true, true, true])
+  // The one that went through is the visit's line, sent again after the owed one dropped, and it answered.
+  expect([r.through.map(t => t.n > r.s1 && r.dropped.every(d => d < t.n)), /switched to another of your Claude accounts/.test(r.through[0]?.text ?? ''), r.log.lastIndexOf('carry-on resolved') > r.log.lastIndexOf('carry-on drop')], 'the line, after the drops, answered').toEqual([[true], true, true])
+})
+
+test('90-ZB: as 90-ZA, but the owed one answers: no second line (puma-9arph.101)', async ($, on) => {
+  const r = await g1dWorld101($, on, 'clean')
+  expect([r.isCut, r.isS1Started, r.isS0Answered, r.dropped.length > 0], 'the visit cut the stop; the owed one went; the old one answered; the line sent early was dropped').toEqual([true, true, true, true])
+  expect(r.through.map(t => t.n), 'the owed one alone went through').toEqual([r.s1])
+})
+
+test('90-ZC: as 90-ZA, but the line sent again is dropped too: it is not sent a third time (puma-9arph.101)', async ($, on) => {
+  const r = await g1dWorld101($, on, 'drop', true)
+  expect([r.isCut, r.isS1Started, r.isS0Answered, r.dropped.length], 'the visit cut the stop; the owed one went; the old one answered; the line dropped twice').toEqual([true, true, true, 2])
+  expect([r.sent, r.through.length], 'the owed one and the line twice; none through').toEqual([3, 0])
+})
+
+test('90-ZD: a connected line turned away behind a queued one, a person\'s turn, then that one dropped: the line does not look again (puma-9arph.101)', async ($, on) => {
+  const w = fresh()
+  w.chrome = { extensions: [SLOT2] }
+  await spentTwo(w)
+  const spent = { fiveHour: { pct: 100, resetsAt: '2026-10-12T12:00:00Z' }, at: NOW - 60_000, by: '2', v: 1, src: 'body' }
+  const clock = world(on, w, { ...TWO_LOGINS, 'chrome-account': '2', 'chrome-accounts': ['2'], 'usage:2': spent })
+  await start($, clock)
+  await clock.advance(36_000)
+  // The first visit's connected line is held, so the second visit's line is turned away behind it.
+  const settle = answerNextLate(w, 'drop')
+  await browse($, 'navigate', { url: 'https://example.com' })
+  await clock.settle()
+  for (let i = 0; i < 3; i += 1) await clock.advance(36_000)
+  const first = w.submitted.length
+  if (w.chrome !== undefined) w.chrome.as = 'a slot no browser answers as'
+  await browse($, 'navigate', { url: 'https://example.com' })
+  await clock.settle()
+  for (let i = 0; i < 3; i += 1) await clock.advance(36_000)
+  const atTurn = w.submitted.length
+  await $.turn.start({ text: 'a turn of the person', turnId: '90-ZD-turn' })
+  settle()
+  await clock.settle()
+  await tenMinutes(clock)
+  expect([first, atTurn, w.commands.length, w.submitted[0]?.startsWith('Claude in Chrome is connected')], 'the first line held; the second visit reconnected and sent nothing past it').toEqual([1, 1, 2, true])
+  expect(w.submitted.length, 'the connected line turned away is not sent after the drop cleared it').toBe(1)
+})
