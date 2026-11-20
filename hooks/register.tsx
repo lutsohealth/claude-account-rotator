@@ -317,6 +317,8 @@ let carryOnRefusals = 0
 let carryOnAnswers = 0
 /** Counts the refresh nudge's own submits: no carry-on of the work, so no evidence for a Connect visit's line. */
 let nudgeSubmits = 0
+/** The latest carry-on of the work answered clean, by its submission: a dropped one is no evidence for a Connect visit's line. */
+let workAnsweredClean = 0
 /** Carry-ons armed and not yet due: the look says nothing is queued only while none is. */
 let armedCarryOns = 0
 /**
@@ -2167,6 +2169,7 @@ async function sendCarryOn($: Host, prompt: { text: string; asUser?: true }): Pr
   }
   carryOnAnswers += 1
   if (answer.drop === undefined) {
+    if (prompt.text !== NUDGE_TEXT) workAnsweredClean = Math.max(workAnsweredClean, submit)
     void logStop($, 'carry-on resolved')
     return
   }
@@ -2936,8 +2939,9 @@ function connectChrome($: Host, isQuiet = false, tryId?: string): Promise<Chrome
     // backup only. It waits while that one is owed or armed, and, once a main turn began and a carry-on other than the
     // refresh nudge was submitted since the visit's end, while any submit of the session waits on its answer. With none
     // submitted since, an older submit that never answers holds nothing (puma-9arph.95). It stands down only once such a
-    // carry-on was submitted since and every submit of the session is answered: a main turn alone, or the nudge, is no
-    // evidence. An older submit that never answers, after the one owed went, keeps it looking each minute for good.
+    // carry-on submitted since was answered clean, not dropped or refused, and every submit of the session is answered:
+    // a main turn alone, the nudge, or a carry-on the engine dropped is no evidence (puma-9arph.100). An older submit
+    // that never answers, after the one owed went, keeps it looking each minute for good.
     // A refusal or drop of the submit that was the latest when it answered lets it go. Else it goes, even where that
     // makes two. The connected line is never held. Not fixed: after a switch that carries nothing ends what is owed (a
     // press), the line can go inside that switch's settle (the class of puma-9arph.93).
@@ -2959,7 +2963,7 @@ function connectChrome($: Host, isQuiet = false, tryId?: string): Promise<Chrome
             // A submit still waiting on its answer can yet be dropped, after its turn began: the line waits for it.
             const isWorkSent = carryOnSubmits - nudgeSubmits > owedAtEnd.submits - owedAtEnd.nudges
             if (mainTurns > owedAtEnd.turns && isWorkSent && carryOnAnswers !== carryOnSubmits) return wait()
-            if (isWorkSent && carryOnAnswers === carryOnSubmits) {
+            if (workAnsweredClean > owedAtEnd.submits && carryOnAnswers === carryOnSubmits) {
               void logStop($, 'carry-on not sent: the one owed went')
               return
             }
