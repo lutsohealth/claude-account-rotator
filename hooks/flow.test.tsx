@@ -15033,7 +15033,7 @@ async function droppedDuringVisit($: Engine, on: On, end: 'lands' | 'refused') {
 }
 
 for (const end of ['lands', 'refused'] as const) {
-  const what = end === 'lands' ? 'ends goes once, after the visit closes' : 'throws goes once, before the visit closes'
+  const what = end === 'lands' ? 'ends goes once, after the visit closes' : 'throws goes once, after the visit closes'
   test(`91-D${end === 'lands' ? '1' : '2'}: a carry-on turned away behind a submit dropped during a Connect visit that ${what} (puma-9arph.91)`, async ($, on) => {
     const r = await droppedDuringVisit($, on, end)
     expect([r.first, r.active, r.isTurnedAway], 'the first carry-on held on login 2, the second turned away on login 3').toEqual([['2', 1], '3', true])
@@ -15042,8 +15042,264 @@ for (const end of ['lands', 'refused'] as const) {
     // No browser answered as login 3: a paired visit would send its own connected line, whatever was turned away.
     expect(r.w.submitted.some(text => text.startsWith('Claude in Chrome is connected')), 'the visit paired').toBe(false)
     expect([r.during, r.w.submitted.length], 'none while the visit waits, one in all').toEqual([['3', 1], 2])
-    // Where the visit to login 3 (which moves nothing) ends: on login 3, with the carry-on gone by then only where the
-    // visit threw, as connectChrome's catch sends before its finally. puma-9arph.89 moves that send: this line then changes.
-    expect(r.visitEnds.filter(at => at.startsWith('3@')), 'the visit\'s end against the send').toEqual([end === 'lands' ? '3@3:1' : '3@3:2'])
+    // Where the visit to login 3 (which moves nothing) ends: on login 3, the carry-on not yet gone, whether it ended or
+    // threw: a thrown visit sends from the same place as one that ends, after it closes (puma-9arph.89).
+    expect(r.visitEnds.filter(at => at.startsWith('3@')), 'the visit\'s end against the send').toEqual(['3@3:1'])
   })
 }
+
+/**
+ * puma-9arph.89: chromeVisitWorld with three logins, the view's note of what Chrome answered as `noteAs` refusable or
+ * held, the visit's closing write (chromeConnecting cleared) refusable or held, and the move back off `noteAs` refusable.
+ * Each submit is logged as the login whose slot is set when it goes, `+visit` where a visit's view is open then.
+ */
+async function visitTailWorld($: Engine, on: On, noteAs: '2' | '3') {
+  const w = fresh()
+  w.chrome = { extensions: [''] }
+  w.keychain[await keychainItem(SLOT3)] = blob('tok-3')
+  w.usage['tok-3'] = [10, 30]
+  const { store, clock } = await loggedWorld(on, w, { ...THREE_LOGINS, 'chrome-account': '1' })
+  const k = {
+    last: undefined as View | undefined,
+    isNoteRefused: false,
+    noteHold: undefined as Promise<void> | undefined,
+    isCloseRefused: false,
+    closeHold: undefined as Promise<void> | undefined,
+    isBackRefused: false,
+    backHold: undefined as Promise<void> | undefined,
+    isBacked: false,
+    ends: 0,
+    sends: [] as string[],
+    sentAt: [] as number[],
+    backAt: undefined as number | undefined,
+  }
+  const loginOf = (slot: string | undefined) => ({ [SLOT2]: '2', [SLOT3]: '3' })[slot ?? ''] ?? '1'
+  Object.defineProperty(w, 'submitHold', {
+    configurable: true,
+    get: () => {
+      if (k.sends.length < w.submitted.length) {
+        k.sends.push(`${loginOf(w.envSets.at(-1)?.value)}${k.last?.chromeConnecting === undefined ? '' : '+visit'}`)
+        k.sentAt.push(clock.now())
+      }
+      return undefined
+    },
+  })
+  const deny = { deny: 'state: refused' }
+  const gated = async (hold: Promise<void> | undefined) => {
+    if (hold !== undefined) await hold
+  }
+  on('state.set', async (_$, e, next) => {
+    const { key, value } = e as unknown as { key: string; value: View }
+    if (key !== 'view') return next(e)
+    if (value.chrome?.as === noteAs && k.last?.chrome?.as !== noteAs) {
+      const hold = k.noteHold
+      k.noteHold = undefined
+      await gated(hold)
+      if (k.isNoteRefused) {
+        k.isNoteRefused = false
+        return deny as unknown as Awaited<ReturnType<typeof next>>
+      }
+    }
+    const isClose = k.last?.chromeConnecting !== undefined && value.chromeConnecting === undefined
+    if (isClose) {
+      const hold = k.closeHold
+      k.closeHold = undefined
+      await gated(hold)
+      if (k.isCloseRefused) {
+        k.isCloseRefused = false
+        return deny as unknown as Awaited<ReturnType<typeof next>>
+      }
+      k.ends += 1
+    }
+    const isBack = k.last?.activeId === noteAs && value.activeId !== noteAs
+    if (isBack && k.isBackRefused) {
+      k.isBackRefused = false
+      return deny as unknown as Awaited<ReturnType<typeof next>>
+    }
+    k.last = value
+    const written = await next(e)
+    if (isBack) k.backAt = clock.now()
+    // Once the move back's write has landed, before the switch that made it goes on.
+    if (isBack && k.backHold !== undefined) {
+      const hold = k.backHold
+      k.backHold = undefined
+      k.isBacked = true
+      await hold
+    }
+    return written
+  })
+  await start($, clock)
+  // A stop on login 1 moves to login 2; its carry-on goes and its turn starts, so the visit below starts owing nothing.
+  w.usage['tok-1'] = [100, 41]
+  await $.classic.StopFailure(PLAIN)
+  await settleReal(clock)
+  const pane = await mountPane($)
+  await pane.press({ key: 'chrome-others' })
+  await clock.advance(60_000)
+  await settleReal(clock)
+  await $.turn.start({ text: w.submitted[0] ?? '', turnId: '89-first-carry-on' })
+  await settleReal(clock)
+  await pane.redraw()
+  const log = () => whats(stopLogOf(store, w))
+  const minutes = async (n: number) => {
+    for (let i = 0; i < 4 * n; i += 1) {
+      await clock.advance(15_000)
+      await settleReal(clock)
+    }
+  }
+  return { w, clock, k, pane, log, minutes, loginOf, before: w.submitted.length }
+}
+
+/** A gate a test opens: the promise, and what opens it. */
+function gate89(): { p: Promise<void>; open: () => void } {
+  let open = () => {}
+  const p = new Promise<void>(resolve => {
+    open = resolve
+  })
+  return { p, open }
+}
+
+test('89-B: a Connect visit that moves and throws sends the carry-on a stop handed it once, back on the login it left, after the visit (puma-9arph.89)', async ($, on) => {
+  const r = await visitTailWorld($, on, '3')
+  r.k.isNoteRefused = true
+  void r.pane.press({ key: 'chrome-try-3' })
+  await settleReal(r.clock)
+  // The stop comes while the visit's switch to login 3 settles: the visit takes its carry-on.
+  void $.classic.StopFailure(PLAIN)
+  await settleReal(r.clock)
+  await r.minutes(3)
+  await r.pane.unmount()
+  expect(r.w.toasts.some(text => text.startsWith('Something went wrong')), 'the visit threw').toBe(true)
+  expect([r.k.sends.slice(r.before), r.loginOf(r.w.envSets.at(-1)?.value)], 'one, on login 2, the session back there').toEqual([['2'], '2'])
+  // Once the move back lands: SETTLE_MS after its write, as after a visit that ends.
+  expect((r.k.sentAt.at(-1) ?? 0) - (r.k.backAt ?? Infinity), 'sent SETTLE_MS after the move back').toBeGreaterThanOrEqual(35_000)
+})
+
+test('89-H: a carry-on a visit that moves held is not sent during the visit Use for Chrome starts after it (puma-9arph.89)', async ($, on) => {
+  const r = await visitTailWorld($, on, '3')
+  void r.pane.press({ key: 'chrome-try-3' })
+  await settleReal(r.clock)
+  void $.classic.StopFailure(PLAIN)
+  await settleReal(r.clock)
+  // No browser answers as login 3: Claude in Chrome connects again as login 1, a second visit, during the first's wait.
+  await r.minutes(3)
+  await r.pane.unmount()
+  expect(r.k.sends.slice(r.before), 'one, on login 2, with no visit open').toEqual(['2'])
+})
+
+test('89-C: a Connect visit that throws, its closing write refused too, still sends the carry-on it held once (puma-9arph.89)', async ($, on) => {
+  const r = await visitTailWorld($, on, '2')
+  const note = gate89()
+  r.k.noteHold = note.p
+  r.k.isNoteRefused = true
+  r.k.isCloseRefused = true
+  void r.pane.press({ key: 'chrome-try-2' })
+  await settleReal(r.clock)
+  void $.classic.StopFailure(PLAIN)
+  await settleReal(r.clock)
+  note.open()
+  await r.minutes(3)
+  await r.pane.unmount()
+  expect(r.log(), 'the visit took it').toContain('stayed: Claude in Chrome is connecting')
+  expect(r.w.submitted.length - r.before).toBe(1)
+})
+
+test('89-D: a Connect visit that ends, its closing write refused, still sends the carry-on it held once (puma-9arph.89)', async ($, on) => {
+  const r = await visitTailWorld($, on, '2')
+  const note = gate89()
+  r.k.noteHold = note.p
+  r.k.isCloseRefused = true
+  void r.pane.press({ key: 'chrome-try-2' })
+  await settleReal(r.clock)
+  void $.classic.StopFailure(PLAIN)
+  await settleReal(r.clock)
+  note.open()
+  await r.minutes(3)
+  await r.pane.unmount()
+  expect(r.log(), 'the visit took it').toContain('stayed: Claude in Chrome is connecting')
+  expect(r.w.submitted.length - r.before).toBe(1)
+})
+
+test('89-E: a stop during a thrown Connect visit\'s move back is carried on once, not skipped as another switch (puma-9arph.89)', async ($, on) => {
+  const r = await visitTailWorld($, on, '3')
+  r.k.isNoteRefused = true
+  void r.pane.press({ key: 'chrome-try-3' })
+  await settleReal(r.clock)
+  const back = gate89()
+  r.k.backHold = back.p
+  // The visit's own wait out, then the throw. The stop comes once the move back's write has landed, where one runs.
+  await r.clock.advance(36_000)
+  await settleReal(r.clock)
+  r.w.usage['tok-3'] = [100, 41]
+  void $.classic.StopFailure(PLAIN)
+  await settleReal(r.clock)
+  back.open()
+  await r.minutes(3)
+  await r.pane.unmount()
+  expect(r.log(), 'the stop\'s carry-on').not.toContain('carry-on skipped: another switch since')
+  expect(r.w.submitted.length - r.before).toBe(1)
+})
+
+test('89-F: a carry-on owed as a thrown Connect visit closes waits out a visit begun meanwhile (puma-9arph.89)', async ($, on) => {
+  const r = await visitTailWorld($, on, '2')
+  r.k.isNoteRefused = true
+  const close = gate89()
+  r.k.closeHold = close.p
+  void r.pane.press({ key: 'chrome-try-2' })
+  await r.minutes(1)
+  // Visit 2: a browser call that finds no browser connects Claude in Chrome as login 1; its move there is held.
+  const move = gate89()
+  r.w.beforeEnv = () => move.p
+  if (r.w.chrome !== undefined) r.w.chrome.as = 'a slot no browser answers as'
+  await browse($, 'navigate', { url: 'https://example.com' })
+  await r.minutes(1)
+  r.w.usage['tok-2'] = [100, 41]
+  void $.classic.StopFailure(PLAIN)
+  await settleReal(r.clock)
+  const isCut = r.log().includes('stayed: Claude in Chrome is connecting')
+  close.open()
+  await r.minutes(1)
+  const whileOpen = r.w.submitted.length - r.before
+  r.w.beforeEnv = undefined
+  move.open()
+  await r.minutes(3)
+  await r.pane.unmount()
+  expect([isCut, whileOpen], 'visit 2 cut the stop, and nothing went while it was open').toEqual([true, 0])
+  expect(r.w.submitted.length - r.before, 'visit 2\'s line, once').toBe(1)
+})
+
+test('89-G: a thrown Connect visit whose move back is refused sends the carry-on it held once, on the login it stays on (puma-9arph.89)', async ($, on) => {
+  const r = await visitTailWorld($, on, '3')
+  r.k.isNoteRefused = true
+  r.k.isBackRefused = true
+  void r.pane.press({ key: 'chrome-try-3' })
+  await settleReal(r.clock)
+  void $.classic.StopFailure(PLAIN)
+  await settleReal(r.clock)
+  await r.minutes(3)
+  await r.pane.unmount()
+  // A limit (RULING 7178): sent on the login the failed move back left the session on, not kept owed.
+  expect(r.k.sends.slice(r.before)).toEqual(['3'])
+})
+
+test('89-I: a stop during the wait after a thrown Connect visit that moved carries on, at most twice, never on the login visited (puma-9arph.89)', async ($, on) => {
+  const r = await visitTailWorld($, on, '3')
+  r.k.isNoteRefused = true
+  void r.pane.press({ key: 'chrome-try-3' })
+  await settleReal(r.clock)
+  void $.classic.StopFailure(PLAIN)
+  await settleReal(r.clock)
+  let isStopped = false
+  for (let i = 0; i < 12; i += 1) {
+    await r.clock.advance(15_000)
+    await settleReal(r.clock)
+    if (!isStopped && r.k.ends > 1) {
+      isStopped = true
+      void $.classic.StopFailure(PLAIN)
+      await settleReal(r.clock)
+    }
+  }
+  await r.pane.unmount()
+  const sends = r.k.sends.slice(r.before)
+  expect([isStopped, sends.length >= 1 && sends.length <= 2, sends.filter(at => at.startsWith('3'))], 'a stop after the close, 1 or 2 sent, none on 3').toEqual([true, true, []])
+})

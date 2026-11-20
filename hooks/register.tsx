@@ -2119,7 +2119,7 @@ async function carryOn($: Host, need?: Need, own?: string): Promise<void> {
  * dropped too keeps nothing, so a further one needs a new turn-away. Nothing goes where the queued one went through or
  * anything since cleared the queue: a main turn began, the stop found no login left, the episode ended. A Connect visit
  * open then takes it, and sends its own line in its place, the mod's even for a Fable line kept as your words. Not fixed:
- * a drop after a visit's finally and before its move back lands sends at once (puma-9arph.89).
+ * a drop after a visit's finally and before its move back settles sends at once (puma-9arph.89).
  */
 async function sendCarryOn($: Host, prompt: { text: string; asUser?: true }): Promise<void> {
   if (isCarryOnInFlight) {
@@ -2885,30 +2885,47 @@ function connectChrome($: Host, isQuiet = false, tryId?: string): Promise<Chrome
   isConnectingChrome = true
   return (async () => {
     let done: { target: Account; answer: ChromeAnswer; isVisit: boolean } | undefined
+    // A visit that throws ends as one that answers: what it cut or held goes from the one send below, then the error.
+    // Nothing on the way to that send may throw past it: the carry-on would be lost (puma-9arph.89).
+    let failure: { error: unknown } | undefined
+    const movesBefore = moves
     try {
       done = await connectingChrome($, isQuiet, tryId)
     } catch (error) {
-      // A visit that throws still carries on, once, what it cut or what a settling switch held for it: nothing else will.
-      if (isCutByVisit) {
-        isCutByVisit = false
-        void sendCarryOn($, { text: CONTINUE }).catch(e => debug($, `carry-on failed: ${String(e)}`))
-      }
-      throw error
-    } finally {
-      isConnectingChrome = false
-      await setView($, v => ({ ...v, chromeConnecting: undefined }))
+      failure = { error }
     }
-    const isMoved = (await maybeRotate($)) || done?.isVisit === true
+    isConnectingChrome = false
+    try {
+      await setView($, v => ({ ...v, chromeConnecting: undefined }))
+    } catch (error) {
+      failure ??= { error }
+    }
+    let isRotated = false
+    try {
+      isRotated = await maybeRotate($)
+    } catch (error) {
+      failure ??= { error }
+    }
+    const isMoved = isRotated || moves !== movesBefore
     const isConnected = done?.answer === 'paired' && isChromeAwaited
     const text = isConnected && done !== undefined ? `Claude in Chrome is connected as ${claudeAccount(done.target, (await getView($)).accounts)}. Continue where you left off.` : isCutByVisit ? CONTINUE : undefined
     if (isConnected) isChromeAwaited = false
     isCutByVisit = false
     if (text !== undefined) {
-      const send = () => void sendCarryOn($, { text }).catch(error => debug($, `carry-on failed: ${String(error)}`))
+      const send = () => {
+        // A visit begun since takes it, as for a stop it cuts: nothing goes while one is open.
+        if (isConnectingChrome) {
+          isCutByVisit = true
+          void logStop($, 'carry-on held: Claude in Chrome is connecting')
+          return
+        }
+        void sendCarryOn($, { text }).catch(error => debug($, `carry-on failed: ${String(error)}`))
+      }
       // Once the move back lands: until then the turn's requests may go out as the extension's account.
       if (isMoved) $.clock.after(SETTLE_MS, send)
       else send()
     }
+    if (failure !== undefined) throw failure.error
     return done?.answer
   })()
 }
@@ -2946,26 +2963,34 @@ async function connectingChrome(
   await setView($, v => ({ ...v, chromeConnecting: target.id }))
   const isVisit = from.id !== target.id
   if (isVisit && !(await switchTo($, target, 'Claude in Chrome connects as it', true))) return undefined
-  const wait = movedAt === undefined ? 0 : movedAt + SETTLE_MS - (await $.clock.now())
-  if (wait > 0) await $.clock.sleep(wait)
-  // A connection made before, as whichever login the session was on then, is made again as this one.
-  const before = await getView($)
-  if (before.chrome !== undefined || before.hasChrome === true) {
-    try {
-      await $.command.run({ command: 'mcp', args: `reconnect ${CHROME_SERVER}` })
-    } catch (error) {
-      await debug($, `/mcp reconnect ${CHROME_SERVER} failed: ${String(error)}`)
+  let answer: ChromeAnswer
+  try {
+    const wait = movedAt === undefined ? 0 : movedAt + SETTLE_MS - (await $.clock.now())
+    if (wait > 0) await $.clock.sleep(wait)
+    // A connection made before, as whichever login the session was on then, is made again as this one.
+    const before = await getView($)
+    if (before.chrome !== undefined || before.hasChrome === true) {
+      try {
+        await $.command.run({ command: 'mcp', args: `reconnect ${CHROME_SERVER}` })
+      } catch (error) {
+        await debug($, `/mcp reconnect ${CHROME_SERVER} failed: ${String(error)}`)
+      }
     }
-  }
-  const answer = await askChrome($)
-  if (isTrial && answer === 'paired') await setChromeAccount($, target.id)
-  await noteChrome($, target, answer)
-  // Whether a browser answers as the extension's account: a trial that found none didn't ask there.
-  if (!isTrial || answer === 'paired') hasChromeMissed = answer === 'unpaired'
-  if (answer === 'paired') {
-    // A browser answering as the account shows the switch took: the rotation need not wait for a response to say so.
-    const settling = (await getView($)).pending
-    if (settling?.id === target.id) await proveSwitch($, target.id, settling.since)
+    answer = await askChrome($)
+    if (isTrial && answer === 'paired') await setChromeAccount($, target.id)
+    await noteChrome($, target, answer)
+    // Whether a browser answers as the extension's account: a trial that found none didn't ask there.
+    if (!isTrial || answer === 'paired') hasChromeMissed = answer === 'unpaired'
+    if (answer === 'paired') {
+      // A browser answering as the account shows the switch took: the rotation need not wait for a response to say so.
+      const settling = (await getView($)).pending
+      if (settling?.id === target.id) await proveSwitch($, target.id, settling.since)
+    }
+  } catch (error) {
+    // Back while the visit still holds the session: a stop meanwhile hands its carry-on to the visit, not to a timer
+    // this move would skip. Where the move back fails, the carry-on still goes, on the login the session is on.
+    if (isVisit) await leaveVisit($, from).catch(e => debug($, `move back after a failed visit failed: ${String(e)}`))
+    throw error
   }
   if (isVisit) await leaveVisit($, from)
   if (!isQuiet && answer === 'paired') tell($, `Claude in Chrome is connected as ${claudeAccount(target, view.accounts)}.`)
