@@ -16473,3 +16473,10 @@ test('90-ZD: a connected line turned away behind a queued one, a person\'s turn,
   expect([first, atTurn, w.commands.length, w.submitted[0]?.startsWith('Claude in Chrome is connected')], 'the first line held; the second visit reconnected and sent nothing past it').toEqual([1, 1, 2, true])
   expect(w.submitted.length, 'the connected line turned away is not sent after the drop cleared it').toBe(1)
 })
+
+test('90-ZE: 90-V\'s world, its count first: the owed one alone goes through, and the line waits for its answer (puma-9arph.101)', async ($, on) => {
+  const r = await nudgedDebt100($, on, 'clean')
+  // A line sent while the owed one is still out makes two: the snapshot of the answers at the visit's end holds it back.
+  expect(r.through.map(t => t.n), 'the owed one alone went through').toEqual([r.s1])
+  expect([r.isCut, r.isS1Answered, r.phase], 'the visit cut the stop; the owed one answered; the hold dropped').toEqual([true, true, 'hold dropped'])
+})
