@@ -2933,16 +2933,17 @@ function connectChrome($: Host, isQuiet = false, tryId?: string): Promise<Chrome
     if (isConnected) isChromeAwaited = false
     isCutByVisit = false
     // A carry-on owed for a free login carries the turn this visit cut on (puma-9arph.90): the visit's own line is its
-    // backup only. It waits while that one is owed or armed, and, once a main turn began, while a submit sent since the
-    // visit's end waits on its answer: one older submit that never answers holds nothing (puma-9arph.95). It stands down
-    // only once a carry-on other than the refresh nudge was submitted since and every submit of the session is answered:
-    // a main turn alone, or the nudge, is no evidence. A refusal or drop of the submit that was the latest when it
+    // backup only. It waits while that one is owed or armed, and, once a main turn began and a carry-on other than the
+    // refresh nudge was submitted since the visit's end, while any submit of the session waits on its answer. With none
+    // submitted since, an older submit that never answers holds nothing (puma-9arph.95). It stands down only once such a
+    // carry-on was submitted since and every submit of the session is answered: a main turn alone, or the nudge, is no
+    // evidence. An older submit that never answers, after the one owed went, keeps it looking each minute for good. A refusal or drop of the submit that was the latest when it
     // answered lets it go. Else it goes, even where that makes two. The connected line is never held. Not fixed: after a
     // switch that carries nothing ends what is owed (a press), the line can go inside that switch's settle (the class of
     // puma-9arph.93).
     const owedAtEnd =
       !isConnected && due !== undefined
-        ? { turns: mainTurns, submits: carryOnSubmits, answers: carryOnAnswers, nudges: nudgeSubmits, refusals: carryOnRefusals }
+        ? { turns: mainTurns, submits: carryOnSubmits, nudges: nudgeSubmits, refusals: carryOnRefusals }
         : undefined
     let isWaitLogged = false
     if (text !== undefined) {
@@ -2956,8 +2957,9 @@ function connectChrome($: Host, isQuiet = false, tryId?: string): Promise<Chrome
           if (due !== undefined || armedCarryOns > 0) return wait()
           if (carryOnRefusals === owedAtEnd.refusals) {
             // A submit still waiting on its answer can yet be dropped, after its turn began: the line waits for it.
-            if (mainTurns > owedAtEnd.turns && carryOnSubmits - carryOnAnswers > owedAtEnd.submits - owedAtEnd.answers) return wait()
-            if (carryOnSubmits - nudgeSubmits > owedAtEnd.submits - owedAtEnd.nudges && carryOnAnswers === carryOnSubmits) {
+            const isWorkSent = carryOnSubmits - nudgeSubmits > owedAtEnd.submits - owedAtEnd.nudges
+            if (mainTurns > owedAtEnd.turns && isWorkSent && carryOnAnswers !== carryOnSubmits) return wait()
+            if (isWorkSent && carryOnAnswers === carryOnSubmits) {
               void logStop($, 'carry-on not sent: the one owed went')
               return
             }
