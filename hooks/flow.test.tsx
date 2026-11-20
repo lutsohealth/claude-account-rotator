@@ -16490,8 +16490,9 @@ test('90-ZE: 90-V\'s world, its count first: the owed one alone goes through, an
  * - 'stuck' (LOSS-STUCK): the line drops at once while the latest; X as above, refused at 10:17:30; S1 never answers.
  * - 'recount' (LOSS-RECOUNT): as 'stuck', with X refused at 10:18:30, some looks after the line's drop.
  * - 'refused': the line is refused at once while the latest; no second stop; S1 drops at 10:17.
- * - 'row11': as 'late', with X refused at 10:16:30, before the line's own drop at 10:17; S1 never answers.
- * - 'cleanlate': as 'row11', the line answered clean at 10:17; S1 drops at 10:18.
+ * - 'row11': as 'late', with X refused at 10:17, before the line's own drop that same minute; S1 never answers.
+ * - 'cleanlate': X refused at 10:17 while the line is out, a look of the mod's between, the line answered clean at
+ *   10:18; S1 drops at 10:18:30.
  * Every other submit is answered at once and its turn starts.
  */
 async function late101($: Engine, on: On, mode: 'late' | 'stuck' | 'recount' | 'refused' | 'row11' | 'cleanlate') {
@@ -16590,7 +16591,7 @@ async function late101($: Engine, on: On, mode: 'late' | 'stuck' | 'recount' | '
   let isXReleased = false
   let isS1Released = false
   while (clock.now() < at95(mode === 'recount' ? '10:19:30' : '10:19:00')) {
-    await clock.advance(clock.now() < at95('10:13:30') ? 60_000 : clock.now() < at95('10:15:00') ? 10_000 : 30_000)
+    await clock.advance(clock.now() < at95('10:13:30') || clock.now() >= at95('10:18:30') ? 60_000 : 30_000)
     await clock.settle()
     if (!isS1Started && w.submitted.length >= s1) {
       isS1Started = true
@@ -16612,16 +16613,17 @@ async function late101($: Engine, on: On, mode: 'late' | 'stuck' | 'recount' | '
       await $.turn.complete({ turnId: 'late-stop', reason: 'error', answer: '', durationMs: 1, isAborted: false })
       await settleReal(clock)
     }
-    const xAnswerAt = mode === 'recount' ? '10:18:30' : mode === 'row11' || mode === 'cleanlate' ? '10:16:30' : '10:17:30'
+    const xAnswerAt = mode === 'recount' ? '10:18:30' : mode === 'row11' || mode === 'cleanlate' ? '10:17:00' : '10:17:30'
     if (!isXReleased && xAt !== undefined && clock.now() >= at95(xAnswerAt)) {
       isXReleased = true
       await release(xAt, mode === 'late' ? 'drop' : 'reject')
     }
-    if (isHeldLine && !isLineReleased && xAt !== undefined && clock.now() >= at95('10:17:00')) {
+    if (isHeldLine && !isLineReleased && xAt !== undefined && clock.now() >= at95(mode === 'cleanlate' ? '10:18:00' : '10:17:00')) {
       isLineReleased = true
       await release([...roles].find(([, role]) => role === 'early')?.[0], mode === 'cleanlate' ? 'clean' : 'drop')
     }
-    if ((mode === 'late' || mode === 'refused' || mode === 'cleanlate') && !isS1Released && clock.now() >= at95(mode === 'refused' ? '10:17:00' : '10:18:00')) {
+    const s1AnswerAt = mode === 'refused' ? '10:17:00' : mode === 'cleanlate' ? '10:18:30' : '10:18:00'
+    if ((mode === 'late' || mode === 'refused' || mode === 'cleanlate') && !isS1Released && clock.now() >= at95(s1AnswerAt)) {
       isS1Released = true
       await release(s1, 'drop')
     }
