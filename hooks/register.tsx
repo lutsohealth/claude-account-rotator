@@ -2937,17 +2937,22 @@ function connectChrome($: Host, isQuiet = false, tryId?: string): Promise<Chrome
     isCutByVisit = false
     // A carry-on owed for a free login carries the turn this visit cut on (puma-9arph.90): the visit's own line is its
     // backup only. It waits while that one is owed or armed, and, once a main turn began and a carry-on other than the
-    // refresh nudge was submitted since the visit's end, while any submit of the session waits on its answer. With none
-    // submitted since, an older submit that never answers holds nothing (puma-9arph.95). It stands down only once such a
-    // carry-on submitted since was answered clean, not dropped or refused, and every submit of the session is answered:
-    // a main turn alone, the nudge, or a carry-on the engine dropped is no evidence (puma-9arph.100). An older submit
-    // that never answers, after the one owed went, keeps it looking each minute for good.
+    // refresh nudge was submitted since the visit's end, while more submits wait on their answer than at the visit's end,
+    // or any does after a carry-on submitted since was answered clean: a submit out at the visit's end that never answers
+    // holds nothing on its own (puma-9arph.95, puma-9arph.101). It stands down only once such a carry-on submitted since
+    // was answered clean, not dropped or refused, and every submit of the session is answered: a main turn alone, the
+    // nudge, or a carry-on the engine dropped is no evidence (puma-9arph.100). After that clean answer, an older submit
+    // that never answers keeps it looking each minute for good.
     // A refusal or drop of the submit that was the latest when it answered lets it go. Else it goes, even where that
-    // makes two. The connected line is never held. Not fixed: after a switch that carries nothing ends what is owed (a
+    // makes two. A line sendCarryOn turns away behind a queued one looks again each minute while it stands turned away;
+    // once that one's drop or refusal has cleared it with nothing submitted since, the look runs again, a main turn
+    // between them or not (puma-9arph.101). Where the queued one answers clean, the line stands turned away until another
+    // turn-away replaces it or the mod's code reloads, its timer looking each minute and sending nothing. The connected
+    // line is never held. Not fixed: after a switch that carries nothing ends what is owed (a
     // press), the line can go inside that switch's settle (the class of puma-9arph.93).
     const owedAtEnd =
       !isConnected && due !== undefined
-        ? { turns: mainTurns, submits: carryOnSubmits, nudges: nudgeSubmits, refusals: carryOnRefusals }
+        ? { turns: mainTurns, submits: carryOnSubmits, nudges: nudgeSubmits, refusals: carryOnRefusals, answers: carryOnAnswers }
         : undefined
     let isWaitLogged = false
     if (text !== undefined) {
@@ -2962,7 +2967,10 @@ function connectChrome($: Host, isQuiet = false, tryId?: string): Promise<Chrome
           if (carryOnRefusals === owedAtEnd.refusals) {
             // A submit still waiting on its answer can yet be dropped, after its turn began: the line waits for it.
             const isWorkSent = carryOnSubmits - nudgeSubmits > owedAtEnd.submits - owedAtEnd.nudges
-            if (mainTurns > owedAtEnd.turns && isWorkSent && carryOnAnswers !== carryOnSubmits) return wait()
+            const unanswered = carryOnSubmits - carryOnAnswers
+            const isSinceOut = unanswered > owedAtEnd.submits - owedAtEnd.answers
+            const isCleanSince = workAnsweredClean > owedAtEnd.submits
+            if (mainTurns > owedAtEnd.turns && isWorkSent && (isSinceOut || (isCleanSince && unanswered > 0))) return wait()
             if (workAnsweredClean > owedAtEnd.submits && carryOnAnswers === carryOnSubmits) {
               void logStop($, 'carry-on not sent: the one owed went')
               return
@@ -2976,7 +2984,15 @@ function connectChrome($: Host, isQuiet = false, tryId?: string): Promise<Chrome
           void logStop($, 'carry-on held: Claude in Chrome is connecting')
           return
         }
-        void sendCarryOn($, { text }).catch(error => debug($, `carry-on failed: ${String(error)}`))
+        const line = { text }
+        const submitsAt = carryOnSubmits
+        void sendCarryOn($, line).catch(error => debug($, `carry-on failed: ${String(error)}`))
+        const again = (): void => {
+          if (turnedAway?.prompt === line) return void $.clock.after(OWED_LINE_LOOK_MS, again)
+          if (carryOnSubmits > submitsAt) return
+          send()
+        }
+        $.clock.after(OWED_LINE_LOOK_MS, again)
       }
       // Once the move back lands: until then the turn's requests may go out as the extension's account.
       if (isMoved) $.clock.after(SETTLE_MS, send)
