@@ -315,6 +315,8 @@ let carryOnText: string | undefined
 let carryOnRefusals = 0
 /** Counts carry-on submissions answered, any way: one fewer than carryOnSubmits while a submit waits on its answer. */
 let carryOnAnswers = 0
+/** Counts the refresh nudge's own submits: no carry-on of the work, so no evidence for a Connect visit's line. */
+let nudgeSubmits = 0
 /** Carry-ons armed and not yet due: the look says nothing is queued only while none is. */
 let armedCarryOns = 0
 /**
@@ -2469,7 +2471,10 @@ async function nudgeIfDue($: Host, ep: Episode, view: View, now: number): Promis
       ? `refresh nudge again: login ${active.id}'s token expired ${Math.round((now - credential.expiresAt) / 1000)} s ago, carry-on sent on it`
       : `refresh nudge: login ${active.id}'s token expires in ${Math.round((credential.expiresAt - now) / 1000)} s, carry-on sent on it`,
   )
+  // sendCarryOn counts a submit before its first await, so this reads whether the nudge went or was turned away.
+  const submitsBefore = carryOnSubmits
   void sendCarryOn($, { text: NUDGE_TEXT }).catch(error => debug($, `refresh nudge failed: ${String(error)}`))
+  if (carryOnSubmits > submitsBefore) nudgeSubmits += 1
   return true
 }
 
@@ -2928,13 +2933,17 @@ function connectChrome($: Host, isQuiet = false, tryId?: string): Promise<Chrome
     if (isConnected) isChromeAwaited = false
     isCutByVisit = false
     // A carry-on owed for a free login carries the turn this visit cut on (puma-9arph.90): the visit's own line is its
-    // backup only. It waits while that one is owed or armed, and, once a main turn began, while any submit of the session
-    // waits on its answer. It stands down only once a carry-on was submitted since and every submit of the session is
-    // answered: a main turn alone is no evidence. A refusal or drop of the submit that was the latest when it answered
-    // lets it go. Else it goes, even where that makes two. The connected line is never held. Not fixed: after a switch
-    // that carries nothing ends what is owed (a press), the line can go inside that switch's settle (the class of
+    // backup only. It waits while that one is owed or armed, and, once a main turn began, while a submit sent since the
+    // visit's end waits on its answer: one older submit that never answers holds nothing (puma-9arph.95). It stands down
+    // only once a carry-on other than the refresh nudge was submitted since and every submit of the session is answered:
+    // a main turn alone, or the nudge, is no evidence. A refusal or drop of the submit that was the latest when it
+    // answered lets it go. Else it goes, even where that makes two. The connected line is never held. Not fixed: after a
+    // switch that carries nothing ends what is owed (a press), the line can go inside that switch's settle (the class of
     // puma-9arph.93).
-    const owedAtEnd = !isConnected && due !== undefined ? { turns: mainTurns, submits: carryOnSubmits, refusals: carryOnRefusals } : undefined
+    const owedAtEnd =
+      !isConnected && due !== undefined
+        ? { turns: mainTurns, submits: carryOnSubmits, answers: carryOnAnswers, nudges: nudgeSubmits, refusals: carryOnRefusals }
+        : undefined
     let isWaitLogged = false
     if (text !== undefined) {
       const wait = () => {
@@ -2947,8 +2956,8 @@ function connectChrome($: Host, isQuiet = false, tryId?: string): Promise<Chrome
           if (due !== undefined || armedCarryOns > 0) return wait()
           if (carryOnRefusals === owedAtEnd.refusals) {
             // A submit still waiting on its answer can yet be dropped, after its turn began: the line waits for it.
-            if (mainTurns > owedAtEnd.turns && carryOnAnswers !== carryOnSubmits) return wait()
-            if (carryOnSubmits > owedAtEnd.submits && carryOnAnswers === carryOnSubmits) {
+            if (mainTurns > owedAtEnd.turns && carryOnSubmits - carryOnAnswers > owedAtEnd.submits - owedAtEnd.answers) return wait()
+            if (carryOnSubmits - nudgeSubmits > owedAtEnd.submits - owedAtEnd.nudges && carryOnAnswers === carryOnSubmits) {
               void logStop($, 'carry-on not sent: the one owed went')
               return
             }
