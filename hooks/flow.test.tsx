@@ -15834,9 +15834,10 @@ async function cutVisit95($: Engine, w: World, store: Map<string, unknown>, cloc
  * ends with it owed, and a person's turn begins at 10:12. `press`: Use now on login 1 at 10:15 ends the debt with no
  * carry-on. `zero`: the debt's own submit at 10:20 stays queued, the old submit answers, then the engine drops the
  * queued one. `turned`: as `zero`, and the queued one's own turn starts after the line has looked, before the drop.
- * Answers the carry-ons after the visit's end that were not dropped.
+ * `quiet`: as `zero` with no person's turn, and the old submit answers before the line's first look after the debt's
+ * own submit goes. Answers the carry-ons after the visit's end that were not dropped.
  */
-async function oldSubmitVisit95($: Engine, on: On, ending: 'press' | 'zero' | 'turned') {
+async function oldSubmitVisit95($: Engine, on: On, ending: 'press' | 'zero' | 'turned' | 'quiet') {
   const w = fresh()
   w.chrome = { extensions: [''] }
   w.keychain[await keychainItem(SLOT3)] = blob('tok-3')
@@ -15860,10 +15861,13 @@ async function oldSubmitVisit95($: Engine, on: On, ending: 'press' | 'zero' | 't
   const { pane, isCut } = await cutVisit95($, w, store, clock)
   const atEnd = w.submitted.length
   await steps90(clock, 3 * 60_000, 60_000)
-  await $.turn.start({ text: 'a prompt of the person', turnId: '95-person' })
-  await clock.settle()
+  if (ending !== 'quiet') {
+    await $.turn.start({ text: 'a prompt of the person', turnId: '95-person' })
+    await clock.settle()
+  }
   const isQueuedOwed = ending !== 'press'
   const dropOwed = isQueuedOwed ? answerNextLate(w, 'drop') : () => {}
+  const oldLook = ending === 'quiet' ? 1 : 3
   const owedAt = w.submitted.length + 1
   let isPressed = false
   let looks = 0
@@ -15879,8 +15883,8 @@ async function oldSubmitVisit95($: Engine, on: On, ending: 'press' | 'zero' | 't
     }
     if (isQueuedOwed && w.submitted.length >= owedAt) {
       looks += 1
-      if (looks === 3 || looks === 15) {
-        if (looks === 3) answerOld()
+      if (looks === oldLook || looks === 15) {
+        if (looks === oldLook) answerOld()
         else dropOwed()
         await settleReal(clock)
       }
@@ -15917,6 +15921,12 @@ test('90-P: a submit out at a Connect visit\'s end answers while the carry-on ow
 
 test('90-R: a submit out at a Connect visit\'s end answers while the carry-on owed is queued, whose own turn starts and then drops: the line still goes (puma-9arph.95)', async ($, on) => {
   const r = await oldSubmitVisit95($, on, 'turned')
+  expect([r.old, r.isCut], 'one submit out at the visit end; the visit cut the stop').toEqual([1, true])
+  expect(r.notDropped, 'carry-ons after the visit ended that were not dropped').toBe(1)
+})
+
+test('90-S: a submit out at a Connect visit\'s end answers after the carry-on owed goes, with no main turn since, and the queued one drops: the line still goes (puma-9arph.95)', async ($, on) => {
+  const r = await oldSubmitVisit95($, on, 'quiet')
   expect([r.old, r.isCut], 'one submit out at the visit end; the visit cut the stop').toEqual([1, true])
   expect(r.notDropped, 'carry-ons after the visit ended that were not dropped').toBe(1)
 })
