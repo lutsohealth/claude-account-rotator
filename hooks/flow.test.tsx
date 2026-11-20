@@ -15375,6 +15375,22 @@ async function owedVisit90($: Engine, on: On, from: string, to: string, o: { ref
   }
   const { store, clock } = await loggedWorld(on, w, { ...(o.isThree === true ? THREE_LOGINS : {}), 'chrome-account': '1' })
   const view = watchedView(on)
+  // Each submit is tagged as the kit takes it, before it can throw: the time, the login, and `+visit` while one is open.
+  const sends: string[] = []
+  let isThrown = false
+  Object.defineProperty(w, 'isSubmitThrown', {
+    configurable: true,
+    get: () => {
+      if (sends.length < w.submitted.length) {
+        const v = view()
+        sends.push(`${new Date(clock.now()).toISOString().slice(11, 19)} on ${v?.activeId}${v?.chromeConnecting === undefined ? '' : '+visit'}`)
+      }
+      return isThrown
+    },
+    set: (value: boolean) => {
+      isThrown = value
+    },
+  })
   w.usage['tok-2'] = [100, 30]
   await start($, clock)
   w.usage['tok-1'] = [100, 41]
@@ -15403,37 +15419,38 @@ async function owedVisit90($: Engine, on: On, from: string, to: string, o: { ref
   if (o.refuse === 'dropped') w.submitDrop = 'a Stop stands'
   endVisit()
   await settleReal(clock)
-  const sends: string[] = []
+  let seen = 0
   while (clock.now() < Date.parse('2026-10-12T12:25:00Z')) {
     await clock.advance(10_000)
     await clock.settle()
-    while (sends.length < w.submitted.length) {
-      const v = view()
-      sends.push(`${new Date(clock.now()).toISOString().slice(11, 19)} on ${v?.activeId}${v?.chromeConnecting === undefined ? '' : '+visit'}`)
-      if (w.isSubmitThrown === true || w.submitDrop !== undefined) {
+    while (seen < w.submitted.length) {
+      seen += 1
+      if (isThrown || w.submitDrop !== undefined) {
         w.isSubmitThrown = false
         w.submitDrop = undefined
         if (o.isPersonTurn === true) await $.turn.start({ text: 'a prompt of the person', turnId: '90-person' })
         continue
       }
-      await $.turn.start({ text: w.submitted[sends.length - 1] ?? '', turnId: `90-${sends.length}` })
+      await $.turn.start({ text: w.submitted[seen - 1] ?? '', turnId: `90-${seen}` })
       await clock.settle()
     }
   }
   await pane.unmount()
   const log = whats(stopLogOf(store, w))
   expect([isCut, sends.filter(s => s.endsWith('+visit'))], 'the visit cut the stop, and nothing went while one was open').toEqual([true, []])
-  return { sends, log, waits: log.filter(what => what === 'carry-on waits on the one owed').length }
+  // The one owed goes by the tick, whose log says so once; the visit's line says nothing before it goes.
+  const owed = log.filter(what => what.startsWith('a login is free: carry-on on')).length
+  return { sends, log, owed, isStoodDown: log.includes('carry-on not sent: the one owed went'), waits: log.filter(what => what === 'carry-on waits on the one owed').length }
 }
 
 test('90-A: a carry-on owed and a stop a Connect visit cut carry on once, the one owed going first (puma-9arph.90)', async ($, on) => {
   const r = await owedVisit90($, on, '11:58:00', '12:06:00')
-  expect([r.sends.length, r.log.includes('carry-on not sent: the one owed went')]).toEqual([1, true])
+  expect([r.sends.length, r.owed, r.isStoodDown], 'one went, the one owed; the line stood down').toEqual([1, 1, true])
 })
 
 test('90-B: a carry-on owed and a stop a Connect visit cut carry on once, the visit\'s line due first (puma-9arph.90)', async ($, on) => {
   const r = await owedVisit90($, on, '11:58:00', '12:06:30')
-  expect([r.sends.length, r.waits]).toEqual([1, 1])
+  expect([r.sends.length, r.waits, r.owed, r.isStoodDown], 'one went, the one owed; the line waited once, then stood down').toEqual([1, 1, 1, true])
 })
 
 test('90-C: a carry-on owed still goes once a login frees up after a Connect visit that ended with none free (puma-9arph.90)', async ($, on) => {
@@ -15448,22 +15465,22 @@ test('90-D: a Connect visit that ended with no login free sends nothing on the s
 
 test('90-E: where the carry-on owed is dropped, the Connect visit\'s line goes after it (puma-9arph.90)', async ($, on) => {
   const r = await owedVisit90($, on, '11:58:00', '12:06:30', { refuse: 'dropped' })
-  expect([r.sends.length, r.log.includes('carry-on drop')]).toEqual([2, true])
+  expect([r.sends.length, r.log.includes('carry-on drop'), r.owed, r.isStoodDown], 'the one owed, dropped, then the line').toEqual([2, true, 1, false])
 })
 
 test('90-F: where the carry-on owed is dropped and a person\'s turn begins, the Connect visit\'s line still goes (puma-9arph.90)', async ($, on) => {
   const r = await owedVisit90($, on, '11:58:00', '12:06:30', { refuse: 'dropped', isPersonTurn: true })
-  expect(r.sends).toHaveLength(2)
+  expect([r.sends.length, r.owed, r.isStoodDown], 'the one owed, dropped, then the line').toEqual([2, 1, false])
 })
 
 test('90-G: where the carry-on owed is refused, the Connect visit\'s line goes after it (puma-9arph.90)', async ($, on) => {
   const r = await owedVisit90($, on, '11:58:00', '12:06:00', { refuse: 'thrown' })
-  expect(r.sends).toHaveLength(2)
+  expect([r.sends.length, r.owed, r.isStoodDown], 'the one owed, refused, then the line').toEqual([2, 1, false])
 })
 
 test('90-H: a Connect visit whose move back lands on a login just freed carries on once, not with the one the tick armed too (puma-9arph.90)', async ($, on) => {
   const r = await owedVisit90($, on, '11:58:00', '12:06:00', { isThree: true })
-  expect([r.log.includes('carry-on armed'), r.sends.length]).toEqual([true, 1])
+  expect([r.log.includes('carry-on armed'), r.sends.length, r.owed, r.isStoodDown], 'one went, the one the tick armed; the line stood down').toEqual([true, 1, 1, true])
 })
 
 /**
@@ -15528,7 +15545,7 @@ async function lateDrop90($: Engine, on: On, end: string): Promise<number> {
 
 for (const end of ['11:55:00', '11:56:00']) {
   test(`90-${end === '11:55:00' ? 'I' : 'J'}: a carry-on owed dropped after its turn began, a Connect visit ending ${end} before, still leaves the visit's line to go (puma-9arph.90)`, async ($, on) => {
-    expect(await lateDrop90($, on, end)).toBeGreaterThanOrEqual(2)
+    expect(await lateDrop90($, on, end), 'the one owed, dropped late, and the line').toBe(2)
   })
 }
 
