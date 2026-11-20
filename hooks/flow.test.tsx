@@ -16490,9 +16490,12 @@ test('90-ZE: 90-V\'s world, its count first: the owed one alone goes through, an
  * - 'stuck' (LOSS-STUCK): the line drops at once while the latest; X as above, refused at 10:17:30; S1 never answers.
  * - 'recount' (LOSS-RECOUNT): as 'stuck', with X refused at 10:18:30, some looks after the line's drop.
  * - 'refused': the line is refused at once while the latest; no second stop; S1 drops at 10:17.
+ * - 'row11': as 'late', with X refused at 10:16:30, before the line's own drop at 10:17; S1 never answers.
+ * - 'cleanlate': as 'row11', the line answered clean at 10:17; S1 drops at 10:18.
  * Every other submit is answered at once and its turn starts.
  */
-async function late101($: Engine, on: On, mode: 'late' | 'stuck' | 'recount' | 'refused') {
+async function late101($: Engine, on: On, mode: 'late' | 'stuck' | 'recount' | 'refused' | 'row11' | 'cleanlate') {
+  const isHeldLine = mode === 'late' || mode === 'row11' || mode === 'cleanlate'
   const w = fresh()
   w.chrome = { extensions: [''] }
   w.keychain[await keychainItem(SLOT3)] = blob('tok-3')
@@ -16547,8 +16550,8 @@ async function late101($: Engine, on: On, mode: 'late' | 'stuck' | 'recount' | '
       if (n < s1 || roles.has(n)) return undefined
       if (clock.now() < at95('10:16:00')) {
         roles.set(n, 'early')
-        failed.add(n)
-        if (mode === 'late') return hold(n)
+        if (mode !== 'cleanlate') failed.add(n)
+        if (isHeldLine) return hold(n)
         if (mode === 'refused') {
           const refused = Promise.reject(new Error('submission refused'))
           refused.catch(() => undefined)
@@ -16567,11 +16570,12 @@ async function late101($: Engine, on: On, mode: 'late' | 'stuck' | 'recount' | '
     },
   })
   Object.defineProperty(w, 'submitDrop', { configurable: true, get: () => (releasing !== undefined || dropAtOnce === w.submitted.length ? 'a Stop stands' : undefined) })
-  const release = async (n: number | undefined, how: 'drop' | 'reject') => {
+  const release = async (n: number | undefined, how: 'drop' | 'reject' | 'clean') => {
     const h = n === undefined ? undefined : holds.get(n)
     if (n === undefined || h === undefined) return
-    failed.add(n)
-    if (how === 'drop') {
+    if (how !== 'clean') failed.add(n)
+    if (how === 'clean') h.settle()
+    else if (how === 'drop') {
       releasing = n
       h.settle()
     } else h.reject()
@@ -16608,15 +16612,16 @@ async function late101($: Engine, on: On, mode: 'late' | 'stuck' | 'recount' | '
       await $.turn.complete({ turnId: 'late-stop', reason: 'error', answer: '', durationMs: 1, isAborted: false })
       await settleReal(clock)
     }
-    if (mode === 'late' && !isLineReleased && xAt !== undefined && clock.now() >= at95('10:17:00')) {
-      isLineReleased = true
-      await release([...roles].find(([, role]) => role === 'early')?.[0], 'drop')
-    }
-    if (!isXReleased && xAt !== undefined && clock.now() >= at95(mode === 'recount' ? '10:18:30' : '10:17:30')) {
+    const xAnswerAt = mode === 'recount' ? '10:18:30' : mode === 'row11' || mode === 'cleanlate' ? '10:16:30' : '10:17:30'
+    if (!isXReleased && xAt !== undefined && clock.now() >= at95(xAnswerAt)) {
       isXReleased = true
       await release(xAt, mode === 'late' ? 'drop' : 'reject')
     }
-    if ((mode === 'late' || mode === 'refused') && !isS1Released && clock.now() >= at95(mode === 'late' ? '10:18:00' : '10:17:00')) {
+    if (isHeldLine && !isLineReleased && xAt !== undefined && clock.now() >= at95('10:17:00')) {
+      isLineReleased = true
+      await release([...roles].find(([, role]) => role === 'early')?.[0], mode === 'cleanlate' ? 'clean' : 'drop')
+    }
+    if ((mode === 'late' || mode === 'refused' || mode === 'cleanlate') && !isS1Released && clock.now() >= at95(mode === 'refused' ? '10:17:00' : '10:18:00')) {
       isS1Released = true
       await release(s1, 'drop')
     }
@@ -16637,14 +16642,17 @@ const LATE_TITLES = {
   stuck: '90-ZG: the line sent early is dropped, a later carry-on is refused, and the owed one never answers: the line goes again (puma-9arph.101)',
   recount: '90-ZI: as 90-ZG, the later carry-on refused some looks after the line\'s drop: the line still goes again (puma-9arph.101)',
   refused: '90-ZH: the line sent early is refused, then the owed one drops: the line goes again, and the refusal is in the debug log (puma-9arph.101)',
+  row11: '90-ZJ: a later carry-on is refused before the line sent early drops, and the owed one never answers: the line goes again (puma-9arph.101)',
+  cleanlate: '90-ZK: a later carry-on is refused while the line sent early is out, then the line answers: no second line (puma-9arph.101)',
 } as const
-for (const mode of ['late', 'stuck', 'recount', 'refused'] as const) {
+for (const mode of ['late', 'stuck', 'recount', 'refused', 'row11', 'cleanlate'] as const) {
   test(LATE_TITLES[mode], async ($, on) => {
     const r = await late101($, on, mode)
     expect([r.isCut, r.roles.get(r.s1), mode === 'refused' || r.isX], 'the visit cut the stop; the owed one went; the later carry-on went').toEqual([true, 'S1', true])
-    // The one that went through is the visit's line, sent after every failure, and it answered.
+    // The one that went through is the visit's line, and it answered: sent again after every failure, or, in
+    // 'cleanlate', the early one itself, with no second.
     const line = r.through.map(t => [t.role, /switched to another of your Claude accounts/.test(t.text)])
-    expect([line, r.log.lastIndexOf('carry-on resolved') > r.log.lastIndexOf('carry-on queued')], 'the line went through after the failures; it answered').toEqual([[['later', true]], true])
+    expect([line, r.log.lastIndexOf('carry-on resolved') > r.log.lastIndexOf('carry-on queued')], 'the line went through after the failures; it answered').toEqual([[[mode === 'cleanlate' ? 'early' : 'later', true]], true])
     if (mode === 'refused') expect(r.refusalsLogged, 'the line\'s own refusal is in the debug log').toBe(1)
   })
 }
