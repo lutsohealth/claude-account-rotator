@@ -16443,8 +16443,8 @@ test('90-ZB: as 90-ZA, but the owed one answers: no second line (puma-9arph.101)
 
 test('90-ZC: as 90-ZA, but the line sent again is dropped too: it is not sent a third time (puma-9arph.101)', async ($, on) => {
   const r = await g1dWorld101($, on, 'drop', true)
-  expect([r.isCut, r.isS1Started, r.isS0Answered, r.dropped.length], 'the visit cut the stop; the owed one went; the old one answered; the line dropped twice').toEqual([true, true, true, 2])
-  expect([r.sent, r.through.length], 'the owed one and the line twice; none through').toEqual([3, 0])
+  expect([r.isCut, r.isS1Started, r.isS0Answered, (r.dropped[0] ?? 0) > r.s1], 'the visit cut the stop; the owed one went; the old one answered; the line sent early was dropped').toEqual([true, true, true, true])
+  expect([r.sent, r.dropped.length, r.through.length], 'the owed one and the line twice, both dropped; none through').toEqual([3, 2, 0])
 })
 
 test('90-ZD: a connected line turned away behind a queued one, a person\'s turn, then that one dropped: the line does not look again (puma-9arph.101)', async ($, on) => {
@@ -16480,3 +16480,171 @@ test('90-ZE: 90-V\'s world, its count first: the owed one alone goes through, an
   expect(r.through.map(t => t.n), 'the owed one alone went through').toEqual([r.s1])
   expect([r.isCut, r.isS1Answered, r.phase], 'the visit cut the stop; the owed one answered; the hold dropped').toEqual([true, true, 'hold dropped'])
 })
+
+/**
+ * puma-9arph.101 round 3: g1dWorld101's prefix (S0 out at the visit's end, a person's turn, the owed S1 at 10:14 held
+ * and its turn started, S0 answered at 10:14:30), so the line goes early, after S1. Then, by `mode`:
+ * - 'late' (LOSS-LATE): the line is held, its turn started; at 10:16 a person's turn stops on the login in use with login
+ *   1 free, so the mod moves and carries on (X); at 10:17 the line drops, X being the latest; X drops at 10:17:30 and S1
+ *   at 10:18.
+ * - 'stuck' (LOSS-STUCK): the line drops at once while the latest; X as above, refused at 10:17:30; S1 never answers.
+ * - 'recount' (LOSS-RECOUNT): as 'stuck', with X refused at 10:18:30, some looks after the line's drop.
+ * - 'refused': the line is refused at once while the latest; no second stop; S1 drops at 10:17.
+ * Every other submit is answered at once and its turn starts.
+ */
+async function late101($: Engine, on: On, mode: 'late' | 'stuck' | 'recount' | 'refused') {
+  const w = fresh()
+  w.chrome = { extensions: [''] }
+  w.keychain[await keychainItem(SLOT3)] = blob('tok-3')
+  w.usage['tok-3'] = [10, 30]
+  w.fiveHourResets = { 'tok-1': '2026-10-12T10:14:00Z', 'tok-2': '2026-10-12T10:14:00Z', 'tok-3': '2026-10-12T10:14:00Z' }
+  const { store, clock } = await loggedWorld(on, w, { ...THREE_LOGINS, 'chrome-account': '1' })
+  w.usage['tok-2'] = [100, 30]
+  await start($, clock)
+  const answerS0 = answerNextLate(w, 'resolve')
+  w.usage['tok-1'] = [100, 41]
+  await $.classic.StopFailure(PLAIN)
+  await settleReal(clock)
+  await steps90(clock, 60_000)
+  w.usage['tok-3'] = [100, 30]
+  await $.turn.start({ text: w.submitted[0] ?? '', turnId: 'late-carry' })
+  await $.classic.StopFailure(PLAIN)
+  await $.turn.complete({ turnId: 'late-carry', reason: 'error', answer: '', durationMs: 1, isAborted: false })
+  await settleReal(clock)
+  const { pane, isCut } = await cutVisit95($, w, store, clock)
+  const atEnd = w.submitted.length
+  await $.turn.start({ text: 'a prompt of the person', turnId: 'late-person' })
+  await $.turn.complete({ turnId: 'late-person', reason: 'answer', answer: 'done', durationMs: 1, isAborted: false })
+  await clock.settle()
+  const s1 = w.submitted.length + 1
+  const holds = new Map<number, { held: Promise<void>; settle: () => void; reject: () => void }>()
+  const failed = new Set<number>()
+  const roles = new Map<number, string>()
+  let releasing: number | undefined
+  let dropAtOnce: number | undefined
+  let xAt: number | undefined
+  const hold = (n: number) => {
+    let settle = () => {}
+    let reject = () => {}
+    const held = new Promise<void>((resolve, rej) => {
+      settle = resolve
+      reject = () => rej(new Error('submission refused'))
+    })
+    held.catch(() => undefined)
+    holds.set(n, { held, settle, reject })
+    return held
+  }
+  // Each submit's role is set when it goes, so main and a fix meet the same engine whichever submit comes first.
+  Object.defineProperty(w, 'submitHold', {
+    configurable: true,
+    get: () => {
+      const n = w.submitted.length
+      if (holds.has(n)) return holds.get(n)?.held
+      if (n === s1) {
+        roles.set(n, 'S1')
+        return hold(n)
+      }
+      if (n < s1 || roles.has(n)) return undefined
+      if (clock.now() < at95('10:16:00')) {
+        roles.set(n, 'early')
+        failed.add(n)
+        if (mode === 'late') return hold(n)
+        if (mode === 'refused') {
+          const refused = Promise.reject(new Error('submission refused'))
+          refused.catch(() => undefined)
+          return refused
+        }
+        dropAtOnce = n
+        return undefined
+      }
+      if (mode !== 'refused' && xAt === undefined) {
+        xAt = n
+        roles.set(n, 'X')
+        return hold(n)
+      }
+      roles.set(n, 'later')
+      return undefined
+    },
+  })
+  Object.defineProperty(w, 'submitDrop', { configurable: true, get: () => (releasing !== undefined || dropAtOnce === w.submitted.length ? 'a Stop stands' : undefined) })
+  const release = async (n: number | undefined, how: 'drop' | 'reject') => {
+    const h = n === undefined ? undefined : holds.get(n)
+    if (n === undefined || h === undefined) return
+    failed.add(n)
+    if (how === 'drop') {
+      releasing = n
+      h.settle()
+    } else h.reject()
+    await settleReal(clock)
+    releasing = undefined
+  }
+  let started = w.submitted.length
+  let isS1Started = false
+  let isS0Answered = false
+  let isStopped = false
+  let isLineReleased = false
+  let isXReleased = false
+  let isS1Released = false
+  while (clock.now() < at95(mode === 'recount' ? '10:19:30' : '10:19:00')) {
+    await clock.advance(clock.now() < at95('10:13:30') ? 60_000 : clock.now() < at95('10:15:00') ? 10_000 : 30_000)
+    await clock.settle()
+    if (!isS1Started && w.submitted.length >= s1) {
+      isS1Started = true
+      started = Math.max(started, s1)
+      await $.turn.start({ text: w.submitted[s1 - 1] ?? '', turnId: 'late-s1' })
+      await clock.settle()
+    }
+    if (isS1Started && !isS0Answered && clock.now() >= at95('10:14:30')) {
+      isS0Answered = true
+      answerS0()
+      await settleReal(clock)
+    }
+    if (mode !== 'refused' && !isStopped && clock.now() >= at95('10:16:00')) {
+      isStopped = true
+      w.usage['tok-1'] = [10, 30]
+      w.usage['tok-2'] = [100, 30]
+      await $.turn.start({ text: 'a third prompt of the person', turnId: 'late-stop' })
+      await $.classic.StopFailure(PLAIN)
+      await $.turn.complete({ turnId: 'late-stop', reason: 'error', answer: '', durationMs: 1, isAborted: false })
+      await settleReal(clock)
+    }
+    if (mode === 'late' && !isLineReleased && xAt !== undefined && clock.now() >= at95('10:17:00')) {
+      isLineReleased = true
+      await release([...roles].find(([, role]) => role === 'early')?.[0], 'drop')
+    }
+    if (!isXReleased && xAt !== undefined && clock.now() >= at95(mode === 'recount' ? '10:18:30' : '10:17:30')) {
+      isXReleased = true
+      await release(xAt, mode === 'late' ? 'drop' : 'reject')
+    }
+    if ((mode === 'late' || mode === 'refused') && !isS1Released && clock.now() >= at95(mode === 'late' ? '10:18:00' : '10:17:00')) {
+      isS1Released = true
+      await release(s1, 'drop')
+    }
+    while (started < w.submitted.length) {
+      started += 1
+      if (started === s1 || started === dropAtOnce) continue
+      await $.turn.start({ text: w.submitted[started - 1] ?? '', turnId: `late-${started}` })
+      await clock.settle()
+    }
+  }
+  await pane.unmount()
+  const through = w.submitted.map((text, i) => ({ n: i + 1, text, role: roles.get(i + 1) })).filter(({ n }) => n > atEnd && n !== s1 && !failed.has(n))
+  return { isCut, s1, roles, isX: xAt !== undefined, through, refusalsLogged: debugLines(w, 'carry-on failed').length, log: whats(stopLogOf(store, w)) }
+}
+
+const LATE_TITLES = {
+  late: '90-ZF: the line sent early answers late as a drop after a later carry-on went, then that one drops: the line goes again (puma-9arph.101)',
+  stuck: '90-ZG: the line sent early is dropped, a later carry-on is refused, and the owed one never answers: the line goes again (puma-9arph.101)',
+  recount: '90-ZI: as 90-ZG, the later carry-on refused some looks after the line\'s drop: the line still goes again (puma-9arph.101)',
+  refused: '90-ZH: the line sent early is refused, then the owed one drops: the line goes again, and the refusal is in the debug log (puma-9arph.101)',
+} as const
+for (const mode of ['late', 'stuck', 'recount', 'refused'] as const) {
+  test(LATE_TITLES[mode], async ($, on) => {
+    const r = await late101($, on, mode)
+    expect([r.isCut, r.roles.get(r.s1), mode === 'refused' || r.isX], 'the visit cut the stop; the owed one went; the later carry-on went').toEqual([true, 'S1', true])
+    // The one that went through is the visit's line, sent after every failure, and it answered.
+    const line = r.through.map(t => [t.role, /switched to another of your Claude accounts/.test(t.text)])
+    expect([line, r.log.lastIndexOf('carry-on resolved') > r.log.lastIndexOf('carry-on queued')], 'the line went through after the failures; it answered').toEqual([[['later', true]], true])
+    if (mode === 'refused') expect(r.refusalsLogged, 'the line\'s own refusal is in the debug log').toBe(1)
+  })
+}
