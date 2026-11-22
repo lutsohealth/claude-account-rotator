@@ -38,8 +38,8 @@ Write the entry's bullets and the two ways to update (step 7) to a file in the s
 
 ```sh
 git push origin <branch>
-gh pr create --title "Release <version>" --body-file <a body file>
-gh pr checks <number> --watch
+gh pr create -R lutsohealth/claude-account-rotator --title "Release <version>" --body-file <a body file>
+gh pr checks <number> --watch -R lutsohealth/claude-account-rotator
 gh pr merge <number> --squash -R lutsohealth/claude-account-rotator
 ```
 
