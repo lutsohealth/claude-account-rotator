@@ -16547,7 +16547,7 @@ test('a stop with no switch pending whose reset names another login moves the vi
   expect(store.get('fable-mark:1')).toBeUndefined()
 })
 
-test('a stop whose reset names the login in use goes as before', async ($, on) => {
+test('guard: a stop whose reset names the login in use goes as before (passes before the change too)', async ($, on) => {
   const { w, store, clock } = await fableOnTwo($, on, '1')
   await $.classic.StopFailure(STOP_NAMING_1)
   await clock.settle()
@@ -16578,4 +16578,117 @@ test('a wordless stop on an unproven switch adds the login moved to to tried onl
   await $.classic.StopFailure(FABLE_STOP)
   await clock.settle()
   expect(whats(stopLogOf(store, w))).toContain('stayed: no untried login (tried 1, 2)')
+})
+
+// Codex round 1 on the first PR2 commit.
+test('F1: a unique reset owner wins inside the 35 s settle window too: a stop 10 s after a move to login 1 naming login 2 points back to 2 and counts one non-landing for 1', async ($, on) => {
+  const ctx = await fableOnTwo($, on, '2')
+  const { w, store, clock } = ctx
+  await $.classic.StopFailure(STOP_NAMING_2)
+  await clock.settle()
+  expect(slotValues(w), 'the first stop moves the session to login 1').toEqual([undefined])
+  await clock.advance(10_000)
+  await $.classic.StopFailure(STOP_NAMING_2)
+  await clock.settle()
+  expect(whats(stopLogOf(store, w))).toContain(NOT_LANDED)
+  expect(store.get('fable-mark:1')).toBeUndefined()
+  // Back to login 2, then the one untried login with Fable room again: login 1 was never tried.
+  expect(slotValues(w)).toEqual([undefined, SLOT2, undefined])
+  expect(whats(stopLogOf(store, w)).filter(line => line.startsWith('picked '))).toEqual([expect.stringMatching(/^picked 1: .*; tried 2$/), expect.stringMatching(/^picked 1: .*; tried 2$/)])
+  expect(w.toasts.filter(t => /did not land/.test(t)), 'one non-landing is no toast').toEqual([])
+  // The second non-landing, again inside the window of the second move, leaves login 1 be.
+  await clock.advance(10_000)
+  await $.classic.StopFailure(STOP_NAMING_2)
+  await clock.settle()
+  expect(w.toasts.filter(t => /did not land/.test(t))).toHaveLength(1)
+  expect(slotValues(w)).toEqual([undefined, SLOT2, undefined, SLOT2])
+})
+
+test('F2: a response whose week two logins share proves neither: a wordless stop after it adds no login to tried', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  // Both logins' weeks reset at WEEK_RESET: a response carrying it is login 1's and login 2's alike.
+  w.usage['tok-1'] = [20, 30]
+  w.usage['tok-2'] = [10, 30]
+  const store = new Map<string, unknown>(Object.entries(TWO_LOGINS))
+  const clock = world(on, w, store)
+  await start($, clock)
+  await $.classic.StopFailure({ error: 'rate_limit' })
+  await clock.settle()
+  expect(slotValues(w)).toEqual([SLOT2])
+  await clock.advance(40_000)
+  w.limits = limitsOf(50, 40)
+  await respond($, clock, w)
+  await $.classic.StopFailure({ error: 'rate_limit' })
+  await clock.settle()
+  // Nobody is charged: login 1 was tried at the first stop, login 2 is in use and no response proved it the stopper.
+  expect(whats(stopLogOf(store, w))).toContain('stayed: no untried login (tried 1)')
+})
+
+/** A view read that answers late, once: the next one after `arm()` waits for `release()` and then answers what it read. */
+function gateNextViewRead(on: On): { arm: () => void; isPaused: () => boolean; release: () => void } {
+  let state: 'idle' | 'armed' | 'paused' | 'fired' = 'idle'
+  let open: () => void = () => undefined
+  const gate = new Promise<void>(resolve => {
+    open = resolve
+  })
+  on('state.get', async (_$, e, next) => {
+    const read = await next(e)
+    if (state !== 'armed' || e.plugin !== 'account-rotator' || e.key !== 'view') return read
+    state = 'paused'
+    await gate
+    state = 'fired'
+    return read
+  })
+  return { arm: () => void (state = 'armed'), isPaused: () => state === 'paused', release: open }
+}
+
+/** Login 2 is spent for Fable and the session starts on it; stop 1 moves it to login 1; the second stop, 35 s on, is held at its first read of the view. */
+async function heldSecondStop($: Engine, on: On) {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.keychain[await keychainItem(SLOT3)] = blob('tok-3')
+  w.usage['tok-1'] = [20, 30, 21]
+  w.usage['tok-2'] = [10, 30, 100]
+  w.usage['tok-3'] = [10, 30, 100]
+  w.fableResetsBy = { 'tok-1': FABLE_RESET, 'tok-2': FABLE_RESET_2, 'tok-3': '2026-10-15T12:00:00Z' }
+  w.env.CLAUDE_SECURESTORAGE_CONFIG_DIR = SLOT2
+  const store = new Map<string, unknown>(Object.entries(THREE_LOGINS))
+  const clock = world(on, w, store)
+  const gate = gateNextViewRead(on)
+  await start($, clock)
+  await $.classic.StopFailure(STOP_NAMING_2)
+  await clock.settle()
+  expect(slotValues(w), 'the first stop moves the session to login 1').toEqual([undefined])
+  await clock.advance(35_000)
+  gate.arm()
+  const stopping = $.classic.StopFailure(STOP_NAMING_2)
+  await clock.settle()
+  expect(gate.isPaused(), 'the second stop waits on its read of the view').toBe(true)
+  return { w, store, clock, gate, stopping }
+}
+
+test('F3: a point-back acts only on the switch it examined: a press that moved the session to login 3 meanwhile stands', async ($, on) => {
+  const { w, store, clock, gate, stopping } = await heldSecondStop($, on)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  await pane.press({ key: 'use-3' })
+  await clock.settle()
+  await pane.unmount()
+  gate.release()
+  await stopping
+  await clock.settle()
+  expect(slotValues(w), 'the press to login 3 stands').toEqual([undefined, SLOT3])
+  expect(whats(stopLogOf(store, w))).toContain('stop dropped: the switch or the failed turn it examined has changed since')
+})
+
+test('F3: a point-back acts only on a failed turn: a main turn that began meanwhile clears it, and the stop is dropped', async ($, on) => {
+  const { w, store, clock, gate, stopping } = await heldSecondStop($, on)
+  await $.turn.start({ text: 'go on by hand', turnId: 'by-hand' })
+  gate.release()
+  await stopping
+  await clock.settle()
+  expect(slotValues(w), 'no point-back to login 2').toEqual([undefined])
+  expect(whats(stopLogOf(store, w))).toContain('stop dropped: the switch or the failed turn it examined has changed since')
 })
