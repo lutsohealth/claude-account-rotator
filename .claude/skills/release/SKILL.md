@@ -40,7 +40,7 @@ Write the entry's bullets and the two ways to update (step 7) to a file in the s
 git push origin <branch>
 gh pr create --title "Release <version>" --body-file <a body file>
 gh pr checks <number> --watch
-gh pr merge <number> --squash
+gh pr merge <number> --squash -R lutsohealth/claude-account-rotator
 ```
 
 Tag only after the merge, on the squash commit it made: after the switch, `git log -1 --format=%s` reads `Release <version> (#<number>)`. The switch detaches at `origin/main`, so it works in a worktree while another checkout holds `main`.
@@ -48,7 +48,7 @@ Tag only after the merge, on the squash commit it made: after the switch, `git l
 ```sh
 git fetch origin && git switch --detach origin/main
 claude plugin tag . --push -m "account-rotator %s"
-gh release create account-rotator--v<version> --verify-tag --title "<version>" --notes-file <the bullets file>
+gh release create account-rotator--v<version> -R lutsohealth/claude-account-rotator --verify-tag --title "<version>" --notes-file <the bullets file>
 ```
 
 `claude plugin tag` refuses while anything is uncommitted, checks the versions agree, and makes `account-rotator--v<version>`: the tag form Claude Code reads when someone pins a version range. Never move or reuse a tag; a mistake gets a new patch version.
