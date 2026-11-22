@@ -160,6 +160,8 @@ const CONTINUE =
 const CONTINUE_RESET = "This Claude account's usage limit has reset. Continue where you left off."
 /** How long past the time owed a carry-on with no switch waits: Claude Code can carry on a 5-hour stop by itself after its reset (puma-9arph.35 d5), and one carry-on goes, not two. */
 const CARRY_ON_GRACE_MS = 3 * 60_000
+/** A response this recent, and no failure since, proves the login in use serves: a session answering that fast is working, however its stored usage reads. */
+const RUNNING_FINE_MS = 5 * 60_000
 
 const viewAtom = atom({ plugin: 'account-rotator', key: 'view' } as const, EMPTY_VIEW)
 
@@ -183,6 +185,13 @@ let bootedAt: number | undefined
 const OLDER_WRITER_MS = 30 * 60_000
 /** The last response this session measured, and when: it names the login a stop during an unproven switch belongs to. */
 let lastMeasured: { at: number; reading: Reading | undefined } | undefined
+/** The order of the events that say a session works or fails, as Orca's own hooks read them: a turn starts, a response measures, a stop fails. */
+let eventSeq = 0
+let lastTurnSeq = 0
+let lastGoodSeq = 0
+let lastFailSeq = 0
+/** The login whose hold (a tick or a response left it be, its stored usage saying leave) the stop-log already told: one line a hold. */
+let heldTold: string | undefined
 /**
  * The session ends whose process ends with them, by the engine's SessionEndReason: /exit and its keys, a logout, a
  * `-p` run done or a signal. A reason not named here keeps the stop's marks.
@@ -1495,6 +1504,18 @@ async function saveCheckError($: Host, id: string, why: string | undefined, isUs
   await setView($, v => ({ ...v, checkErrors: { ...v.checkErrors, [id]: failure } }))
 }
 
+/**
+ * Whether the agent in this session is running fine on the login in use: a turn started since the last failed stop is
+ * still open, or the last response came within RUNNING_FINE_MS, after the last switch had settled and the last failed stop.
+ * The signals Orca's own hooks read: a prompt or a tool means working, a stop means done, a failed stop means failed.
+ */
+function isRunningFine(now: number): boolean {
+  if (openTurns.size > 0 && lastTurnSeq > lastFailSeq) return true
+  if (lastMeasured === undefined || lastGoodSeq < lastFailSeq) return false
+  if (movedAt !== undefined && lastMeasured.at - movedAt < SETTLE_MS) return false
+  return now - lastMeasured.at <= RUNNING_FINE_MS
+}
+
 /** Why the login in use is left, counted the way the footer shows it: room left, or what is used. */
 function whyLeave(view: View, now: number, need?: Need): string {
   const name = labelOf(view.accounts, view.activeId)
@@ -1522,6 +1543,7 @@ function whyLeave(view: View, now: number, need?: Need): string {
  * turn that died on the Fable week (`need`), it leaves for that too, and only
  * for a login with Fable room: the ticks and responses pass none, so a session
  * that never hit the Fable week stays on a login whose Fable week is spent.
+ * A tick or a response never moves a session running fine (isRunningFine): only a usage-limit stop does.
  */
 async function maybeRotate($: Host, need?: Need, carry?: CarryOn): Promise<boolean> {
   // A view at its defaults names login 1 in use, whichever login this session runs on.
@@ -1576,7 +1598,20 @@ async function maybeRotate($: Host, need?: Need, carry?: CarryOn): Promise<boole
     void logStop($, `picked ${pick.account.id}: ${pick.tier}${age}; tried ${tried.join(', ')}`)
     return switchTo($, pick.account, whyLeave(view, now, need), false, carry, true)
   }
-  if (!shouldLeave(view, now, need)) return stays('the login in use need not be left')
+  if (!shouldLeave(view, now, need)) {
+    heldTold = undefined
+    return stays('the login in use need not be left')
+  }
+  // Only a usage-limit stop moves a session that works: a tick or a response leaves it where it runs, whatever the
+  // stored numbers say (a login reset by hand keeps its old 100 until the next read). A login that needs a sign-in is no working one.
+  if (carry === undefined && view.health[view.activeId]?.kind !== 'login-needed' && isRunningFine(now)) {
+    if (heldTold !== view.activeId) {
+      heldTold = view.activeId
+      void logStop($, `held on login ${view.activeId}: the session is answering, its stored usage says leave`)
+    }
+    return false
+  }
+  heldTold = undefined
   // With none to move to, the band above the prompt says when the next login frees up.
   const target = pickTarget({ ...view, accounts: view.accounts.filter(a => !untaken.has(a.id)) }, now, need)
   if (target === undefined) {
@@ -2072,6 +2107,7 @@ async function settlePending($: Host, isResponse: boolean): Promise<void> {
 
 /** A response's own usage: the active login's, unless a switch is still settling. */
 async function onMeasure($: Host, limits: readonly SessionRateLimit[]): Promise<void> {
+  lastGoodSeq = ++eventSeq
   const measuredAt = await $.clock.now()
   lastMeasured = { at: measuredAt, reading: readingFromLimits(limits, measuredAt) }
   // A view not bound holds a default login, not this session's: a response measured then is no login's to store (it
@@ -2503,6 +2539,8 @@ const isSwitchingStop = (error: string): boolean => error === 'rate_limit' || er
  */
 async function onStopFailure($: Host, stop: { error: string; last_assistant_message?: string }): Promise<void> {
   const { error } = stop
+  // Any failed stop ends the session's standing as working, whether the mod switches on it or not.
+  lastFailSeq = ++eventSeq
   if (!isSwitchingStop(error)) return
   const view = await getView($)
   const active = view.accounts.find(a => a.id === view.activeId)
@@ -3682,6 +3720,7 @@ export const register: Register = on => {
   // The turns open now, any loop's, and how many the main loop began: what a queued carry-on's Escape waits on.
   on('turn.start', async ($, e, next) => {
     openTurns.add(e.turnId)
+    lastTurnSeq = ++eventSeq
     if (e.agentId === undefined) {
       // A main turn leaves the own-continue arm: only a person's prompt (prompt.submit below) cancels the countdown.
       const ep = episode
