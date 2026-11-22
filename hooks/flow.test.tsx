@@ -16255,10 +16255,11 @@ test('a tick does not move a session whose turn is open off a login whose stored
   const { store, clock } = await loggedWorld(on, w)
   w.usage['tok-1'] = [20, 30]
   await start($, clock)
+  await clock.advance(29 * 60_000)
   await $.turn.start({ text: 'work on it', turnId: 'work-1' })
   // The next check of login 1 stores a week at 100, as a login's stale stored reading does.
   w.usage['tok-1'] = [20, 100]
-  await pastNextRead(clock)
+  await clock.advance(2 * 60_000)
   await clock.settle()
   expect(w.envSets, 'the session moved off a login that was working').toEqual([])
   expect(whats(stopLogOf(store, w))).toEqual([HELD_ONE])
@@ -16268,6 +16269,8 @@ test('a tick does not move a session whose last response on the login was good a
   const w = fresh()
   const { store, clock } = await loggedWorld(on, w)
   w.usage['tok-1'] = [20, 30, 10]
+  // Two weeks that differ, so a response's week names login 1 and the response is proven its own.
+  w.weekResets = { 'tok-2': OTHER_WEEK }
   await start($, clock)
   // The login's next read falls due 30 minutes after boot: the response comes a minute before it.
   await clock.advance(29 * 60_000)
@@ -16310,6 +16313,7 @@ test('an idle session (no open turn, no response within the window) still rotate
   const w = fresh()
   const { clock } = await loggedWorld(on, w)
   w.usage['tok-1'] = [20, 30]
+  w.weekResets = { 'tok-2': OTHER_WEEK }
   await start($, clock)
   // The last good response is 11 minutes old when the read at 30 minutes comes.
   await clock.advance(20 * 60_000)
@@ -16325,6 +16329,7 @@ test('a failed turn since the last good response ends the hold: the session rota
   const w = fresh()
   const { clock } = await loggedWorld(on, w)
   w.usage['tok-1'] = [20, 30]
+  w.weekResets = { 'tok-2': OTHER_WEEK }
   await start($, clock)
   await clock.advance(29 * 60_000)
   await goodResponse($, w)
@@ -16334,4 +16339,85 @@ test('a failed turn since the last good response ends the hold: the session rota
   await clock.advance(2 * 60_000)
   await clock.settle()
   expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
+})
+
+// Review F1 [MISSED-SWITCH], the instance (the reviewer's block): a response is proven the login in use's before it holds anything.
+test('a response attributed to another login, then a spent reading and a tick, moves the session', async ($, on) => {
+  const w = fresh()
+  const { clock } = await loggedWorld(on, w)
+  w.usage['tok-1'] = [20, 30]
+  w.weekResets = { 'tok-2': OTHER_WEEK }
+  await start($, clock)
+  await clock.advance(29 * 60_000)
+  w.limits = limitsOf(20, 30, OTHER_WEEK)
+  await respond($, clock, w)
+  w.usage['tok-1'] = [20, 100]
+  await clock.advance(2 * 60_000)
+  await clock.settle()
+  expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
+})
+
+// Review F1 [MISSED-SWITCH], the class: a response whose login is not proven the active one holds nothing.
+for (const [name, week] of [
+  ['another login', OTHER_WEEK],
+  ['no known login', '2026-10-19T03:00:00Z'],
+  ['two logins sharing a week', WEEK_RESET],
+] as const) {
+  test(`an unattributed response from ${name} cannot hold a spent active login`, async ($, on) => {
+    const w = fresh()
+    const { clock } = await loggedWorld(on, w)
+    w.usage['tok-1'] = [20, 30]
+    // Login 2's week differs from login 1's, except where the case is the two sharing one.
+    w.weekResets = { 'tok-2': week === WEEK_RESET ? WEEK_RESET : OTHER_WEEK }
+    await start($, clock)
+    await clock.advance(29 * 60_000)
+    w.limits = limitsOf(20, 30, week)
+    await respond($, clock, w)
+    w.usage['tok-1'] = [20, 100]
+    await clock.advance(2 * 60_000)
+    await clock.settle()
+    expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
+  })
+}
+
+test('an open turn with no activity for over 30 minutes no longer holds the login (UNBOUNDED-HOLD)', async ($, on) => {
+  const w = fresh()
+  const { clock } = await loggedWorld(on, w)
+  w.usage['tok-1'] = [20, 30]
+  await start($, clock)
+  await $.turn.start({ text: 'work on it', turnId: 'work-1' })
+  w.usage['tok-1'] = [20, 100]
+  await clock.advance(31 * 60_000)
+  await clock.settle()
+  expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
+})
+
+test("a sub-agent's usage-limit stop ends the hold of an open turn (STOP-SCOPE)", async ($, on) => {
+  const w = fresh()
+  const { clock } = await loggedWorld(on, w)
+  w.usage['tok-1'] = [20, 30]
+  await start($, clock)
+  await clock.advance(29 * 60_000)
+  await $.turn.start({ text: 'work on it', turnId: 'work-1' })
+  await $.classic.StopFailure({ error: 'rate_limit', agent_id: 'agent-1', agent_type: 'Explore' })
+  await clock.settle()
+  w.usage['tok-1'] = [20, 100]
+  await clock.advance(2 * 60_000)
+  await clock.settle()
+  expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
+})
+
+test("a sub-agent's other failure leaves the hold of an open turn standing", async ($, on) => {
+  const w = fresh()
+  const { clock } = await loggedWorld(on, w)
+  w.usage['tok-1'] = [20, 30]
+  await start($, clock)
+  await clock.advance(29 * 60_000)
+  await $.turn.start({ text: 'work on it', turnId: 'work-1' })
+  await $.classic.StopFailure({ error: 'server_error', agent_id: 'agent-1', agent_type: 'Explore' })
+  await clock.settle()
+  w.usage['tok-1'] = [20, 100]
+  await clock.advance(2 * 60_000)
+  await clock.settle()
+  expect(w.envSets).toEqual([])
 })
