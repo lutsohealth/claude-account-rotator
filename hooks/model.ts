@@ -656,6 +656,81 @@ export function whoseWeek(reading: Reading | undefined, readings: Readonly<Recor
     .map(([id]) => id)
 }
 
+const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec']
+const DAY_MS = 86_400_000
+/** A reset time the clock has passed by no more than this still reads as the one coming: the words carry minutes at best. */
+const RESET_PAST_SLACK_MS = 5 * 60_000
+
+/** The calendar parts of an instant on a time zone's wall clock; undefined for a zone name Intl does not know. */
+function wallClock(at: number, timeZone: string): { year: number; month: number; day: number; hour: number; minute: number; second: number } | undefined {
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', { timeZone, hourCycle: 'h23', year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric', second: 'numeric' }).formatToParts(at)
+    const n = (type: string) => Number(parts.find(p => p.type === type)?.value)
+    return { year: n('year'), month: n('month') - 1, day: n('day'), hour: n('hour'), minute: n('minute'), second: n('second') }
+  } catch {
+    return undefined
+  }
+}
+
+/** The instant a wall-clock time falls on in a zone (the later one where a clock change repeats it); undefined for an unknown zone. */
+function zonedInstant(wall: number, timeZone: string): number | undefined {
+  const offsetAt = (at: number): number | undefined => {
+    const w = wallClock(at, timeZone)
+    return w === undefined ? undefined : Date.UTC(w.year, w.month, w.day, w.hour, w.minute, w.second) - Math.floor(at / 1000) * 1000
+  }
+  const first = offsetAt(wall)
+  if (first === undefined) return undefined
+  const second = offsetAt(wall - first)
+  return second === undefined ? undefined : wall - second
+}
+
+/**
+ * The instant a usage-limit stop's own words give for the reset, as Claude Code writes them: "resets Nov 25 at 3pm
+ * (Europe/Tallinn)", "resets 3pm (Europe/Tallinn)", "resets 3:30pm (Europe/Tallinn)". A date-less time is the next one
+ * to come; a date is the next year's when this year's has passed. Minute precision at best, so a match with a stored
+ * reset (`whoseReset`) is within an hour, never exact. Undefined where there is no such wording, where it names no zone
+ * (the wall clock of a zone the words do not name is a guess), or where the zone or date is not one.
+ */
+export function stopResetAt(text: string | undefined, now: number): number | undefined {
+  const m = /resets\s+(?:([A-Za-z]{3,9})\s+(\d{1,2})(?:,?\s+at)?\s+)?(\d{1,2})(?::(\d{2}))?\s*([ap]m)\s*\(([^)]+)\)/i.exec(text ?? '')
+  if (m === null) return undefined
+  const [, monthWord, dayWord, hourWord, minuteWord, meridiem, timeZone] = m
+  const hour12 = Number(hourWord)
+  const minute = minuteWord === undefined ? 0 : Number(minuteWord)
+  if (hour12 < 1 || hour12 > 12 || minute > 59 || timeZone === undefined || meridiem === undefined) return undefined
+  const hour = (hour12 % 12) + (meridiem.toLowerCase() === 'pm' ? 12 : 0)
+  const today = wallClock(now, timeZone)
+  if (today === undefined) return undefined
+  const at = (year: number, month: number, day: number) => zonedInstant(Date.UTC(year, month, day, hour, minute), timeZone)
+  if (monthWord === undefined || dayWord === undefined) {
+    const first = at(today.year, today.month, today.day)
+    return first !== undefined && first < now - RESET_PAST_SLACK_MS ? at(today.year, today.month, today.day + 1) : first
+  }
+  const month = MONTHS.indexOf(monthWord.slice(0, 3).toLowerCase())
+  const day = Number(dayWord)
+  if (month === -1 || day < 1 || new Date(Date.UTC(2000, month, day)).getUTCMonth() !== month) return undefined
+  const first = at(today.year, month, day)
+  return first !== undefined && first < now - RESET_PAST_SLACK_MS - DAY_MS ? at(today.year + 1, month, day) : first
+}
+
+/** Which window a limit stop's words name: the Fable week, the week, or the 5-hour session. */
+export type StopWindow = 'fable' | 'week' | 'session'
+
+/**
+ * The logins whose own window of that kind resets within an hour of `at` (the reset a stop's words gave): one login is
+ * the one that stopped, two or more share a reset and prove neither, none is a reset no stored read knows.
+ */
+export function whoseReset(view: View, at: number, window: StopWindow): string[] {
+  return view.accounts
+    .filter(a => {
+      const r = view.readings[a.id]
+      const w = window === 'fable' ? r?.fable : window === 'week' ? r?.sevenDay : r?.fiveHour
+      const reset = w?.resetsAt === undefined ? NaN : Date.parse(w.resetsAt)
+      return Number.isFinite(reset) && Math.abs(reset - at) <= SAME_WEEK_MS
+    })
+    .map(a => a.id)
+}
+
 /** The part of a stored login Claude Code keeps in the keychain (on Linux, a file) that matters here. */
 export type Credential = {
   accessToken: string

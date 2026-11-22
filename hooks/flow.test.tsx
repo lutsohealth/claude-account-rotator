@@ -11561,8 +11561,9 @@ test('a carry-on whose turn dies on the usage limit again moves to the next logi
     "resume ended rate_limit: the carry-on's own turn, nothing queued",
     stopHeard('none', '2'),
     'owed resume: turns closed',
-    'stop on owed resume: login 2 tried, no response since its switch, no mark',
-    'picked 3: fresh, read 1 min ago; tried 1, 2',
+    // A wordless stop on a switch no response has proven is login 2's only at its second: this first one may have gone out on login 1.
+    'stop on owed resume: login 2 in use, no response since its switch, no mark',
+    'picked 3: fresh, read 1 min ago; tried 1',
     'moved to 3',
     'carry-on armed',
     'carry-on queued',
@@ -11599,16 +11600,19 @@ const logTime = (store: Map<string, unknown>, w: World, prefix: string): number 
 test('row b: pickAfterStop skips tried logins and answers undefined once all are tried', async ($, on) => {
   const w = fresh()
   const { store, clock } = await owedWorld($, on, w)
-  // Each stop is the carry-on's turn dying: no response, no entry, so one episode, and its tried set grows.
-  for (let stop = 0; stop < 3; stop++) {
+  // Each stop is the carry-on's turn dying: no response, no entry, so one episode, and its tried set grows. A wordless stop
+  // on a switch no response proved makes its login tried only at its second, so each login after the first takes two.
+  for (let stop = 0; stop < 5; stop++) {
     await $.classic.StopFailure({ error: 'rate_limit' })
     await clock.settle()
     await clock.advance(36_000)
   }
-  expect(slots(w)).toEqual([SLOT2, SLOT3])
+  expect(slots(w)).toEqual([SLOT2, SLOT3, SLOT2, SLOT3])
   expect(whats(stopLogOf(store, w)).filter(l => l.startsWith('picked ') || l.startsWith('stayed'))).toEqual([
     'picked 2: fresh, read 0 min ago; tried 1',
-    'picked 3: fresh, read 1 min ago; tried 1, 2',
+    'picked 3: fresh, read 1 min ago; tried 1',
+    'picked 2: fresh, read 1 min ago; tried 1',
+    'picked 3: fresh, read 2 min ago; tried 1, 2',
     'stayed: no untried login (tried 1, 2, 3)',
   ])
 })
@@ -12017,7 +12021,7 @@ test('row r: a resume that dies with no response since its switch marks nothing 
   await clock.settle()
   expect(slots(w)).toEqual([SLOT2, SLOT3])
   expect(['mark:1', 'mark:2', 'week-mark:2', 'fable-mark:2'].map(key => store.get(key) !== undefined)).toEqual([true, false, false, false])
-  expect(whats(stopLogOf(store, w))).toContain('stop on owed resume: login 2 tried, no response since its switch, no mark')
+  expect(whats(stopLogOf(store, w))).toContain('stop on owed resume: login 2 in use, no response since its switch, no mark')
 })
 
 // The kit cannot draw 'dialog': the look reaches the fill within v4's bound, and the resume enters there.
@@ -12069,7 +12073,8 @@ test('row b: a measure within 30 s of entry, then a stop, keeps one episode and 
   await clock.settle()
   const lines = whats(stopLogOf(store, w))
   expect(lines.filter(l => l.startsWith('work resumed'))).toEqual([])
-  expect(lines.filter(l => l.startsWith('picked 3'))).toEqual(['picked 3: fresh, read 1 min ago; tried 1, 2'])
+  // The stop on login 2 is wordless and its switch unproven: login 2 is tried only at its second such stop.
+  expect(lines.filter(l => l.startsWith('picked 3'))).toEqual(['picked 3: fresh, read 1 min ago; tried 1'])
   expect(slots(w)).toEqual([SLOT2, SLOT3])
 })
 
@@ -15011,9 +15016,11 @@ async function turnedAwayOnThree($: Engine, on: On) {
 test('91-E: a carry-on turned away behind a queued submit is not sent where a stop with no login left owes the carry-on before the drop (puma-9arph.91)', async ($, on) => {
   const r = await turnedAwayOnThree($, on)
   r.w.usage['tok-3'] = [100, 41]
+  // Login 2 cannot be tried (a wordless stop makes a login tried only at its second): none is left for this stop.
+  r.store.set('health:2', { kind: 'login-needed', why: 'its sign-in has run out' })
   await $.classic.StopFailure(PLAIN)
   await r.clock.settle()
-  const isOwed = whats(stopLogOf(r.store, r.w)).some(what => what.startsWith('no login left'))
+  const isOwed =whats(stopLogOf(r.store, r.w)).some(what => what.startsWith('no login left'))
   r.settle()
   await r.clock.settle()
   await r.clock.advance(60_000)
