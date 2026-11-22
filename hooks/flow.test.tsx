@@ -16692,3 +16692,102 @@ test('F3: a point-back acts only on a failed turn: a main turn that began meanwh
   expect(slotValues(w), 'no point-back to login 2').toEqual([undefined])
   expect(whats(stopLogOf(store, w))).toContain('stop dropped: the switch or the failed turn it examined has changed since')
 })
+
+// Codex round 2 on the second PR2 commit: the owner decision as one function.
+test('OWNER-RESPONSE: a response since the switch that uniquely proves login 1, then a wordless stop on login 2, points the session back to login 1', async ($, on) => {
+  const last = [{ kind: 'five_hour', percentUsed: 100, resetsAt: '2026-10-12T12:00:00Z' }, { kind: 'seven_day', percentUsed: 41, resetsAt: WEEK_RESET }]
+  const { w, store } = await stopDuringSwitch($, on, 61_000, 'Claude usage limit reached.', last)
+  expect(whats(stopLogOf(store, w))).toContain("a response since the switch is login 1's, not login 2's: the move to 2 has not landed")
+  expect(slots(w), 'login 2 by the press, back to login 1 by the stop').toEqual([SLOT2, ''])
+})
+
+test('POINTBACK-TURN: a main turn that begins while the point-back writes the slot stands: nothing is published, the slot goes back to the login the view names', async ($, on) => {
+  const { w, store, clock } = await fableOnTwo($, on, '2')
+  await $.classic.StopFailure(STOP_NAMING_2)
+  await clock.settle()
+  await clock.advance(35_000)
+  expect(slotValues(w)).toEqual([undefined])
+  let isHeld = false
+  let open: () => void = () => undefined
+  const gate = new Promise<void>(resolve => {
+    open = resolve
+  })
+  w.beforeEnv = async () => {
+    isHeld = true
+    await gate
+  }
+  const stopping = $.classic.StopFailure(STOP_NAMING_2)
+  await clock.settle()
+  expect(isHeld, "the point-back's slot write waits").toBe(true)
+  await $.turn.start({ text: 'go on by hand', turnId: 'by-hand' })
+  w.beforeEnv = undefined
+  open()
+  await stopping
+  await clock.settle()
+  expect(whats(stopLogOf(store, w))).toContain('stop dropped: the switch or the failed turn it examined has changed since')
+  expect(whats(stopLogOf(store, w)).filter(line => line.startsWith('picked ')), 'the dropped stop picks nothing more').toHaveLength(1)
+  expect(slotValues(w).at(-1), 'the slot is back on login 1, the one the view names').toBeUndefined()
+})
+
+test('PROOF-COUNT: a proof whose write did not apply (a press replaced the switch) leaves the login\'s non-landing count: its second non-landing still leaves it be', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.keychain[await keychainItem(SLOT3)] = blob('tok-3')
+  w.usage['tok-1'] = [20, 30, 21]
+  w.usage['tok-2'] = [10, 30, 100]
+  w.usage['tok-3'] = [10, 30, 100]
+  w.fableResetsBy = { 'tok-1': FABLE_RESET, 'tok-2': FABLE_RESET_2, 'tok-3': '2026-10-15T12:00:00Z' }
+  w.weekResets = { 'tok-1': '2026-10-18T03:00:00Z', 'tok-2': '2026-10-19T03:00:00Z', 'tok-3': '2026-10-20T03:00:00Z' }
+  w.env.CLAUDE_SECURESTORAGE_CONFIG_DIR = SLOT2
+  const store = new Map<string, unknown>(Object.entries(THREE_LOGINS))
+  const clock = world(on, w, store)
+  // The write that ends the pending switch (a proof's) waits once, armed.
+  let isArmed = false
+  let isHeld = false
+  let open: () => void = () => undefined
+  const gate = new Promise<void>(resolve => {
+    open = resolve
+  })
+  let last: View | undefined
+  on('state.set', async (_$, e, next) => {
+    const { key, value } = e as unknown as { key: string; value: View }
+    if (key === 'view' && isArmed && last?.pending !== undefined && value.pending === undefined) {
+      isArmed = false
+      isHeld = true
+      await gate
+    }
+    if (key === 'view') last = value
+    return next(e)
+  })
+  await start($, clock)
+  await $.classic.StopFailure(STOP_NAMING_2)
+  await clock.settle()
+  await clock.advance(35_000)
+  // The first non-landing of login 1; the stop goes on to move to login 1 again.
+  await $.classic.StopFailure(STOP_NAMING_2)
+  await clock.settle()
+  expect(slotValues(w)).toEqual([undefined, SLOT2, undefined])
+  await clock.advance(40_000)
+  // A response with login 1's week proves the move to login 1; its write waits, and a press moves the session to login 3.
+  w.limits = limitsOf(30, 30, '2026-10-18T03:00:00Z')
+  isArmed = true
+  const responding = $.session.measure({ context: { window: 200_000 }, rateLimits: w.limits, changed: ['rateLimits'] })
+  await clock.settle()
+  expect(isHeld, "the proof's write waits").toBe(true)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  const pressing = pane.press({ key: 'use-3' })
+  await clock.settle()
+  open()
+  await responding
+  await pressing
+  await clock.settle()
+  // Login 1 again, and a stop that names login 2 again: the second non-landing of login 1 in this session.
+  await pane.press({ key: 'use-1' })
+  await clock.settle()
+  await pane.unmount()
+  await clock.advance(35_000)
+  await $.classic.StopFailure(STOP_NAMING_2)
+  await clock.settle()
+  expect(w.toasts.filter(t => /did not land/.test(t))).toHaveLength(1)
+})
