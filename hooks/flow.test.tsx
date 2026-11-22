@@ -156,6 +156,8 @@ type World = {
   isNotifyRefused?: boolean
   /** When the Fable week the usage endpoint lists resets; `FABLE_RESET` where unset. */
   fableResets?: string
+  /** access token -> when its Fable week resets, where the logins' Fable weeks reset apart; `fableResets` where unset */
+  fableResetsBy?: Record<string, string>
   /** The session's environment beyond USER and HOME. */
   env: Record<string, string>
   /** Claude Code's security policy refuses every switch, as in a session on a Team seat. */
@@ -368,7 +370,7 @@ function world(on: On, w: World, store: Record<string, unknown> | Map<string, un
       five_hour: five === null ? null : { utilization: five, resets_at: w.fiveHourResets?.[token] ?? '2026-10-12T12:00:00Z' },
       seven_day: week === null ? null : { utilization: week, resets_at: w.weekResets?.[token] ?? WEEK_RESET },
       // A row for another model beside the Fable one, spent: read as Fable's, it would show.
-      ...(fable === undefined ? {} : { limits: [limitRow('Sonnet', 100), limitRow('Fable 5.1', fable, w.fableResets)] }),
+      ...(fable === undefined ? {} : { limits: [limitRow('Sonnet', 100), limitRow('Fable 5.1', fable, w.fableResetsBy?.[token] ?? w.fableResets)] }),
     }
     return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(body) } }
   })
@@ -16459,4 +16461,114 @@ test("a main turn starting while a tick's switch waits on the keychain keeps the
   open()
   await settleReal(clock)
   expect(w.envSets, 'a switch landed against a session a new turn had cleared').toEqual([])
+})
+
+// ---------------------------------------------------------------- F1 defense: a stop's owner is the login its reset names
+
+/** Login 2's Fable week resets here, 3pm in Tallinn (UTC+3 on this date); login 1's is FABLE_RESET. */
+const FABLE_RESET_2 = '2026-10-14T12:00:00Z'
+const STOP_NAMING_2 = { error: 'rate_limit', last_assistant_message: "You've hit your Fable limit · resets Oct 14 at 3pm (Europe/Tallinn)" }
+const STOP_NAMING_1 = { error: 'rate_limit', last_assistant_message: "You've hit your Fable limit · resets Oct 17 at 6am (Europe/Tallinn)" }
+const NOT_LANDED = "stop names login 2's reset, not login 1's: the move to 1 has not landed"
+const slotValues = (w: World) => w.envSets.map(e => e.value)
+
+/** Login 1 has Fable room, login 2's Fable week is spent; the session starts on login `on`, with no switch pending. */
+async function fableOnTwo($: Engine, on: On, startsOn: '1' | '2'): Promise<{ w: World; store: Map<string, unknown>; clock: MockClock }> {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [20, 30, 21]
+  w.usage['tok-2'] = [10, 30, 100]
+  w.fableResetsBy = { 'tok-1': FABLE_RESET, 'tok-2': FABLE_RESET_2 }
+  if (startsOn === '2') w.env.CLAUDE_SECURESTORAGE_CONFIG_DIR = SLOT2
+  const store = new Map<string, unknown>(Object.entries(TWO_LOGINS))
+  const clock = world(on, w, store)
+  await start($, clock)
+  return { w, store, clock }
+}
+
+/** The stop on login 2 that moves the session to login 1, then 35 s on, when the carry-on goes out, the stop login 2's reset names. */
+async function movedToOneThenStoppedOnTwo($: Engine, ctx: { w: World; clock: MockClock }): Promise<void> {
+  await $.classic.StopFailure(STOP_NAMING_2)
+  await ctx.clock.settle()
+  expect(slotValues(ctx.w), 'the first stop moves the session to login 1').toEqual([undefined])
+  await ctx.clock.advance(35_000)
+  await $.classic.StopFailure(STOP_NAMING_2)
+  await ctx.clock.settle()
+}
+
+test('a Fable stop whose reset is login 2\'s, 35 s after a move to login 1, marks nothing on login 1, leaves it untried, and points the session back to login 2 (master438 04:24:21)', async ($, on) => {
+  const ctx = await fableOnTwo($, on, '2')
+  const { w, store } = ctx
+  await movedToOneThenStoppedOnTwo($, ctx)
+  expect(store.get('fable-mark:1'), 'no mark on the login the move never reached').toBeUndefined()
+  const log = whats(stopLogOf(store, w))
+  expect(log).toContain(NOT_LANDED)
+  // Login 1 is picked both times: it was never tried.
+  expect(log.filter(line => line.startsWith('picked '))).toEqual([expect.stringMatching(/^picked 1: .*; tried 2$/), expect.stringMatching(/^picked 1: .*; tried 2$/)])
+  // Back to login 2, then the one untried login with Fable room again.
+  expect(slotValues(w)).toEqual([undefined, SLOT2, undefined])
+})
+
+test('a second move to login 1 that does not land stops the rotation trying it this session, and says so once', async ($, on) => {
+  const ctx = await fableOnTwo($, on, '2')
+  const { w, store, clock } = ctx
+  await movedToOneThenStoppedOnTwo($, ctx)
+  expect(w.toasts.filter(t => /did not land/.test(t))).toEqual([])
+  await clock.advance(35_000)
+  await $.classic.StopFailure(STOP_NAMING_2)
+  await clock.settle()
+  // The point-back, and no third move to login 1.
+  expect(slotValues(w)).toEqual([undefined, SLOT2, undefined, SLOT2])
+  expect(whats(stopLogOf(store, w)).filter(line => line === NOT_LANDED)).toHaveLength(2)
+  expect(w.toasts.filter(t => /did not land/.test(t))).toHaveLength(1)
+  expect(store.get('fable-mark:1')).toBeUndefined()
+  await clock.advance(35_000)
+  await $.classic.StopFailure(STOP_NAMING_2)
+  await clock.settle()
+  expect(w.toasts.filter(t => /did not land/.test(t)), 'said once').toHaveLength(1)
+  expect(slotValues(w)).toEqual([undefined, SLOT2, undefined, SLOT2])
+})
+
+test('a stop with no switch pending whose reset names another login moves the view to that login (master438 01:15:55)', async ($, on) => {
+  const { w, store, clock } = await fableOnTwo($, on, '1')
+  await $.classic.StopFailure(STOP_NAMING_2)
+  await clock.settle()
+  const log = whats(stopLogOf(store, w))
+  expect(log).toContain(NOT_LANDED)
+  expect(slotValues(w)[0], 'the view moves to the login the reset names').toBe(SLOT2)
+  expect(store.get('fable-mark:1')).toBeUndefined()
+})
+
+test('a stop whose reset names the login in use goes as before', async ($, on) => {
+  const { w, store, clock } = await fableOnTwo($, on, '1')
+  await $.classic.StopFailure(STOP_NAMING_1)
+  await clock.settle()
+  expect(store.get('fable-mark:1')).toBeDefined()
+  expect(whats(stopLogOf(store, w)).filter(line => /has not landed/.test(line))).toEqual([])
+  // Login 2's Fable week is spent: nowhere to go, nothing pointed back.
+  expect(slotValues(w)).toEqual([])
+})
+
+test('a wordless stop on an unproven switch adds the login moved to to tried only at its second stop', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [20, 30, 100]
+  w.usage['tok-2'] = [10, 30, 10]
+  const store = new Map<string, unknown>(Object.entries(TWO_LOGINS))
+  const clock = world(on, w, store)
+  await start($, clock)
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  expect(slotValues(w)).toEqual([SLOT2])
+  // Past the settle, no response since: the stop may have gone out on login 1.
+  await clock.advance(40_000)
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  expect(whats(stopLogOf(store, w))).toContain('stayed: no untried login (tried 1)')
+  await clock.advance(10_000)
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  expect(whats(stopLogOf(store, w))).toContain('stayed: no untried login (tried 1, 2)')
 })

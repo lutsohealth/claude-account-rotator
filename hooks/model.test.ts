@@ -2,7 +2,7 @@ import { expect, test } from 'claude-code/testing'
 
 import type { Reading, RotateTo, View } from '../types'
 import { weekLeaveFrom, launchOnFrom, pickLaunch, isSessionStop, isWeeklyStop } from './model'
-import { isSameWeek, whoseWeek } from './model'
+import { isSameWeek, stopResetAt, whoseReset, whoseWeek } from './model'
 import { companyOf, identityFromStatus, planName } from './model'
 import { laterMark, spentMark, withFableMark } from './model'
 import { EMPTY_VIEW, USAGE_IDLE_MS, fitRow, hasRoom, rowOf, rowsOf, rowText, storedLine, storedLineText } from './model'
@@ -2267,3 +2267,87 @@ for (const [name, exitCode, stdout, read] of [
     expect(signInFromStatus(exitCode, stdout)).toBe(read)
   })
 }
+
+// F1 defense: a limit stop's own words give the reset of the window that ran out, and each login's stored window has
+// its own. The Fable stop master438 heard at 04:24:56 said "resets 3pm" while the mod believed login 1 was in use.
+const STOP_NOW = Date.parse('2026-11-22T04:24:56Z')
+const STOP_ZONE = '(Europe/Tallinn)'
+for (const [said, now, at] of [
+  [`You've hit your Fable limit · resets Nov 25 at 3pm ${STOP_ZONE}`, STOP_NOW, '2026-11-25T13:00:00Z'],
+  [`You've hit your Fable limit · resets 3pm ${STOP_ZONE}`, STOP_NOW, '2026-11-22T13:00:00Z'],
+  [`You've hit your Fable limit · resets Nov 23 at 7am ${STOP_ZONE}`, STOP_NOW, '2026-11-23T05:00:00Z'],
+  [`You've hit your session limit · resets 3:30pm ${STOP_ZONE}`, STOP_NOW, '2026-11-22T13:30:00Z'],
+  [`You've hit your session limit · resets 12am ${STOP_ZONE}`, STOP_NOW, '2026-11-22T22:00:00Z'],
+  // The time of day passed today: the next one is tomorrow's.
+  [`You've hit your session limit · resets 3pm ${STOP_ZONE}`, Date.parse('2026-11-22T14:00:00Z'), '2026-11-23T13:00:00Z'],
+  // A date this year has passed: next year's, in the summer time of that date.
+  [`You've hit your weekly limit · resets Jul 1 at 3pm ${STOP_ZONE}`, STOP_NOW, '2027-07-01T12:00:00Z'],
+] as const) {
+  test(`stopResetAt reads "${said.slice(said.indexOf('resets'))}" at ${new Date(now).toISOString()} as ${at}`, () => {
+    expect(stopResetAt(said, now)).toBe(Date.parse(at))
+  })
+}
+
+for (const [name, said] of [
+  ['no words', undefined],
+  ['words that name no reset', "You've hit your Fable limit"],
+  ['a reset that names no zone', "You've hit your Fable limit · resets Nov 25 at 3pm"],
+  ['a zone Intl does not know', "You've hit your Fable limit · resets Nov 25 at 3pm (Mars/Olympus)"],
+  ['a day the month lacks', `You've hit your Fable limit · resets Nov 31 at 3pm ${STOP_ZONE}`],
+  ['an hour no clock has', `You've hit your Fable limit · resets 13pm ${STOP_ZONE}`],
+] as const) {
+  test(`stopResetAt answers undefined for ${name}`, () => {
+    expect(stopResetAt(said, STOP_NOW)).toBeUndefined()
+  })
+}
+
+/** Logins whose windows reset at the given times, as the stored readings carry them (seconds included). */
+function resetView(rows: Record<string, { fable?: string; week?: string; five?: string }>): View {
+  const accounts = Object.keys(rows).map(id => ({ id, slot: id === '1' ? '' : `/h/.claude/accounts/${id}` }))
+  const window = (resetsAt: string | undefined) => (resetsAt === undefined ? {} : { pct: 50, resetsAt })
+  const readings = Object.fromEntries(
+    Object.entries(rows).map(([id, r]) => [
+      id,
+      {
+        at: STOP_NOW,
+        ...(r.five === undefined ? {} : { fiveHour: window(r.five) }),
+        ...(r.week === undefined ? {} : { sevenDay: window(r.week) }),
+        ...(r.fable === undefined ? {} : { fable: window(r.fable) }),
+      },
+    ]),
+  )
+  return { ...EMPTY_VIEW, accounts, readings } as unknown as View
+}
+
+const INCIDENT = resetView({
+  '1': { fable: '2026-11-24T09:00:00Z', week: '2026-11-24T09:00:00Z', five: '2026-11-22T08:00:00Z' },
+  '3': { fable: '2026-11-25T13:00:00Z', week: '2026-11-25T13:00:00Z', five: '2026-11-22T08:30:00Z' },
+  '4': { fable: '2026-11-22T13:00:00Z', week: '2026-11-22T13:00:00Z', five: '2026-11-22T09:00:00Z' },
+  '5': { fable: '2026-11-25T12:59:59Z', week: '2026-11-25T12:59:59Z', five: '2026-11-22T09:20:00Z' },
+})
+
+test('whoseReset: "resets 3pm" on 2026-11-22 is login 4 alone (04:24:56)', () => {
+  const at = stopResetAt(`You've hit your Fable limit · resets 3pm ${STOP_ZONE}`, STOP_NOW)
+  expect(at).toBe(Date.parse('2026-11-22T13:00:00Z'))
+  expect(whoseReset(INCIDENT, at as number, 'fable')).toEqual(['4'])
+})
+
+test('whoseReset: "Nov 25 at 3pm" is logins 3 and 5 sharing it, so it proves neither', () => {
+  const at = stopResetAt(`You've hit your Fable limit · resets Nov 25 at 3pm ${STOP_ZONE}`, STOP_NOW)
+  expect(whoseReset(INCIDENT, at as number, 'fable')).toEqual(['3', '5'])
+})
+
+test('whoseReset reads the window the stop names: the week row for a weekly stop, the 5-hour row for a session stop', () => {
+  const view = resetView({
+    '1': { fable: '2026-11-26T09:00:00Z', week: '2026-11-24T09:00:00Z', five: '2026-11-22T08:00:00Z' },
+    '2': { fable: '2026-11-24T09:00:00Z', week: '2026-11-27T09:00:00Z', five: '2026-11-22T11:00:00Z' },
+  })
+  const at = Date.parse('2026-11-24T09:00:00Z')
+  expect([whoseReset(view, at, 'fable'), whoseReset(view, at, 'week'), whoseReset(view, at, 'session')]).toEqual([['2'], ['1'], []])
+  expect(whoseReset(view, Date.parse('2026-11-22T11:00:00Z'), 'session')).toEqual(['2'])
+})
+
+test('whoseReset: a reset an hour and a second from every stored one names no login', () => {
+  expect(whoseReset(INCIDENT, Date.parse('2026-11-22T14:00:01Z'), 'fable')).toEqual([])
+  expect(whoseReset(INCIDENT, Date.parse('2026-11-22T14:00:00Z'), 'fable')).toEqual(['4'])
+})
