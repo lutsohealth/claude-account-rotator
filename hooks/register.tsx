@@ -2577,14 +2577,29 @@ async function countNonLanding($: Host, target: Account, owner: Account): Promis
 
 /**
  * Points the session's slot and view back at `owner`, the login a stop's words showed its requests go out on, ending a
- * switch that never landed as settlePending's give-up does. False where another switch runs or the slot write fails:
- * the stop then goes on with the login believed.
+ * switch that never landed as settlePending's give-up does. It acts only on what the stop examined: the login believed in
+ * use and the switch pending (`seen`), and a main loop still failed. 'stale' where either changed (a press's switch, a
+ * new main turn) before the write, and nothing is written; 'failed' where another switch runs or the slot write fails,
+ * and the stop then goes on with the login believed.
  */
-async function pointBackTo($: Host, owner: Account): Promise<boolean> {
+async function pointBackTo($: Host, owner: Account, seen: { activeId: string; since: number | undefined }): Promise<'done' | 'failed' | 'stale'> {
+  if (!isFailed) return 'stale'
   const token = ++lastToken
-  if (!(await writeSwitch($, { claim: undefined }, v => ({ ...v, owner: { token } })))) return false
-  return runOwned($, token, async () => {
+  let isStale = false
+  const isClaimed = await writeSwitch($, { claim: undefined }, v => {
+    isStale = v.activeId !== seen.activeId || v.pending?.since !== seen.since
+    return isStale ? v : { ...v, owner: { token } }
+  })
+  if (isStale) return 'stale'
+  if (!isClaimed) return 'failed'
+  let isLate = false
+  const isDone = await runOwned($, token, async () => {
     if (!(await undoProvisionalStop($, { owner: token }))) return false
+    // A main turn that began meanwhile cleared the failure: the stop is no longer the session's.
+    if (!isFailed) {
+      isLate = true
+      return false
+    }
     try {
       await useSlot($, owner.slot)
     } catch (error) {
@@ -2596,6 +2611,7 @@ async function pointBackTo($: Host, owner: Account): Promise<boolean> {
     moves += 1
     return true
   })
+  return isLate ? 'stale' : isDone ? 'done' : 'failed'
 }
 
 /** The stops the stop path acts on: a usage limit and a rejected sign-in. */
@@ -2667,11 +2683,39 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
     ep.stops += 1
     // Who the stop died on: the login its words name; else, with no response yet from the login moved to, that login only
     // at its second such stop (the first may have gone out on the login left, and nothing says); else the login a
-    // response since the switch proved, or the one in use.
-    const proven = hasResponseSince ? provenStopper(view, lastMeasured?.reading) : undefined
-    const died = named?.id ?? (since !== undefined && !hasResponseSince ? (isSecondUnprovenStop(ep, active.id) ? active.id : undefined) : (proven?.id ?? active.id))
+    // response since the switch proved (nobody where that response is two logins' alike), or the one in use where no
+    // switch is pending.
+    const died =
+      named?.id ??
+      (since === undefined
+        ? active.id
+        : hasResponseSince
+          ? provenStopper(view, lastMeasured?.reading)?.id
+          : isSecondUnprovenStop(ep, active.id)
+            ? active.id
+            : undefined)
     if (died !== undefined && !ep.tried.includes(died)) ep.tried.push(died)
     ep.budget ??= 2 * view.accounts.length + 2
+  }
+  // The stop's words name another login's reset than the one the mod believes in use, whatever the switch's age: the
+  // move to the believed login never landed (the requests still go out on the one named). The believed login is charged
+  // nothing; the session is pointed back at the named one, as a give-up of the switch does, and the stop goes on as that
+  // login's. A believed login that fails to land twice in a session is left be. The point-back acts only on the switch
+  // and the failed turn this stop examined: where either has changed since, the stop is dropped.
+  if (named !== undefined && named.id !== active.id) {
+    void logStop($, `stop names login ${named.id}'s reset, not login ${active.id}'s: the move to ${active.id} has not landed`)
+    const back = await pointBackTo($, named, { activeId: active.id, since })
+    if (back === 'stale') {
+      void logStop($, `stop dropped: the switch or the failed turn it examined has changed since`)
+      return
+    }
+    await countNonLanding($, active, named)
+    if (back === 'done') {
+      view = await getView($)
+      active = named
+      since = view.pending?.since
+      hasResponseSince = false
+    }
   }
   const isProvenRejection = error === 'authentication_failed' && hasResponseSince && provenStopper(view, lastMeasured?.reading)?.id === active.id
   const isSettling = view.pending !== undefined && (await $.clock.now()) - view.pending.since < SETTLE_MS
@@ -2680,20 +2724,6 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
     else if (carriedFor !== view.pending?.since) carryOnAfterSettle($, isFable ? { need: 'fable' } : {})
     carriedFor = view.pending?.since
     return
-  }
-  // The stop's words name another login's reset than the one the mod believes in use, and the settle window is over: the
-  // move to the believed login never landed (the requests still go out on the one named). The believed login is charged
-  // nothing; the session is pointed back at the named one, as a give-up of the switch does, and the stop goes on as that
-  // login's. A believed login that fails to land twice in a session is left be.
-  if (named !== undefined && named.id !== active.id) {
-    void logStop($, `stop names login ${named.id}'s reset, not login ${active.id}'s: the move to ${active.id} has not landed`)
-    await countNonLanding($, active, named)
-    if (await pointBackTo($, named)) {
-      view = await getView($)
-      active = named
-      since = view.pending?.since
-      hasResponseSince = false
-    }
   }
   // A later stop of the episode, on a login no response has shown since the switch to it: that try died. Nothing is
   // marked (the stop may have gone out on the login left), and the next untried login is tried. A stop whose words name
