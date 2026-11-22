@@ -184,6 +184,14 @@ const OLDER_WRITER_MS = 30 * 60_000
 /** The last response this session measured, and when: it names the login a stop during an unproven switch belongs to. */
 let lastMeasured: { at: number; reading: Reading | undefined } | undefined
 /**
+ * Whether the main loop is failed, as Orca shows an agent red: its last StopFailure (any error) came after its last turn
+ * start. A tick or a response moves a session only while it is failed; a sub-agent's stop or turn changes nothing here.
+ * It starts false: a session holds until its main loop fails, a lost sign-in included (the next request fails).
+ */
+let isFailed = false
+/** The login whose hold (a tick or a response left it be, its stored usage saying leave) the stop-log already told: one line a hold. */
+let heldTold: string | undefined
+/**
  * The session ends whose process ends with them, by the engine's SessionEndReason: /exit and its keys, a logout, a
  * `-p` run done or a signal. A reason not named here keeps the stop's marks.
  */
@@ -1522,6 +1530,7 @@ function whyLeave(view: View, now: number, need?: Need): string {
  * turn that died on the Fable week (`need`), it leaves for that too, and only
  * for a login with Fable room: the ticks and responses pass none, so a session
  * that never hit the Fable week stays on a login whose Fable week is spent.
+ * A tick or a response moves a session only while its main loop is failed (isFailed): otherwise only a usage-limit stop does.
  */
 async function maybeRotate($: Host, need?: Need, carry?: CarryOn): Promise<boolean> {
   // A view at its defaults names login 1 in use, whichever login this session runs on.
@@ -1576,7 +1585,21 @@ async function maybeRotate($: Host, need?: Need, carry?: CarryOn): Promise<boole
     void logStop($, `picked ${pick.account.id}: ${pick.tier}${age}; tried ${tried.join(', ')}`)
     return switchTo($, pick.account, whyLeave(view, now, need), false, carry, true)
   }
-  if (!shouldLeave(view, now, need)) return stays('the login in use need not be left')
+  if (!shouldLeave(view, now, need)) {
+    heldTold = undefined
+    return stays('the login in use need not be left')
+  }
+  // A tick or a response moves a session only while it is failed (red in Orca): otherwise it stays where it runs,
+  // whatever the stored numbers say (a login reset by hand keeps its old 100 until the next read), a sign-in mark
+  // included: a lost sign-in fails the next request, which turns the session red.
+  if (carry === undefined && !isFailed) {
+    if (heldTold !== view.activeId) {
+      heldTold = view.activeId
+      void logStop($, `held on login ${view.activeId}: the session is answering, its stored usage says leave`)
+    }
+    return false
+  }
+  heldTold = undefined
   // With none to move to, the band above the prompt says when the next login frees up.
   const target = pickTarget({ ...view, accounts: view.accounts.filter(a => !untaken.has(a.id)) }, now, need)
   if (target === undefined) {
@@ -1773,6 +1796,12 @@ async function retryHeld($: Host): Promise<void> {
       return
     }
     if (isConnectingChrome) return
+    // A rotation that carries nothing (a tick's or a response's) goes only while the session is red: a main turn since
+    // has cleared it, so the hold ends and the next tick decides again.
+    if (h.carry === undefined && !isFailed) {
+      await writeSwitch($, { idle: true }, v => ({ ...v, held: undefined }))
+      return
+    }
   }
   await switchTo($, h.target, h.why, false, h.carry, h.isRotation)
 }
@@ -1952,6 +1981,9 @@ async function switchNow($: Host, token: number, target: Account, why: string, i
   const owed = carry
   if (!(await writeSwitch($, mine, v => ({ ...v, held: undefined })))) return givenUp()
   await keepChrome($)
+  // The awaits since maybeRotate's check can span a main turn start, which clears the failure: a rotation that carries
+  // nothing reads it again here, the last point before the slot write, and stays where the session now runs.
+  if (isRotation && carry === undefined && !isFailed) return false
   try {
     await useSlot($, target.slot)
   } catch (error) {
@@ -3633,6 +3665,9 @@ export const register: Register = on => {
   })
 
   on('classic.StopFailure', async ($, e, next) => {
+    // The main loop's failed stop, whatever the error, turns the session red. Set here, before any await and outside
+    // the stop's queued work, so the next tick finds it; a sub-agent's stop never does.
+    if (e.agent_id === undefined) isFailed = true
     // A subagent's stop switches nothing: the main loop's own stop, which follows it, does the work.
     if (e.agent_id !== undefined) {
       void logStop($, `stop heard from agent ${e.agent_type ?? 'unknown'}: ${e.error}, no switch`)
@@ -3683,6 +3718,8 @@ export const register: Register = on => {
   on('turn.start', async ($, e, next) => {
     openTurns.add(e.turnId)
     if (e.agentId === undefined) {
+      // A new main turn clears the failure, as Orca's next prompt clears the red.
+      isFailed = false
       // A main turn leaves the own-continue arm: only a person's prompt (prompt.submit below) cancels the countdown.
       const ep = episode
       // The refresh nudge's own turn is no entry (council B2): the resume stays owed and the held switch stands.

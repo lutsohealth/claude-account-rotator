@@ -544,8 +544,13 @@ const pastLastRead = (clock: MockClock) => clock.advance(USAGE_FORCE_AFTER_MS + 
 /** Lets the schedule come round for a login no response read: the 10-minute check reads it again. */
 const pastNextRead = (clock: MockClock) => clock.advance(USAGE_IDLE_MS)
 
-/** Starts the session and lets boot finish, its usage claims' wait included. */
-async function start($: Engine, clock: MockClock): Promise<void> {
+/**
+ * Starts the session and lets boot finish, its usage claims' wait included. A tick or a response moves a session only
+ * while its main loop is failed (red in Orca), so unless a test is about that hold (`isClean`), the session starts red:
+ * a main-loop StopFailure of an error that switches nothing, heard before boot.
+ */
+async function start($: Engine, clock: MockClock, isClean = false): Promise<void> {
+  if (!isClean) await $.classic.StopFailure({ error: 'server_error' })
   await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
   await clock.settle()
   await clock.advance(USAGE_CLAIM_WAIT_MS)
@@ -5136,7 +5141,7 @@ test('a switch that took is confirmed though its login was spent elsewhere since
   await start($, clock)
   expect(w.envSets).toEqual([])
   await clock.advance(25 * 60_000)
-  // Login 2 was used outside this store meanwhile; login 1's response crosses the leave line.
+  // Login 2 was used outside this store meanwhile; login 1's response crosses the leave line (the session is red: `start` fails it).
   w.usage['tok-2'] = [30, 32]
   w.usage['tok-1'] = [93, 40]
   w.limits = limitsOf(93, 40)
@@ -16234,4 +16239,224 @@ test('90-W: a submit out at a Connect visit\'s end answers after the carry-on ow
   const r = await oldCleanVisit100($, on)
   expect([r.old, r.isCut, r.oldAnsweredAt], 'one submit out at the visit end, answered after the owed one; the visit cut the stop').toEqual([1, true, 1])
   expect(r.carried, 'carry-ons after the visit ended').toBe(1)
+})
+
+// ---------------------------------------------------------------- no leaving a login while the session works on it
+
+/** The one stop-log line a hold writes, once for as long as the hold lasts. */
+const HELD_ONE = 'held on login 1: the session is answering, its stored usage says leave'
+/** A response from login 1: its 5-hour window and week as login 1's own. */
+const goodResponse = ($: Engine, w: World, five = 20, week = 30) => {
+  w.limits = [
+    { kind: 'five_hour', percentUsed: five, resetsAt: '2026-10-12T12:00:00Z' },
+    { kind: 'seven_day', percentUsed: week, resetsAt: WEEK_RESET },
+  ]
+  return $.session.measure({ context: { window: 200_000 }, rateLimits: w.limits, changed: ['rateLimits'] })
+}
+
+test('a tick does not move a session whose turn is open off a login whose stored week reads 100 (master438 06:40:35)', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await loggedWorld(on, w)
+  w.usage['tok-1'] = [20, 30]
+  await start($, clock, true)
+  await clock.advance(29 * 60_000)
+  await $.turn.start({ text: 'work on it', turnId: 'work-1' })
+  // The next check of login 1 stores a week at 100, as a login's stale stored reading does.
+  w.usage['tok-1'] = [20, 100]
+  await clock.advance(2 * 60_000)
+  await clock.settle()
+  expect(w.envSets, 'the session moved off a login that was working').toEqual([])
+  expect(whats(stopLogOf(store, w))).toEqual([HELD_ONE])
+})
+
+test('a response does not move the session off the login it came from', async ($, on) => {
+  const w = fresh()
+  const { clock } = await loggedWorld(on, w)
+  w.usage['tok-1'] = [20, 30]
+  // Two weeks that differ, so a response's week names login 1 and the response is stored.
+  w.weekResets = { 'tok-2': OTHER_WEEK }
+  await start($, clock, true)
+  await $.turn.start({ text: 'work on it', turnId: 'work-1' })
+  // The response itself reads 95% of the 5-hour window, which leaves the login on its numbers alone.
+  await goodResponse($, w, 95, 30)
+  await clock.settle()
+  expect(w.envSets, 'a response moved a session that is not failed').toEqual([])
+})
+
+test('a usage-limit stop still moves a working session', async ($, on) => {
+  const w = fresh()
+  const { clock } = await loggedWorld(on, w)
+  w.usage['tok-1'] = [20, 30]
+  await start($, clock, true)
+  await $.turn.start({ text: 'work on it', turnId: 'work-1' })
+  await goodResponse($, w)
+  w.usage['tok-1'] = [100, 41]
+  await $.classic.StopFailure({ error: 'rate_limit' })
+  await clock.settle()
+  expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
+})
+
+// Orca shows an agent red (failed) on the main loop's StopFailure; the next main turn clears it. A tick or a response moves
+// a session only while it is red.
+test('a turn open for over 30 minutes is not moved by a tick off a login whose stored week reads 100 (WRONG-SWITCH)', async ($, on) => {
+  const w = fresh()
+  const { clock } = await loggedWorld(on, w)
+  w.usage['tok-1'] = [20, 30]
+  await start($, clock, true)
+  await $.turn.start({ text: 'work on it', turnId: 'work-1' })
+  w.usage['tok-1'] = [20, 100]
+  await clock.advance(45 * 60_000)
+  await clock.settle()
+  expect(w.envSets, 'a tick moved a session whose turn was still open').toEqual([])
+})
+
+test("a sub-agent's usage-limit stop does not end the parent's hold (only the main loop)", async ($, on) => {
+  const w = fresh()
+  const { clock } = await loggedWorld(on, w)
+  w.usage['tok-1'] = [20, 30]
+  await start($, clock, true)
+  await clock.advance(29 * 60_000)
+  await $.turn.start({ text: 'work on it', turnId: 'work-1' })
+  await $.classic.StopFailure({ error: 'rate_limit', agent_id: 'agent-1', agent_type: 'Explore' })
+  await clock.settle()
+  w.usage['tok-1'] = [20, 100]
+  await clock.advance(2 * 60_000)
+  await clock.settle()
+  expect(w.envSets, "a sub-agent's stop moved the parent").toEqual([])
+})
+
+test("after the main loop's StopFailure (any error), a tick moves the session: failed is red", async ($, on) => {
+  const w = fresh()
+  const { clock } = await loggedWorld(on, w)
+  w.usage['tok-1'] = [20, 30]
+  await start($, clock, true)
+  await clock.advance(29 * 60_000)
+  await $.turn.start({ text: 'work on it', turnId: 'work-1' })
+  await $.classic.StopFailure({ error: 'server_error' })
+  await clock.settle()
+  w.usage['tok-1'] = [20, 100]
+  await clock.advance(2 * 60_000)
+  await clock.settle()
+  expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
+})
+
+/** A main turn that dies on a failed stop: it starts, the stop is heard, the turn ends on the error. */
+async function mainTurnFails($: Engine, clock: MockClock, error = 'server_error'): Promise<void> {
+  await $.turn.start({ text: 'work on it', turnId: 'work-1' })
+  await $.classic.StopFailure({ error })
+  await $.turn.complete({ turnId: 'work-1', reason: 'error', answer: '', durationMs: 1, isAborted: false })
+  await clock.settle()
+}
+
+test('after that failure, a new main turn clears it and a tick holds again', async ($, on) => {
+  const w = fresh()
+  const { clock } = await loggedWorld(on, w)
+  w.usage['tok-1'] = [20, 30]
+  await start($, clock, true)
+  await clock.advance(29 * 60_000)
+  await mainTurnFails($, clock)
+  await $.turn.start({ text: 'try again', turnId: 'work-2' })
+  w.usage['tok-1'] = [20, 100]
+  await clock.advance(2 * 60_000)
+  await clock.settle()
+  expect(w.envSets, 'a new main turn did not clear the failure').toEqual([])
+})
+
+test("a sub-agent's turn start does not clear the main loop's failure", async ($, on) => {
+  const w = fresh()
+  const { clock } = await loggedWorld(on, w)
+  w.usage['tok-1'] = [20, 30]
+  await start($, clock, true)
+  await clock.advance(29 * 60_000)
+  await mainTurnFails($, clock)
+  await $.turn.start({ text: 'look around', turnId: 'sub-1', agentId: 'agent-1' })
+  w.usage['tok-1'] = [20, 100]
+  await clock.advance(2 * 60_000)
+  await clock.settle()
+  expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
+})
+
+test("an idle session that finished cleanly (no failure) is held on a tick: only red moves", async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await loggedWorld(on, w)
+  w.usage['tok-1'] = [20, 30]
+  await start($, clock, true)
+  await clock.advance(10 * 60_000)
+  await $.turn.start({ text: 'work on it', turnId: 'work-1' })
+  await $.turn.complete({ turnId: 'work-1', reason: 'answer', answer: 'done', durationMs: 1, isAborted: false })
+  await clock.settle()
+  w.usage['tok-1'] = [20, 100]
+  await clock.advance(30 * 60_000)
+  await clock.settle()
+  expect(w.envSets, 'a clean idle session was moved on its stored week').toEqual([])
+  expect(whats(stopLogOf(store, w))).toEqual([HELD_ONE])
+})
+
+test('a fresh session holds at boot and on every tick until its main loop fails, then a tick moves it (BOOT_NONFAILED)', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await loggedWorld(on, w)
+  w.usage['tok-1'] = [20, 100]
+  await start($, clock, true)
+  expect(w.envSets, 'boot moved a session that had not failed').toEqual([])
+  await clock.advance(31 * 60_000)
+  await clock.settle()
+  expect(w.envSets, 'a tick moved a session that had not failed').toEqual([])
+  expect(whats(stopLogOf(store, w))).toEqual([HELD_ONE])
+  await $.classic.StopFailure({ error: 'server_error' })
+  await clock.settle()
+  await clock.advance(60_000)
+  await clock.settle()
+  expect(w.envSets).toEqual([{ name: 'CLAUDE_SECURESTORAGE_CONFIG_DIR', value: SLOT2 }])
+})
+
+test('a login marked as needing a sign-in does not move a session whose main loop has not failed (LOGIN_NEEDED_BYPASS)', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await loggedWorld(on, w)
+  await start($, clock, true)
+  await $.turn.start({ text: 'work on it', turnId: 'work-1' })
+  store.set('health:1', { kind: 'login-needed', why: 'sign-in rejected', at: NOW })
+  await clock.advance(5 * 60_000)
+  await clock.settle()
+  expect(w.envSets, 'a sign-in mark moved a session that had not failed').toEqual([])
+})
+
+test('a held rotation does not land once a main turn has cleared the failure (HELD_AFTER_CLEAR)', async ($, on) => {
+  const w = fresh()
+  const { clock } = await loggedWorld(on, w)
+  // Login 1 spent from the start, its token about to refresh: the red session's rotation is held for login 2.
+  w.keychain['Claude Code-credentials'] = blob('tok-1', NOW + 5 * 60_000)
+  w.usage['tok-1'] = [100, 41]
+  await start($, clock)
+  await settleReal(clock)
+  expect(w.toasts.filter(isSwitchedToast)).toHaveLength(0)
+  // A main turn starts: the session is no longer red. The token refreshes, and the minute's retry would land the switch.
+  await $.turn.start({ text: 'work on it', turnId: 'work-1' })
+  refresh(w)
+  for (let i = 0; i < 4; i += 1) {
+    await clock.advance(60_000)
+    await settleReal(clock)
+  }
+  expect(w.envSets, 'a held rotation landed on a session that was no longer red').toEqual([])
+})
+
+test("a main turn starting while a tick's switch waits on the keychain keeps the login (RACE)", async ($, on) => {
+  const w = fresh()
+  const { clock } = await loggedWorld(on, w)
+  const view = watchedView(on)
+  w.usage['tok-1'] = [20, 30]
+  await start($, clock)
+  let open: () => void = () => undefined
+  const gate = new Promise<void>(resolve => {
+    open = resolve
+  })
+  // Once the switch owns the session, its keychain read waits: the check that began it passed the red test already.
+  w.beforeKeychain = () => (view()?.owner === undefined ? Promise.resolve() : gate)
+  w.usage['tok-1'] = [20, 100]
+  await pastNextRead(clock)
+  await settleReal(clock)
+  expect(view()?.owner, 'the tick started a switch and waits').toBeDefined()
+  await $.turn.start({ text: 'work on it', turnId: 'work-1' })
+  open()
+  await settleReal(clock)
+  expect(w.envSets, 'a switch landed against a session a new turn had cleared').toEqual([])
 })
