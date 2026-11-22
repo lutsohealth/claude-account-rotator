@@ -186,10 +186,9 @@ let lastMeasured: { at: number; reading: Reading | undefined } | undefined
 /**
  * Whether the main loop is failed, as Orca shows an agent red: its last StopFailure (any error) came after its last turn
  * start. A tick or a response moves a session only while it is failed; a sub-agent's stop or turn changes nothing here.
- * It starts true: a session that has not yet run a main turn has no agent running fine to leave be, and rotates on its
- * readings as before.
+ * It starts false: a session holds until its main loop fails, a lost sign-in included (the next request fails).
  */
-let isFailed = true
+let isFailed = false
 /** The login whose hold (a tick or a response left it be, its stored usage saying leave) the stop-log already told: one line a hold. */
 let heldTold: string | undefined
 /**
@@ -1591,9 +1590,9 @@ async function maybeRotate($: Host, need?: Need, carry?: CarryOn): Promise<boole
     return stays('the login in use need not be left')
   }
   // A tick or a response moves a session only while it is failed (red in Orca): otherwise it stays where it runs,
-  // whatever the stored numbers say (a login reset by hand keeps its old 100 until the next read). A login that needs a
-  // sign-in is left, failed or not.
-  if (carry === undefined && view.health[view.activeId]?.kind !== 'login-needed' && !isFailed) {
+  // whatever the stored numbers say (a login reset by hand keeps its old 100 until the next read), a sign-in mark
+  // included: a lost sign-in fails the next request, which turns the session red.
+  if (carry === undefined && !isFailed) {
     if (heldTold !== view.activeId) {
       heldTold = view.activeId
       void logStop($, `held on login ${view.activeId}: the session is answering, its stored usage says leave`)
@@ -1797,6 +1796,12 @@ async function retryHeld($: Host): Promise<void> {
       return
     }
     if (isConnectingChrome) return
+    // A rotation that carries nothing (a tick's or a response's) goes only while the session is red: a main turn since
+    // has cleared it, so the hold ends and the next tick decides again.
+    if (h.carry === undefined && !isFailed) {
+      await writeSwitch($, { idle: true }, v => ({ ...v, held: undefined }))
+      return
+    }
   }
   await switchTo($, h.target, h.why, false, h.carry, h.isRotation)
 }
@@ -1976,6 +1981,9 @@ async function switchNow($: Host, token: number, target: Account, why: string, i
   const owed = carry
   if (!(await writeSwitch($, mine, v => ({ ...v, held: undefined })))) return givenUp()
   await keepChrome($)
+  // The awaits since maybeRotate's check can span a main turn start, which clears the failure: a rotation that carries
+  // nothing reads it again here, the last point before the slot write, and stays where the session now runs.
+  if (isRotation && carry === undefined && !isFailed) return false
   try {
     await useSlot($, target.slot)
   } catch (error) {
