@@ -2,6 +2,12 @@
 
 What each version of the account rotator changed. To get each one as Claude Code starts, turn on auto-update: in `/plugin`, open **Marketplaces**, pick **claude-account-rotator** and choose **Enable auto-update**. To update by hand, run `claude plugin marketplace update claude-account-rotator`, then `claude plugin update account-rotator@claude-account-rotator`, and start a new session.
 
+## 0.5.52-lutso.1 - 2026-11-22
+
+- **A session that runs fine stays on its login**: the minute's check and a response no longer move a session off its login, whatever its stored usage says, unless the session is failed, as Orca shows it red: its main loop's last stop ended in an error after its last turn started. A usage-limit or sign-in stop still moves the session. A move held this way writes one stop-log line, `held on login N: the session is answering, its stored usage says leave`. A sub-agent's stop or turn changes nothing; the next prompt clears the failure (#159).
+- **A fresh session, and one that finished cleanly, are not moved ahead of your next prompt**: that prompt's usage-limit or sign-in stop moves them. A reload of the mod's code counts the session as not failed (#159).
+- **Not fixed yet**: the hold line says "the session is answering" also for a fresh session that has not run a turn, and some refused moves write no stop-log line (#159). The items listed under 0.5.51-lutso.1 still stand (puma-9arph.102, puma-9arph.105, puma-9arph.66, puma-9arph.67, puma-9arph.93).
+
 ## 0.5.51-lutso.1 - 2026-11-22
 
 - **After a Claude in Chrome visit that cut a usage-limit stop, the work carries on once, not twice**: where a carry-on is owed for a free login, that carry-on carries the work on, and the visit's own line waits as its backup. The backup looks again each minute while the carry-on is owed or armed. It stands down once a carry-on sent since the visit's end was answered, not dropped or refused. Every carry-on of the session must also have its answer. Otherwise the backup goes, even where that makes two. A reload of the mod's code drops the backup. A visit that connected Claude in Chrome still sends its own line, so two lines can go there (#152, puma-9arph.90).
