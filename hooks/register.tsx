@@ -204,13 +204,17 @@ const PROCESS_ENDS: ReadonlySet<string> = new Set(['prompt_input_exit', 'logout'
  * and a stop marked on it provisionally is kept, so no later end of anything reverts it.
  */
 async function proveSwitch($: Host, id: string, since: number): Promise<void> {
-  untaken.delete(id)
-  nonLandings.delete(id)
-  await writeSwitch($, { pending: since }, v => ({
+  // The login's record of failed landings goes only where this proof's write applied: a switch that replaced the pending
+  // one meanwhile makes it stale, and the login has not landed.
+  const isProven = await writeSwitch($, { pending: since }, v => ({
     ...v,
     provisionalStop: v.provisionalStop?.id === id ? undefined : v.provisionalStop,
     pending: v.pending?.id === id ? undefined : v.pending,
   }))
+  if (isProven) {
+    untaken.delete(id)
+    nonLandings.delete(id)
+  }
 }
 
 /** The keys a stop writes for a login, every session's: its marks, its reading, its `no-five-hour`. */
@@ -2606,7 +2610,14 @@ async function pointBackTo($: Host, owner: Account, seen: { activeId: string; si
       await debug($, `point-back to ${owner.id} failed: ${errorName(error)}`)
       return false
     }
-    if (!(await writeSwitch($, { owner: token }, v => ({ ...v, activeId: owner.id, pending: undefined })))) return false
+    // The slot write awaited: a main turn that began meanwhile cleared the failure, or the switch examined changed. Then
+    // nothing is published, and the release's reconcile puts the slot back on the login the view names. The check is
+    // inside the write, the last point before the view changes.
+    const isPublished = await writeSwitch($, { owner: token }, v => {
+      isLate = !isFailed || v.activeId !== seen.activeId || v.pending?.since !== seen.since
+      return isLate ? v : { ...v, activeId: owner.id, pending: undefined }
+    })
+    if (isLate || !isPublished) return false
     movedAt = await $.clock.now()
     moves += 1
     return true
@@ -2675,44 +2686,38 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
     }
     return
   }
-  // The login the stop's own words name by its reset: the stop's owner whatever login the mod believes is in use.
-  const named = error === 'rate_limit' ? await stopNamed($, view, stop.last_assistant_message) : undefined
   let since = view.pending?.since
   let hasResponseSince = since !== undefined && lastMeasured !== undefined && lastMeasured.at > since
+  // THE owner decision of a usage-limit stop, the only one: every path below acts on `owner` and `isUnproven`.
+  const words = error === 'rate_limit' ? await stopNamed($, view, stop.last_assistant_message) : undefined
+  const { owner, isProvisional } =
+    error === 'rate_limit' ? ownerOfStop(view, active, words, hasResponseSince ? lastMeasured?.reading : undefined, hasResponseSince) : { owner: active, isProvisional: false }
   if (ep !== undefined && error === 'rate_limit') {
     ep.stops += 1
-    // Who the stop died on: the login its words name; else, with no response yet from the login moved to, that login only
-    // at its second such stop (the first may have gone out on the login left, and nothing says); else the login a
-    // response since the switch proved (nobody where that response is two logins' alike), or the one in use where no
-    // switch is pending.
-    const died =
-      named?.id ??
-      (since === undefined
-        ? active.id
-        : hasResponseSince
-          ? provenStopper(view, lastMeasured?.reading)?.id
-          : isSecondUnprovenStop(ep, active.id)
-            ? active.id
-            : undefined)
+    // Who the stop died on: its owner; where the owner is only provisional, the login moved to only at its second such
+    // stop (the first may have gone out on the login left, and nothing says); nobody where a response since the switch
+    // proves two logins alike.
+    const died = isProvisional ? (isSecondUnprovenStop(ep, active.id) ? active.id : undefined) : owner?.id
     if (died !== undefined && !ep.tried.includes(died)) ep.tried.push(died)
     ep.budget ??= 2 * view.accounts.length + 2
   }
-  // The stop's words name another login's reset than the one the mod believes in use, whatever the switch's age: the
-  // move to the believed login never landed (the requests still go out on the one named). The believed login is charged
-  // nothing; the session is pointed back at the named one, as a give-up of the switch does, and the stop goes on as that
-  // login's. A believed login that fails to land twice in a session is left be. The point-back acts only on the switch
-  // and the failed turn this stop examined: where either has changed since, the stop is dropped.
-  if (named !== undefined && named.id !== active.id) {
-    void logStop($, `stop names login ${named.id}'s reset, not login ${active.id}'s: the move to ${active.id} has not landed`)
-    const back = await pointBackTo($, named, { activeId: active.id, since })
+  // The owner is not the login the mod believes in use, whatever the switch's age and whether the words or a response
+  // proved it: the move to the believed login never landed (the requests still go out on the owner). The believed login
+  // is charged nothing; the session is pointed back at the owner, as a give-up of the switch does, and the stop goes on
+  // as the owner's. A believed login that fails to land twice in a session is left be. The point-back acts only on the
+  // switch and the failed turn this stop examined: where either has changed since, the stop is dropped.
+  if (owner !== undefined && owner.id !== active.id) {
+    const proof = words === undefined ? `a response since the switch is login ${owner.id}'s` : `stop names login ${owner.id}'s reset`
+    void logStop($, `${proof}, not login ${active.id}'s: the move to ${active.id} has not landed`)
+    const back = await pointBackTo($, owner, { activeId: active.id, since })
     if (back === 'stale') {
       void logStop($, `stop dropped: the switch or the failed turn it examined has changed since`)
       return
     }
-    await countNonLanding($, active, named)
+    await countNonLanding($, active, owner)
     if (back === 'done') {
       view = await getView($)
-      active = named
+      active = owner
       since = view.pending?.since
       hasResponseSince = false
     }
@@ -2726,9 +2731,8 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
     return
   }
   // A later stop of the episode, on a login no response has shown since the switch to it: that try died. Nothing is
-  // marked (the stop may have gone out on the login left), and the next untried login is tried. A stop whose words name
-  // the login in use is its own, whatever responses came: it goes on to its mark.
-  if (ep !== undefined && ep.stops > 1 && error === 'rate_limit' && named === undefined && since !== undefined && !hasResponseSince) {
+  // marked (the stop may have gone out on the login left), and the next untried login is tried.
+  if (ep !== undefined && ep.stops > 1 && error === 'rate_limit' && isProvisional) {
     void logStop($, `stop on owed resume: login ${active.id} ${ep.tried.includes(active.id) ? 'tried' : 'in use'}, no response since its switch, no mark`)
     if (!(await maybeRotate($, ep.need, { need: ep.need })) && isConnectingChrome) isCutByVisit = true
     return
@@ -2745,12 +2749,6 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
       await setView($, v => ({ ...v, provisionalStop: record }))
     }
   } else {
-    // While a switch is unproven, a response since it began names the stop's login by its week, alone, or none at all
-    // (a mark is every session's). With no response since, the switch has landed by now: the stop is the login moved
-    // to, provisionally, and a settle that finds the switch did not take drops what the stop marked there.
-    // A stop whose own words name a login's reset is that login's, a mark on no other, whatever the switch's proof.
-    const owner = named ?? (since === undefined || !hasResponseSince ? active : provenStopper(view, lastMeasured?.reading))
-    const isProvisional = since !== undefined && !hasResponseSince && named === undefined
     // The landing can lag the settle: the turn the carry-on starts as the settle ends can still go out on the login
     // left (measured on vox), and a turn over the Fable limit dies at once. So a Fable stop within SETTLE_MS of the
     // carry-on, before any response proves the switch, that the login moved to's own usage read contradicts (a body this
@@ -2845,6 +2843,23 @@ async function undoProvisionalStop($: Host, by: SwitchWriter): Promise<boolean> 
   }))
   await mergeStore($)
   return true
+}
+
+/**
+ * THE owner decision of a usage-limit stop: whose it is, and so what is marked and tried and whether the session is
+ * pointed back (the owner is not the login believed in use). In this order:
+ *   1. the login the stop's own words name by its reset (`words`), at any switch age;
+ *   2. no switch pending: the login in use;
+ *   3. a response since the switch (`hasResponseSince`): the login whose week it carries, alone, else nobody;
+ *   4. an unproven switch with no response and no words: the login moved to, provisionally (`isProvisional`): its mark is
+ *      given back where the switch ends unproven (undoProvisionalStop), and it counts as tried only at its second such stop.
+ * Nobody owns a stop that two logins' response fits alike (3): nothing is marked and nothing is tried.
+ */
+function ownerOfStop(view: View, active: Account, words: Account | undefined, last: Reading | undefined, hasResponseSince: boolean): { owner: Account | undefined; isProvisional: boolean } {
+  if (words !== undefined) return { owner: words, isProvisional: false }
+  if (view.pending === undefined) return { owner: active, isProvisional: false }
+  if (hasResponseSince) return { owner: provenStopper(view, last), isProvisional: false }
+  return { owner: active, isProvisional: true }
 }
 
 /** The login a stop during an unproven switch belongs to: the one whose week the last response carries, alone. */

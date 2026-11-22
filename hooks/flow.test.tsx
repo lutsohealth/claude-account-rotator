@@ -5753,7 +5753,9 @@ for (const delay of [40_000, 90_000, 150_000]) {
 const ONES_WEEK: SessionRateLimit[] = [{ kind: 'seven_day', percentUsed: 42, resetsAt: WEEK_RESET }]
 const F3_ENDS: [string, ($: Engine, w: World, clock: MockClock) => Promise<void>][] = [
   ['the session end', async ($, _w, clock) => endSession($, clock)],
-  ['Use now on login 1', async ($, _w, clock) => useNow($, clock, '1')],
+  // The proven Fable stop (the response since the switch carries login 1's week) points the session back to login 1 itself,
+  // so no Use now on login 1 is left to press: the stop's mark must stand with the switch already ended that way.
+  ['the stop\'s own point-back to login 1', async () => undefined],
   ['the did-not-take settle', async ($, w, clock) => {
     await clock.advance(4 * 60_000 + 10_000)
     await respond($, clock, w)
