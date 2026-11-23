@@ -4,7 +4,7 @@ import type { Engine, MockClock } from 'claude-code/testing'
 import type { On } from 'claude-code'
 import type { View } from '../types'
 import { NUDGE_TEXT, USAGE_CLAIM_WAIT_MS, USAGE_FORCE_AFTER_MS, keychainItem } from './model'
-import { DAY, FABLE_RESET, FABLE_STOP, FILE1, HOUR, NOTE, NOW, OTHER_WEEK, PANE_PROPS, PLAIN, PLAIN_STOPS, SLOT2, SLOT3, THREE_LOGINS, TWO_LOGINS, WEEK_RESET, answerNextLate, blob, browse, clearSession, clearable, fresh, isSwitchedToast, kept, limitsOf, loggedWorld, markStands, mountPane, painted, pastNextRead, refresh, reloadedWorld, respond, sent, settleReal, slots, start, stopDuringSwitch, stopLogOf, useNow, watchedView, whats, world } from './flow-harness'
+import { DAY, FABLE_RESET, FABLE_STOP, FILE1, HOUR, NOTE, NOW, OTHER_WEEK, PANE_PROPS, PLAIN, PLAIN_STOPS, SLOT2, SLOT3, THREE_LOGINS, TWO_LOGINS, WEEK_RESET, answerNextLate, blob, browse, carryEndedOf, clearSession, clearable, fresh, isSwitchedToast, kept, limitsOf, loggedWorld, markStands, mountPane, painted, pastNextRead, refresh, reloadedWorld, respond, sent, settleReal, slots, start, stopDuringSwitch, stopLogOf, useNow, watchedView, whats, world } from './flow-harness'
 import type { World } from './flow-harness'
 
 /**
@@ -2583,7 +2583,7 @@ test('MODEL-DEBT-CLEAR: a tick clearing the model debt it read sends nothing whe
  * 'after-read' holds the view read that follows the clear, 'mark' the view read markCarryEnded makes (the clear is refused,
  * so the debt is marked ended), 'carry-read' the second view read after the clear, which carryOn makes before it submits.
  */
-async function laterDebtDuringTick($: Engine, on: On, where: 'after-read' | 'mark' | 'carry-read') {
+async function laterDebtDuringTick($: Engine, on: On, where: 'after-read' | 'mark' | 'carry-read', isTurnRun = false) {
   const w = fresh()
   const { clock, store } = await loggedWorld(on, w)
   w.usage['tok-1'] = [20, 30, 21]
@@ -2620,6 +2620,8 @@ async function laterDebtDuringTick($: Engine, on: On, where: 'after-read' | 'mar
   await start($, clock)
   await $.classic.StopFailure(OPUS_AT_4PM)
   await clock.settle()
+  // A main turn since the stop: the tick's own line for the debt says so, and sends nothing.
+  if (isTurnRun) await $.turn.start({ text: 'working by hand', turnId: 'by-hand' })
   await tickUntil(clock, AT_1PM_Z - 3 * 60_000)
   for (let waited = 0; waited < 20 * 60_000 && !held.isPaused; waited += 1_000) await clock.advance(1_000)
   expect(held.isPaused, `the tick at the debt's date waits at its ${where}`).toBe(true)
@@ -2648,7 +2650,18 @@ test('MODEL-DEBT-AFTER-READ guard: a later model stop owing a later debt while t
 })
 
 test('MODEL-DEBT-MARK guard: a later model stop owing a later debt while the tick marks the old debt ended sends nothing of the old debt', { timeoutMs: 30_000 }, async ($, on) => {
-  await expectLaterDebtStands(await laterDebtDuringTick($, on, 'mark'))
+  const held = await laterDebtDuringTick($, on, 'mark')
+  // The clear was refused, so the view held the old debt: the store marks it ended, and not the later one.
+  const ended = carryEndedOf(held.store, held.w)?.owedAt
+  const later = held.view()?.carryDue?.owedAt
+  expect(ended !== undefined && later !== undefined && ended < later, `the old debt (${ended}) is marked ended, the later one (${later}) is not`).toBe(true)
+  await expectLaterDebtStands(held)
+})
+
+test('MODEL-DEBT-MARK-TURN: a later model stop owing a later debt while the tick marks a debt a turn has since overtaken logs no verdict on the old debt', { timeoutMs: 30_000 }, async ($, on) => {
+  const held = await laterDebtDuringTick($, on, 'mark', true)
+  expect(whats(stopLogOf(held.store, held.w)).filter(line => line.startsWith('a turn ran since the stop')), 'the old debt gets no verdict').toEqual([])
+  expect(held.view()?.carryDue, 'the later debt stands').toMatchObject({ at: Date.parse('2026-10-12T15:00:00Z'), from: '1' })
 })
 
 test('MODEL-DEBT-CARRY-READ: a later model stop owing a later debt while carryOn reads before it submits sends nothing of the old debt', { timeoutMs: 30_000 }, async ($, on) => {
