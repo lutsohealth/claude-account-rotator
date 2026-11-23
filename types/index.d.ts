@@ -25,6 +25,12 @@ export type ReadingSource = 'body' | 'response' | 'stop'
  */
 export type Mark = { pct: number; resetsAt: string; at: number }
 
+/**
+ * What a stop's pick of a login rests on, which the carry-on's line follows: the tier it was taken in, the age of the read it
+ * was judged on, when a login believed spent frees (epoch ms), and whether a fresh read that lists the Fable week showed room.
+ */
+export type StopProof = { tier: 'fresh' | 'stale' | 'unread' | 'spent-old'; readAgeMs?: number; freesAt?: number; hasFableRoom: boolean }
+
 /** A usage check that failed: what failed (a stage and an HTTP status, or the error), and when, in epoch milliseconds. */
 /** `isUsageRead`: the usage read itself failed, which runs only once a profile call has named the sign-in. */
 export type CheckError = { why: string; at: number; isUsageRead?: true }

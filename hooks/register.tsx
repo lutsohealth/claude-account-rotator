@@ -9,7 +9,7 @@ import type {
   SessionRateLimit,
 } from 'claude-code'
 
-import type { Account, CheckError, FiveHourLimit, FooterStyle, Health, Holder, LaunchOn, LaunchPick, Mark, ProvisionalStop, Reading, ReadingSource, RotateTo, RotatorRequest, UsageDue, View } from '../types'
+import type { Account, CheckError, FiveHourLimit, FooterStyle, Health, Holder, LaunchOn, LaunchPick, Mark, ProvisionalStop, Reading, ReadingSource, RotateTo, RotatorRequest, StopProof, UsageDue, View } from '../types'
 import {
   CHROME_SERVER,
   CHROME_TOOL,
@@ -43,6 +43,7 @@ import {
   fingerprint,
   footerStyleFrom,
   freeId,
+  fableCarryOnNote,
   firstFreeAt,
   limitNotice,
   healthOf,
@@ -157,8 +158,9 @@ const CHROME_WAIT_MS = 15_000
 const MACOS_MARKER = '/System/Library/CoreServices/SystemVersion.plist'
 const USAGE_URL = 'https://api.anthropic.com/api/oauth/usage'
 const PROFILE_URL = 'https://api.anthropic.com/api/oauth/profile'
-const CONTINUE =
-  'Claude Code switched to another of your Claude accounts because the previous one hit its usage limit or lost its sign-in. Continue where you left off.'
+const CONTINUE_LEAD = 'Claude Code switched to another of your Claude accounts because the previous one hit its usage limit or lost its sign-in.'
+const CONTINUE_TAIL = 'Continue where you left off.'
+const CONTINUE = `${CONTINUE_LEAD} ${CONTINUE_TAIL}`
 /** The carry-on after a stop with no login left, where the login in use freed up itself: nothing switched. */
 const CONTINUE_RESET = "This Claude account's usage limit has reset. Continue where you left off."
 /** How long past the time owed a carry-on with no switch waits: Claude Code can carry on a 5-hour stop by itself after its reset (puma-9arph.35 d5), and one carry-on goes, not two. */
@@ -266,7 +268,7 @@ let signInQueue: Promise<void> = Promise.resolve()
  * the failure epoch the stop examined: the move goes only while that failure is still the latest and uncleared
  * (`isSameFailure`), whatever the stop awaited on the way. A press carries none.
  */
-type CarryOn = { need?: Need; epoch?: number }
+type CarryOn = { need?: Need; epoch?: number; proof?: StopProof }
 /** When the switch began whose landing a carry-on already follows: the switch's own, or one for a turn that died before it landed. */
 let carriedFor: number | undefined
 /** The last carry-on sent: when the switch it follows began, and when it went. The turn it starts may answer as the login left. */
@@ -301,6 +303,8 @@ let movedAt: number | undefined
  */
 type Episode = {
   need?: Need
+  /** What the carry-on last armed rests on (the pick's tier, read age and Fable proof): the nudge's carry-on after it reuses it. */
+  proof?: StopProof
   stops: number
   tried: string[]
   /**
@@ -1627,7 +1631,9 @@ async function maybeRotate($: Host, need?: Need, carry?: CarryOn): Promise<boole
     }
     const age = pick.readAgeMs === undefined ? '' : `, read ${Math.round(pick.readAgeMs / 60_000)} min ago`
     void logStop($, `picked ${pick.account.id}: ${pick.tier}${age}; tried ${tried.join(', ')}`)
-    return switchTo($, pick.account, whyLeave(view, now, need), false, carry, true)
+    // The carry-on goes with what the pick rests on: its line says no more than that proves.
+    const { tier, readAgeMs, freesAt, hasFableRoom } = pick
+    return switchTo($, pick.account, whyLeave(view, now, need), false, { ...carry, proof: { tier, readAgeMs, freesAt, hasFableRoom } }, true)
   }
   if (!shouldLeave(view, now, need)) {
     heldTold = undefined
@@ -1896,6 +1902,8 @@ async function retryHeld($: Host): Promise<void> {
 function carryOnAfterSettle($: Host, owed: CarryOn): void {
   const mark = moves
   armedCarryOns += 1
+  // What the armed carry-on rests on, kept for the episode: the nudge's carry-on after it reuses the armed words.
+  if (episode !== undefined && owed.proof !== undefined) episode.proof = owed.proof
   $.clock.after(SETTLE_MS, () => {
     armedCarryOns -= 1
     // A Connect visit holds the session: it carries the turn on once it ends, as for a stop it cut, though its move counts
@@ -1903,7 +1911,7 @@ function carryOnAfterSettle($: Host, owed: CarryOn): void {
     if (isConnectingChrome) {
       isCutByVisit = true
       void logStop($, 'carry-on held: Claude in Chrome is connecting')
-    } else if (moves === mark) void carryOn($, owed.need).catch(error => debug($, `carry-on failed: ${String(error)}`))
+    } else if (moves === mark) void carryOn($, owed.need, undefined, owed.proof ?? episode?.proof).catch(error => debug($, `carry-on failed: ${String(error)}`))
     else void logStop($, 'carry-on skipped: another switch since')
   })
   // Not awaited: a caller sets carriedFor in the same tick, so a second stop cannot arm a second carry-on meanwhile.
@@ -2063,6 +2071,8 @@ async function switchNow($: Host, token: number, target: Account, why: string, i
       wasHeld = v.held !== undefined
       return { ...v, held: { target, why, carry: carry === undefined ? undefined : { need: carry.need }, isRotation } }
     }))) return givenUp()
+    // What the held stop's carry-on will rest on, kept in the episode: the held record carries the need alone.
+    if (carry?.proof !== undefined && episode !== undefined) episode.proof = carry.proof
     if (!wasHeld) {
       if (carry !== undefined) void logStop($, `held for ${target.id}: the token in use refreshes soon`)
       const { accounts } = await getView($)
@@ -2241,10 +2251,14 @@ async function onMeasure($: Host, limits: readonly SessionRateLimit[]): Promise<
  * and a Fable one with no line kept, sends the mod's own line under its name:
  * `own` where the caller names it (a carry-on with no switch), else CONTINUE.
  */
-async function carryOn($: Host, need?: Need, own?: string): Promise<void> {
+async function carryOn($: Host, need?: Need, own?: string, proof?: StopProof): Promise<void> {
   const view = await getView($)
-  const kept = need === 'fable' ? view.fableContinueText : undefined
   carriedOn = { since: view.pending?.since, at: await $.clock.now() }
+  // The person's kept line says there is Fable credit: it goes only where a fresh read that lists the Fable week showed
+  // room. Any other pick sends the mod's own line, with what the pick rests on.
+  const note = need === 'fable' ? fableCarryOnNote(proof) : undefined
+  if (note !== undefined) return sendCarryOn($, { text: `${CONTINUE_LEAD} ${note} ${CONTINUE_TAIL}` })
+  const kept = need === 'fable' ? view.fableContinueText : undefined
   await sendCarryOn($, kept === undefined ? { text: own ?? CONTINUE } : { text: kept, asUser: true })
 }
 
@@ -2326,7 +2340,7 @@ async function sendCarryOn($: Host, prompt: { text: string; asUser?: true }): Pr
 function carryOnAfterNudge($: Host, ep: Episode, isOwed: boolean): void {
   if (episode !== ep || !(isOwed || ep.isCarryOnHeldBack === true) || isCarryOnInFlight || armedCarryOns > 0) return
   ep.isCarryOnHeldBack = undefined
-  void carryOn($, ep.need).catch(error => debug($, `carry-on failed: ${String(error)}`))
+  void carryOn($, ep.need, undefined, ep.proof).catch(error => debug($, `carry-on failed: ${String(error)}`))
 }
 
 /** Ends a stop's episode once its resume has answered: a later stop opens a new one, with its own tried list and budget. */
@@ -2585,7 +2599,7 @@ async function nudgeIfDue($: Host, ep: Episode, view: View, now: number): Promis
   const due = { isRenudged: ep.isRenudged === true, firstExpiresAt: ep.nudge?.expiresAt, expiresAt: credential.expiresAt, firstToken: ep.nudge?.token, token, now }
   if (isAgain && !renudgeDue(due)) return false
   // A box the read cannot show is no empty box (council B5); the mod's own lines left in it count as empty.
-  if (!isBoxFree(boxText, [NUDGE_TEXT, CONTINUE, view.fableContinueText])) {
+  if (!isBoxFree(boxText, [NUDGE_TEXT, CONTINUE, view.fableContinueText, carryOnText])) {
     if (boxText !== undefined) {
       tellOnce($, ep, 'draft', 'refresh nudge: a draft in the box, switch still held')
       toastOnce($, ep, 'draft told', 'Switching accounts waits for your draft: press Enter to send it, or clear the box.')
@@ -2854,7 +2868,7 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
   if (!(await isCurrent())) return dropStale()
   if (isSettling && !isProvenRejection) {
     if (isConnectingChrome) isCutByVisit = true
-    else if (carriedFor !== view.pending?.since) carryOnAfterSettle($, { need: heldNeed })
+    else if (carriedFor !== view.pending?.since) carryOnAfterSettle($, { need: heldNeed, proof: ep?.proof })
     carriedFor = view.pending?.since
     return
   }
@@ -2895,7 +2909,7 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
         if (!(await isCurrent())) return dropStale()
         clearedFor = since
         if (isConnectingChrome) isCutByVisit = true
-        else carryOnAfterSettle($, { need: 'fable' })
+        else carryOnAfterSettle($, { need: 'fable', proof: { tier: 'fresh', hasFableRoom: true } })
         return
       }
     }

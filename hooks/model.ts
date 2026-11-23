@@ -1,4 +1,4 @@
-import type { Account, CheckError, Fill, FiveHourLimit, FooterStyle, Glyphs, Health, Highlight, LaunchOn, LaunchPick, Mark, PlanTier, Reading, RotateTo, RotatorRequest, Row, RowPart, StoredRows, StoredRun, UsageDue, UsageWindow, View } from '../types'
+import type { Account, CheckError, Fill, FiveHourLimit, FooterStyle, Glyphs, Health, Highlight, LaunchOn, LaunchPick, Mark, PlanTier, Reading, RotateTo, RotatorRequest, Row, RowPart, StopProof, StoredRows, StoredRun, UsageDue, UsageWindow, View } from '../types'
 
 /** Leave a login once its 5-hour window is this full (percent). */
 export const LEAVE_FIVE_HOUR = 90
@@ -300,7 +300,7 @@ export function pickAfterStop(
   tried: readonly string[],
   untaken: ReadonlySet<string>,
   live: ReadonlySet<string> = new Set(),
-): { account: Account; tier: StopTier; readAgeMs?: number; spentOld?: Account[] } | undefined {
+): (StopProof & { account: Account; spentOld?: Account[] }) | undefined {
   const isFable = need === 'fable'
   const counts: Record<string, Reading | undefined> = {}
   for (const a of view.accounts) counts[a.id] = raw[a.id] && counted(raw[a.id] as Reading, view.fiveHourLimit, now)
@@ -326,10 +326,31 @@ export function pickAfterStop(
           firstByRotateTo(view, ready, counts, now, need)
     if (account === undefined) continue
     const read = raw[account.id]
-    const spentOld = tier === 'spent-old' ? { spentOld: ready } : {}
-    return read === undefined ? { account, tier, ...spentOld } : { account, tier, readAgeMs: now - read.at, ...spentOld }
+    // The Fable week is proven roomy only by a fresh read that lists it; a spent-old pick says when it believed it frees.
+    const hasFableRoom = tier === 'fresh' && counts[account.id]?.fable !== undefined && !isFableSpent(counts[account.id], now)
+    const spentOld = tier === 'spent-old' ? { spentOld: ready, freesAt: finiteOr(freesAt(view, account.id, counts[account.id], now, need)) } : {}
+    return { account, tier, hasFableRoom, ...(read === undefined ? {} : { readAgeMs: now - read.at }), ...spentOld }
   }
   return undefined
+}
+
+const finiteOr = (at: number): number | undefined => (Number.isFinite(at) ? at : undefined)
+
+/**
+ * The sentence a Fable carry-on's own line carries in place of the person's kept line, where the pick does not prove Fable
+ * room (a fresh read that lists the Fable week with room does): what it rests on. Undefined where it does.
+ */
+export function fableCarryOnNote(proof: StopProof | undefined): string | undefined {
+  if (proof === undefined) return 'Its Fable room is not confirmed.'
+  if (proof.hasFableRoom) return undefined
+  if (proof.tier === 'spent-old') {
+    if (proof.freesAt === undefined) return 'Its Fable week was believed spent; it is tried in case it was reset or freed elsewhere.'
+    const when = `${new Date(proof.freesAt).toISOString().slice(0, 16).replace('T', ' ')} UTC`
+    return `Its Fable week was believed spent until ${when}; it is tried in case that was reset or freed elsewhere.`
+  }
+  if (proof.tier === 'unread') return 'Its usage could not be read, so Fable room on it is not confirmed.'
+  if (proof.tier === 'stale' && proof.readAgeMs !== undefined) return `Its Fable week was last read ${Math.round(proof.readAgeMs / 60_000)} min ago, so room on it is not confirmed.`
+  return 'Its usage lists no Fable week, so room on it is not confirmed.'
 }
 
 /** Whether a login has room on every limit it reports: none of its windows, the Fable week among them, is at 100%. */
