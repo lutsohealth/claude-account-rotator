@@ -608,12 +608,11 @@ export function bodyReadFrom(value: unknown): BodyRead | undefined {
 /**
  * The body a usage request that began at `startedAt` is judged against, among the bodies the sessions keep, each under a key
  * of its own, written once (`usage-body:<id>:<read time>:<session mark>`: the store has no atomic read and write or delete
- * of one key, so none is ever rewritten): the newest that completed before the request began, whichever session wrote it. `isOlder`: a body completed
- * at or after the request began, so the request is no later read to fall from.
+ * of one key, so none is ever rewritten): the newest that completed before the request began, whichever session wrote it;
+ * a body that completed at or after the request began is none.
  */
-export function baselineBody(bodies: readonly BodyRead[], startedAt: number): { before?: BodyRead; isOlder: boolean } {
-  const before = bodies.filter(b => b.at < startedAt).reduce<BodyRead | undefined>((newest, b) => (newest === undefined || b.at > newest.at ? b : newest), undefined)
-  return { ...(before === undefined ? {} : { before }), isOlder: bodies.some(b => b.at >= startedAt) }
+export function baselineBody(bodies: readonly BodyRead[], startedAt: number): BodyRead | undefined {
+  return bodies.filter(b => b.at < startedAt).reduce<BodyRead | undefined>((newest, b) => (newest === undefined || b.at > newest.at ? b : newest), undefined)
 }
 
 /** The body a body row is: its time and windows, for a session's `usage-body:<id>:<mark>` and, where none is written, for the baseline. */

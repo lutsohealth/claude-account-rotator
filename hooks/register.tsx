@@ -1510,17 +1510,18 @@ async function checkAccount($: Host, account: Account, gate: UsageGate): Promise
             week: markFrom(await $.store.get(`week-mark:${account.id}`)),
             five: markFrom(await $.store.get(`mark:${account.id}`)),
           }
-          // A stored body saved at or after this read began is newer than this body, or came back with it: this body is no
-          // earlier read to fall from, ends no mark, drops no kept row and never overwrites that row.
-          // Judged against the newest body that completed before this request began, across the keys of every session (each
-          // writes only its own): never a response row stored since. A row an earlier version left, a body, stands in while no
-          // session has written a key.
+          // Judged against the newest body that completed before this request began, across the keys of every session: never
+          // a response row stored since. A row an earlier version left, a body, stands in while no session has written a key.
           const bodies = new Map<string, BodyRead>()
           for (const key of await bodyKeysOf($, account.id)) {
             const body = bodyReadFrom(await $.store.get(key))
             if (body !== undefined) bodies.set(key, body)
           }
-          const { before, isOlder } = baselineBody(bodies.size > 0 ? [...bodies.values()] : prior?.src === 'body' ? [bodyOfReading(prior)] : [], usage.startedAt)
+          const before = baselineBody(bodies.size > 0 ? [...bodies.values()] : prior?.src === 'body' ? [bodyOfReading(prior)] : [], usage.startedAt)
+          // The row every session shares goes by the order of the requests: a body whose request began at or before the stored
+          // row's time is older than that row, so it ends no mark, drops no kept row and never overwrites the row. Its body
+          // still has its key below: a completed body is a baseline for the next request whatever completed in between.
+          const isOlder = prior !== undefined && usage.startedAt <= prior.at
           if (!isOlder) {
             // A body whose 5-hour window it cannot read leaves what the last one said.
             if (reading.fiveHour !== undefined || noFiveHour === true) await saveNoFiveHour($, account.id, noFiveHour === true)
@@ -1535,14 +1536,14 @@ async function checkAccount($: Host, account: Account, gate: UsageGate): Promise
             if (five !== undefined && isAfter(five) && endsFiveHourMark(reading.fiveHour, five, before?.fiveHour)) await dropMark($, account.id, five)
             // A body with no Fable row keeps the stored one's, unless the week fell since the last body: the stored read, never the view.
             await saveReading($, account.id, { ...keepFable(reading, prior === undefined ? undefined : { ...prior, sevenDay: before?.sevenDay }, now), by: account.id }, 'body')
-            // This body is a baseline of the next, whichever rows are stored over the reading meanwhile, under a key of its own,
-            // named by its read time and this session, and written once: no key is rewritten, so deleting one can lose no newer
-            // body. One key a body read, at most about 336 a login a week at the 30-minute schedule, and a key over a week old
-            // is a baseline of no window still running: it goes.
-            await $.store.set(`usage-body:${account.id}:${reading.at}:${(await getView($)).sessionMark ?? SELF}`, { ...before, ...bodyOfReading(reading) })
-            for (const [key, body] of bodies) if (body.at < now - BODY_KEEP_MS) await $.store.delete(key)
             hasFreshFable = reading.fable !== undefined
           }
+          // This body is a baseline of the next, whichever rows are stored over the reading meanwhile, under a key of its own,
+          // named by its read time and this session, and written once: no key is rewritten, so deleting one can lose no newer
+          // body. One key a body read, at most about 336 a login a week at the 30-minute schedule, and a key over a week old
+          // is a baseline of no window still running: it goes.
+          await $.store.set(`usage-body:${account.id}:${reading.at}:${(await getView($)).sessionMark ?? SELF}`, { ...before, ...bodyOfReading(reading) })
+          for (const [key, body] of bodies) if (body.at < now - BODY_KEEP_MS) await $.store.delete(key)
         }
       }
     }
