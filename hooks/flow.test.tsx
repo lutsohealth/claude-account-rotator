@@ -18041,7 +18041,8 @@ test('BODY-KEYS: a sign-in as another account deletes every body key of the logi
   )
   const clock = world(on, w, store)
   await start($, clock)
-  expect([...store.keys()].filter(k => k.startsWith('usage-body:1'))).toEqual([`usage-body:1:${w.otherEnv.ACCOUNT_ROTATOR_SESSION}`])
+  // The sign-in's usage is dropped and not read again in the same check: no body key stands.
+  expect([...store.keys()].filter(k => k.startsWith('usage-body:1'))).toEqual([])
 })
 
 test('BODY-KEYS: a login keeps the body keys of its newest 20 sessions, though none is a week old', async ($, on) => {
