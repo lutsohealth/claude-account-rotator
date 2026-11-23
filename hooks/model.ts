@@ -520,7 +520,9 @@ export function readingFromUsage(body: unknown, now: number): Reading | undefine
  */
 export function keepFable(fresh: Reading, stored: Reading | undefined, now: number): Reading {
   const kept = stored?.fable
-  if (fresh.fable !== undefined || kept?.resetsAt === undefined || Date.parse(kept.resetsAt) <= now) return fresh
+  // A week counter that fell inside the stored week's window was reset: the Fable row kept from before it is no longer true.
+  const isReset = fresh.sevenDay !== undefined && stored?.sevenDay !== undefined && isSameWindow(fresh.sevenDay.resetsAt, stored.sevenDay.resetsAt) && stored.sevenDay.pct - fresh.sevenDay.pct >= RESET_FALL_PCT
+  if (isReset || fresh.fable !== undefined || kept?.resetsAt === undefined || Date.parse(kept.resetsAt) <= now) return fresh
   return { ...fresh, fable: kept }
 }
 
@@ -577,14 +579,43 @@ export function withFableMark(r: Reading | undefined, mark: Mark | undefined, no
 /** How long a usage read may lag a Fable stop: a read of the mark's own week this long after it, below 100, outweighs the stop. */
 export const FABLE_MARK_LAG_MS = 30 * 60_000
 
+/** A usage counter only grows inside a window: one that falls this many points between two reads of it was reset (Council Q10). */
+export const RESET_FALL_PCT = 5
+
+/** With no earlier read of a window to compare, a read at or below this many percent reads as reset (Council Q10). */
+export const RESET_LOW_PCT = 5
+
+/** Whether two reset times name one window: within an hour, as a reset moves by seconds between reads. A manual reset keeps the time. */
+const isSameWindow = (a: string | undefined, b: string | undefined): boolean => a !== undefined && b !== undefined && Math.abs(Date.parse(a) - Date.parse(b)) <= SAME_WEEK_MS
+
+/**
+ * Whether a body's window was reset since `before`, the earlier read of that window: it fell RESET_FALL_PCT or more inside
+ * the same window. With no earlier read of this window, a read at or below RESET_LOW_PCT does. A read that lags a stop sits
+ * near it, so it neither falls nor reads low. The reset time is never relied on: a reset by hand leaves it as it was.
+ */
+function hasReset(read: UsageWindow, before: UsageWindow | undefined): boolean {
+  return before !== undefined && isSameWindow(read.resetsAt, before.resetsAt) ? before.pct - read.pct >= RESET_FALL_PCT : read.pct <= RESET_LOW_PCT
+}
+
 /**
  * Whether a usage body read at `readAt` ends a Fable mark: its Fable week is the mark's own (resetting within an hour of
- * the mark's reset), it reads below 100, and the stop is FABLE_MARK_LAG_MS or more behind it. The stop was then
- * another login's, as one that went out before a switch landed.
+ * the mark's reset) and either was reset (`hasReset`, at once), or reads below 100 with the stop FABLE_MARK_LAG_MS or more
+ * behind it, so the stop was another login's, as one that went out before a switch landed. `before`: the earlier read.
  */
-export function endsFableMark(read: UsageWindow | undefined, readAt: number, mark: Mark): boolean {
-  if (read?.resetsAt === undefined || read.pct >= 100 || readAt - mark.at < FABLE_MARK_LAG_MS) return false
-  return Math.abs(Date.parse(read.resetsAt) - Date.parse(mark.resetsAt)) <= SAME_WEEK_MS
+export function endsFableMark(read: UsageWindow | undefined, readAt: number, mark: Mark, before?: UsageWindow): boolean {
+  if (read?.resetsAt === undefined || !isSameWindow(read.resetsAt, mark.resetsAt)) return false
+  if (hasReset(read, before)) return true
+  return read.pct < 100 && readAt - mark.at >= FABLE_MARK_LAG_MS
+}
+
+/** Whether a usage body ends a week mark: its week is the mark's own and was reset since `before`; no lag rule ends it. */
+export function endsWeekMark(read: UsageWindow | undefined, mark: Mark, before?: UsageWindow): boolean {
+  return read !== undefined && isSameWindow(read.resetsAt, mark.resetsAt) && hasReset(read, before)
+}
+
+/** Whether a usage body ends a 5-hour mark: its 5-hour window is the mark's own and was reset since `before`. */
+export function endsFiveHourMark(read: UsageWindow | undefined, mark: Mark, before?: UsageWindow): boolean {
+  return read !== undefined && isSameWindow(read.resetsAt, mark.resetsAt) && hasReset(read, before)
 }
 
 /**

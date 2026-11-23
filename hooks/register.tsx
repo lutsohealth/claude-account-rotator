@@ -38,6 +38,8 @@ import {
   credentialFrom,
   credentialsFile,
   endsFableMark,
+  endsFiveHourMark,
+  endsWeekMark,
   fableMark,
   fableStay,
   fingerprint,
@@ -577,6 +579,26 @@ async function dropFableMark($: Host, id: string, judged: Mark): Promise<void> {
   await setView($, v => {
     const { [id]: _ended, ...fableMarks } = v.fableMarks ?? {}
     return { ...v, fableMarks }
+  })
+}
+
+/** Ends a login's week mark for every session, as dropFableMark ends the Fable mark: only the mark judged ended goes. */
+async function dropWeekMark($: Host, id: string, judged: Mark): Promise<void> {
+  if (!sameValue(markFrom(await $.store.get(`week-mark:${id}`)), judged)) return
+  await $.store.delete(`week-mark:${id}`)
+  await setView($, v => {
+    const { [id]: _ended, ...weekMarks } = v.weekMarks ?? {}
+    return { ...v, weekMarks }
+  })
+}
+
+/** Ends a login's 5-hour mark for every session, as dropFableMark ends the Fable mark: only the mark judged ended goes. */
+async function dropMark($: Host, id: string, judged: Mark): Promise<void> {
+  if (!sameValue(markFrom(await $.store.get(`mark:${id}`)), judged)) return
+  await $.store.delete(`mark:${id}`)
+  await setView($, v => {
+    const { [id]: _ended, ...marks } = v.marks ?? {}
+    return { ...v, marks }
   })
 }
 
@@ -1454,11 +1476,19 @@ async function checkAccount($: Host, account: Account, gate: UsageGate): Promise
           const { noFiveHour, ...reading } = read
           // A body whose 5-hour window it cannot read leaves what the last one said.
           if (reading.fiveHour !== undefined || noFiveHour === true) await saveNoFiveHour($, account.id, noFiveHour === true)
-          // A Fable mark that this body's own week, read long enough after the stop, contradicts ends before the reading is drawn.
+          // The earlier read of each window, as stored (never the view, which carries the marks): what a fall is judged against.
+          const prior = await ownedReading($, account.id)
+          // A mark that this body's own window contradicts ends before the reading is drawn: a counter that fell inside the
+          // window was reset (by hand, which leaves the reset time as it was), and a Fable mark also ends where the week
+          // reads below 100 long enough after the stop.
           const fableMarked = markFrom(await $.store.get(`fable-mark:${account.id}`))
-          if (fableMarked !== undefined && endsFableMark(reading.fable, now, fableMarked)) await dropFableMark($, account.id, fableMarked)
-          // A body with no Fable row keeps the stored one's: the stored read, never the view, which carries the marks.
-          await saveReading($, account.id, { ...keepFable(reading, await ownedReading($, account.id), now), by: account.id }, 'body')
+          if (fableMarked !== undefined && endsFableMark(reading.fable, now, fableMarked, prior?.fable)) await dropFableMark($, account.id, fableMarked)
+          const weekMarked = markFrom(await $.store.get(`week-mark:${account.id}`))
+          if (weekMarked !== undefined && endsWeekMark(reading.sevenDay, weekMarked, prior?.sevenDay)) await dropWeekMark($, account.id, weekMarked)
+          const fiveMarked = markFrom(await $.store.get(`mark:${account.id}`))
+          if (fiveMarked !== undefined && endsFiveHourMark(reading.fiveHour, fiveMarked, prior?.fiveHour)) await dropMark($, account.id, fiveMarked)
+          // A body with no Fable row keeps the stored one's, unless the week fell: the stored read, never the view.
+          await saveReading($, account.id, { ...keepFable(reading, prior, now), by: account.id }, 'body')
           hasFreshFable = reading.fable !== undefined
         }
       }
