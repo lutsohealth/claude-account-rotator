@@ -1330,10 +1330,11 @@ async function bodyKeysOf($: Host, id: string): Promise<string[]> {
 
 /**
  * Drops every session's body of a login, where its reading goes, and the key part A's first version wrote with no session
- * in it, and the records that proofs ended its marks.
+ * in it. The records that proofs ended its marks stay, so an ended mark does not come back on another sign-in: they go with
+ * the marks (`dropAccountKeys`) or once their reset has passed (`pruneMarkEnds`).
  */
 async function dropBodyKeys($: Host, id: string): Promise<void> {
-  for (const key of [`usage-body:${id}`, ...(await bodyKeysOf($, id)), ...(await markEndKeysOf($, id))]) await $.store.delete(key)
+  for (const key of [`usage-body:${id}`, ...(await bodyKeysOf($, id))]) await $.store.delete(key)
 }
 
 /** Drops what the last sign-in's usage left on a login (its reading, its no-five-hour, its schedule), for every session. */
@@ -3796,6 +3797,8 @@ async function dropAccountKeys($: Host, id: string): Promise<void> {
     await $.store.delete(`${key}:${id}`)
   }
   await dropBodyKeys($, id)
+  // The marks went above, so the records that ended them have nothing left to hold ended.
+  for (const key of await markEndKeysOf($, id)) await $.store.delete(key)
 }
 
 /**
