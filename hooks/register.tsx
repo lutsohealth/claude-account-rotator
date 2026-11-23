@@ -1912,7 +1912,8 @@ async function carryOnWhenFree($: Host): Promise<void> {
     throw error
   })
   // A later stop can owe a debt of its own during that write, for a later time: it stands, and this debt, ended by the
-  // clear, is not sent for it. The checks after the marking below hold that, and the marking marks it where the view holds it.
+  // clear, is not sent for it. Where the view still holds this one, the store marks it ended.
+  if (due !== undefined) return isCleared ? undefined : markCarryEnded($, owed)
   if (after.activeId !== view.activeId || shouldLeave(after, now) || isConnectingChrome) {
     // A switch that ended what is owed moved it: nothing stays owed, and a view that still holds it is marked.
     if (dueEndings !== endings) return isCleared ? undefined : markCarryEnded($, owed)
