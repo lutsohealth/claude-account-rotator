@@ -1309,9 +1309,9 @@ function rowView(change: Partial<View> = {}, account: View['accounts'][number] =
   }
 }
 const rowLines = (v: View, timeZone = TALLINN) => rowText(rowOf(v, v.accounts[0] ?? ANDRES, ROW_NOW, timeZone))
-const OPERATOR_LINE_2 = 'Used ▰▰▰▱▱▱▱▱▱▱  31% Fable ▰▰▰▰▱▱▱▱▱▱  38%  resets 2d 3h 14m'
+const OPERATOR_LINE_2 = 'Used ▰▰▰▱▱▱▱▱▱▱  31% Fable used ▰▰▰▰▱▱▱▱▱▱  38%  resets 2d 3h 14m'
 /** A line with no Fable part keeps the Fable part's cells blank, so its "resets" stands where OPERATOR_LINE_2's does (puma-9arph.28). */
-const NO_FABLE_GAP = ' '.repeat(24)
+const NO_FABLE_GAP = ' '.repeat(29)
 const PRO_LINE_2 = `Used ▰▰▰▱▱▱▱▱▱▱  31%${NO_FABLE_GAP}resets 2d 3h 14m`
 const FIVE_HOUR_50 = `5h   ▰▰▰▰▰▱▱▱▱▱  50%${NO_FABLE_GAP}resets 1h 20m`
 
@@ -1325,9 +1325,9 @@ test('the usage line pads each percent to three cells, so Fable and resets stand
     rowLines(rowView({ readings: { '1': { sevenDay: { pct: week, resetsAt: ahead(3, 16, 50) }, fable: { pct: fable, resetsAt: ahead(3, 16, 50) }, noFiveHour: true, at: READ_AT, by: '1' } } }))[1] ?? ''
   const lines = [at(0, 0), at(46, 38), at(100, 100)]
   expect(lines).toEqual([
-    'Used ▱▱▱▱▱▱▱▱▱▱   0% Fable ▱▱▱▱▱▱▱▱▱▱   0%  resets 3d 16h 50m',
-    'Used ▰▰▰▰▰▱▱▱▱▱  46% Fable ▰▰▰▰▱▱▱▱▱▱  38%  resets 3d 16h 50m',
-    'Used ▰▰▰▰▰▰▰▰▰▰ 100% Fable ▰▰▰▰▰▰▰▰▰▰ 100%  resets 3d 16h 50m',
+    'Used ▱▱▱▱▱▱▱▱▱▱   0% Fable used ▱▱▱▱▱▱▱▱▱▱   0%  resets 3d 16h 50m',
+    'Used ▰▰▰▰▰▱▱▱▱▱  46% Fable used ▰▰▰▰▱▱▱▱▱▱  38%  resets 3d 16h 50m',
+    'Used ▰▰▰▰▰▰▰▰▰▰ 100% Fable used ▰▰▰▰▰▰▰▰▰▰ 100%  resets 3d 16h 50m',
   ])
   expect(new Set(lines.map(line => line.indexOf('resets'))).size).toBe(1)
 })
@@ -1341,7 +1341,7 @@ test('a Pro row, a Max row and a 5-hour line start their bars and "resets" at on
     rowView({ readings: { '1': { sevenDay: { pct: 31, resetsAt: ROW_WEEK_END }, fable: { pct: 38, resetsAt: ROW_WEEK_END }, fiveHour: { pct: 50, resetsAt: ahead(0, 1, 20) }, at: READ_AT, by: '1' } }, noFiveHour: { '1': false } }, max),
   )
   const lines = [proLines[1] ?? '', maxLines[1] ?? '', maxLines[2] ?? '']
-  expect(lines.map(line => [line.search(/[▰▱]/), line.indexOf('resets')])).toEqual([[5, 44], [5, 44], [5, 44]])
+  expect(lines.map(line => [line.search(/[▰▱]/), line.indexOf('resets')])).toEqual([[5, 49], [5, 49], [5, 49]])
   // A 5-hour window whose percent is unread draws its dash in the bar column too (RULING 5918).
   const unread = rowLines(
     rowView({ readings: { '1': { sevenDay: { pct: 31, resetsAt: ROW_WEEK_END }, fable: { pct: 38, resetsAt: ROW_WEEK_END }, fiveHour: { resetsAt: ahead(0, 1, 20) } as never, at: READ_AT, by: '1' } }, noFiveHour: { '1': false } }, max),
@@ -1361,7 +1361,7 @@ test('a dash takes the cells of a bar and its percent, so what follows keeps its
   const noFable = { ...v.readings['1'], fable: undefined } as View['readings'][string]
   expect((rowLines({ ...v, readings: { '1': noFable } })[1] ?? '').indexOf('resets')).toBe((rowLines(v)[1] ?? '').indexOf('resets'))
   const passed = rowView({ readings: { '1': { sevenDay: { pct: 31, resetsAt: ahead(0, 0, -1) }, noFiveHour: true, at: READ_AT, by: '1' } } })
-  expect(rowLines(passed)[1]).toBe('Used ▱▱▱▱▱▱▱▱▱▱   0% Fable –')
+  expect(rowLines(passed)[1]).toBe('Used ▱▱▱▱▱▱▱▱▱▱   0% Fable used –')
 })
 
 // The operator's order of 2026-11-14 20:17Z: an account is named by its email (+ org, if multiple orgs available).
@@ -1480,7 +1480,7 @@ test('a login never read draws an empty bar and says so, dim, on line 2', () => 
 test('on Max and Ultra a Fable week no body listed is a dash; on other plans there is no Fable part', () => {
   const v = rowView()
   const noFable = { ...v.readings['1'], fable: undefined } as View['readings'][string]
-  expect(rowLines({ ...v, readings: { '1': noFable } })[1]).toBe('Used ▰▰▰▱▱▱▱▱▱▱  31% Fable –                resets 2d 3h 14m')
+  expect(rowLines({ ...v, readings: { '1': noFable } })[1]).toBe('Used ▰▰▰▱▱▱▱▱▱▱  31% Fable used –                resets 2d 3h 14m')
   const pro = { ...ANDRES, plan: 'pro', tier: undefined }
   expect(rowLines({ ...rowView({}, pro), readings: { '1': noFable }, noFiveHour: {} })).toEqual(['andres@lutsohealth.com · Company · Pro  updated 18:34', PRO_LINE_2])
 })
@@ -1493,15 +1493,15 @@ test('a Fable week that resets at another time than the week says its own reset 
 
 test('a reset under a day drops the days, and under an hour the hours', () => {
   const at = (resetsAt: string) => rowLines(rowView({ readings: { '1': { sevenDay: { pct: 31, resetsAt }, fable: { pct: 38, resetsAt }, noFiveHour: true, at: READ_AT, by: '1' } } }))[1]
-  expect(at(ahead(0, 20, 27))).toBe('Used ▰▰▰▱▱▱▱▱▱▱  31% Fable ▰▰▰▰▱▱▱▱▱▱  38%  resets 20h 27m')
-  expect(at(ahead(0, 0, 27))).toBe('Used ▰▰▰▱▱▱▱▱▱▱  31% Fable ▰▰▰▰▱▱▱▱▱▱  38%  resets 27m')
+  expect(at(ahead(0, 20, 27))).toBe('Used ▰▰▰▱▱▱▱▱▱▱  31% Fable used ▰▰▰▰▱▱▱▱▱▱  38%  resets 20h 27m')
+  expect(at(ahead(0, 0, 27))).toBe('Used ▰▰▰▱▱▱▱▱▱▱  31% Fable used ▰▰▰▰▱▱▱▱▱▱  38%  resets 27m')
 })
 
 test('a week whose reset has passed is 0% used with no reset; a plan that reports no week is a dash', () => {
   const passed = rowView({ readings: { '1': { sevenDay: { pct: 31, resetsAt: ahead(0, 0, -1) }, noFiveHour: true, at: READ_AT, by: '1' } } })
-  expect(rowLines(passed)[1]).toBe('Used ▱▱▱▱▱▱▱▱▱▱   0% Fable –')
+  expect(rowLines(passed)[1]).toBe('Used ▱▱▱▱▱▱▱▱▱▱   0% Fable used –')
   const noWeek = rowView({ readings: { '1': { fable: { pct: 38, resetsAt: ROW_WEEK_END }, noFiveHour: true, at: READ_AT, by: '1' } } })
-  expect(rowLines(noWeek)[1]).toBe('Used –               Fable ▰▰▰▰▱▱▱▱▱▱  38%  Fable resets 2d 3h 14m')
+  expect(rowLines(noWeek)[1]).toBe('Used –               Fable used ▰▰▰▰▱▱▱▱▱▱  38%  Fable resets 2d 3h 14m')
 })
 
 test('a login with a 5-hour window in its counted reading has a third line for it; one with none has two lines', () => {
@@ -1588,7 +1588,7 @@ test('a Pro or a Max failed row holds its buttons on a line of their own too', (
   // puma-9arph.28 item 4: a Max failed row whose usage lists no Fable week draws a dash in the Fable cells, and fits at 82.
   const max = { ...ANDRES, tier: 'default_claude_max_5x' }
   const dash = rowView({ checkErrors: { '1': HTTP_429 }, readings: { '1': { sevenDay: { pct: 31, resetsAt: ROW_WEEK_END }, at: READ_AT, by: '1' } } }, max)
-  expect(fitted(dash, 82)).toEqual({ lines: ['andres@lutsohealth.com · Company · Max  18:39 Failed to update (HTTP 429)', 'Used ▰▰▰▱▱▱▱▱▱▱  31% Fable –                resets 2d 3h 14m', ''], end: 'own' })
+  expect(fitted(dash, 82)).toEqual({ lines: ['andres@lutsohealth.com · Company · Max  18:39 Failed to update (HTTP 429)', 'Used ▰▰▰▱▱▱▱▱▱▱  31% Fable used –                resets 2d 3h 14m', ''], end: 'own' })
 })
 
 test('a line 1 wider than the pane cuts the cause, then the Company, then the email\'s middle, never the state', () => {
@@ -1606,8 +1606,8 @@ test('a login with no reading, no Fable row, a 5-hour window or a sign-in needed
   expect(fitted(noReading, 82)).toEqual({ lines: ['andres@lutsohealth.com · Company · Ultra', 'Used ▱▱▱▱▱▱▱▱▱▱ no reading yet', ''], end: 'own' })
   expect(fitted(noReading, 64)).toEqual({ lines: ['andres@lutsohealth.com · Company · Ultra', 'Used ▱▱▱▱▱▱▱▱▱▱ no reading yet', ''], end: 'own' })
   const noFable = rowView({ readings: { '1': { sevenDay: { pct: 31, resetsAt: ROW_WEEK_END }, noFiveHour: true, at: READ_AT, by: '1' } } })
-  expect(fitted(noFable, 82)).toEqual({ lines: [L1, 'Used ▰▰▰▱▱▱▱▱▱▱  31% Fable –                resets 2d 3h 14m', ''], end: 'own' })
-  expect(fitted(noFable, 64)).toEqual({ lines: [L1, 'Used ▰▰▰▱▱▱▱▱▱▱  31% Fable –                resets 2d 3h 14m', ''], end: 'own' })
+  expect(fitted(noFable, 82)).toEqual({ lines: [L1, 'Used ▰▰▰▱▱▱▱▱▱▱  31% Fable used –                resets 2d 3h 14m', ''], end: 'own' })
+  expect(fitted(noFable, 64)).toEqual({ lines: [L1, 'Used ▰▰▰▱▱▱▱▱▱▱  31% Fable used –                resets 2d 3h 14m', ''], end: 'own' })
   const max = { ...ANDRES, tier: 'default_claude_max_5x' }
   const five = rowView({ readings: { '1': { sevenDay: { pct: 31, resetsAt: ROW_WEEK_END }, fable: { pct: 38, resetsAt: ROW_WEEK_END }, fiveHour: { pct: 50, resetsAt: ahead(0, 1, 20) }, at: READ_AT, by: '1' } }, noFiveHour: { '1': false } }, max)
   const maxL1 = 'andres@lutsohealth.com · Company · Max  updated 18:34'
@@ -1751,7 +1751,7 @@ test('a stored reset read after it passed says passed, not 0m', () => {
 
 test('a stored line read a minute later counts its resets down, and read in UTC says its times in UTC', () => {
   const [line1, line2] = rowsOf(FIXTURE_VIEW, ROWS_FIXTURE.now).find(r => r.id === '1')?.lines ?? []
-  expect(storedLineText(line2 ?? [], ROWS_FIXTURE.now + MINUTE, TALLINN)).toBe('Used ▰▰▰▱▱▱▱▱▱▱  31% Fable ▰▰▰▰▱▱▱▱▱▱  38%  resets 2d 3h 13m · Fable 1d 3h 13m')
+  expect(storedLineText(line2 ?? [], ROWS_FIXTURE.now + MINUTE, TALLINN)).toBe('Used ▰▰▰▱▱▱▱▱▱▱  31% Fable used ▰▰▰▰▱▱▱▱▱▱  38%  resets 2d 3h 13m · Fable 1d 3h 13m')
   expect(storedLineText(line1 ?? [], ROWS_FIXTURE.now, 'UTC')).toBe('andres@lutsohealth.com · Company · Ultra  updated 16:34')
 })
 
@@ -2564,4 +2564,64 @@ test('READ-AGE guard: a Fable week read spent whose stated reset has passed coun
   const v = view({ '1': [100, 50], '2': [0, 0] })
   v.readings['2'] = { fiveHour: { pct: 10, resetsAt: LATER }, sevenDay: { pct: 10, resetsAt: WEEK_END }, fable: { pct: 100, resetsAt: new Date(NOW - MIN).toISOString(), at: NOW - 5 * MIN }, at: NOW - 5 * MIN }
   expect(pickAfterStop(v, v.readings, NOW, 'fable', ['1'], new Set())).toMatchObject({ tier: 'fresh', hasFableRoom: true })
+})
+
+// ---------------------------------------------------------------- puma-9arph.109.7: every bar says what it is and where its number came from
+
+const usageParts = (v: View) => rowOf(v, v.accounts[0] ?? ANDRES, ROW_NOW, TALLINN).lines[1] ?? []
+const barTones = (parts: readonly { text: string; tone?: string }[]) => parts.filter(p => /[▰▱]/.test(p.text)).map(p => p.tone)
+/** Login 1's row view with its read at READ_AT, the week and Fable windows as given, and no 5-hour window. */
+const rowWith = (week: object, fable: object | undefined, change: Partial<View> = {}, at = READ_AT): View =>
+  rowView({ readings: { '1': { sevenDay: { pct: 31, resetsAt: ROW_WEEK_END, ...week }, ...(fable === undefined ? {} : { fable: { pct: 38, resetsAt: ROW_WEEK_END, ...fable } }), noFiveHour: true, at, by: '1' } }, ...change })
+const HOURS = 3600_000
+
+test('PROVENANCE: every bar carries its words: Used, Fable used (a dash too) and 5h', () => {
+  const max = { ...ANDRES, tier: 'default_claude_max_5x' }
+  const v = rowView({ readings: { '1': { sevenDay: { pct: 31, resetsAt: ROW_WEEK_END }, fable: { pct: 38, resetsAt: ROW_WEEK_END }, fiveHour: { pct: 50, resetsAt: ahead(0, 1, 20) }, at: READ_AT, by: '1' } }, noFiveHour: { '1': false } }, max)
+  const [, used = '', five = ''] = rowLines(v)
+  expect([used.startsWith('Used ▰'), used.includes(' Fable used ▰'), five.startsWith('5h   ▰')]).toEqual([true, true, true])
+  expect(rowLines(rowWith({}, undefined))[1]).toContain('Fable used –')
+})
+
+test('PROVENANCE: a spent window is drawn in the warning tone, and one with room in none', () => {
+  const at = (week: number, fable: number) => barTones(usageParts(rowWith({ pct: week }, { pct: fable, at: READ_AT })))
+  expect(at(100, 100), 'both spent').toEqual(['warning', 'warning'])
+  expect(at(31, 95), 'the Fable week is spent at 95').toEqual([undefined, 'warning'])
+  expect(at(99, 94), 'room left on both').toEqual([undefined, undefined])
+  const max = { ...ANDRES, tier: 'default_claude_max_5x' }
+  const five = (pct: number) => barTones(rowOf(rowView({ readings: { '1': { sevenDay: { pct: 31, resetsAt: ROW_WEEK_END }, fiveHour: { pct, resetsAt: ahead(0, 1, 20) }, at: READ_AT, by: '1' } }, noFiveHour: { '1': false } }, max), max, ROW_NOW, TALLINN).lines[2] ?? [])
+  expect([five(90), five(89)], 'the 5-hour window is spent at 90').toEqual([['warning'], [undefined]])
+})
+
+test('PROVENANCE: a read under an hour old adds no line; a read over an hour, a kept Fable row and a stop mark each say what they are', () => {
+  const extra = (v: View) => rowLines(v).slice(2)
+  expect(extra(rowView()), 'a fresh read').toEqual([])
+  expect(extra(rowWith({}, { at: ROW_NOW - 3 * HOURS }, {}, ROW_NOW - 3 * HOURS)), 'both windows read 3 hours ago').toEqual(['Used: read 3h ago · Fable used: read 3h ago'])
+  expect(extra(rowWith({}, { at: ROW_NOW - 5 * HOURS })), 'the week read now, the Fable row kept from 5 hours ago').toEqual(['Fable used: kept from a read 5h ago'])
+  expect(extra(rowWith({}, { at: READ_AT - 10 * 60_000 })), 'kept under an hour: no age').toEqual(['Fable used: kept from an earlier read'])
+  const stopped = (kind: 'fableMarks' | 'weekMarks', age: number) => {
+    const mark = { pct: 100, resetsAt: ROW_WEEK_END, at: ROW_NOW - age }
+    const window = { pct: 100, isStop: true }
+    return rowWith(kind === 'weekMarks' ? window : {}, kind === 'fableMarks' ? window : { at: READ_AT }, { [kind]: { '1': mark } })
+  }
+  expect(extra(stopped('fableMarks', 2 * HOURS))).toEqual(['Fable used: stop mark 2h ago'])
+  expect(extra(stopped('fableMarks', 10 * 60_000)), 'a stop under an hour: no age').toEqual(['Fable used: stop mark'])
+  expect(extra(stopped('weekMarks', 2 * HOURS))).toEqual(['Used: stop mark 2h ago'])
+  const max = { ...ANDRES, tier: 'default_claude_max_5x' }
+  const five = rowView({ readings: { '1': { sevenDay: { pct: 31, resetsAt: ROW_WEEK_END }, fiveHour: { pct: 100, resetsAt: ahead(0, 1, 20), isStop: true }, at: READ_AT, by: '1' } }, noFiveHour: { '1': false }, marks: { '1': { pct: 100, resetsAt: ahead(0, 1, 20), at: ROW_NOW - 10 * 60_000 } } }, max)
+  expect(rowText(rowOf(five, max, ROW_NOW, TALLINN)).slice(3)).toEqual(['5h: stop mark'])
+})
+
+test('PROVENANCE: the stored row carries the week and the Fable week as numbers with their source and read time, at rows version 2', () => {
+  expect(modelExports.ROWS_VERSION).toBe(2)
+  const windows = (v: View) => rowsOf(v, ROW_NOW)[0]?.windows
+  expect(windows(rowView())).toEqual({ week: { pct: 31, source: 'read', readAt: READ_AT }, fable: { pct: 38, source: 'read', readAt: READ_AT } })
+  expect(windows(rowWith({}, { at: ROW_NOW - 5 * HOURS }))).toEqual({ week: { pct: 31, source: 'read', readAt: READ_AT }, fable: { pct: 38, source: 'kept', readAt: ROW_NOW - 5 * HOURS } })
+  const mark = { pct: 100, resetsAt: ROW_WEEK_END, at: ROW_NOW - 2 * HOURS }
+  expect(windows(rowWith({}, { pct: 100, isStop: true }, { fableMarks: { '1': mark } }))).toEqual({
+    week: { pct: 31, source: 'read', readAt: READ_AT },
+    fable: { pct: 100, source: 'stop', readAt: ROW_NOW - 2 * HOURS },
+  })
+  expect(windows(rowWith({}, undefined)), 'no Fable row, none stored').toEqual({ week: { pct: 31, source: 'read', readAt: READ_AT } })
+  expect(windows(rowView({ readings: {} })), 'no reading, no window').toEqual({})
 })

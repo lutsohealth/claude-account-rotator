@@ -6907,7 +6907,7 @@ for (const status of [503, 429, 500]) {
 /** What the pane draws after each `Fable` row's label, in order: one entry per row. */
 async function fableRows($: Engine): Promise<string[]> {
   const texts = (await paneText($)).split('\n')
-  return texts.flatMap((t, i) => (t === ' Fable ' ? [texts[i + 1] ?? ''] : t.trimEnd() === ' Fable –' ? ['–'] : []))
+  return texts.flatMap((t, i) => (t === ' Fable used ' ? [texts[i + 1] ?? ''] : t.trimEnd() === ' Fable used –' ? ['–'] : []))
 }
 
 test('a reading with Fable 66% draws a Fable row under the week with its bar at 66%', async ($, on) => {
@@ -7292,9 +7292,9 @@ async function rowsWorld($: Engine, on: On, isFailing = false): Promise<{ w: Wor
 test('the merge stores each login\'s row lines under rows, stamped with when and the writer\'s version', async ($, on) => {
   const { store, clock } = await rowsWorld($, on)
   const rows = rowsOf(store)
-  expect([rows?.v, typeof rows?.at, rows?.rows?.map(r => r.id)]).toEqual([1, 'number', ['1', '2']])
+  expect([rows?.v, typeof rows?.at, rows?.rows?.map(r => r.id)]).toEqual([2, 'number', ['1', '2']])
   expect(lineOne(store, '1')).toMatch(new RegExp(`^one@example\\.com.*  updated ${localTime(goodReadAt(store, '1'))}$`))
-  expect(rowsText(store, clock.now())?.[0]?.lines[1]).toBe('Used ▰▰▰▱▱▱▱▱▱▱  30% Fable ▰▰▰▰▱▱▱▱▱▱  40%  resets 5d 16h 59m · Fable 4d 16h 59m')
+  expect(rowsText(store, clock.now())?.[0]?.lines[1]).toBe('Used ▰▰▰▱▱▱▱▱▱▱  30% Fable used ▰▰▰▰▱▱▱▱▱▱  40%  resets 5d 16h 59m · Fable 4d 16h 59m')
   expect(clock.now()).toBeLessThan(NOW + 2 * 60_000)
 })
 
@@ -17829,4 +17829,35 @@ test('READ-AGE guard: a login with a live token read 5 minutes ago, Fable row in
   await clock.settle()
   expect(slotValues(w)).toEqual([SLOT2])
   expect(whats(stopLogOf(store, w)).filter(line => line.startsWith('picked '))).toEqual(['picked 2: fresh, read 5 min ago; tried 1'])
+})
+
+// ---------------------------------------------------------------- puma-9arph.109.7: readings that show what they are
+
+test('PROVENANCE: the rows every session stores are at version 2 and carry each login\'s windows with their source and read time', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [20, 30, 40]
+  w.usage['tok-2'] = [10, 30]
+  const store = new Map<string, unknown>(Object.entries(TWO_LOGINS))
+  const clock = world(on, w, store)
+  await start($, clock)
+  await clock.advance(61_000)
+  const read = store.get('usage:1') as { at: number }
+  const rows = store.get('rows') as { v: number; rows: { id: string; windows?: unknown }[] }
+  expect(rows.v).toBe(2)
+  expect(rows.rows.find(r => r.id === '1')?.windows).toEqual({ week: { pct: 30, source: 'read', readAt: read.at }, fable: { pct: 40, source: 'read', readAt: read.at } })
+})
+
+test('PROVENANCE: the pane draws a spent window in the warning colour and one with room in none', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.usage['tok-1'] = [20, 100, 40]
+  const clock = world(on, w, { accounts: [TWO_LOGINS.accounts[0]] })
+  await start($, clock)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  const spent = await pane.find({ text: /^▰{10} 100%$/ })
+  const room = await pane.find({ text: /^▰{4}▱{6}  40%$/ })
+  expect([painted(spent)[0]?.color, painted(room)[0]?.color], 'the spent week is in the warning colour, the Fable week with room in none').toEqual(['warning', undefined])
+  await pane.unmount()
 })
