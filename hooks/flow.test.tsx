@@ -17836,21 +17836,34 @@ test('MARK-END: a proven end is a record naming the mark, and the end records wh
   expect([store.has('mark-end:week:1:100'), store.has('mark-end:week:1:200')]).toEqual([false, true])
 })
 
-test('MARK-END: a sign-in as another account deletes the end records of the login', async ($, on) => {
+test('MARK-END: a sign-in as another account keeps the end records, so an ended mark stays ended and a new mark stands', async ($, on) => {
+  let last: View | undefined
+  on('state.set', async (_$, e, next) => {
+    const { key, value } = e as unknown as { key: string; value: View }
+    if (key === 'view') last = value
+    return next(e)
+  })
   const w = fresh()
   w.keychain['Claude Code-credentials'] = blob('tok-1')
   w.usage['tok-1'] = [20, 30, 40]
+  const ended = { pct: 100, resetsAt: '2026-10-20T03:00:00Z', at: NOW - HOUR }
   const store = new Map<string, unknown>(
     Object.entries({
       ...TWO_LOGINS,
       'holder:1': { token: 'a-token-that-is-not-this-one', who: { email: 'nine@example.com' } },
-      'mark-end:week:1:200': { resetsAt: '2026-10-20T03:00:00Z' },
-      'mark-end:fable:2:200': { resetsAt: '2026-10-20T03:00:00Z' },
+      'week-mark:1': ended,
+      [`mark-end:week:1:${ended.at}`]: { resetsAt: ended.resetsAt },
     }),
   )
   const clock = world(on, w, store)
   await start($, clock)
-  expect([store.has('mark-end:week:1:200'), store.has('mark-end:fable:2:200')], 'another login\'s record stays').toEqual([false, true])
+  expect(store.has(`mark-end:week:1:${ended.at}`), 'the record stays until its reset has passed').toBe(true)
+  expect(last?.weekMarks?.['1'], 'the ended mark does not come back on the new account').toBeUndefined()
+  const fresher = { pct: 100, resetsAt: '2026-10-21T03:00:00Z', at: NOW + 60_000 }
+  store.set('week-mark:1', fresher)
+  await clock.advance(2 * 60_000)
+  await clock.settle()
+  expect(last?.weekMarks?.['1'], 'a new mark stands').toEqual(fresher)
 })
 
 test('MARK-END: removing a login deletes the end records of it', async ($, on) => {
@@ -17860,7 +17873,12 @@ test('MARK-END: removing a login deletes the end records of it', async ($, on) =
   w.usage['tok-1'] = [null, 40]
   w.usage['tok-2'] = [null, 30]
   const store = new Map<string, unknown>(
-    Object.entries({ ...TWO_LOGINS, 'mark-end:five:2:5': { resetsAt: '2026-10-20T03:00:00Z' }, 'mark-end:week:1:5': { resetsAt: '2026-10-20T03:00:00Z' } }),
+    Object.entries({
+      ...TWO_LOGINS,
+      'mark:2': { pct: 100, resetsAt: '2026-10-20T03:00:00Z', at: 5 },
+      'mark-end:five:2:5': { resetsAt: '2026-10-20T03:00:00Z' },
+      'mark-end:week:1:5': { resetsAt: '2026-10-20T03:00:00Z' },
+    }),
   )
   const clock = world(on, w, store)
   await start($, clock)
@@ -17870,7 +17888,7 @@ test('MARK-END: removing a login deletes the end records of it', async ($, on) =
   await pane.redraw()
   await pane.press({ key: 'remove-2' })
   await clock.settle()
-  expect([store.has('mark-end:five:2:5'), store.has('mark-end:week:1:5')]).toEqual([false, true])
+  expect([store.has('mark-end:five:2:5'), store.has('mark:2'), store.has('mark-end:week:1:5')], 'its marks and their end records go, another login\'s record stays').toEqual([false, false, true])
   await pane.unmount()
 })
 
