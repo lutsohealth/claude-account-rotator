@@ -9,7 +9,7 @@ import type {
   SessionRateLimit,
 } from 'claude-code'
 
-import type { Account, CheckError, FiveHourLimit, FooterStyle, Health, Holder, LaunchOn, LaunchPick, Mark, ProvisionalStop, Reading, ReadingSource, RotateTo, RotatorRequest, StopProof, UsageDue, View } from '../types'
+import type { Account, BodyRead, CheckError, FiveHourLimit, FooterStyle, Health, Holder, LaunchOn, LaunchPick, Mark, ProvisionalStop, Reading, ReadingSource, RotateTo, RotatorRequest, StopProof, UsageDue, View } from '../types'
 import {
   CHROME_SERVER,
   CHROME_TOOL,
@@ -65,6 +65,8 @@ import {
   isNoBrowser,
   isPolicyRefusal,
   keepFable,
+  BODY_KEEP_MS,
+  baselineBody,
   bodyOfReading,
   bodyReadFrom,
   isSpent,
@@ -1299,9 +1301,23 @@ function withSignIn(account: Account, who: Identity): Account {
   return { ...rest, ...who }
 }
 
+/**
+ * Every session's last body of a login, each under a key of its own, `usage-body:<id>:<session mark>`: no two sessions
+ * write one key, as a get followed by a set is no atomic write (https://code.claude.com/docs/en/plugins/mods/interface.md).
+ */
+async function bodyKeysOf($: Host, id: string): Promise<string[]> {
+  return (await $.store.keys()).filter(key => key.startsWith(`usage-body:${id}:`))
+}
+
+/** Drops every session's body of a login, where its reading goes. */
+async function dropBodyKeys($: Host, id: string): Promise<void> {
+  for (const key of await bodyKeysOf($, id)) await $.store.delete(key)
+}
+
 /** Drops what the last sign-in's usage left on a login (its reading, its no-five-hour, its schedule), for every session. */
 async function dropSignInUsage($: Host, id: string): Promise<void> {
-  for (const key of [`usage:${id}`, `usage-body:${id}`, `no-five-hour:${id}`, `usage-due:${id}`]) await $.store.delete(key)
+  for (const key of [`usage:${id}`, `no-five-hour:${id}`, `usage-due:${id}`]) await $.store.delete(key)
+  await dropBodyKeys($, id)
   await setView($, v => {
     const { [id]: _reading, ...readings } = v.readings
     const { [id]: _noFive, ...noFiveHour } = v.noFiveHour ?? {}
@@ -1489,10 +1505,15 @@ async function checkAccount($: Host, account: Account, gate: UsageGate): Promise
           }
           // A stored body saved at or after this read began is newer than this body, or came back with it: this body is no
           // earlier read to fall from, ends no mark, drops no kept row and never overwrites that row.
-          // Judged against the last body read, kept under its own key that only this path writes: never a response row stored
-          // since. A row an earlier version left, a body, stands in until the key is first written.
-          const before = bodyReadFrom(await $.store.get(`usage-body:${account.id}`)) ?? (prior?.src === 'body' ? bodyOfReading(prior) : undefined)
-          const isOlder = before !== undefined && before.at >= usage.startedAt
+          // Judged against the newest body that completed before this request began, across the keys of every session (each
+          // writes only its own): never a response row stored since. A row an earlier version left, a body, stands in while no
+          // session has written a key.
+          const bodies = new Map<string, BodyRead>()
+          for (const key of await bodyKeysOf($, account.id)) {
+            const body = bodyReadFrom(await $.store.get(key))
+            if (body !== undefined) bodies.set(key, body)
+          }
+          const { before, isOlder } = baselineBody(bodies.size > 0 ? [...bodies.values()] : prior?.src === 'body' ? [bodyOfReading(prior)] : [], usage.startedAt)
           if (!isOlder) {
             // A body whose 5-hour window it cannot read leaves what the last one said.
             if (reading.fiveHour !== undefined || noFiveHour === true) await saveNoFiveHour($, account.id, noFiveHour === true)
@@ -1507,8 +1528,11 @@ async function checkAccount($: Host, account: Account, gate: UsageGate): Promise
             if (five !== undefined && isAfter(five) && endsFiveHourMark(reading.fiveHour, five, before?.fiveHour)) await dropMark($, account.id, five)
             // A body with no Fable row keeps the stored one's, unless the week fell since the last body: the stored read, never the view.
             await saveReading($, account.id, { ...keepFable(reading, prior === undefined ? undefined : { ...prior, sevenDay: before?.sevenDay }, now), by: account.id }, 'body')
-            // This body is the baseline of the next, whichever rows are stored over the reading meanwhile.
-            await $.store.set(`usage-body:${account.id}`, { ...before, ...bodyOfReading(reading) })
+            // This body is a baseline of the next, whichever rows are stored over the reading meanwhile, under this session's
+            // own key. A key over a week old, of a session gone, is a baseline of no window still running: it goes.
+            const ownKey = `usage-body:${account.id}:${(await getView($)).sessionMark ?? SELF}`
+            await $.store.set(ownKey, { ...before, ...bodyOfReading(reading) })
+            for (const [key, body] of bodies) if (key !== ownKey && body.at < now - BODY_KEEP_MS) await $.store.delete(key)
             hasFreshFable = reading.fable !== undefined
           }
         }
@@ -3723,9 +3747,10 @@ async function adoptSlot($: Host, slot: string): Promise<{ ok: boolean; message:
 
 /** Every store key of one account's own, each dropped when an account goes and before a row takes its id. */
 async function dropAccountKeys($: Host, id: string): Promise<void> {
-  for (const key of ['reading', 'usage', 'usage-body', 'mark', 'no-five-hour', 'week-mark', 'fable-mark', 'check-error', 'health', 'holder', 'usage-due']) {
+  for (const key of ['reading', 'usage', 'mark', 'no-five-hour', 'week-mark', 'fable-mark', 'check-error', 'health', 'holder', 'usage-due']) {
     await $.store.delete(`${key}:${id}`)
   }
+  await dropBodyKeys($, id)
 }
 
 /**

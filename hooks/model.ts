@@ -590,7 +590,18 @@ export function bodyReadFrom(value: unknown): BodyRead | undefined {
   return { at: v.at, ...(fiveHour ? { fiveHour } : {}), ...(sevenDay ? { sevenDay } : {}), ...(fable ? { fable } : {}) }
 }
 
-/** The body a body row is: its time and windows, for `usage-body:<id>` and, where that key is not yet written, for the baseline. */
+/**
+ * The body a usage request that began at `startedAt` is judged against, among the bodies the sessions keep, each under a key
+ * of its own (`usage-body:<id>:<session mark>`: a `set` changes only its own key, and the store has no atomic read and write
+ * of one key): the newest that completed before the request began, whichever session wrote it. `isOlder`: a body completed
+ * at or after the request began, so the request is no later read to fall from.
+ */
+export function baselineBody(bodies: readonly BodyRead[], startedAt: number): { before?: BodyRead; isOlder: boolean } {
+  const before = bodies.filter(b => b.at < startedAt).reduce<BodyRead | undefined>((newest, b) => (newest === undefined || b.at > newest.at ? b : newest), undefined)
+  return { ...(before === undefined ? {} : { before }), isOlder: bodies.some(b => b.at >= startedAt) }
+}
+
+/** The body a body row is: its time and windows, for a session's `usage-body:<id>:<mark>` and, where none is written, for the baseline. */
 export function bodyOfReading(r: Reading): BodyRead {
   return { at: r.at, ...(r.fiveHour ? { fiveHour: r.fiveHour } : {}), ...(r.sevenDay ? { sevenDay: r.sevenDay } : {}), ...(r.fable ? { fable: r.fable } : {}) }
 }
@@ -673,6 +684,9 @@ export function markFrom(value: unknown): Mark | undefined {
 /** How long a week, the Fable week among them, runs: a mark with no reset time of its own stands this long. */
 export const WEEK_MS = 7 * 24 * 3600_000
 export const FABLE_WEEK_MS = WEEK_MS
+
+/** How long a session's body key is kept: the longest window a body can fall inside is a week, so an older body is no baseline. */
+export const BODY_KEEP_MS = WEEK_MS
 
 /**
  * The mark a Fable stop leaves on a login: its Fable week spent, until the
