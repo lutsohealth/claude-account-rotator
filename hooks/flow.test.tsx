@@ -17431,7 +17431,7 @@ test('SPENT-OLD-GATE: a body 30 s old that the minute gate keeps from being read
  * The session runs on login 3, whose last body read `first` percent of every window, with a mark standing 10 minutes old on
  * `kind`. A response then stores `response` percent over that row; the next body, due in ten minutes, reads `live`.
  */
-/** What the body path keeps of a body read, under `usage-body:<id>`: its time and its windows. */
+/** What the body path keeps of a body read, under its session's own key `usage-body:<id>:<session mark>`: its time and its windows. */
 const bodyOfThree = (pct: number, at: number) => ({ at, fiveHour: { pct, resetsAt: FIVE_RESET_3 }, sevenDay: { pct, resetsAt: WEEK_RESET_3 }, fable: { pct, resetsAt: FABLE_RESET } })
 
 async function markedOnThree($: Engine, on: On, kind: 'week' | 'five', first: number, live: number) {
@@ -17451,7 +17451,7 @@ async function markedOnThree($: Engine, on: On, kind: 'week' | 'five', first: nu
       ...THREE_LOGINS,
       ...mark,
       'usage:3': bodyRowOfThree(first, NOW - 15 * 60_000),
-      'usage-body:3': bodyOfThree(first, NOW - 15 * 60_000),
+      'usage-body:3:session-other': bodyOfThree(first, NOW - 15 * 60_000),
       'usage-due:3': { next: NOW + 10 * 60_000, fails: 0, at: NOW - 15 * 60_000, v: 1 },
     }),
   )
@@ -17492,7 +17492,7 @@ for (const kind of ['week', 'five'] as const) {
     expect(held.isPaused, 'the response save waits after reading the row').toBe(true)
     // Another session's body 94 is saved meanwhile, as the body path saves it: the row and its own baseline key.
     store.set('usage:3', bodyRowOfThree(94, clock.now()))
-    store.set('usage-body:3', bodyOfThree(94, clock.now()))
+    store.set('usage-body:3:session-y', bodyOfThree(94, clock.now()))
     held.open()
     await responding
     await clock.settle()
@@ -17593,4 +17593,159 @@ test('GREEN-TICK-MOVE: after a model stop, a person\'s new turn and then a freed
   await tickUntil(clock, AT_1PM_Z + 30 * 60_000)
   expect(slotValues(w), 'the freed login is not moved to by a tick').toEqual([])
   expect(w.submitted, 'the carry-on is not sent over the person\'s own work').toEqual([])
+})
+
+// ---------------------------------------------------------------- PR A follow-ups: the two BLOCKs of Codex's last round on #161
+// https://code.claude.com/docs/en/plugins/mods/interface.md: "A `get` followed by a `set` isn't atomic": no two sessions write one key.
+
+/**
+ * Login 3's body, read by this session, answers `live` where `first` was the last body's percent (another session's key),
+ * and waits after it read its baseline, for a test that saves another session's newer body then. A mark stands 10 minutes old.
+ */
+async function heldBody($: Engine, on: On, kind: 'week' | 'five', first: number, live: number) {
+  const { w, store, clock, key } = await markedOnThree($, on, kind, first, live)
+  const held = { isPaused: false, open: () => {} }
+  const gate = new Promise<void>(resolve => {
+    held.open = resolve
+  })
+  const written: string[] = []
+  w.onStoreSet = storeKey => {
+    if (storeKey.startsWith('usage-body:3')) written.push(storeKey)
+  }
+  w.afterStoreGet = async storeKey => {
+    if (held.isPaused || !storeKey.startsWith('usage-body:3')) return
+    held.isPaused = true
+    await gate
+  }
+  for (let waited = 0; waited < 12 * 60_000 && !held.isPaused; waited += 1_000) await clock.advance(1_000)
+  expect(held.isPaused, 'the body of login 3 waits after reading its baseline').toBe(true)
+  await clock.advance(1_000)
+  return { w, store, clock, key, written, release: () => { w.afterStoreGet = undefined; held.open() } }
+}
+
+for (const kind of ['week', 'five'] as const) {
+  test(`BODY-WRITE-ORDER: a body (96) that waits after reading its baseline (98) while another session saves a newer one (94) leaves 94 the baseline of the next body (91): the ${kind} mark stands`, async ($, on) => {
+    const { w, store, clock, key, release } = await heldBody($, on, kind, 98, 96)
+    store.set('usage-body:3:session-y', bodyOfThree(94, clock.now()))
+    store.set('usage:3', bodyRowOfThree(94, clock.now()))
+    release()
+    await clock.settle()
+    const heldAt = (store.get('usage:3') as { at: number }).at
+    w.usage['tok-3'] = [91, 91, 91]
+    // No response since the held body: the schedule reads login 3 again 30 minutes after it.
+    for (let waited = 0; waited < 35 * 60_000; waited += 20_000) await clock.advance(20_000)
+    await clock.settle()
+    expect((store.get('usage:3') as { at: number; sevenDay?: { pct: number } }).sevenDay?.pct, 'the next body, 91, is stored').toBe(91)
+    expect((store.get('usage:3') as { at: number }).at).toBeGreaterThan(heldAt)
+    expect(store.get(key), 'body to body is 94 to 91: no reset').toBeDefined()
+  })
+
+  test(`BODY-WRITE-ORDER class: the ${kind} body path writes no key but its own session's, whatever the order of the bodies`, async ($, on) => {
+    const { w, store, clock, written, release } = await heldBody($, on, kind, 98, 96)
+    store.set('usage-body:3:session-y', bodyOfThree(94, clock.now()))
+    release()
+    await clock.settle()
+    expect(written.length, 'the held body wrote its baseline').toBeGreaterThan(0)
+    expect([...new Set(written)]).toEqual([`usage-body:3:${w.otherEnv.ACCOUNT_ROTATOR_SESSION}`])
+  })
+}
+
+for (const kind of ['week', 'five'] as const) {
+  test(`guard: of two other sessions' bodies the newest is the baseline, so a fall from it ends the ${kind} mark (100 at -15 min, 50 at -3 h, then 0)`, async ($, on) => {
+    const { w, store, clock, key } = await markedOnThree($, on, kind, 100, 0)
+    // Before the next body, due in nine minutes.
+    store.set('usage-body:3:session-old', bodyOfThree(50, NOW - 3 * HOUR))
+    for (let waited = 0; waited < 12 * 60_000; waited += 20_000) await clock.advance(20_000)
+    await clock.settle()
+    expect((store.get('usage:3') as { src?: string }).src, 'the next body is stored').toBe('body')
+    expect(store.get(key), 'the mark ended: 100 to 0').toBeUndefined()
+    void w
+  })
+}
+
+test('BODY-KEYS: a body check deletes the body keys of a login that are over a week old and keeps the newer ones', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.usage['tok-1'] = [20, 30, 21]
+  const store = new Map<string, unknown>(
+    Object.entries({
+      ...TWO_LOGINS,
+      'usage-body:1:session-old': { at: NOW - 8 * DAY, sevenDay: { pct: 5, resetsAt: '2026-10-05T03:00:00Z' } },
+      'usage-body:1:session-recent': { at: NOW - HOUR, sevenDay: { pct: 5, resetsAt: WEEK_RESET } },
+    }),
+  )
+  const clock = world(on, w, store)
+  await start($, clock)
+  const keys = [...store.keys()].filter(k => k.startsWith('usage-body:1:')).sort()
+  expect(keys).toEqual(['usage-body:1:session-recent', `usage-body:1:${w.otherEnv.ACCOUNT_ROTATOR_SESSION}`].sort())
+})
+
+test('BODY-KEYS: removing a login deletes every session\'s body key of it', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [null, 40]
+  w.usage['tok-2'] = [null, 30]
+  const store = new Map<string, unknown>(
+    Object.entries({ ...TWO_LOGINS, 'usage-body:2:session-a': { at: NOW - HOUR }, 'usage-body:2:session-b': { at: NOW - HOUR }, 'usage-body:1:session-a': { at: NOW - HOUR } }),
+  )
+  const clock = world(on, w, store)
+  await start($, clock)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  await pane.press({ key: 'ask-remove-2' })
+  await clock.settle()
+  await pane.redraw()
+  await pane.press({ key: 'remove-2' })
+  await clock.settle()
+  expect([...store.keys()].filter(k => k.startsWith('usage-body:2'))).toEqual([])
+  expect(store.has('usage-body:1:session-a'), 'another login\'s key stays').toBe(true)
+  await pane.unmount()
+})
+
+/**
+ * A Fable stop's twin: login 1's Opus limit with login 2 spent owes a carry-on dated 13:00Z. A tick at that time begins to
+ * clear it, and its write of the view waits, while a later Opus stop owes one for 15:00Z.
+ */
+test('MODEL-DEBT-CLEAR: a tick clearing the model debt it read sends nothing when a later model stop owes a later debt during the clear', async ($, on) => {
+  // modelStopWithTwoSpent's world, with a view write that can wait: a hook is registered before the first call on `$`.
+  const w = fresh()
+  const { clock, store } = await loggedWorld(on, w)
+  w.usage['tok-1'] = [20, 30, 21]
+  // Login 2 stays spent past the later stop, so that stop finds no login to move to and owes a debt of its own.
+  w.usage['tok-2'] = [100, 30, 21]
+  w.fiveHourResets = { 'tok-2': '2026-10-12T17:00:00Z' }
+  let last: View | undefined
+  const held = { isPaused: false, open: () => {} }
+  const gate = new Promise<void>(resolve => {
+    held.open = resolve
+  })
+  on('state.set', async (_$, e, next) => {
+    const { key, value } = e as unknown as { key: string; value: View }
+    if (key !== 'view') return next(e)
+    last = value
+    if (!held.isPaused && value.carryDue === undefined && clock.now() >= AT_1PM_Z) {
+      held.isPaused = true
+      await gate
+    }
+    return next(e)
+  })
+  const view = () => last
+  await start($, clock)
+  await $.classic.StopFailure(OPUS_AT_4PM)
+  await clock.settle()
+  await tickUntil(clock, AT_1PM_Z - 3 * 60_000)
+  for (let waited = 0; waited < 20 * 60_000 && !held.isPaused; waited += 1_000) await clock.advance(1_000)
+  expect(held.isPaused, 'the tick at the debt\'s date waits while it clears the debt').toBe(true)
+  await $.classic.StopFailure(OPUS_AT_6PM)
+  await clock.settle()
+  held.open()
+  await clock.settle()
+  // Past the settle a carry-on takes before it is submitted.
+  await clock.advance(60_000)
+  await clock.settle()
+  expect(whats(stopLogOf(store, w)).filter(line => line.startsWith('moved to')), 'no login to move to').toEqual([])
+  expect(w.submitted, 'the debt the tick read is not sent: a later one stands').toEqual([])
+  expect(view()?.carryDue, 'the later debt stands').toMatchObject({ at: Date.parse('2026-10-12T15:00:00Z'), from: '1' })
+  await tickUntil(clock, Date.parse('2026-10-12T15:00:00Z') + 10 * 60_000)
+  expect(w.submitted, 'the later debt goes at its own date').toHaveLength(1)
 })
