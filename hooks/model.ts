@@ -1,4 +1,4 @@
-import type { Account, CheckError, Fill, FiveHourLimit, FooterStyle, Glyphs, Health, Highlight, LaunchOn, LaunchPick, Mark, PlanTier, Reading, RotateTo, RotatorRequest, Row, RowPart, StopProof, StoredRows, StoredRun, UsageDue, UsageWindow, View } from '../types'
+import type { Account, BodyRead, CheckError, Fill, FiveHourLimit, FooterStyle, Glyphs, Health, Highlight, LaunchOn, LaunchPick, Mark, PlanTier, Reading, RotateTo, RotatorRequest, Row, RowPart, StopProof, StoredRows, StoredRun, UsageDue, UsageWindow, View } from '../types'
 
 /** Leave a login once its 5-hour window is this full (percent). */
 export const LEAVE_FIVE_HOUR = 90
@@ -315,13 +315,15 @@ export function pickAfterStop(
     if (isFresh) return hasRoom(r) ? 'fresh' : undefined
     return hasRoom(r) ? 'stale' : 'spent-old'
   }
+  const isLiveRoom = (a: Account): boolean => live.has(a.id) && counts[a.id] !== undefined && hasRoom(counts[a.id] as Reading)
   const open = view.accounts.filter(a => a.id !== view.activeId && !tried.includes(a.id) && !untaken.has(a.id) && view.health[a.id]?.kind === 'ok')
   for (const tier of STOP_TIERS) {
     const ready = open.filter(a => tierOf(a) === tier)
     if (ready.length === 0) continue
     const account =
       tier === 'spent-old'
-        ? [...ready].sort((a, b) => Math.sign(freesAt(view, a.id, counts[a.id], now, need) - freesAt(view, b.id, counts[b.id], now, need)) || 0)[0]
+        ? // A login read live in this stop that shows room goes before every blind try, whatever its mark's reset: then by the reset that frees first.
+          [...ready].sort((a, b) => Number(isLiveRoom(b)) - Number(isLiveRoom(a)) || Math.sign(freesAt(view, a.id, counts[a.id], now, need) - freesAt(view, b.id, counts[b.id], now, need)) || 0)[0]
         : (isFable ? firstByRotateTo(view, ready.filter(a => counts[a.id]?.fable !== undefined && !isFableSpent(counts[a.id], now)), counts, now, need) : undefined) ??
           firstByRotateTo(view, ready, counts, now, need)
     if (account === undefined) continue
@@ -578,6 +580,13 @@ export function withFableMark(r: Reading | undefined, mark: Mark | undefined, no
 
 /** How long a usage read may lag a Fable stop: a read of the mark's own week this long after it, below 100, outweighs the stop. */
 export const FABLE_MARK_LAG_MS = 30 * 60_000
+
+/** The last usage body read of a stored row: the row itself where it is one, else the one a response row carries over. */
+export function lastBody(r: Reading | undefined): BodyRead | undefined {
+  if (r === undefined) return undefined
+  if (r.src === 'body') return { at: r.at, ...(r.fiveHour ? { fiveHour: r.fiveHour } : {}), ...(r.sevenDay ? { sevenDay: r.sevenDay } : {}), ...(r.fable ? { fable: r.fable } : {}) }
+  return r.body
+}
 
 /** A usage counter only grows inside a window: one that falls this many points between two reads of it was reset (Council Q10). */
 export const RESET_FALL_PCT = 5

@@ -65,6 +65,7 @@ import {
   isNoBrowser,
   isPolicyRefusal,
   keepFable,
+  lastBody,
   isSpent,
   isUnread,
   keychainItem,
@@ -612,7 +613,8 @@ async function saveReading($: Host, id: string, read: Reading, src: ReadingSourc
   const legacy = legacyMark(await legacyReading($, id), now)
   if (legacy !== undefined) await keepLegacyMark($, id, legacy)
   await $.store.set(`usage:${id}`, { ...read, v: WRITER_VERSION, src })
-  await setView($, v => ({ ...v, readings: { ...v.readings, [id]: viewed(read, besideOf(v, id), v.fiveHourLimit, now) } }))
+  const { body: _earlierBody, ...shown } = read
+  await setView($, v => ({ ...v, readings: { ...v.readings, [id]: viewed(shown, besideOf(v, id), v.fiveHourLimit, now) } }))
 }
 
 /** Moves an older version's mark to the mark's own key, unless the mark there already stands longer. */
@@ -1486,7 +1488,9 @@ async function checkAccount($: Host, account: Account, gate: UsageGate): Promise
           }
           // A stored body saved at or after this read began is newer than this body, or came back with it: this body is no
           // earlier read to fall from, ends no mark, drops no kept row and never overwrites that row.
-          const isOlder = prior?.src === 'body' && prior.at >= usage.startedAt
+          // Judged against the last body read, never a response row stored since (`lastBody`).
+          const before = lastBody(prior)
+          const isOlder = before !== undefined && before.at >= usage.startedAt
           if (!isOlder) {
             // A body whose 5-hour window it cannot read leaves what the last one said.
             if (reading.fiveHour !== undefined || noFiveHour === true) await saveNoFiveHour($, account.id, noFiveHour === true)
@@ -1496,11 +1500,11 @@ async function checkAccount($: Host, account: Account, gate: UsageGate): Promise
             // long enough after the stop.
             const isAfter = (mark: Mark) => usage.startedAt >= mark.at
             const { fable, week, five } = marks
-            if (fable !== undefined && isAfter(fable) && endsFableMark(reading.fable, now, fable, prior?.fable)) await dropFableMark($, account.id, fable)
-            if (week !== undefined && isAfter(week) && endsWeekMark(reading.sevenDay, week, prior?.sevenDay)) await dropWeekMark($, account.id, week)
-            if (five !== undefined && isAfter(five) && endsFiveHourMark(reading.fiveHour, five, prior?.fiveHour)) await dropMark($, account.id, five)
-            // A body with no Fable row keeps the stored one's, unless the week fell: the stored read, never the view.
-            await saveReading($, account.id, { ...keepFable(reading, prior, now), by: account.id }, 'body')
+            if (fable !== undefined && isAfter(fable) && endsFableMark(reading.fable, now, fable, before?.fable)) await dropFableMark($, account.id, fable)
+            if (week !== undefined && isAfter(week) && endsWeekMark(reading.sevenDay, week, before?.sevenDay)) await dropWeekMark($, account.id, week)
+            if (five !== undefined && isAfter(five) && endsFiveHourMark(reading.fiveHour, five, before?.fiveHour)) await dropMark($, account.id, five)
+            // A body with no Fable row keeps the stored one's, unless the week fell since the last body: the stored read, never the view.
+            await saveReading($, account.id, { ...keepFable(reading, prior === undefined ? undefined : { ...prior, sevenDay: before?.sevenDay }, now), by: account.id }, 'body')
             hasFreshFable = reading.fable !== undefined
           }
         }
@@ -2287,9 +2291,11 @@ async function onMeasure($: Host, limits: readonly SessionRateLimit[]): Promise<
   // A response that reports a 5-hour window shows the account has one, whatever the last usage check said: recorded once,
   // in a form the 5h limit does not filter.
   if (reading.fiveHour !== undefined && view.noFiveHour?.[view.activeId] !== false) await saveNoFiveHour($, view.activeId, false)
-  // A response never lists the Fable week: the one the last check stored stays (the view's carries the marks).
-  const fable = (await ownedReading($, view.activeId))?.fable
-  await saveReading($, view.activeId, { ...reading, ...(fable ? { fable } : {}), by: view.activeId }, 'response')
+  // A response never lists the Fable week: the one the last check stored stays (the view's carries the marks). So does
+  // the last body read of each window, which the next body is compared with, never this response.
+  const prior = await ownedReading($, view.activeId)
+  const body = lastBody(prior)
+  await saveReading($, view.activeId, { ...reading, ...(prior?.fable ? { fable: prior.fable } : {}), ...(body ? { body } : {}), by: view.activeId }, 'response')
   await maybeRotate($)
 }
 

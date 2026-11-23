@@ -9,7 +9,13 @@ export type UsageWindow = { pct: number; resetsAt?: string; isStop?: true }
  * reading carries it from `View.noFiveHour`; a stored one does not. `by` is the login whose sign-in produced the
  * read; a stored reading without it, or naming another login, is no login's and is not read back.
  */
-export type Reading = { fiveHour?: UsageWindow; sevenDay?: UsageWindow; fable?: UsageWindow; noFiveHour?: true; at: number; by?: string; v?: number; src?: ReadingSource }
+export type Reading = { fiveHour?: UsageWindow; sevenDay?: UsageWindow; fable?: UsageWindow; noFiveHour?: true; at: number; by?: string; v?: number; src?: ReadingSource; body?: BodyRead }
+
+/**
+ * The last usage body read of each window, when a response row has since been stored over the body's own: counters are
+ * compared body to body, never against a response, which a stop or another session may have saved between two bodies.
+ */
+export type BodyRead = { at: number; fiveHour?: UsageWindow; sevenDay?: UsageWindow; fable?: UsageWindow }
 
 /**
  * Where a stored reading came from: a usage body (`body`), a response's rate limits (`response`), or a stop that
