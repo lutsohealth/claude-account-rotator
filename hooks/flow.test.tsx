@@ -96,6 +96,8 @@ type World = {
   onStoreSet?: (key: string, value: unknown) => void
   /** Runs after each write of a shared store: another session's write that lands next. */
   afterStoreSet?: (key: string) => void
+  /** Awaited once a read of a shared store has its value, before it answers: a read that comes back late. */
+  afterStoreGet?: (key: string) => Promise<void>
   /** The slot of each `claude auth status` the mod ran. */
   statusAsked?: string[]
   /** Runs inside a `claude auth status`: what another session writes while this one waits on it. */
@@ -236,7 +238,9 @@ const ran = (exitCode: number, stdout: string): ProcessRunResult => ({
 function sharedStore(on: On, entries: Map<string, unknown>, w: World): void {
   on('store.get', (_$, e) => {
     const isRefused = (e.key === 'store-id' && w.storeIdFails === 'read') || (w.storeReadFails !== undefined && e.key.startsWith(w.storeReadFails))
-    return isRefused ? { deny: 'store: refused' } : { value: entries.get(e.key) }
+    if (isRefused) return { deny: 'store: refused' }
+    const value = entries.get(e.key)
+    return w.afterStoreGet === undefined ? { value } : w.afterStoreGet(e.key).then(() => ({ value }))
   })
   on('store.set', (_$, e) => {
     if (e.key === 'store-id' && w.storeIdFails !== undefined) return { deny: 'store: refused' }
@@ -15048,6 +15052,27 @@ test('91-E: a carry-on turned away behind a queued submit is not sent where a st
   expect([r.w.submitted.length, r.last()?.carryDue !== undefined], 'nothing sent at the drop, the carry-on owed').toEqual([1, true])
 })
 
+test('91-E: a carry-on turned away behind a queued submit is not sent where the tried list itself leaves no login (puma-9arph.91)', async ($, on) => {
+  const r = await turnedAwayOnThree($, on)
+  r.w.usage['tok-3'] = [100, 41]
+  // A wordless stop on a login whose switch no response proved makes it tried only at its second: the run of stops that
+  // follows (3, then 2, then 3 again) leaves login 1, 2 and 3 all tried, so no login is left with every login healthy.
+  for (let i = 0; i < 3; i += 1) {
+    await r.clock.advance(36_000)
+    await $.classic.StopFailure(PLAIN)
+    await r.clock.settle()
+  }
+  const log = whats(stopLogOf(r.store, r.w))
+  expect(log, 'the tried list alone ends the stop').toContain('stayed: no untried login (tried 1, 2, 3)')
+  const isOwed = log.some(what => what.startsWith('no login left'))
+  r.settle()
+  await r.clock.settle()
+  await r.clock.advance(60_000)
+  await r.clock.settle()
+  expect([r.last()?.activeId, r.isTurnedAway, isOwed], 'turned away on 3, then no login left').toEqual(['3', true, true])
+  expect([r.w.submitted.length, r.last()?.carryDue !== undefined], 'nothing sent at the drop, the carry-on owed').toEqual([1, true])
+})
+
 /**
  * puma-9arph.91: the world above, then a Connect trial on login 3, which moves nothing and pairs no browser, its note of
  * what Chrome answered held, so the visit is open when the first submit is dropped. `end` is how that note ends.
@@ -16499,7 +16524,7 @@ const NOT_LANDED = "stop names login 2's reset, not login 1's: the move to 1 has
 const slotValues = (w: World) => w.envSets.map(e => e.value)
 
 /** Login 1 has Fable room, login 2's Fable week is spent; the session starts on login `on`, with no switch pending. */
-async function fableOnTwo($: Engine, on: On, startsOn: '1' | '2', beforeStart?: () => void): Promise<{ w: World; store: Map<string, unknown>; clock: MockClock }> {
+async function fableOnTwo($: Engine, on: On, startsOn: '1' | '2', beforeStart?: (w: World) => void): Promise<{ w: World; store: Map<string, unknown>; clock: MockClock }> {
   const w = fresh()
   w.keychain['Claude Code-credentials'] = blob('tok-1')
   w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
@@ -16509,7 +16534,7 @@ async function fableOnTwo($: Engine, on: On, startsOn: '1' | '2', beforeStart?: 
   if (startsOn === '2') w.env.CLAUDE_SECURESTORAGE_CONFIG_DIR = SLOT2
   const store = new Map<string, unknown>(Object.entries(TWO_LOGINS))
   const clock = world(on, w, store)
-  beforeStart?.()
+  beforeStart?.(w)
   await start($, clock)
   return { w, store, clock }
 }
@@ -16925,4 +16950,102 @@ test('PROVISIONAL-LOST: a mark a stop left on a login moved to unproven, then mo
   await clock.settle()
   expect(whats(stopLogOf(store, w))).toContain("stop names login 1's reset, not login 3's: the move to 3 has not landed")
   expect(store.get('mark:2'), "login 2 never received a request: its mark is given back").toBeUndefined()
+})
+
+// Codex round 5: the class "a stop reads, awaits, then writes or moves". The check goes last, and a write or a move follows it
+// with no await between.
+/** The first read of store key `read` after a write of `after` answers late: a stop paused inside its own read of the store. */
+function gateStoreRead(w: World, read: string, after: string): { arm: () => void; isPaused: () => boolean; release: () => void } {
+  let state: 'idle' | 'armed' | 'written' | 'paused' | 'fired' = 'idle'
+  let open: () => void = () => undefined
+  const gate = new Promise<void>(resolve => {
+    open = resolve
+  })
+  w.onStoreSet = key => {
+    if (state === 'armed' && key === after) state = 'written'
+  }
+  w.afterStoreGet = async key => {
+    if (state !== 'written' || key !== read) return
+    state = 'paused'
+    await gate
+    state = 'fired'
+  }
+  return { arm: () => void (state = 'armed'), isPaused: () => state === 'paused', release: open }
+}
+
+/** The session starts on login `startsOn`; the stop's own forced read of it is saved, and the stop is held at its first read of `read` after the write of `after`. */
+async function stopHeldOnStoreRead($: Engine, on: On, startsOn: '1' | '2', stop: typeof STOP_NAMING_1, read: string, after: string) {
+  const held: { gate?: ReturnType<typeof gateStoreRead> } = {}
+  const { w, store, clock } = await fableOnTwo($, on, startsOn, w => void (held.gate = gateStoreRead(w, read, after)))
+  const gate = held.gate
+  if (gate === undefined) throw new Error('the gate was not registered')
+  await clock.advance(USAGE_FORCE_AFTER_MS + 1000)
+  gate.arm()
+  const stopping = $.classic.StopFailure(stop)
+  await clock.settle()
+  expect(gate.isPaused(), `the stop waits on its read of ${read}`).toBe(true)
+  return { w, store, clock, gate, stopping }
+}
+
+test('STALE-MARK: a main turn that starts while the stop reads the stored reading before its mark leaves no mark and no move', async ($, on) => {
+  const { w, store, clock, gate, stopping } = await stopHeldOnStoreRead($, on, '1', STOP_NAMING_1, 'usage:1', 'usage:1')
+  await $.turn.start({ text: 'go on by hand', turnId: 'by-hand' })
+  gate.release()
+  await stopping
+  await clock.settle()
+  expect(store.get('fable-mark:1'), 'no mark').toBeUndefined()
+  expect(slotValues(w), 'no move').toEqual([])
+  expect(whats(stopLogOf(store, w))).toContain('stop dropped: the switch or the failed turn it examined has changed since')
+})
+
+test('STALE-MARK: a press that lands while the stop reads the stored reading before its mark leaves no mark and no second move', async ($, on) => {
+  const { w, store, clock, gate, stopping } = await stopHeldOnStoreRead($, on, '1', STOP_NAMING_1, 'usage:1', 'usage:1')
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  await pane.press({ key: 'use-2' })
+  await clock.settle()
+  await pane.unmount()
+  gate.release()
+  await stopping
+  await clock.settle()
+  expect(store.get('fable-mark:1'), 'no mark').toBeUndefined()
+  expect(slotValues(w), 'the press alone moved the session').toEqual([SLOT2])
+  expect(whats(stopLogOf(store, w))).toContain('stop dropped: the switch or the failed turn it examined has changed since')
+})
+
+/** The stop on login 2 (its Fable week already read spent: no mark to write) picks login 1; its read of login 1's stored reading, inside the pick, is held. */
+const stopHeldInThePick = ($: Engine, on: On) => stopHeldOnStoreRead($, on, '2', STOP_NAMING_2, 'usage:1', 'usage:2')
+
+test('STALE-ROTATE: a main turn that starts while the stop picks its target moves nothing and sends no carry-on', async ($, on) => {
+  const { w, store, clock, gate, stopping } = await stopHeldInThePick($, on)
+  await $.turn.start({ text: 'go on by hand', turnId: 'by-hand' })
+  gate.release()
+  await stopping
+  await clock.settle()
+  await clock.advance(60_000)
+  expect(slotValues(w), 'the session stays where it runs').toEqual([])
+  expect(w.submitted, 'no carry-on').toEqual([])
+  expect(whats(stopLogOf(store, w)), 'the stop says it moved nothing').toContain('stop switch dropped: the failed turn it examined has changed since')
+})
+
+test('STALE-ROTATE: a newer failed main turn that starts while the stop picks its target is not moved by the older stop', async ($, on) => {
+  const { w, clock, gate, stopping } = await stopHeldInThePick($, on)
+  // The newer failure is no limit stop: nothing but the older stop could move the session.
+  await $.turn.start({ text: 'go on by hand', turnId: 'by-hand' })
+  await $.classic.StopFailure({ error: 'server_error' })
+  gate.release()
+  await stopping
+  await clock.settle()
+  await clock.advance(60_000)
+  expect(slotValues(w), 'the older stop cannot move the newer failure').toEqual([])
+  expect(w.submitted, 'no carry-on').toEqual([])
+})
+
+test('guard: a press moves a session whose failure a main turn cleared (a press is exempt from the failure epoch)', async ($, on) => {
+  const { w, clock } = await fableOnTwo($, on, '2')
+  await $.turn.start({ text: 'go on by hand', turnId: 'by-hand' })
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  await pane.press({ key: 'use-1' })
+  await clock.settle()
+  await pane.unmount()
+  expect(slotValues(w)).toEqual([undefined])
 })
