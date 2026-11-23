@@ -2631,7 +2631,7 @@ async function laterDebtDuringTick($: Engine, on: On, where: 'after-read' | 'mar
   await clock.advance(60_000)
   await clock.settle()
   expect(whats(stopLogOf(store, w)).filter(line => line.startsWith('moved to')), 'no login to move to').toEqual([])
-  return { w, clock, view: () => last }
+  return { w, clock, store, view: () => last }
 }
 
 /** Sends nothing at the earlier date, keeps the later debt in the view, and sends one carry-on at its own date. */
@@ -2652,7 +2652,11 @@ test('MODEL-DEBT-MARK guard: a later model stop owing a later debt while the tic
 })
 
 test('MODEL-DEBT-CARRY-READ: a later model stop owing a later debt while carryOn reads before it submits sends nothing of the old debt', { timeoutMs: 30_000 }, async ($, on) => {
-  await expectLaterDebtStands(await laterDebtDuringTick($, on, 'carry-read'))
+  const held = await laterDebtDuringTick($, on, 'carry-read')
+  const isFreeLine = (line: string) => line.startsWith('a login is free: carry-on')
+  expect(whats(stopLogOf(held.store, held.w)).filter(isFreeLine), 'no carry-on is logged for the send the guard declined').toEqual([])
+  await expectLaterDebtStands(held)
+  expect(whats(stopLogOf(held.store, held.w)).filter(isFreeLine), 'the later debt logs its own send').toEqual(['a login is free: carry-on on 1'])
 })
 
 // ---------------------------------------------------------------- PR B, epic puma-9arph.109: readings that show what they are
