@@ -165,6 +165,8 @@ type World = {
   /** Claude Code's security policy refuses every switch, as in a session on a Team seat. */
   refuseEnv?: boolean
   breakEnv?: boolean
+  /** Awaited once a usage body is made, before it is answered: a body that comes back late, its numbers those of its own time. */
+  afterUsageBody?: (token: string) => Promise<void>
   /** Awaited before each answer, so a press can finish during a usage read. */
   beforeFetch?: () => Promise<void>
   /** Awaited before each keychain answer, so a read can come back late, as on a real Mac. */
@@ -376,6 +378,7 @@ function world(on: On, w: World, store: Record<string, unknown> | Map<string, un
       // A row for another model beside the Fable one, spent: read as Fable's, it would show.
       ...(fable === undefined ? {} : { limits: [limitRow('Sonnet', 100), limitRow('Fable 5.1', fable, w.fableResetsBy?.[token] ?? w.fableResets)] }),
     }
+    await w.afterUsageBody?.(token)
     return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(body) } }
   })
   // Claude Code keeps a /login's sign-in where the session reads its own: the slot it is on.
@@ -17290,7 +17293,7 @@ test('HONEST-CARRY-ON: a fresh read that lists no Fable week proves no room, so 
  * stored body said `before` (week, Fable, 5-hour). Then the operator reset its usage by hand, and the endpoint says `live`
  * with every reset time as before (seen live: the reset time does not move). Its read is due in three minutes.
  */
-async function manualResetOnThree($: Engine, on: On, kind: 'fable' | 'week' | 'five', before: { week: number; fable: number; five: number }, live: [number, number, number]) {
+async function manualResetOnThree($: Engine, on: On, kind: 'fable' | 'week' | 'five', before: { week: number; fable: number; five: number }, live: [number, number, number], isHeld = false) {
   const w = fresh()
   w.keychain['Claude Code-credentials'] = blob('tok-1')
   w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
@@ -17319,12 +17322,65 @@ async function manualResetOnThree($: Engine, on: On, kind: 'fable' | 'week' | 'f
   )
   const clock = world(on, w, store)
   await start($, clock)
+  const key = Object.keys(marks)[0] ?? ''
+  if (isHeld) {
+    // Login 3's body is answered, then waits before the mod reads it: another session's body can land meanwhile.
+    const held = { isPaused: false, release: () => {} }
+    const gate = new Promise<void>(resolve => {
+      held.release = resolve
+    })
+    w.afterUsageBody = async token => {
+      if (token !== 'tok-3' || held.isPaused) return
+      held.isPaused = true
+      await gate
+    }
+    // In steps, so the wait of a read stays inside the mod's 10-second limit on an answer.
+    for (let waited = 0; waited < 10 * 60_000 && !held.isPaused; waited += 1_000) await clock.advance(1_000)
+    expect(held.isPaused, 'the read of login 3 waits after its answer').toBe(true)
+    return { w, store, clock, key, held }
+  }
   // The schedule reads login 3: five minutes on, the read is due and claimed.
   await clock.advance(5 * 60_000)
   await clock.settle()
   await clock.advance(USAGE_CLAIM_WAIT_MS)
   await clock.settle()
-  return { w, store, clock, key: Object.keys(marks)[0] ?? '' }
+  return { w, store, clock, key }
+}
+
+const FIVE_RESET_3 = '2026-10-12T12:00:00Z'
+const WEEK_RESET_3 = '2026-10-20T03:00:00Z'
+/** The row another session saves for login 3: its body at `pct`, read at `at`. */
+const bodyRowOfThree = (pct: number, at: number) => ({
+  fiveHour: { pct, resetsAt: FIVE_RESET_3 },
+  sevenDay: { pct, resetsAt: WEEK_RESET_3 },
+  fable: { pct, resetsAt: FABLE_RESET },
+  at,
+  by: '3',
+  v: 1,
+  src: 'body',
+})
+
+for (const kind of ['fable', 'week', 'five'] as const) {
+  test(`RESET-ORDER: a body that began before the stored body was saved ends no ${kind} mark and does not overwrite the newer row (A reads 90, B saves 96)`, async ($, on) => {
+    const { store, clock, key, held } = await manualResetOnThree($, on, kind, { week: 100, fable: 100, five: 100 }, [90, 90, 90], true)
+    await clock.advance(1_000)
+    // Session B read the same login after A's request began, and saved 96 first.
+    store.set('usage:3', bodyRowOfThree(96, clock.now()))
+    held.release()
+    await clock.settle()
+    expect(store.get(key), 'A\'s older 90 is no counter fall: the mark stands').toBeDefined()
+    expect((store.get('usage:3') as { sevenDay?: { pct: number } }).sevenDay?.pct, 'B\'s newer 96 stays').toBe(96)
+  })
+
+  test(`RESET-ORDER: a body that began before the ${kind} mark was written ends nothing`, async ($, on) => {
+    const { store, clock, key, held } = await manualResetOnThree($, on, kind, { week: 100, fable: 100, five: 100 }, [0, 0, 0], true)
+    await clock.advance(1_000)
+    // A stop marks the window after A's request began: A's numbers are from before the stop.
+    store.set(key, { ...(store.get(key) as object), at: clock.now() })
+    held.release()
+    await clock.settle()
+    expect(store.get(key), 'the mark is newer than the body').toBeDefined()
+  })
 }
 
 for (const [kind, stop] of [['fable', FABLE_STOP], ['week', { error: 'rate_limit', last_assistant_message: PLAIN_STOPS[0] }], ['five', { error: 'rate_limit', last_assistant_message: PLAIN_STOPS[0] }]] as const) {
@@ -17342,3 +17398,29 @@ for (const [kind, stop] of [['fable', FABLE_STOP], ['week', { error: 'rate_limit
     expect(store.get(key), 'the mark stands').toBeDefined()
   })
 }
+
+test('SPENT-OLD-GATE: a body 30 s old that the minute gate keeps from being read again is no live read: the login is tried blind, not counted spent', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [20, 30, 100]
+  // Login 2's usage was reset since its last body, which said 100 thirty seconds before the stop.
+  w.usage['tok-2'] = [0, 0, 0]
+  w.fableResetsBy = { 'tok-1': FABLE_RESET, 'tok-2': FABLE_RESET_2 }
+  const at = NOW - 30_000
+  const store = new Map<string, unknown>(
+    Object.entries({
+      ...TWO_LOGINS,
+      'usage:2': { fiveHour: { pct: 100, resetsAt: '2026-10-12T12:00:00Z' }, sevenDay: { pct: 100, resetsAt: WEEK_RESET }, fable: { pct: 100, resetsAt: FABLE_RESET_2 }, at, by: '2', v: 1, src: 'body' },
+      'usage-due:2': { next: NOW + HOUR, fails: 0, at, v: 1 },
+      'fable-mark:2': { pct: 100, resetsAt: FABLE_RESET_2, at },
+    }),
+  )
+  const clock = world(on, w, store)
+  await start($, clock)
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  expect(w.usageCalls.filter(token => token === 'tok-2'), 'the gate kept the read from being made').toEqual([])
+  expect(whats(stopLogOf(store, w))).toContain('not read live: read gate: 2')
+  expect(slotValues(w), 'login 2 is the only candidate and is tried').toEqual([SLOT2])
+})
