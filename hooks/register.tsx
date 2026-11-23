@@ -9,7 +9,7 @@ import type {
   SessionRateLimit,
 } from 'claude-code'
 
-import type { Account, CheckError, FiveHourLimit, FooterStyle, Health, Holder, LaunchOn, LaunchPick, Mark, ProvisionalStop, Reading, ReadingSource, RotateTo, RotatorRequest, UsageDue, View } from '../types'
+import type { Account, CheckError, FiveHourLimit, FooterStyle, Health, Holder, LaunchOn, LaunchPick, Mark, ProvisionalStop, Reading, ReadingSource, RotateTo, RotatorRequest, StopProof, UsageDue, View } from '../types'
 import {
   CHROME_SERVER,
   CHROME_TOOL,
@@ -38,11 +38,14 @@ import {
   credentialFrom,
   credentialsFile,
   endsFableMark,
+  endsFiveHourMark,
+  endsWeekMark,
   fableMark,
   fableStay,
   fingerprint,
   footerStyleFrom,
   freeId,
+  fableCarryOnNote,
   firstFreeAt,
   limitNotice,
   healthOf,
@@ -62,6 +65,8 @@ import {
   isNoBrowser,
   isPolicyRefusal,
   keepFable,
+  bodyOfReading,
+  bodyReadFrom,
   isSpent,
   isUnread,
   keychainItem,
@@ -78,6 +83,8 @@ import {
   shouldLeave,
   WRITER_VERSION,
   whoseWeek,
+  whoseReset,
+  stopResetAt,
   slotEnv,
   stuckText,
   TOKEN_LIVE_MARGIN_MS,
@@ -118,6 +125,7 @@ import {
   pickAfterStop,
   raisesLimitModal,
   renudgeDue,
+  untilText,
   wordingClass,
   mayWrite,
   switchFields,
@@ -154,8 +162,9 @@ const CHROME_WAIT_MS = 15_000
 const MACOS_MARKER = '/System/Library/CoreServices/SystemVersion.plist'
 const USAGE_URL = 'https://api.anthropic.com/api/oauth/usage'
 const PROFILE_URL = 'https://api.anthropic.com/api/oauth/profile'
-const CONTINUE =
-  'Claude Code switched to another of your Claude accounts because the previous one hit its usage limit or lost its sign-in. Continue where you left off.'
+const CONTINUE_LEAD = 'Claude Code switched to another of your Claude accounts because the previous one hit its usage limit or lost its sign-in.'
+const CONTINUE_TAIL = 'Continue where you left off.'
+const CONTINUE = `${CONTINUE_LEAD} ${CONTINUE_TAIL}`
 /** The carry-on after a stop with no login left, where the login in use freed up itself: nothing switched. */
 const CONTINUE_RESET = "This Claude account's usage limit has reset. Continue where you left off."
 /** How long past the time owed a carry-on with no switch waits: Claude Code can carry on a 5-hour stop by itself after its reset (puma-9arph.35 d5), and one carry-on goes, not two. */
@@ -188,7 +197,17 @@ let lastMeasured: { at: number; reading: Reading | undefined } | undefined
  * start. A tick or a response moves a session only while it is failed; a sub-agent's stop or turn changes nothing here.
  * It starts false: a session holds until its main loop fails, a lost sign-in included (the next request fails).
  */
-let isFailed = false
+let isUncleared = false
+/**
+ * How many failed main-loop stops this session has had: each StopFailure of the main loop adds one, and a stop snapshots
+ * the count it examined. Work a stop awaits before it acts is void once the count moved: a newer failure is another
+ * stop's to handle, even where the session is red again (the boolean alone cannot tell the two failures apart).
+ */
+let failureEpoch = 0
+/** Whether the main loop is red now: failed, and no main turn started since. */
+const isRed = (): boolean => isUncleared
+/** Whether the failure a stop examined (`epoch`) is still the latest, and still uncleared. */
+const isSameFailure = (epoch: number): boolean => failureEpoch === epoch && isUncleared
 /** The login whose hold (a tick or a response left it be, its stored usage saying leave) the stop-log already told: one line a hold. */
 let heldTold: string | undefined
 /**
@@ -202,12 +221,19 @@ const PROCESS_ENDS: ReadonlySet<string> = new Set(['prompt_input_exit', 'logout'
  * and a stop marked on it provisionally is kept, so no later end of anything reverts it.
  */
 async function proveSwitch($: Host, id: string, since: number): Promise<void> {
-  untaken.delete(id)
-  await writeSwitch($, { pending: since }, v => ({
+  // The login's record of failed landings goes only where this proof's write applied: a switch that replaced the pending
+  // one meanwhile makes it stale, and the login has not landed.
+  const isProven = await writeSwitch($, { pending: since }, v => ({
     ...v,
     provisionalStop: v.provisionalStop?.id === id ? undefined : v.provisionalStop,
     pending: v.pending?.id === id ? undefined : v.pending,
   }))
+  if (isProven) {
+    untaken.delete(id)
+    nonLandings.delete(id)
+    // A response proved a switch: what the episode kept of earlier unproven moves is no longer a proof of any non-landing.
+    if (episode !== undefined) episode.superseded = undefined
+  }
 }
 
 /** The keys a stop writes for a login, every session's: its marks, its reading, its `no-five-hour`. */
@@ -241,8 +267,12 @@ let running: HookStream<ProcessSpawnChunk, ProcessSpawnResult> | undefined
 /** The login this session is signing in; a stored 'logging-in' from a session that died is checked again. */
 let signingIn: string | undefined
 let signInQueue: Promise<void> = Promise.resolve()
-/** The carry-on a switch owes: what the turn that stopped died on, which picks the line sent. */
-type CarryOn = { need?: Need }
+/**
+ * The carry-on a switch owes: what the turn that stopped died on, which picks the line sent; and, for a stop's own move,
+ * the failure epoch the stop examined: the move goes only while that failure is still the latest and uncleared
+ * (`isSameFailure`), whatever the stop awaited on the way. A press carries none.
+ */
+type CarryOn = { need?: Need; epoch?: number; proof?: StopProof }
 /** When the switch began whose landing a carry-on already follows: the switch's own, or one for a turn that died before it landed. */
 let carriedFor: number | undefined
 /** The last carry-on sent: when the switch it follows began, and when it went. The turn it starts may answer as the login left. */
@@ -265,6 +295,8 @@ let limitStopAfter: number | undefined
 let moves = 0
 /** Logins a switch to did not take this session: the rotation leaves them be; Use now still tries. */
 const untaken = new Set<string>()
+/** How many times a stop named another login's reset right after a move to this one: at two the rotation leaves it be (untaken). */
+const nonLandings = new Map<string, number>()
 /** When this session last moved to another login: until SETTLE_MS after, its requests may still go out as the one before. */
 let movedAt: number | undefined
 
@@ -275,8 +307,19 @@ let movedAt: number | undefined
  */
 type Episode = {
   need?: Need
+  /** What the carry-on last armed rests on (the pick's tier, read age and Fable proof): the nudge's carry-on after it reuses it. */
+  proof?: StopProof
   stops: number
   tried: string[]
+  /**
+   * The provisional records this episode's own moves superseded: a stop's carried move clears the view's record, but its
+   * mark stays on the login moved to until a proof ends it. A later stop whose words show that login's switch never
+   * landed gives them back (`undoSuperseded`); a response that proves a switch drops them. Kept in memory only: a reload
+   * loses the list, and a mark it held then ends with its own reset, as any stop's does.
+   */
+  superseded?: readonly ProvisionalStop[]
+  /** Wordless stops by login while a switch to it was unproven: a login counts as tried at its second (isSecondUnprovenStop). */
+  unprovenStops?: Readonly<Record<string, number>>
   budget?: number
   escapes: number
   lastEscapeAt?: number
@@ -538,6 +581,26 @@ async function dropFableMark($: Host, id: string, judged: Mark): Promise<void> {
   await setView($, v => {
     const { [id]: _ended, ...fableMarks } = v.fableMarks ?? {}
     return { ...v, fableMarks }
+  })
+}
+
+/** Ends a login's week mark for every session, as dropFableMark ends the Fable mark: only the mark judged ended goes. */
+async function dropWeekMark($: Host, id: string, judged: Mark): Promise<void> {
+  if (!sameValue(markFrom(await $.store.get(`week-mark:${id}`)), judged)) return
+  await $.store.delete(`week-mark:${id}`)
+  await setView($, v => {
+    const { [id]: _ended, ...weekMarks } = v.weekMarks ?? {}
+    return { ...v, weekMarks }
+  })
+}
+
+/** Ends a login's 5-hour mark for every session, as dropFableMark ends the Fable mark: only the mark judged ended goes. */
+async function dropMark($: Host, id: string, judged: Mark): Promise<void> {
+  if (!sameValue(markFrom(await $.store.get(`mark:${id}`)), judged)) return
+  await $.store.delete(`mark:${id}`)
+  await setView($, v => {
+    const { [id]: _ended, ...marks } = v.marks ?? {}
+    return { ...v, marks }
   })
 }
 
@@ -1238,7 +1301,7 @@ function withSignIn(account: Account, who: Identity): Account {
 
 /** Drops what the last sign-in's usage left on a login (its reading, its no-five-hour, its schedule), for every session. */
 async function dropSignInUsage($: Host, id: string): Promise<void> {
-  for (const key of [`usage:${id}`, `no-five-hour:${id}`, `usage-due:${id}`]) await $.store.delete(key)
+  for (const key of [`usage:${id}`, `usage-body:${id}`, `no-five-hour:${id}`, `usage-due:${id}`]) await $.store.delete(key)
   await setView($, v => {
     const { [id]: _reading, ...readings } = v.readings
     const { [id]: _noFive, ...noFiveHour } = v.noFiveHour ?? {}
@@ -1315,8 +1378,10 @@ class UsageCallThrew extends Error {
  * when it is next read. The claim is written as the read starts, so it lasts from the read. Undefined when the gate
  * says no.
  */
-async function requestUsage($: Host, account: Account, accessToken: string, gate: UsageGate): Promise<UsageAnswer | undefined> {
+async function requestUsage($: Host, account: Account, accessToken: string, gate: UsageGate): Promise<(UsageAnswer & { startedAt: number; receivedAt: number }) | undefined> {
   if (gate === 'none') return undefined
+  // Before the gate reads anything: a body saved after this time is newer than, or concurrent with, the one this read gets.
+  const startedAt = await $.clock.now()
   const key = `usage-due:${account.id}`
   const stored = await storedReading($, account.id)
   const due = gatingDue(usageDueFrom(await $.store.get(key)), stored !== undefined)
@@ -1346,7 +1411,7 @@ async function requestUsage($: Host, account: Account, accessToken: string, gate
   const ok = usage.kind === 'ok' ? { kind: readingFromUsage(usage.body, at) === undefined ? ('empty' as const) : ('ok' as const), hasResponded } : undefined
   const outcome = ok ?? (usage.kind === 'rejected' ? usage : { kind: 'failed' as const, retryAfter: usage.retryAfter })
   await $.store.set(key, afterUsage(due, outcome, at))
-  return usage
+  return { ...usage, startedAt, receivedAt: at }
 }
 
 /**
@@ -1410,17 +1475,42 @@ async function checkAccount($: Host, account: Account, gate: UsageGate): Promise
       if (usage?.kind === 'ok') {
         isSignInProven = true
         await saveCheckError($, account.id, undefined)
-        const read = readingFromUsage(usage.body, now)
+        // The body is dated when it came back: a body saved since this read began is read at or after its start.
+        const read = readingFromUsage(usage.body, usage.receivedAt)
         if (read !== undefined) {
           const { noFiveHour, ...reading } = read
-          // A body whose 5-hour window it cannot read leaves what the last one said.
-          if (reading.fiveHour !== undefined || noFiveHour === true) await saveNoFiveHour($, account.id, noFiveHour === true)
-          // A Fable mark that this body's own week, read long enough after the stop, contradicts ends before the reading is drawn.
-          const fableMarked = markFrom(await $.store.get(`fable-mark:${account.id}`))
-          if (fableMarked !== undefined && endsFableMark(reading.fable, now, fableMarked)) await dropFableMark($, account.id, fableMarked)
-          // A body with no Fable row keeps the stored one's: the stored read, never the view, which carries the marks.
-          await saveReading($, account.id, { ...keepFable(reading, await ownedReading($, account.id), now), by: account.id }, 'body')
-          hasFreshFable = reading.fable !== undefined
+          // Everything the body is judged against is read first, then the body acts. The earlier read of each window is the
+          // stored one (never the view, which carries the marks).
+          const prior = await ownedReading($, account.id)
+          const marks = {
+            fable: markFrom(await $.store.get(`fable-mark:${account.id}`)),
+            week: markFrom(await $.store.get(`week-mark:${account.id}`)),
+            five: markFrom(await $.store.get(`mark:${account.id}`)),
+          }
+          // A stored body saved at or after this read began is newer than this body, or came back with it: this body is no
+          // earlier read to fall from, ends no mark, drops no kept row and never overwrites that row.
+          // Judged against the last body read, kept under its own key that only this path writes: never a response row stored
+          // since. A row an earlier version left, a body, stands in until the key is first written.
+          const before = bodyReadFrom(await $.store.get(`usage-body:${account.id}`)) ?? (prior?.src === 'body' ? bodyOfReading(prior) : undefined)
+          const isOlder = before !== undefined && before.at >= usage.startedAt
+          if (!isOlder) {
+            // A body whose 5-hour window it cannot read leaves what the last one said.
+            if (reading.fiveHour !== undefined || noFiveHour === true) await saveNoFiveHour($, account.id, noFiveHour === true)
+            // A mark that this body's own window contradicts ends before the reading is drawn: a counter that fell inside the
+            // window was reset (by hand, which leaves the reset time as it was). A body whose request began before the mark
+            // was written is from before the stop, and ends nothing; a Fable mark also ends where the week reads below 100
+            // long enough after the stop.
+            const isAfter = (mark: Mark) => usage.startedAt >= mark.at
+            const { fable, week, five } = marks
+            if (fable !== undefined && isAfter(fable) && endsFableMark(reading.fable, now, fable, before?.fable)) await dropFableMark($, account.id, fable)
+            if (week !== undefined && isAfter(week) && endsWeekMark(reading.sevenDay, week, before?.sevenDay)) await dropWeekMark($, account.id, week)
+            if (five !== undefined && isAfter(five) && endsFiveHourMark(reading.fiveHour, five, before?.fiveHour)) await dropMark($, account.id, five)
+            // A body with no Fable row keeps the stored one's, unless the week fell since the last body: the stored read, never the view.
+            await saveReading($, account.id, { ...keepFable(reading, prior === undefined ? undefined : { ...prior, sevenDay: before?.sevenDay }, now), by: account.id }, 'body')
+            // This body is the baseline of the next, whichever rows are stored over the reading meanwhile.
+            await $.store.set(`usage-body:${account.id}`, { ...before, ...bodyOfReading(reading) })
+            hasFreshFable = reading.fable !== undefined
+          }
         }
       }
     }
@@ -1530,15 +1620,15 @@ function whyLeave(view: View, now: number, need?: Need): string {
  * turn that died on the Fable week (`need`), it leaves for that too, and only
  * for a login with Fable room: the ticks and responses pass none, so a session
  * that never hit the Fable week stays on a login whose Fable week is spent.
- * A tick or a response moves a session only while its main loop is failed (isFailed): otherwise only a usage-limit stop does.
+ * A tick or a response moves a session only while its main loop is failed (isRed): otherwise only a usage-limit stop does.
  */
-async function maybeRotate($: Host, need?: Need, carry?: CarryOn): Promise<boolean> {
+async function maybeRotate($: Host, need?: Need, carry?: CarryOn, modelStop?: { resetAt?: number }): Promise<boolean> {
   // A view at its defaults names login 1 in use, whichever login this session runs on.
   if (!(await isBound($))) return false
   // Every check, response and tick comes through here: the login new sessions start on follows the same readings.
   await saveLaunchPick($).catch(error => debug($, `launch pick failed: ${String(error)}`))
-  const now = await $.clock.now()
-  const view = await getView($)
+  let now = await $.clock.now()
+  let view = await getView($)
   // A stop that stays says why in the stop-log; a tick or a response is no stop.
   const stays = async (why: string): Promise<false> => {
     if (carry !== undefined) void logStop($, `stayed: ${why}`)
@@ -1569,11 +1659,21 @@ async function maybeRotate($: Host, need?: Need, carry?: CarryOn): Promise<boole
   if (carry !== undefined && tried !== undefined) {
     const raw: Record<string, Reading | undefined> = {}
     for (const a of view.accounts) raw[a.id] = await ownedReading($, a.id)
-    const pick = pickAfterStop(view, raw, now, need, tried, untaken)
+    let pick = pickAfterStop(view, raw, now, need, tried, untaken)
+    // Only a pick that is down to the blind try (no login fresh, stale with room or unread): each candidate is read live
+    // first, and the pick is made again on what those reads show.
+    if (pick?.tier === 'spent-old' && pick.spentOld !== undefined) {
+      const live = await readLiveBeforeSpentOld($, pick.spentOld)
+      view = await getView($)
+      now = await $.clock.now()
+      for (const a of view.accounts) raw[a.id] = await ownedReading($, a.id)
+      pick = pickAfterStop(view, raw, now, need, tried, untaken, live)
+    }
     if (pick === undefined) {
       // A plain usage-limit stop (not the Fable week, not a rejected sign-in) with every login tried owes one carry-on once a login frees up.
       if (need === undefined && view.health[view.activeId]?.kind !== 'login-needed') {
-        awaitFreeLogin($, view, now)
+        if (modelStop === undefined) awaitFreeLogin($, view, now)
+        else owedByModelStop($, view, now, modelStop)
         // The stop's episode owes nothing now (no resume enters): the carry-on owed goes by the tick, whose own move
         // an episode standing would hold off.
         episode = undefined
@@ -1583,7 +1683,9 @@ async function maybeRotate($: Host, need?: Need, carry?: CarryOn): Promise<boole
     }
     const age = pick.readAgeMs === undefined ? '' : `, read ${Math.round(pick.readAgeMs / 60_000)} min ago`
     void logStop($, `picked ${pick.account.id}: ${pick.tier}${age}; tried ${tried.join(', ')}`)
-    return switchTo($, pick.account, whyLeave(view, now, need), false, carry, true)
+    // The carry-on goes with what the pick rests on: its line says no more than that proves.
+    const { tier, readAgeMs, freesAt, hasFableRoom } = pick
+    return switchTo($, pick.account, whyLeave(view, now, need), false, { ...carry, proof: { tier, readAgeMs, freesAt, hasFableRoom } }, true)
   }
   if (!shouldLeave(view, now, need)) {
     heldTold = undefined
@@ -1592,7 +1694,7 @@ async function maybeRotate($: Host, need?: Need, carry?: CarryOn): Promise<boole
   // A tick or a response moves a session only while it is failed (red in Orca): otherwise it stays where it runs,
   // whatever the stored numbers say (a login reset by hand keeps its old 100 until the next read), a sign-in mark
   // included: a lost sign-in fails the next request, which turns the session red.
-  if (carry === undefined && !isFailed) {
+  if (carry === undefined && !isRed()) {
     if (heldTold !== view.activeId) {
       heldTold = view.activeId
       void logStop($, `held on login ${view.activeId}: the session is answering, its stored usage says leave`)
@@ -1604,7 +1706,10 @@ async function maybeRotate($: Host, need?: Need, carry?: CarryOn): Promise<boole
   const target = pickTarget({ ...view, accounts: view.accounts.filter(a => !untaken.has(a.id)) }, now, need)
   if (target === undefined) {
     // A plain usage-limit stop (not the Fable week, not a rejected sign-in) owes one carry-on once a login frees up.
-    if (carry !== undefined && need === undefined && view.health[view.activeId]?.kind !== 'login-needed') awaitFreeLogin($, view, now)
+    if (carry !== undefined && need === undefined && view.health[view.activeId]?.kind !== 'login-needed') {
+      if (modelStop === undefined) awaitFreeLogin($, view, now)
+      else owedByModelStop($, view, now, modelStop)
+    }
     return stays('no login to move to')
   }
   const isMoved = await switchTo($, target, whyLeave(view, now, need), false, carry, true)
@@ -1613,6 +1718,49 @@ async function maybeRotate($: Host, need?: Need, carry?: CarryOn): Promise<boole
     void logStop($, `moved to ${target.id} by the tick or a response, its usage read failed, no carry-on`)
   }
   return isMoved
+}
+
+/**
+ * Before a stop tries a login believed spent, reads each candidate's usage from the endpoint, as the stop's own read of the
+ * login it left does: a stored reading, or a mark, can be as old as a day, and a reset from the dashboard or use from
+ * another host never shows in it. Answers the logins read live just now; a read that shows one spent counts as that
+ * login's try (the pick judges it so), and one with room is picked as fresh. A login whose token has run out is not read
+ * (a session on it refreshes the token, and the mod never does), and a read the endpoint refused or failed keeps the old
+ * reading: those stay in the blind try. The stop-log names each.
+ */
+async function readLiveBeforeSpentOld($: Host, candidates: readonly Account[]): Promise<Set<string>> {
+  const live = new Set<string>()
+  const shown: string[] = []
+  const idle: string[] = []
+  const failed: string[] = []
+  const gated: string[] = []
+  for (const account of candidates) {
+    const startedAt = await $.clock.now()
+    const stored = await readStored($, account.slot).catch(() => undefined)
+    const credential = stored?.state === 'present' ? stored.credential : undefined
+    if (credential === undefined || credential.expiresAt <= startedAt + TOKEN_LIVE_MARGIN_MS) {
+      idle.push(account.id)
+      continue
+    }
+    await stopRead($, account, 'force')
+    const read = await ownedReading($, account.id)
+    // Live is a body that came back during this attempt, by this session or another: a body the minute gate kept from being
+    // read again is the old reading, however recent, and says nothing of a reset since.
+    if (read?.src !== 'body' || read.at < startedAt) {
+      const failure = (await getView($)).checkErrors?.[account.id]
+      if (failure !== undefined && failure.at >= startedAt) failed.push(account.id)
+      else gated.push(account.id)
+      continue
+    }
+    live.add(account.id)
+    const pct = (w: { pct: number } | undefined) => (w === undefined ? '-' : String(Math.round(w.pct)))
+    shown.push(`${account.id} (${pct(read.fiveHour)}/${pct(read.sevenDay)})`)
+  }
+  if (shown.length > 0) void logStop($, `read live before spent-old: ${shown.join(', ')}`)
+  if (idle.length > 0) void logStop($, `not read live: token idle: ${idle.join(', ')}`)
+  if (failed.length > 0) void logStop($, `not read live: usage read failed: ${failed.join(', ')}`)
+  if (gated.length > 0) void logStop($, `not read live: read gate: ${gated.join(', ')}`)
+  return live
 }
 
 /**
@@ -1629,6 +1777,38 @@ function awaitFreeLogin($: Host, view: View, now: number): void {
   const debt = due
   void logStop($, `no login left: one carry-on ${at === undefined ? 'once a login frees up' : `at ${new Date(at).toISOString()}`}`)
   const text = `${limitNotice(view, now, untaken)} This session carries on by itself once one frees up.`
+  void (async () => {
+    await writeCarryDue($, debt)
+    $.ui.toast(text, { timeoutMs: 15_000 })
+    notify($, text)
+  })().catch(error => debug($, `carry-on owed not written to the view: ${String(error)}`))
+}
+
+/** Whether a model stop with no usable reset has told the person it owes nothing: once a session. */
+let isModelResetTold = false
+
+/**
+ * A model-family stop (Opus, Sonnet) with no login left to move to: the login in use is not spent, only unable to serve
+ * that family until the reset its words name. It owes the ordinary carry-on, dated at that reset, which no tick moves
+ * earlier (a freed login is used at the next stop or Use now). A later stop on the login moves the date later, never
+ * earlier. Words with no usable reset (none, no zone, one already past) owe nothing, and say so once.
+ */
+function owedByModelStop($: Host, view: View, now: number, stop: { resetAt?: number }): void {
+  const at = stop.resetAt
+  if (at === undefined || at <= now) {
+    if (isModelResetTold) return
+    isModelResetTold = true
+    tell($, "The model limit holds on this account and Claude gave no reset time: this session does not carry on by itself. Use now moves it to another account.")
+    return
+  }
+  if (due !== undefined) {
+    // The date only moves later, and only for the login that stopped.
+    if (due.from !== view.activeId || (due.at !== undefined && due.at >= at)) return
+    due = { ...due, at }
+  } else due = { at, from: view.activeId, owedAt: now, turns: mainTurns }
+  const debt = due
+  void logStop($, `model limit: one carry-on at ${new Date(at).toISOString()}`)
+  const text = `This account's model limit holds until ${untilText(at, now)}: this session carries on by itself then, on this account.`
   void (async () => {
     await writeCarryDue($, debt)
     $.ui.toast(text, { timeoutMs: 15_000 })
@@ -1798,7 +1978,7 @@ async function retryHeld($: Host): Promise<void> {
     if (isConnectingChrome) return
     // A rotation that carries nothing (a tick's or a response's) goes only while the session is red: a main turn since
     // has cleared it, so the hold ends and the next tick decides again.
-    if (h.carry === undefined && !isFailed) {
+    if (h.carry === undefined && !isRed()) {
       await writeSwitch($, { idle: true }, v => ({ ...v, held: undefined }))
       return
     }
@@ -1814,6 +1994,8 @@ async function retryHeld($: Host): Promise<void> {
 function carryOnAfterSettle($: Host, owed: CarryOn): void {
   const mark = moves
   armedCarryOns += 1
+  // What the armed carry-on rests on, kept for the episode: the nudge's carry-on after it reuses the armed words.
+  if (episode !== undefined && owed.proof !== undefined) episode.proof = owed.proof
   $.clock.after(SETTLE_MS, () => {
     armedCarryOns -= 1
     // A Connect visit holds the session: it carries the turn on once it ends, as for a stop it cut, though its move counts
@@ -1821,7 +2003,7 @@ function carryOnAfterSettle($: Host, owed: CarryOn): void {
     if (isConnectingChrome) {
       isCutByVisit = true
       void logStop($, 'carry-on held: Claude in Chrome is connecting')
-    } else if (moves === mark) void carryOn($, owed.need).catch(error => debug($, `carry-on failed: ${String(error)}`))
+    } else if (moves === mark) void carryOn($, owed.need, undefined, owed.proof ?? episode?.proof).catch(error => debug($, `carry-on failed: ${String(error)}`))
     else void logStop($, 'carry-on skipped: another switch since')
   })
   // Not awaited: a caller sets carriedFor in the same tick, so a second stop cannot arm a second carry-on meanwhile.
@@ -1961,15 +2143,28 @@ async function switchNow($: Host, token: number, target: Account, why: string, i
     if (carry !== undefined) void logStop($, 'stop switch given up on: landed late, no carry-on')
     return false
   }
+  // A stop's own move holds the failure its stop examined, and goes only while that is still the latest and uncleared: a
+  // main turn that began, or a newer failure, since, makes it the old stop's move on another's behalf. Abandoned: no
+  // hold, no slot write, no carry-on. Checked last before each: every move but a press passes it, and a press carries no epoch.
+  const isStale = () => carry?.epoch !== undefined && !isSameFailure(carry.epoch)
+  const dropStaleStop = (): false => {
+    void logStop($, 'stop switch dropped: the failed turn it examined has changed since')
+    return false
+  }
   const active = await refreshingSoon($, await getView($), target, await $.clock.now())
   if (active !== undefined) {
     // Where the held switch goes, what it carries on with and who asked for it are one intent, replaced together:
     // a later stop or press brings its own (a press's carries on with nothing); the retry brings the held one's.
+    // The held switch outlives the failure it was made for (the refresh nudge's own turn clears it), so it carries no
+    // epoch: a stop that went stale holds nothing, and its hold would replace a later stop's.
+    if (isStale()) return dropStaleStop()
     let wasHeld = false
     if (!(await writeSwitch($, mine, v => {
       wasHeld = v.held !== undefined
-      return { ...v, held: { target, why, carry, isRotation } }
+      return { ...v, held: { target, why, carry: carry === undefined ? undefined : { need: carry.need }, isRotation } }
     }))) return givenUp()
+    // What the held stop's carry-on will rest on, kept in the episode: the held record carries the need alone.
+    if (carry?.proof !== undefined && episode !== undefined) episode.proof = carry.proof
     if (!wasHeld) {
       if (carry !== undefined) void logStop($, `held for ${target.id}: the token in use refreshes soon`)
       const { accounts } = await getView($)
@@ -1983,7 +2178,8 @@ async function switchNow($: Host, token: number, target: Account, why: string, i
   await keepChrome($)
   // The awaits since maybeRotate's check can span a main turn start, which clears the failure: a rotation that carries
   // nothing reads it again here, the last point before the slot write, and stays where the session now runs.
-  if (isRotation && carry === undefined && !isFailed) return false
+  if (isRotation && carry === undefined && !isRed()) return false
+  if (isStale()) return dropStaleStop()
   try {
     await useSlot($, target.slot)
   } catch (error) {
@@ -1997,7 +2193,14 @@ async function switchNow($: Host, token: number, target: Account, why: string, i
   // marked: the mark is why it moves. Any other drops it. Taken over during its slot write, it writes nothing, and
   // the release puts the slot back on the login the view names.
   if (carry !== undefined) {
-    if (!(await writeSwitch($, mine, v => ({ ...v, provisionalStop: undefined })))) return givenUp()
+    let replaced = undefined as ProvisionalStop | undefined
+    if (!(await writeSwitch($, mine, v => {
+      replaced = v.provisionalStop
+      return { ...v, provisionalStop: undefined }
+    }))) return givenUp()
+    // The record leaves the view but its mark stands: the episode keeps it, for a later proof that its switch did not land.
+    const ep = episode
+    if (replaced !== undefined && ep !== undefined) ep.superseded = [...(ep.superseded ?? []), replaced]
   } else if (!(await undoProvisionalStop($, mine))) return givenUp()
   const now = await $.clock.now()
   // Published only after the slot write landed, and only while it still owns the switch.
@@ -2128,7 +2331,8 @@ async function onMeasure($: Host, limits: readonly SessionRateLimit[]): Promise<
   // A response that reports a 5-hour window shows the account has one, whatever the last usage check said: recorded once,
   // in a form the 5h limit does not filter.
   if (reading.fiveHour !== undefined && view.noFiveHour?.[view.activeId] !== false) await saveNoFiveHour($, view.activeId, false)
-  // A response never lists the Fable week: the one the last check stored stays (the view's carries the marks).
+  // A response never lists the Fable week: the one the last check stored stays (the view's carries the marks). It touches
+  // no other key: the last body read of each window lives under its own, written by the body path alone.
   const fable = (await ownedReading($, view.activeId))?.fable
   await saveReading($, view.activeId, { ...reading, ...(fable ? { fable } : {}), by: view.activeId }, 'response')
   await maybeRotate($)
@@ -2140,10 +2344,14 @@ async function onMeasure($: Host, limits: readonly SessionRateLimit[]): Promise<
  * and a Fable one with no line kept, sends the mod's own line under its name:
  * `own` where the caller names it (a carry-on with no switch), else CONTINUE.
  */
-async function carryOn($: Host, need?: Need, own?: string): Promise<void> {
+async function carryOn($: Host, need?: Need, own?: string, proof?: StopProof): Promise<void> {
   const view = await getView($)
-  const kept = need === 'fable' ? view.fableContinueText : undefined
   carriedOn = { since: view.pending?.since, at: await $.clock.now() }
+  // The person's kept line says there is Fable credit: it goes only where a fresh read that lists the Fable week showed
+  // room. Any other pick sends the mod's own line, with what the pick rests on.
+  const note = need === 'fable' ? fableCarryOnNote(proof) : undefined
+  if (note !== undefined) return sendCarryOn($, { text: `${CONTINUE_LEAD} ${note} ${CONTINUE_TAIL}` })
+  const kept = need === 'fable' ? view.fableContinueText : undefined
   await sendCarryOn($, kept === undefined ? { text: own ?? CONTINUE } : { text: kept, asUser: true })
 }
 
@@ -2225,7 +2433,7 @@ async function sendCarryOn($: Host, prompt: { text: string; asUser?: true }): Pr
 function carryOnAfterNudge($: Host, ep: Episode, isOwed: boolean): void {
   if (episode !== ep || !(isOwed || ep.isCarryOnHeldBack === true) || isCarryOnInFlight || armedCarryOns > 0) return
   ep.isCarryOnHeldBack = undefined
-  void carryOn($, ep.need).catch(error => debug($, `carry-on failed: ${String(error)}`))
+  void carryOn($, ep.need, undefined, ep.proof).catch(error => debug($, `carry-on failed: ${String(error)}`))
 }
 
 /** Ends a stop's episode once its resume has answered: a later stop opens a new one, with its own tried list and budget. */
@@ -2484,7 +2692,7 @@ async function nudgeIfDue($: Host, ep: Episode, view: View, now: number): Promis
   const due = { isRenudged: ep.isRenudged === true, firstExpiresAt: ep.nudge?.expiresAt, expiresAt: credential.expiresAt, firstToken: ep.nudge?.token, token, now }
   if (isAgain && !renudgeDue(due)) return false
   // A box the read cannot show is no empty box (council B5); the mod's own lines left in it count as empty.
-  if (!isBoxFree(boxText, [NUDGE_TEXT, CONTINUE, view.fableContinueText])) {
+  if (!isBoxFree(boxText, [NUDGE_TEXT, CONTINUE, view.fableContinueText, carryOnText])) {
     if (boxText !== undefined) {
       tellOnce($, ep, 'draft', 'refresh nudge: a draft in the box, switch still held')
       toastOnce($, ep, 'draft told', 'Switching accounts waits for your draft: press Enter to send it, or clear the box.')
@@ -2524,6 +2732,96 @@ async function exitOf($: Host, child: HookStream<ProcessSpawnChunk, ProcessSpawn
   return child.result.then(r => r?.code ?? null, () => null)
 }
 
+/** The window a limit stop's wording names, for `whoseReset`. */
+const STOP_WINDOWS: Readonly<Record<string, 'fable' | 'week' | 'session' | undefined>> = { fable: 'fable', weekly: 'week', session: 'session' }
+
+/**
+ * The one login whose window the stop's own words name by its reset time (`stopResetAt`, `whoseReset`); undefined where
+ * the words name no limit or no reset, where no stored read has that reset, or where two logins share it and so prove
+ * neither.
+ */
+async function stopNamed($: Host, view: View, said: string | undefined): Promise<Account | undefined> {
+  const window = STOP_WINDOWS[wordingClass(said)]
+  const at = stopResetAt(said, await $.clock.now())
+  if (window === undefined || at === undefined) return undefined
+  const owners = whoseReset(view, at, window)
+  return owners.length === 1 ? view.accounts.find(a => a.id === owners[0]) : undefined
+}
+
+/**
+ * Counts a stop that named no reset on login `id`, a switch to it unproven; whether it is the login's second or later in
+ * the episode. Counted by login, not by switch, so a run of switches that each get one stop still ends once every login
+ * has had two.
+ */
+function isSecondUnprovenStop(ep: Episode, id: string): boolean {
+  const count = (ep.unprovenStops?.[id] ?? 0) + 1
+  ep.unprovenStops = { ...ep.unprovenStops, [id]: count }
+  return count >= 2
+}
+
+/**
+ * Counts a move to `target` that a stop's words showed did not land. At the second in a session the rotation leaves the
+ * login be (untaken, as a switch that did not take is), and the person is told once.
+ */
+async function countNonLanding($: Host, target: Account, owner: Account): Promise<void> {
+  const count = (nonLandings.get(target.id) ?? 0) + 1
+  nonLandings.set(target.id, count)
+  if (count !== 2) return
+  untaken.add(target.id)
+  const { accounts } = await getView($)
+  tell(
+    $,
+    `The move to ${claudeAccount(target, accounts)} did not land twice: requests still go out as ${label(owner, accounts)}. ` +
+      `The rotation leaves ${labelOf(accounts, target.id)} be in this session; Use now tries it again.`,
+  )
+}
+
+/**
+ * Points the session's slot and view back at `owner`, the login a stop's words showed its requests go out on, ending a
+ * switch that never landed as settlePending's give-up does. It acts only on what the stop examined: the login believed in
+ * use, the switch pending and the failure (`seen`: its epoch, still the latest and still red). 'stale' where any
+ * changed (a press's switch, a new main turn, a newer failure) before the write, and nothing is written; 'failed' where
+ * another switch runs or the slot write fails, and the stop then goes on with the login believed.
+ */
+async function pointBackTo($: Host, owner: Account, seen: { activeId: string; since: number | undefined; epoch: number }): Promise<'done' | 'failed' | 'stale'> {
+  if (!isSameFailure(seen.epoch)) return 'stale'
+  const token = ++lastToken
+  let isStale = false
+  const isClaimed = await writeSwitch($, { claim: undefined }, v => {
+    isStale = v.activeId !== seen.activeId || v.pending?.since !== seen.since
+    return isStale ? v : { ...v, owner: { token } }
+  })
+  if (isStale) return 'stale'
+  if (!isClaimed) return 'failed'
+  let isLate = false
+  const isDone = await runOwned($, token, async () => {
+    if (!(await undoProvisionalStop($, { owner: token }))) return false
+    // A main turn that began meanwhile cleared the failure: the stop is no longer the session's.
+    if (!isSameFailure(seen.epoch)) {
+      isLate = true
+      return false
+    }
+    try {
+      await useSlot($, owner.slot)
+    } catch (error) {
+      await debug($, `point-back to ${owner.id} failed: ${errorName(error)}`)
+      return false
+    }
+    // The slot write awaited: a main turn that began meanwhile cleared the failure, or the switch examined changed. Then
+    // nothing is published, and the release's reconcile puts the slot back on the login the view names. The check is
+    // inside the write, the last point before the view changes.
+    const isPublished = await writeSwitch($, { owner: token }, v => {
+      isLate = !isSameFailure(seen.epoch) || v.activeId !== seen.activeId || v.pending?.since !== seen.since
+      return isLate ? v : { ...v, activeId: owner.id, pending: undefined }
+    })
+    if (isLate || !isPublished) return false
+    movedAt = await $.clock.now()
+    moves += 1
+    return true
+  })
+  return isLate ? 'stale' : isDone ? 'done' : 'failed'
+}
+
 /** The stops the stop path acts on: a usage limit and a rejected sign-in. */
 const isSwitchingStop = (error: string): boolean => error === 'rate_limit' || error === 'authentication_failed'
 
@@ -2533,12 +2831,14 @@ const isSwitchingStop = (error: string): boolean => error === 'rate_limit' || er
  * room, and leaves the 5-hour window alone: the window is not what ran out, and
  * a mark on it, stored for every session, would move them all off the login.
  */
-async function onStopFailure($: Host, stop: { error: string; last_assistant_message?: string }): Promise<void> {
+async function onStopFailure($: Host, stop: { error: string; last_assistant_message?: string }, epoch: number): Promise<void> {
   const { error } = stop
   if (!isSwitchingStop(error)) return
-  const view = await getView($)
-  const active = view.accounts.find(a => a.id === view.activeId)
-  if (active === undefined) return
+  let view = await getView($)
+  const believed = view.accounts.find(a => a.id === view.activeId)
+  if (believed === undefined) return
+  // The login the stop is charged to: the one in use, until a stop's own words name another's reset.
+  let active: Account = believed
   let need: Need | undefined
   // Claude Code reads the new login only once the switch lands: a turn that dies before then, on a limit or a rejected
   // sign-in, went out on the login being left, which the switch already leaves. Nothing is marked on the login moved
@@ -2546,6 +2846,7 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
   // the visit ends. A rejected sign-in after a response with the moved-to login's week went out on that login: the
   // switch has landed.
   const isFable = isFableStop(stop.last_assistant_message)
+  const wordNeed: Need | undefined = isFable ? 'fable' : undefined
   // Not awaited, as no stop-log line is: an await here would let a second stop act on a view read before this one's switch.
   void logStop($, `stop heard: ${error} (wording: ${wordingClass(stop.last_assistant_message)}), login ${active.id} in use`)
   // The login each usage-limit stop of the episode died on is never tried again in it.
@@ -2583,26 +2884,92 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
     }
     return
   }
-  if (ep !== undefined && error === 'rate_limit') {
+  let since = view.pending?.since
+  let hasResponseSince = since !== undefined && lastMeasured !== undefined && lastMeasured.at > since
+  // THE owner decision of a usage-limit stop, the only one: every path below acts on `owner` and `isUnproven`.
+  const words = error === 'rate_limit' ? await stopNamed($, view, stop.last_assistant_message) : undefined
+  const { owner, isProvisional } =
+    error === 'rate_limit' ? ownerOfStop(view, active, words, hasResponseSince ? lastMeasured?.reading : undefined, hasResponseSince) : { owner: active, isProvisional: false }
+  // The stop read the view, the failure and the pending switch before the awaits above; it acts on them only while they
+  // stand. A stop dropped here, or by the point-back below, has changed no episode state, mark or count: those are
+  // written only after the last check.
+  let seen = { activeId: view.activeId, since, epoch }
+  // What the stop charged the episode, to give back where the stop is dropped before it wrote a mark.
+  let undoCharge: (() => void) | undefined
+  const dropStale = () => {
+    undoCharge?.()
+    undoCharge = undefined
+    void logStop($, 'stop dropped: the switch or the failed turn it examined has changed since')
+  }
+  const isCurrent = async () => {
+    const now = await getView($)
+    return isSameFailure(epoch) && now.activeId === seen.activeId && now.pending?.since === seen.since
+  }
+  const charge = () => {
+    if (ep === undefined || error !== 'rate_limit') return
+    const was = { stops: ep.stops, tried: [...ep.tried], budget: ep.budget, unproven: ep.unprovenStops, need: ep.need }
+    undoCharge = () => {
+      ep.stops = was.stops
+      ep.tried = was.tried
+      ep.budget = was.budget
+      ep.unprovenStops = was.unproven
+      ep.need = was.need
+    }
     ep.stops += 1
-    if (!ep.tried.includes(active.id)) ep.tried.push(active.id)
+    // A Fable stop's own words set the episode's need whatever else the stop finds (no owner, no mark, a settling switch):
+    // it stays for the episode, and every pick path below reads it from here. Given back with the rest if the stop is dropped.
+    if (wordNeed !== undefined) ep.need = wordNeed
+    // Who the stop died on: its owner; where the owner is only provisional, the login moved to only at its second such
+    // stop (the first may have gone out on the login left, and nothing says); nobody where a response since the switch
+    // proves two logins alike.
+    const died = isProvisional ? (isSecondUnprovenStop(ep, active.id) ? active.id : undefined) : owner?.id
+    if (died !== undefined && !ep.tried.includes(died)) ep.tried.push(died)
     ep.budget ??= 2 * view.accounts.length + 2
   }
-  const since = view.pending?.since
-  const hasResponseSince = since !== undefined && lastMeasured !== undefined && lastMeasured.at > since
+  if (!(await isCurrent())) return dropStale()
+  // The owner is not the login the mod believes in use, whatever the switch's age and whether the words or a response
+  // proved it: the move to the believed login never landed (the requests still go out on the owner). The believed login
+  // is charged nothing; the session is pointed back at the owner, as a give-up of the switch does, and the stop goes on
+  // as the owner's. A believed login that fails to land twice in a session is left be. The point-back acts only on the
+  // switch and the failure this stop examined: where either has changed since, the stop is dropped.
+  if (owner !== undefined && owner.id !== active.id) {
+    const back = await pointBackTo($, owner, seen)
+    if (back === 'stale') return dropStale()
+    const proof = words === undefined ? `a response since the switch is login ${owner.id}'s` : `stop names login ${owner.id}'s reset`
+    void logStop($, `${proof}, not login ${active.id}'s: the move to ${active.id} has not landed`)
+    charge()
+    await countNonLanding($, active, owner)
+    if (back === 'done') {
+      // The words show the move to the login believed never landed: so did any earlier move of this episode that a
+      // stop marked its target for, unproven.
+      await undoSuperseded($, ep)
+      view = await getView($)
+      active = owner
+      since = view.pending?.since
+      hasResponseSince = false
+      // The session is on the owner now: what the rest of the stop examines is that, not the login it found.
+      seen = { activeId: owner.id, since, epoch }
+    }
+  } else charge()
+  // What a stop that judges no window picks for: its own words, else the need an earlier stop of the episode set. A stop
+  // that marks a window judges its own need (markStop below), as a plain one after a Fable stop does.
+  const heldNeed = ep?.need ?? wordNeed
   const isProvenRejection = error === 'authentication_failed' && hasResponseSince && provenStopper(view, lastMeasured?.reading)?.id === active.id
   const isSettling = view.pending !== undefined && (await $.clock.now()) - view.pending.since < SETTLE_MS
+  // The awaits above (the clock, the point-back's view read) can span a press or a main turn: the stop acts below only
+  // on what it still finds, and a stop dropped here gives its episode charge back.
+  if (!(await isCurrent())) return dropStale()
   if (isSettling && !isProvenRejection) {
     if (isConnectingChrome) isCutByVisit = true
-    else if (carriedFor !== view.pending?.since) carryOnAfterSettle($, isFable ? { need: 'fable' } : {})
+    else if (carriedFor !== view.pending?.since) carryOnAfterSettle($, { need: heldNeed, proof: ep?.proof })
     carriedFor = view.pending?.since
     return
   }
   // A later stop of the episode, on a login no response has shown since the switch to it: that try died. Nothing is
   // marked (the stop may have gone out on the login left), and the next untried login is tried.
-  if (ep !== undefined && ep.stops > 1 && error === 'rate_limit' && since !== undefined && !hasResponseSince) {
-    void logStop($, `stop on owed resume: login ${active.id} tried, no response since its switch, no mark`)
-    if (!(await maybeRotate($, ep.need, { need: ep.need })) && isConnectingChrome) isCutByVisit = true
+  if (ep !== undefined && ep.stops > 1 && error === 'rate_limit' && isProvisional) {
+    void logStop($, `stop on owed resume: login ${active.id} ${ep.tried.includes(active.id) ? 'tried' : 'in use'}, no response since its switch, no mark`)
+    if (!(await maybeRotate($, heldNeed, { need: heldNeed, epoch })) && isConnectingChrome) isCutByVisit = true
     return
   }
   if (error === 'authentication_failed') {
@@ -2610,18 +2977,17 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
     // Its time makes the write this stop's own, so another session's rejection since never reads as it.
     const keys = [`health:${active.id}`]
     const stood = await stopKeys($, active.id, keys)
-    const before = await saveHealth($, active.id, { kind: 'login-needed', why: SIGN_IN_REJECTED, at: await $.clock.now() })
+    const rejectedAt = await $.clock.now()
+    // The last check before the write: the reads above awaited.
+    if (!(await isCurrent())) return dropStale()
+    undoCharge = undefined
+    const before = await saveHealth($, active.id, { kind: 'login-needed', why: SIGN_IN_REJECTED, at: rejectedAt })
     if (before?.kind !== 'login-needed') await announceLockout($, active, SIGN_IN_REJECTED)
     if (since !== undefined && !hasResponseSince) {
       const record = await recordStop($, active.id, since, stood, view.isFableStopped === true, await $.clock.now(), keys)
       await setView($, v => ({ ...v, provisionalStop: record }))
     }
   } else {
-    // While a switch is unproven, a response since it began names the stop's login by its week, alone, or none at all
-    // (a mark is every session's). With no response since, the switch has landed by now: the stop is the login moved
-    // to, provisionally, and a settle that finds the switch did not take drops what the stop marked there.
-    const owner = since === undefined || !hasResponseSince ? active : provenStopper(view, lastMeasured?.reading)
-    const isProvisional = since !== undefined && !hasResponseSince
     // The landing can lag the settle: the turn the carry-on starts as the settle ends can still go out on the login
     // left (measured on vox), and a turn over the Fable limit dies at once. So a Fable stop within SETTLE_MS of the
     // carry-on, before any response proves the switch, that the login moved to's own usage read contradicts (a body this
@@ -2632,9 +2998,11 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
     if (isProvisional && isFable && isOnCarryOn && clearedFor !== since) {
       const hasFreshFable = await stopRead($, active, { since: await $.clock.now() })
       if (hasFreshFable && !isFableSpent((await getView($)).readings[active.id], await $.clock.now())) {
+        // The read awaited: a stop that went stale during it arms no carry-on.
+        if (!(await isCurrent())) return dropStale()
         clearedFor = since
         if (isConnectingChrome) isCutByVisit = true
-        else carryOnAfterSettle($, { need: 'fable' })
+        else carryOnAfterSettle($, { need: 'fable', proof: { tier: 'fresh', hasFableRoom: true } })
         return
       }
     }
@@ -2646,9 +3014,17 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
       wasFableStopped = (await getView($)).isFableStopped === true
       readAt = await $.clock.now()
     }
-    if (owner === undefined) await debug($, `a stop while the switch to account ${view.pending?.id} is unproven marks no account`)
-    else {
-      need = await markStop($, owner, stop.last_assistant_message, isProvisional ? snapshot : undefined)
+    if (owner === undefined) {
+      // No login to mark: the pick still goes for the Fable week where the words or the episode say so.
+      need = heldNeed
+      await debug($, `a stop while the switch to account ${view.pending?.id} is unproven marks no account`)
+    } else {
+      // markStop checks again after its forced read, before the first mark: a stale stop writes none.
+      const marked = await markStop($, owner, stop.last_assistant_message, isProvisional ? snapshot : undefined, isCurrent)
+      if (marked === 'stale') return dropStale()
+      // Marks written: the charge stands with them.
+      undoCharge = undefined
+      need = marked
       if (ep !== undefined) ep.need = need
     }
     if (isProvisional && owner !== undefined) {
@@ -2660,8 +3036,12 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
   }
   // A switch still settling stays settling: only a new switch, or a response that proves one, ends it. The stop may
   // move the session meanwhile (maybeRotate lets a stop through a settling switch), and that switch settles anew.
-  // The switch sends the carry-on once it lands, held back for a refresh or not.
-  if (!(await maybeRotate($, need, { need }))) {
+  // The switch sends the carry-on once it lands, held back for a refresh or not. The marks above awaited: a stop that
+  // went stale meanwhile moves nothing (its marks stand, as the stop happened).
+  if (!(await isCurrent())) return dropStale()
+  // A model-family stop (Opus, Sonnet) tells the pick the family's own reset, where its words give one, for the carry-on it may owe.
+  const modelStop = wordingClass(stop.last_assistant_message) === 'model' ? { resetAt: stopResetAt(stop.last_assistant_message, await $.clock.now()) } : undefined
+  if (!(await maybeRotate($, need, { need, epoch }, modelStop))) {
     if (isConnectingChrome) isCutByVisit = true
     if (need === 'fable') await announceStay($)
   }
@@ -2684,6 +3064,14 @@ async function undoProvisionalStop($: Host, by: SwitchWriter): Promise<boolean> 
     return isSame ? { ...v, provisionalStop: undefined } : v
   }))) return false
   if (!isSame) return true
+  return revertStop($, p)
+}
+
+/**
+ * Gives back the keys one provisional record wrote, each only while it still holds what the stop wrote. The record is
+ * out of the view already (undone, or superseded by the episode's own move).
+ */
+async function revertStop($: Host, p: ProvisionalStop): Promise<boolean> {
   const read = await storedReading($, p.id)
   const isReadSince = read?.src === 'body' && read.at > p.readAt
   const gone: string[] = []
@@ -2718,6 +3106,36 @@ async function undoProvisionalStop($: Host, by: SwitchWriter): Promise<boolean> 
   return true
 }
 
+/**
+ * Gives back every mark the episode's own moves left standing on a login moved to unproven, once a stop's words show a
+ * switch did not land: the stop that marked it may have gone out on the login left. Each goes back on revertStop's
+ * terms. The session's Fable stop stays as it is (setFableStop false): the move that superseded the record was for the
+ * Fable week, and a later stop's own mark decides the rest.
+ */
+async function undoSuperseded($: Host, ep: Episode | undefined): Promise<void> {
+  const records = ep?.superseded ?? []
+  if (ep === undefined || records.length === 0) return
+  ep.superseded = undefined
+  for (const p of records) await revertStop($, { ...p, setFableStop: false })
+}
+
+/**
+ * THE owner decision of a usage-limit stop: whose it is, and so what is marked and tried and whether the session is
+ * pointed back (the owner is not the login believed in use). In this order:
+ *   1. the login the stop's own words name by its reset (`words`), at any switch age;
+ *   2. no switch pending: the login in use;
+ *   3. a response since the switch (`hasResponseSince`): the login whose week it carries, alone, else nobody;
+ *   4. an unproven switch with no response and no words: the login moved to, provisionally (`isProvisional`): its mark is
+ *      given back where the switch ends unproven (undoProvisionalStop), and it counts as tried only at its second such stop.
+ * Nobody owns a stop that two logins' response fits alike (3): nothing is marked and nothing is tried.
+ */
+function ownerOfStop(view: View, active: Account, words: Account | undefined, last: Reading | undefined, hasResponseSince: boolean): { owner: Account | undefined; isProvisional: boolean } {
+  if (words !== undefined) return { owner: words, isProvisional: false }
+  if (view.pending === undefined) return { owner: active, isProvisional: false }
+  if (hasResponseSince) return { owner: provenStopper(view, last), isProvisional: false }
+  return { owner: active, isProvisional: true }
+}
+
 /** The login a stop during an unproven switch belongs to: the one whose week the last response carries, alone. */
 function provenStopper(view: View, last: Reading | undefined): Account | undefined {
   const owners = whoseWeek(last, view.readings)
@@ -2748,14 +3166,14 @@ async function stopRead($: Host, account: Account, gate: UsageGate): Promise<boo
 }
 
 /** Marks what a usage-limit stop on `active` spent, after reading its usage when the gate lets it; answers the need it names. */
-async function markStop($: Host, active: Account, said: string | undefined, afterRead?: () => Promise<void>): Promise<Need | undefined> {
+async function markStop($: Host, active: Account, said: string | undefined, afterRead?: () => Promise<void>, isStillCurrent?: () => Promise<boolean>): Promise<Need | undefined | 'stale'> {
   let need: Need | undefined
-  // A stop that judges no window (its read already shows the account spent) leaves the arm to the newest mark.
-  stopWindow = undefined
   {
     await stopRead($, active, 'force')
     // What stands once the stop's own read is in: the stop's writes are judged against it.
     await afterRead?.()
+    // Everything the marks are judged on is read first, then the stop is checked, then it writes: no await stands between
+    // the check and the first write, so nothing can make the stop stale after the check and before its mark.
     const now = await $.clock.now()
     const after = await getView($)
     const r = after.readings[active.id]
@@ -2767,6 +3185,13 @@ async function markStop($: Host, active: Account, said: string | undefined, afte
     // where they name no limit this mod knows.
     const wording = wordingClass(said)
     const isFable = wording === 'none' || wording === 'unknown' ? isFableSpent(r, now) : wording === 'fable'
+    // A main turn or a press since the stop began makes it stale, and it writes no mark, no arm.
+    if (isStillCurrent !== undefined && !(await isStillCurrent())) return 'stale'
+    // A stop that judges no window (its read already shows the account spent) leaves the arm to the newest mark.
+    stopWindow = undefined
+    // An Opus or Sonnet limit applies only to that model family: no window of the login is spent, so nothing is marked.
+    // The stop still counts as the login's try, and the session moves on to a login that may have the family's room.
+    if (wording === 'model') return undefined
     if (isFable) {
       need = 'fable'
       stopWindow = { id: active.id, window: 'fable' }
@@ -3298,7 +3723,7 @@ async function adoptSlot($: Host, slot: string): Promise<{ ok: boolean; message:
 
 /** Every store key of one account's own, each dropped when an account goes and before a row takes its id. */
 async function dropAccountKeys($: Host, id: string): Promise<void> {
-  for (const key of ['reading', 'usage', 'mark', 'no-five-hour', 'week-mark', 'fable-mark', 'check-error', 'health', 'holder', 'usage-due']) {
+  for (const key of ['reading', 'usage', 'usage-body', 'mark', 'no-five-hour', 'week-mark', 'fable-mark', 'check-error', 'health', 'holder', 'usage-due']) {
     await $.store.delete(`${key}:${id}`)
   }
 }
@@ -3667,7 +4092,11 @@ export const register: Register = on => {
   on('classic.StopFailure', async ($, e, next) => {
     // The main loop's failed stop, whatever the error, turns the session red. Set here, before any await and outside
     // the stop's queued work, so the next tick finds it; a sub-agent's stop never does.
-    if (e.agent_id === undefined) isFailed = true
+    if (e.agent_id === undefined) {
+      failureEpoch += 1
+      isUncleared = true
+    }
+    const epoch = failureEpoch
     // A subagent's stop switches nothing: the main loop's own stop, which follows it, does the work.
     if (e.agent_id !== undefined) {
       void logStop($, `stop heard from agent ${e.agent_type ?? 'unknown'}: ${e.error}, no switch`)
@@ -3688,7 +4117,7 @@ export const register: Register = on => {
       // This stop's countdown is cancelled only by a person's prompt from here on.
       episode.personPrompts = personPrompts
     }
-    void withLock(() => onStopFailure($, e)).catch(error => {
+    void withLock(() => onStopFailure($, e, epoch)).catch(error => {
       // A fault of the host itself (its store, its view) outside the stop's own read: the recovery ends here, and the
       // stop-log says so.
       void logStop($, `stop handling failed: ${errorName(error)}`)
@@ -3719,7 +4148,7 @@ export const register: Register = on => {
     openTurns.add(e.turnId)
     if (e.agentId === undefined) {
       // A new main turn clears the failure, as Orca's next prompt clears the red.
-      isFailed = false
+      isUncleared = false
       // A main turn leaves the own-continue arm: only a person's prompt (prompt.submit below) cancels the countdown.
       const ep = episode
       // The refresh nudge's own turn is no entry (council B2): the resume stays owed and the held switch stands.

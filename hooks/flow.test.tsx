@@ -96,6 +96,8 @@ type World = {
   onStoreSet?: (key: string, value: unknown) => void
   /** Runs after each write of a shared store: another session's write that lands next. */
   afterStoreSet?: (key: string) => void
+  /** Awaited once a read of a shared store has its value, before it answers: a read that comes back late. */
+  afterStoreGet?: (key: string) => Promise<void>
   /** The slot of each `claude auth status` the mod ran. */
   statusAsked?: string[]
   /** Runs inside a `claude auth status`: what another session writes while this one waits on it. */
@@ -156,11 +158,15 @@ type World = {
   isNotifyRefused?: boolean
   /** When the Fable week the usage endpoint lists resets; `FABLE_RESET` where unset. */
   fableResets?: string
+  /** access token -> when its Fable week resets, where the logins' Fable weeks reset apart; `fableResets` where unset */
+  fableResetsBy?: Record<string, string>
   /** The session's environment beyond USER and HOME. */
   env: Record<string, string>
   /** Claude Code's security policy refuses every switch, as in a session on a Team seat. */
   refuseEnv?: boolean
   breakEnv?: boolean
+  /** Awaited once a usage body is made, before it is answered: a body that comes back late, its numbers those of its own time. */
+  afterUsageBody?: (token: string) => Promise<void>
   /** Awaited before each answer, so a press can finish during a usage read. */
   beforeFetch?: () => Promise<void>
   /** Awaited before each keychain answer, so a read can come back late, as on a real Mac. */
@@ -234,7 +240,9 @@ const ran = (exitCode: number, stdout: string): ProcessRunResult => ({
 function sharedStore(on: On, entries: Map<string, unknown>, w: World): void {
   on('store.get', (_$, e) => {
     const isRefused = (e.key === 'store-id' && w.storeIdFails === 'read') || (w.storeReadFails !== undefined && e.key.startsWith(w.storeReadFails))
-    return isRefused ? { deny: 'store: refused' } : { value: entries.get(e.key) }
+    if (isRefused) return { deny: 'store: refused' }
+    const value = entries.get(e.key)
+    return w.afterStoreGet === undefined ? { value } : w.afterStoreGet(e.key).then(() => ({ value }))
   })
   on('store.set', (_$, e) => {
     if (e.key === 'store-id' && w.storeIdFails !== undefined) return { deny: 'store: refused' }
@@ -368,8 +376,9 @@ function world(on: On, w: World, store: Record<string, unknown> | Map<string, un
       five_hour: five === null ? null : { utilization: five, resets_at: w.fiveHourResets?.[token] ?? '2026-10-12T12:00:00Z' },
       seven_day: week === null ? null : { utilization: week, resets_at: w.weekResets?.[token] ?? WEEK_RESET },
       // A row for another model beside the Fable one, spent: read as Fable's, it would show.
-      ...(fable === undefined ? {} : { limits: [limitRow('Sonnet', 100), limitRow('Fable 5.1', fable, w.fableResets)] }),
+      ...(fable === undefined ? {} : { limits: [limitRow('Sonnet', 100), limitRow('Fable 5.1', fable, w.fableResetsBy?.[token] ?? w.fableResets)] }),
     }
+    await w.afterUsageBody?.(token)
     return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(body) } }
   })
   // Claude Code keeps a /login's sign-in where the session reads its own: the slot it is on.
@@ -5585,7 +5594,9 @@ for (const isProven of [false, true]) {
     }
     await $.classic.StopFailure({ error: 'rate_limit', last_assistant_message: 'Claude usage limit reached.' })
     await clock.settle()
-    expect([isPressed, store.get('mark:2') !== undefined]).toEqual([true, true])
+    // A stop whose view or switch changed during its own read is stale: it writes no mark at all (round 4), so there is
+    // nothing for the next press to give back, and the login stays unmarked throughout.
+    expect([isPressed, store.get('mark:2') !== undefined]).toEqual([true, false])
     if (isProven) {
       await clock.advance(SETTLE_WAIT)
       w.limits = [{ kind: 'seven_day', percentUsed: 42, resetsAt: WEEK_RESET }]
@@ -5751,7 +5762,6 @@ for (const delay of [40_000, 90_000, 150_000]) {
 const ONES_WEEK: SessionRateLimit[] = [{ kind: 'seven_day', percentUsed: 42, resetsAt: WEEK_RESET }]
 const F3_ENDS: [string, ($: Engine, w: World, clock: MockClock) => Promise<void>][] = [
   ['the session end', async ($, _w, clock) => endSession($, clock)],
-  ['Use now on login 1', async ($, _w, clock) => useNow($, clock, '1')],
   ['the did-not-take settle', async ($, w, clock) => {
     await clock.advance(4 * 60_000 + 10_000)
     await respond($, clock, w)
@@ -5769,6 +5779,24 @@ for (const [name, end] of F3_ENDS) {
     expect([name, 'after', /has used its Fable week/.test(await bandText($))]).toEqual([name, 'after', true])
   })
 }
+
+// Restored: the press that ends an unproven switch (Use now on login 1), with a Fable stop after it. The proven Fable stop
+// can no longer come first (it points the session back to login 1 itself), so the press comes before it.
+test('Use now on login 1 ends an unproven switch, gives back its provisional mark, and a proven Fable stop after it stands', async ($, on) => {
+  const { w, store, clock } = await stopDuringSwitch($, on, 40_000, 'Claude usage limit reached.', undefined, { 'tok-1': [10, 40, 21], 'tok-2': [10, 41] })
+  expect(store.get('mark:2'), 'the provisional mark on login 2').toBeDefined()
+  w.limits = ONES_WEEK
+  await respond($, clock, w)
+  await useNow($, clock, '1')
+  expect(store.get('mark:2'), 'the press gave the provisional mark back').toBeUndefined()
+  // A response carrying login 1's week proves the press's switch, then a Fable stop on it.
+  await clock.advance(SETTLE_WAIT)
+  await respond($, clock, w)
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  expect(store.get('fable-mark:1'), "the proven Fable stop's mark stands once the provisional one is gone").toBeDefined()
+  expect(store.get('mark:2')).toBeUndefined()
+})
 
 // Review opus-e17 F2 [END-IS-NOT-EXIT]: an end the process outlives (a /clear, a resume) leaves the switch, and its stop,
 // unsettled, through the reset of $.state that follows the end.
@@ -11559,8 +11587,9 @@ test('a carry-on whose turn dies on the usage limit again moves to the next logi
     "resume ended rate_limit: the carry-on's own turn, nothing queued",
     stopHeard('none', '2'),
     'owed resume: turns closed',
-    'stop on owed resume: login 2 tried, no response since its switch, no mark',
-    'picked 3: fresh, read 1 min ago; tried 1, 2',
+    // A wordless stop on a switch no response has proven is login 2's only at its second: this first one may have gone out on login 1.
+    'stop on owed resume: login 2 in use, no response since its switch, no mark',
+    'picked 3: fresh, read 1 min ago; tried 1',
     'moved to 3',
     'carry-on armed',
     'carry-on queued',
@@ -11597,16 +11626,19 @@ const logTime = (store: Map<string, unknown>, w: World, prefix: string): number 
 test('row b: pickAfterStop skips tried logins and answers undefined once all are tried', async ($, on) => {
   const w = fresh()
   const { store, clock } = await owedWorld($, on, w)
-  // Each stop is the carry-on's turn dying: no response, no entry, so one episode, and its tried set grows.
-  for (let stop = 0; stop < 3; stop++) {
+  // Each stop is the carry-on's turn dying: no response, no entry, so one episode, and its tried set grows. A wordless stop
+  // on a switch no response proved makes its login tried only at its second, so each login after the first takes two.
+  for (let stop = 0; stop < 5; stop++) {
     await $.classic.StopFailure({ error: 'rate_limit' })
     await clock.settle()
     await clock.advance(36_000)
   }
-  expect(slots(w)).toEqual([SLOT2, SLOT3])
+  expect(slots(w)).toEqual([SLOT2, SLOT3, SLOT2, SLOT3])
   expect(whats(stopLogOf(store, w)).filter(l => l.startsWith('picked ') || l.startsWith('stayed'))).toEqual([
     'picked 2: fresh, read 0 min ago; tried 1',
-    'picked 3: fresh, read 1 min ago; tried 1, 2',
+    'picked 3: fresh, read 1 min ago; tried 1',
+    'picked 2: fresh, read 1 min ago; tried 1',
+    'picked 3: fresh, read 2 min ago; tried 1, 2',
     'stayed: no untried login (tried 1, 2, 3)',
   ])
 })
@@ -12015,7 +12047,7 @@ test('row r: a resume that dies with no response since its switch marks nothing 
   await clock.settle()
   expect(slots(w)).toEqual([SLOT2, SLOT3])
   expect(['mark:1', 'mark:2', 'week-mark:2', 'fable-mark:2'].map(key => store.get(key) !== undefined)).toEqual([true, false, false, false])
-  expect(whats(stopLogOf(store, w))).toContain('stop on owed resume: login 2 tried, no response since its switch, no mark')
+  expect(whats(stopLogOf(store, w))).toContain('stop on owed resume: login 2 in use, no response since its switch, no mark')
 })
 
 // The kit cannot draw 'dialog': the look reaches the fill within v4's bound, and the resume enters there.
@@ -12067,7 +12099,8 @@ test('row b: a measure within 30 s of entry, then a stop, keeps one episode and 
   await clock.settle()
   const lines = whats(stopLogOf(store, w))
   expect(lines.filter(l => l.startsWith('work resumed'))).toEqual([])
-  expect(lines.filter(l => l.startsWith('picked 3'))).toEqual(['picked 3: fresh, read 1 min ago; tried 1, 2'])
+  // The stop on login 2 is wordless and its switch unproven: login 2 is tried only at its second such stop.
+  expect(lines.filter(l => l.startsWith('picked 3'))).toEqual(['picked 3: fresh, read 1 min ago; tried 1'])
   expect(slots(w)).toEqual([SLOT2, SLOT3])
 })
 
@@ -15009,14 +15042,37 @@ async function turnedAwayOnThree($: Engine, on: On) {
 test('91-E: a carry-on turned away behind a queued submit is not sent where a stop with no login left owes the carry-on before the drop (puma-9arph.91)', async ($, on) => {
   const r = await turnedAwayOnThree($, on)
   r.w.usage['tok-3'] = [100, 41]
+  // Login 2 cannot be tried (a wordless stop makes a login tried only at its second): none is left for this stop.
+  r.store.set('health:2', { kind: 'login-needed', why: 'its sign-in has run out' })
   await $.classic.StopFailure(PLAIN)
   await r.clock.settle()
-  const isOwed = whats(stopLogOf(r.store, r.w)).some(what => what.startsWith('no login left'))
+  const isOwed =whats(stopLogOf(r.store, r.w)).some(what => what.startsWith('no login left'))
   r.settle()
   await r.clock.settle()
   await r.clock.advance(60_000)
   await r.clock.settle()
   expect([r.first, r.last()?.activeId, r.isTurnedAway, isOwed], 'held on 2, turned away on 3, then no login left').toEqual([['2', 1], '3', true, true])
+  expect([r.w.submitted.length, r.last()?.carryDue !== undefined], 'nothing sent at the drop, the carry-on owed').toEqual([1, true])
+})
+
+test('91-E: a carry-on turned away behind a queued submit is not sent where the tried list itself leaves no login (puma-9arph.91)', async ($, on) => {
+  const r = await turnedAwayOnThree($, on)
+  r.w.usage['tok-3'] = [100, 41]
+  // A wordless stop on a login whose switch no response proved makes it tried only at its second: the run of stops that
+  // follows (3, then 2, then 3 again) leaves login 1, 2 and 3 all tried, so no login is left with every login healthy.
+  for (let i = 0; i < 3; i += 1) {
+    await r.clock.advance(36_000)
+    await $.classic.StopFailure(PLAIN)
+    await r.clock.settle()
+  }
+  const log = whats(stopLogOf(r.store, r.w))
+  expect(log, 'the tried list alone ends the stop').toContain('stayed: no untried login (tried 1, 2, 3)')
+  const isOwed = log.some(what => what.startsWith('no login left'))
+  r.settle()
+  await r.clock.settle()
+  await r.clock.advance(60_000)
+  await r.clock.settle()
+  expect([r.last()?.activeId, r.isTurnedAway, isOwed], 'turned away on 3, then no login left').toEqual(['3', true, true])
   expect([r.w.submitted.length, r.last()?.carryDue !== undefined], 'nothing sent at the drop, the carry-on owed').toEqual([1, true])
 })
 
@@ -16459,4 +16515,1082 @@ test("a main turn starting while a tick's switch waits on the keychain keeps the
   open()
   await settleReal(clock)
   expect(w.envSets, 'a switch landed against a session a new turn had cleared').toEqual([])
+})
+
+// ---------------------------------------------------------------- F1 defense: a stop's owner is the login its reset names
+
+/** Login 2's Fable week resets here, 3pm in Tallinn (UTC+3 on this date); login 1's is FABLE_RESET. */
+const FABLE_RESET_2 = '2026-10-14T12:00:00Z'
+const STOP_NAMING_2 = { error: 'rate_limit', last_assistant_message: "You've hit your Fable limit · resets Oct 14 at 3pm (Europe/Tallinn)" }
+const STOP_NAMING_1 = { error: 'rate_limit', last_assistant_message: "You've hit your Fable limit · resets Oct 17 at 6am (Europe/Tallinn)" }
+const NOT_LANDED = "stop names login 2's reset, not login 1's: the move to 1 has not landed"
+const slotValues = (w: World) => w.envSets.map(e => e.value)
+
+/** Login 1 has Fable room, login 2's Fable week is spent; the session starts on login `on`, with no switch pending. */
+async function fableOnTwo($: Engine, on: On, startsOn: '1' | '2', beforeStart?: (w: World) => void): Promise<{ w: World; store: Map<string, unknown>; clock: MockClock }> {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [20, 30, 21]
+  w.usage['tok-2'] = [10, 30, 100]
+  w.fableResetsBy = { 'tok-1': FABLE_RESET, 'tok-2': FABLE_RESET_2 }
+  if (startsOn === '2') w.env.CLAUDE_SECURESTORAGE_CONFIG_DIR = SLOT2
+  const store = new Map<string, unknown>(Object.entries(TWO_LOGINS))
+  const clock = world(on, w, store)
+  beforeStart?.(w)
+  await start($, clock)
+  return { w, store, clock }
+}
+
+/** The stop on login 2 that moves the session to login 1, then 35 s on, when the carry-on goes out, the stop login 2's reset names. */
+async function movedToOneThenStoppedOnTwo($: Engine, ctx: { w: World; clock: MockClock }): Promise<void> {
+  await $.classic.StopFailure(STOP_NAMING_2)
+  await ctx.clock.settle()
+  expect(slotValues(ctx.w), 'the first stop moves the session to login 1').toEqual([undefined])
+  await ctx.clock.advance(35_000)
+  await $.classic.StopFailure(STOP_NAMING_2)
+  await ctx.clock.settle()
+}
+
+test('a Fable stop whose reset is login 2\'s, 35 s after a move to login 1, marks nothing on login 1, leaves it untried, and points the session back to login 2 (master438 04:24:21)', async ($, on) => {
+  const ctx = await fableOnTwo($, on, '2')
+  const { w, store } = ctx
+  await movedToOneThenStoppedOnTwo($, ctx)
+  expect(store.get('fable-mark:1'), 'no mark on the login the move never reached').toBeUndefined()
+  const log = whats(stopLogOf(store, w))
+  expect(log).toContain(NOT_LANDED)
+  // Login 1 is picked both times: it was never tried.
+  expect(log.filter(line => line.startsWith('picked '))).toEqual([expect.stringMatching(/^picked 1: .*; tried 2$/), expect.stringMatching(/^picked 1: .*; tried 2$/)])
+  // Back to login 2, then the one untried login with Fable room again.
+  expect(slotValues(w)).toEqual([undefined, SLOT2, undefined])
+})
+
+test('a second move to login 1 that does not land stops the rotation trying it this session, and says so once', async ($, on) => {
+  const ctx = await fableOnTwo($, on, '2')
+  const { w, store, clock } = ctx
+  await movedToOneThenStoppedOnTwo($, ctx)
+  expect(w.toasts.filter(t => /did not land/.test(t))).toEqual([])
+  await clock.advance(35_000)
+  await $.classic.StopFailure(STOP_NAMING_2)
+  await clock.settle()
+  // The point-back, and no third move to login 1.
+  expect(slotValues(w)).toEqual([undefined, SLOT2, undefined, SLOT2])
+  expect(whats(stopLogOf(store, w)).filter(line => line === NOT_LANDED)).toHaveLength(2)
+  expect(w.toasts.filter(t => /did not land/.test(t))).toHaveLength(1)
+  expect(store.get('fable-mark:1')).toBeUndefined()
+  await clock.advance(35_000)
+  await $.classic.StopFailure(STOP_NAMING_2)
+  await clock.settle()
+  expect(w.toasts.filter(t => /did not land/.test(t)), 'said once').toHaveLength(1)
+  expect(slotValues(w)).toEqual([undefined, SLOT2, undefined, SLOT2])
+})
+
+test('a stop with no switch pending whose reset names another login moves the view to that login (master438 01:15:55)', async ($, on) => {
+  const { w, store, clock } = await fableOnTwo($, on, '1')
+  await $.classic.StopFailure(STOP_NAMING_2)
+  await clock.settle()
+  const log = whats(stopLogOf(store, w))
+  expect(log).toContain(NOT_LANDED)
+  expect(slotValues(w)[0], 'the view moves to the login the reset names').toBe(SLOT2)
+  expect(store.get('fable-mark:1')).toBeUndefined()
+})
+
+test('guard: a stop whose reset names the login in use goes as before (passes before the change too)', async ($, on) => {
+  const { w, store, clock } = await fableOnTwo($, on, '1')
+  await $.classic.StopFailure(STOP_NAMING_1)
+  await clock.settle()
+  expect(store.get('fable-mark:1')).toBeDefined()
+  expect(whats(stopLogOf(store, w)).filter(line => /has not landed/.test(line))).toEqual([])
+  // Login 2's Fable week is spent: nowhere to go, nothing pointed back.
+  expect(slotValues(w)).toEqual([])
+})
+
+test('a wordless stop on an unproven switch adds the login moved to to tried only at its second stop', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [20, 30, 100]
+  w.usage['tok-2'] = [10, 30, 10]
+  const store = new Map<string, unknown>(Object.entries(TWO_LOGINS))
+  const clock = world(on, w, store)
+  await start($, clock)
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  expect(slotValues(w)).toEqual([SLOT2])
+  // Past the settle, no response since: the stop may have gone out on login 1.
+  await clock.advance(40_000)
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  expect(whats(stopLogOf(store, w))).toContain('stayed: no untried login (tried 1)')
+  await clock.advance(10_000)
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  expect(whats(stopLogOf(store, w))).toContain('stayed: no untried login (tried 1, 2)')
+})
+
+// Codex round 1 on the first PR2 commit.
+test('F1: a unique reset owner wins inside the 35 s settle window too: a stop 10 s after a move to login 1 naming login 2 points back to 2 and counts one non-landing for 1', async ($, on) => {
+  const ctx = await fableOnTwo($, on, '2')
+  const { w, store, clock } = ctx
+  await $.classic.StopFailure(STOP_NAMING_2)
+  await clock.settle()
+  expect(slotValues(w), 'the first stop moves the session to login 1').toEqual([undefined])
+  await clock.advance(10_000)
+  await $.classic.StopFailure(STOP_NAMING_2)
+  await clock.settle()
+  expect(whats(stopLogOf(store, w))).toContain(NOT_LANDED)
+  expect(store.get('fable-mark:1')).toBeUndefined()
+  // Back to login 2, then the one untried login with Fable room again: login 1 was never tried.
+  expect(slotValues(w)).toEqual([undefined, SLOT2, undefined])
+  expect(whats(stopLogOf(store, w)).filter(line => line.startsWith('picked '))).toEqual([expect.stringMatching(/^picked 1: .*; tried 2$/), expect.stringMatching(/^picked 1: .*; tried 2$/)])
+  expect(w.toasts.filter(t => /did not land/.test(t)), 'one non-landing is no toast').toEqual([])
+  // The second non-landing, again inside the window of the second move, leaves login 1 be.
+  await clock.advance(10_000)
+  await $.classic.StopFailure(STOP_NAMING_2)
+  await clock.settle()
+  expect(w.toasts.filter(t => /did not land/.test(t))).toHaveLength(1)
+  expect(slotValues(w)).toEqual([undefined, SLOT2, undefined, SLOT2])
+})
+
+test('F2: a response whose week two logins share proves neither: a wordless stop after it adds no login to tried', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  // Both logins' weeks reset at WEEK_RESET: a response carrying it is login 1's and login 2's alike.
+  w.usage['tok-1'] = [20, 30]
+  w.usage['tok-2'] = [10, 30]
+  const store = new Map<string, unknown>(Object.entries(TWO_LOGINS))
+  const clock = world(on, w, store)
+  await start($, clock)
+  await $.classic.StopFailure({ error: 'rate_limit' })
+  await clock.settle()
+  expect(slotValues(w)).toEqual([SLOT2])
+  await clock.advance(40_000)
+  w.limits = limitsOf(50, 40)
+  await respond($, clock, w)
+  await $.classic.StopFailure({ error: 'rate_limit' })
+  await clock.settle()
+  // Nobody is charged: login 1 was tried at the first stop, login 2 is in use and no response proved it the stopper.
+  expect(whats(stopLogOf(store, w))).toContain('stayed: no untried login (tried 1)')
+})
+
+/** A view read that answers late, once: the next one after `arm()` waits for `release()` and then answers what it read. */
+function gateNextViewRead(on: On): { arm: () => void; isPaused: () => boolean; release: () => void } {
+  let state: 'idle' | 'armed' | 'paused' | 'fired' = 'idle'
+  let open: () => void = () => undefined
+  const gate = new Promise<void>(resolve => {
+    open = resolve
+  })
+  on('state.get', async (_$, e, next) => {
+    const read = await next(e)
+    if (state !== 'armed' || e.plugin !== 'account-rotator' || e.key !== 'view') return read
+    state = 'paused'
+    await gate
+    state = 'fired'
+    return read
+  })
+  return { arm: () => void (state = 'armed'), isPaused: () => state === 'paused', release: open }
+}
+
+/** Login 2 is spent for Fable and the session starts on it; stop 1 moves it to login 1; the second stop, 35 s on, is held at its first read of the view. */
+async function heldSecondStop($: Engine, on: On) {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.keychain[await keychainItem(SLOT3)] = blob('tok-3')
+  w.usage['tok-1'] = [20, 30, 21]
+  w.usage['tok-2'] = [10, 30, 100]
+  w.usage['tok-3'] = [10, 30, 100]
+  w.fableResetsBy = { 'tok-1': FABLE_RESET, 'tok-2': FABLE_RESET_2, 'tok-3': '2026-10-15T12:00:00Z' }
+  w.env.CLAUDE_SECURESTORAGE_CONFIG_DIR = SLOT2
+  const store = new Map<string, unknown>(Object.entries(THREE_LOGINS))
+  const clock = world(on, w, store)
+  const gate = gateNextViewRead(on)
+  await start($, clock)
+  await $.classic.StopFailure(STOP_NAMING_2)
+  await clock.settle()
+  expect(slotValues(w), 'the first stop moves the session to login 1').toEqual([undefined])
+  await clock.advance(35_000)
+  gate.arm()
+  const stopping = $.classic.StopFailure(STOP_NAMING_2)
+  await clock.settle()
+  expect(gate.isPaused(), 'the second stop waits on its read of the view').toBe(true)
+  return { w, store, clock, gate, stopping }
+}
+
+test('F3: a point-back acts only on the switch it examined: a press that moved the session to login 3 meanwhile stands', async ($, on) => {
+  const { w, store, clock, gate, stopping } = await heldSecondStop($, on)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  await pane.press({ key: 'use-3' })
+  await clock.settle()
+  await pane.unmount()
+  gate.release()
+  await stopping
+  await clock.settle()
+  expect(slotValues(w), 'the press to login 3 stands').toEqual([undefined, SLOT3])
+  expect(whats(stopLogOf(store, w))).toContain('stop dropped: the switch or the failed turn it examined has changed since')
+})
+
+test('F3: a point-back acts only on a failed turn: a main turn that began meanwhile clears it, and the stop is dropped', async ($, on) => {
+  const { w, store, clock, gate, stopping } = await heldSecondStop($, on)
+  await $.turn.start({ text: 'go on by hand', turnId: 'by-hand' })
+  gate.release()
+  await stopping
+  await clock.settle()
+  expect(slotValues(w), 'no point-back to login 2').toEqual([undefined])
+  expect(whats(stopLogOf(store, w))).toContain('stop dropped: the switch or the failed turn it examined has changed since')
+})
+
+// Codex round 2 on the second PR2 commit: the owner decision as one function.
+test('OWNER-RESPONSE: a response since the switch that uniquely proves login 1, then a wordless stop on login 2, points the session back to login 1', async ($, on) => {
+  const last = [{ kind: 'five_hour', percentUsed: 100, resetsAt: '2026-10-12T12:00:00Z' }, { kind: 'seven_day', percentUsed: 41, resetsAt: WEEK_RESET }]
+  const { w, store } = await stopDuringSwitch($, on, 61_000, 'Claude usage limit reached.', last)
+  expect(whats(stopLogOf(store, w))).toContain("a response since the switch is login 1's, not login 2's: the move to 2 has not landed")
+  expect(slots(w), 'login 2 by the press, back to login 1 by the stop').toEqual([SLOT2, ''])
+})
+
+test('POINTBACK-TURN: a main turn that begins while the point-back writes the slot stands: nothing is published, the slot goes back to the login the view names', async ($, on) => {
+  const { w, store, clock } = await fableOnTwo($, on, '2')
+  await $.classic.StopFailure(STOP_NAMING_2)
+  await clock.settle()
+  await clock.advance(35_000)
+  expect(slotValues(w)).toEqual([undefined])
+  let isHeld = false
+  let open: () => void = () => undefined
+  const gate = new Promise<void>(resolve => {
+    open = resolve
+  })
+  w.beforeEnv = async () => {
+    isHeld = true
+    await gate
+  }
+  const stopping = $.classic.StopFailure(STOP_NAMING_2)
+  await clock.settle()
+  expect(isHeld, "the point-back's slot write waits").toBe(true)
+  await $.turn.start({ text: 'go on by hand', turnId: 'by-hand' })
+  w.beforeEnv = undefined
+  open()
+  await stopping
+  await clock.settle()
+  expect(whats(stopLogOf(store, w))).toContain('stop dropped: the switch or the failed turn it examined has changed since')
+  expect(whats(stopLogOf(store, w)).filter(line => line.startsWith('picked ')), 'the dropped stop picks nothing more').toHaveLength(1)
+  expect(slotValues(w).at(-1), 'the slot is back on login 1, the one the view names').toBeUndefined()
+})
+
+test('PROOF-COUNT: a proof whose write did not apply (a press replaced the switch) leaves the login\'s non-landing count: its second non-landing still leaves it be', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.keychain[await keychainItem(SLOT3)] = blob('tok-3')
+  w.usage['tok-1'] = [20, 30, 21]
+  w.usage['tok-2'] = [10, 30, 100]
+  w.usage['tok-3'] = [10, 30, 100]
+  w.fableResetsBy = { 'tok-1': FABLE_RESET, 'tok-2': FABLE_RESET_2, 'tok-3': '2026-10-15T12:00:00Z' }
+  w.weekResets = { 'tok-1': '2026-10-18T03:00:00Z', 'tok-2': '2026-10-19T03:00:00Z', 'tok-3': '2026-10-20T03:00:00Z' }
+  w.env.CLAUDE_SECURESTORAGE_CONFIG_DIR = SLOT2
+  const store = new Map<string, unknown>(Object.entries(THREE_LOGINS))
+  const clock = world(on, w, store)
+  // The write that ends the pending switch (a proof's) waits once, armed.
+  let isArmed = false
+  let isHeld = false
+  let open: () => void = () => undefined
+  const gate = new Promise<void>(resolve => {
+    open = resolve
+  })
+  let last: View | undefined
+  on('state.set', async (_$, e, next) => {
+    const { key, value } = e as unknown as { key: string; value: View }
+    if (key === 'view' && isArmed && last?.pending !== undefined && value.pending === undefined) {
+      isArmed = false
+      isHeld = true
+      await gate
+    }
+    if (key === 'view') last = value
+    return next(e)
+  })
+  await start($, clock)
+  await $.classic.StopFailure(STOP_NAMING_2)
+  await clock.settle()
+  await clock.advance(35_000)
+  // The first non-landing of login 1; the stop goes on to move to login 1 again.
+  await $.classic.StopFailure(STOP_NAMING_2)
+  await clock.settle()
+  expect(slotValues(w)).toEqual([undefined, SLOT2, undefined])
+  await clock.advance(40_000)
+  // A response with login 1's week proves the move to login 1; its write waits, and a press moves the session to login 3.
+  w.limits = limitsOf(30, 30, '2026-10-18T03:00:00Z')
+  isArmed = true
+  const responding = $.session.measure({ context: { window: 200_000 }, rateLimits: w.limits, changed: ['rateLimits'] })
+  await clock.settle()
+  expect(isHeld, "the proof's write waits").toBe(true)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  const pressing = pane.press({ key: 'use-3' })
+  await clock.settle()
+  open()
+  await responding
+  await pressing
+  await clock.settle()
+  // Login 1 again, and a stop that names login 2 again: the second non-landing of login 1 in this session.
+  await pane.press({ key: 'use-1' })
+  await clock.settle()
+  await pane.unmount()
+  await clock.advance(35_000)
+  await $.classic.StopFailure(STOP_NAMING_2)
+  await clock.settle()
+  expect(w.toasts.filter(t => /did not land/.test(t))).toHaveLength(1)
+})
+
+// Codex round 3: a stop reads state, awaits, then acts on what it read. The failure epoch and the staged charge.
+test('TURN-EPOCH: an old stop paused while a new main turn starts and fails does not point back against the new failure', async ($, on) => {
+  const { w, store, clock, gate, stopping } = await heldSecondStop($, on)
+  await $.turn.start({ text: 'go on by hand', turnId: 'by-hand' })
+  // The new turn fails too: red again, a different failure.
+  await $.classic.StopFailure({ error: 'server_error' })
+  await clock.settle()
+  gate.release()
+  await stopping
+  await clock.settle()
+  expect(slotValues(w), 'no point-back for the old stop').toEqual([undefined])
+  expect(whats(stopLogOf(store, w))).toContain('stop dropped: the switch or the failed turn it examined has changed since')
+})
+
+test('STALE-CHARGE: a stop dropped because a press moved the session leaves the episode as it found it: a later stop can still pick the login it would have tried', async ($, on) => {
+  const held: { gate?: ReturnType<typeof gateNextViewRead> } = {}
+  const { w, store, clock } = await fableOnTwo($, on, '1', () => void (held.gate = gateNextViewRead(on)))
+  const gate = held.gate
+  if (gate === undefined) throw new Error('the gate was not registered')
+  gate.arm()
+  const stopping = $.classic.StopFailure(STOP_NAMING_1)
+  await clock.settle()
+  expect(gate.isPaused(), 'the stop waits on its read of the view').toBe(true)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  await pane.press({ key: 'use-2' })
+  await clock.settle()
+  await pane.unmount()
+  gate.release()
+  await stopping
+  await clock.settle()
+  expect(whats(stopLogOf(store, w))).toContain('stop dropped: the switch or the failed turn it examined has changed since')
+  await clock.advance(36_000)
+  await $.classic.StopFailure(STOP_NAMING_2)
+  await clock.settle()
+  // The dropped stop charged login 1 nothing: it is still untried for this stop.
+  expect(whats(stopLogOf(store, w)).filter(line => line.startsWith('picked '))).toEqual([expect.stringMatching(/^picked 1: .*; tried 2$/)])
+})
+
+// Codex round 4.
+/** The stop names login 1 (the owner is the login in use); its forced usage read is held, once armed. */
+async function stopHeldOnItsRead($: Engine, on: On) {
+  const held = { armed: false, paused: false, open: () => {} }
+  const gate = new Promise<void>(resolve => {
+    held.open = resolve
+  })
+  const { w, store, clock } = await fableOnTwo($, on, '1', () => {
+    // Registered before the start: the world's own fetch answers after this one.
+  })
+  w.beforeFetch = async () => {
+    if (!held.armed) return
+    held.armed = false
+    held.paused = true
+    await gate
+  }
+  await clock.advance(USAGE_FORCE_AFTER_MS + 1000)
+  held.armed = true
+  const stopping = $.classic.StopFailure(STOP_NAMING_1)
+  await clock.settle()
+  expect(held.paused, "the stop's forced usage read waits").toBe(true)
+  return { w, store, clock, held, stopping }
+}
+
+test('STALE-AFTER-CHECK: a main turn that starts during the stop\'s usage read leaves no mark, no charge and no move', async ($, on) => {
+  const { w, store, clock, held, stopping } = await stopHeldOnItsRead($, on)
+  await $.turn.start({ text: 'go on by hand', turnId: 'by-hand' })
+  held.open()
+  await stopping
+  await clock.settle()
+  expect(store.get('fable-mark:1'), 'no mark').toBeUndefined()
+  expect(slotValues(w), 'no move').toEqual([])
+  expect(whats(stopLogOf(store, w))).toContain('stop dropped: the switch or the failed turn it examined has changed since')
+})
+
+test('STALE-AFTER-CHECK: a press that lands during the stop\'s usage read leaves no mark and no second move', async ($, on) => {
+  const { w, store, clock, held, stopping } = await stopHeldOnItsRead($, on)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  await pane.press({ key: 'use-2' })
+  await clock.settle()
+  await pane.unmount()
+  held.open()
+  await stopping
+  await clock.settle()
+  expect(store.get('fable-mark:1'), 'no mark').toBeUndefined()
+  expect(slotValues(w), 'the press alone moved the session').toEqual([SLOT2])
+  expect(whats(stopLogOf(store, w))).toContain('stop dropped: the switch or the failed turn it examined has changed since')
+})
+
+test('PROVISIONAL-LOST: a mark a stop left on a login moved to unproven, then moved on from, is given back when a later stop shows that move never landed', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.keychain[await keychainItem(SLOT3)] = blob('tok-3')
+  w.usage['tok-1'] = [60, 40, 21]
+  w.usage['tok-2'] = [10, 41]
+  w.usage['tok-3'] = [5, 10]
+  w.fableResetsBy = { 'tok-1': FABLE_RESET }
+  w.weekResets = { 'tok-1': '2026-10-18T03:00:00Z', 'tok-2': '2026-10-19T03:00:00Z', 'tok-3': '2026-10-20T03:00:00Z' }
+  const store = new Map<string, unknown>(Object.entries({ ...THREE_LOGINS, 'rotate-to': 'room' }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  // A to B by Use now: no response proves it. 40 s on, a wordless stop marks B provisionally and moves to C.
+  await useNow($, clock, '2')
+  await clock.advance(40_000)
+  await $.classic.StopFailure({ error: 'rate_limit', last_assistant_message: 'Claude usage limit reached.' })
+  await clock.settle()
+  expect(store.get('mark:2'), "the wordless stop marks login 2 provisionally").toBeDefined()
+  expect(slotValues(w), 'and moves on to login 3').toEqual([SLOT2, SLOT3])
+  await clock.advance(36_000)
+  // A later stop whose reset is login 1's: requests were going out on login 1 all along.
+  await $.classic.StopFailure(STOP_NAMING_1)
+  await clock.settle()
+  expect(whats(stopLogOf(store, w))).toContain("stop names login 1's reset, not login 3's: the move to 3 has not landed")
+  expect(store.get('mark:2'), "login 2 never received a request: its mark is given back").toBeUndefined()
+})
+
+// Codex round 5: the class "a stop reads, awaits, then writes or moves". The check goes last, and a write or a move follows it
+// with no await between.
+/** The first read of store key `read` after a write of `after` answers late: a stop paused inside its own read of the store. */
+function gateStoreRead(w: World, read: string, after: string): { arm: () => void; isPaused: () => boolean; release: () => void } {
+  let state: 'idle' | 'armed' | 'written' | 'paused' | 'fired' = 'idle'
+  let open: () => void = () => undefined
+  const gate = new Promise<void>(resolve => {
+    open = resolve
+  })
+  w.onStoreSet = key => {
+    if (state === 'armed' && key === after) state = 'written'
+  }
+  w.afterStoreGet = async key => {
+    if (state !== 'written' || key !== read) return
+    state = 'paused'
+    await gate
+    state = 'fired'
+  }
+  return { arm: () => void (state = 'armed'), isPaused: () => state === 'paused', release: open }
+}
+
+/** The session starts on login `startsOn`; the stop's own forced read of it is saved, and the stop is held at its first read of `read` after the write of `after`. */
+async function stopHeldOnStoreRead($: Engine, on: On, startsOn: '1' | '2', stop: typeof STOP_NAMING_1, read: string, after: string) {
+  const held: { gate?: ReturnType<typeof gateStoreRead> } = {}
+  const { w, store, clock } = await fableOnTwo($, on, startsOn, w => void (held.gate = gateStoreRead(w, read, after)))
+  const gate = held.gate
+  if (gate === undefined) throw new Error('the gate was not registered')
+  await clock.advance(USAGE_FORCE_AFTER_MS + 1000)
+  gate.arm()
+  const stopping = $.classic.StopFailure(stop)
+  await clock.settle()
+  expect(gate.isPaused(), `the stop waits on its read of ${read}`).toBe(true)
+  return { w, store, clock, gate, stopping }
+}
+
+test('STALE-MARK: a main turn that starts while the stop reads the stored reading before its mark leaves no mark and no move', async ($, on) => {
+  const { w, store, clock, gate, stopping } = await stopHeldOnStoreRead($, on, '1', STOP_NAMING_1, 'usage:1', 'usage:1')
+  await $.turn.start({ text: 'go on by hand', turnId: 'by-hand' })
+  gate.release()
+  await stopping
+  await clock.settle()
+  expect(store.get('fable-mark:1'), 'no mark').toBeUndefined()
+  expect(slotValues(w), 'no move').toEqual([])
+  expect(whats(stopLogOf(store, w))).toContain('stop dropped: the switch or the failed turn it examined has changed since')
+})
+
+test('STALE-MARK: a press that lands while the stop reads the stored reading before its mark leaves no mark and no second move', async ($, on) => {
+  const { w, store, clock, gate, stopping } = await stopHeldOnStoreRead($, on, '1', STOP_NAMING_1, 'usage:1', 'usage:1')
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  await pane.press({ key: 'use-2' })
+  await clock.settle()
+  await pane.unmount()
+  gate.release()
+  await stopping
+  await clock.settle()
+  expect(store.get('fable-mark:1'), 'no mark').toBeUndefined()
+  expect(slotValues(w), 'the press alone moved the session').toEqual([SLOT2])
+  expect(whats(stopLogOf(store, w))).toContain('stop dropped: the switch or the failed turn it examined has changed since')
+})
+
+/** The stop on login 2 (its Fable week already read spent: no mark to write) picks login 1; its read of login 1's stored reading, inside the pick, is held. */
+const stopHeldInThePick = ($: Engine, on: On) => stopHeldOnStoreRead($, on, '2', STOP_NAMING_2, 'usage:1', 'usage:2')
+
+test('STALE-ROTATE: a main turn that starts while the stop picks its target moves nothing and sends no carry-on', async ($, on) => {
+  const { w, store, clock, gate, stopping } = await stopHeldInThePick($, on)
+  await $.turn.start({ text: 'go on by hand', turnId: 'by-hand' })
+  gate.release()
+  await stopping
+  await clock.settle()
+  await clock.advance(60_000)
+  expect(slotValues(w), 'the session stays where it runs').toEqual([])
+  expect(w.submitted, 'no carry-on').toEqual([])
+  expect(whats(stopLogOf(store, w)), 'the stop says it moved nothing').toContain('stop switch dropped: the failed turn it examined has changed since')
+})
+
+test('STALE-ROTATE: a newer failed main turn that starts while the stop picks its target is not moved by the older stop', async ($, on) => {
+  const { w, clock, gate, stopping } = await stopHeldInThePick($, on)
+  // The newer failure is no limit stop: nothing but the older stop could move the session.
+  await $.turn.start({ text: 'go on by hand', turnId: 'by-hand' })
+  await $.classic.StopFailure({ error: 'server_error' })
+  gate.release()
+  await stopping
+  await clock.settle()
+  await clock.advance(60_000)
+  expect(slotValues(w), 'the older stop cannot move the newer failure').toEqual([])
+  expect(w.submitted, 'no carry-on').toEqual([])
+})
+
+test('guard: a press moves a session whose failure a main turn cleared (a press is exempt from the failure epoch)', async ($, on) => {
+  const { w, clock } = await fableOnTwo($, on, '2')
+  await $.turn.start({ text: 'go on by hand', turnId: 'by-hand' })
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  await pane.press({ key: 'use-1' })
+  await clock.settle()
+  await pane.unmount()
+  expect(slotValues(w)).toEqual([undefined])
+})
+
+// ---------------------------------------------------------------- puma-9arph.109.2: a Fable stop's need reaches every pick path
+
+/**
+ * Three logins, rotation by room. Login 1 (in use) has its Fable week spent, as login 2 does, with the most 5-hour room;
+ * login 3 has the Fable room. A pick that forgets the Fable need takes login 2.
+ */
+async function fableNeedWorld($: Engine, on: On, options: { unique?: boolean; one?: [number, number, number]; three?: [number, number, number] } = {}) {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.keychain[await keychainItem(SLOT3)] = blob('tok-3')
+  w.usage['tok-1'] = options.one ?? [20, 30, 100]
+  w.usage['tok-2'] = [5, 30, 100]
+  w.usage['tok-3'] = options.three ?? [10, 30, 21]
+  // Every login's week resets together unless the test needs a response to prove one login.
+  if (options.unique) w.weekResets = { 'tok-1': '2026-10-18T03:00:00Z', 'tok-2': '2026-10-19T03:00:00Z', 'tok-3': '2026-10-20T03:00:00Z' }
+  const store = new Map<string, unknown>(Object.entries({ ...THREE_LOGINS, 'rotate-to': 'room' }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  return { w, store, clock }
+}
+
+test('NEED-OWNER-UNDEFINED: a Fable stop whose owner no response proves keeps the Fable need: the pick never takes a login whose Fable week is spent', async ($, on) => {
+  const { w, clock } = await fableNeedWorld($, on)
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  expect(slotValues(w), 'the first stop moves to login 3, the one with Fable room').toEqual([SLOT3])
+  await clock.advance(40_000)
+  // A response whose week all three logins share proves none of them: the second stop has no owner.
+  w.limits = limitsOf(50, 40)
+  await respond($, clock, w)
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  expect(slotValues(w), 'no move to login 2, whose Fable week is spent').toEqual([SLOT3])
+})
+
+test('NEED-OWED-RESUME: a Fable stop on an owed resume takes its own need, though the episode held none before it', async ($, on) => {
+  const { w, clock } = await fableNeedWorld($, on, { one: [100, 30, 21], three: [10, 30, 100] })
+  await $.classic.StopFailure({ error: 'rate_limit', last_assistant_message: PLAIN_STOPS[0] })
+  await clock.settle()
+  expect(slotValues(w), 'the plain stop moves to login 2, the most 5-hour room').toEqual([SLOT2])
+  await clock.advance(40_000)
+  // Past the settle, no response since the switch: a stop on an owed resume, now a Fable one. Login 3's Fable week is spent.
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  expect(slotValues(w), 'no move to login 3, whose Fable week is spent').toEqual([SLOT2])
+})
+
+test('NEED-STICKY: a wordless stop of the same episode that has no owner keeps the Fable need an earlier stop set', async ($, on) => {
+  const { w, clock } = await fableNeedWorld($, on)
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  expect(slotValues(w)).toEqual([SLOT3])
+  await clock.advance(40_000)
+  w.limits = limitsOf(50, 40)
+  await respond($, clock, w)
+  // The week all three logins share proves none: no owner, no mark, and the words say nothing of the Fable week.
+  await $.classic.StopFailure({ error: 'rate_limit' })
+  await clock.settle()
+  expect(slotValues(w), 'the episode still needs the Fable week: login 2 has none').toEqual([SLOT3])
+})
+
+test('guard: a plain stop after a Fable stop, one that marks its own window, judges its own need and moves to any login with room', async ($, on) => {
+  const { w, clock } = await fableNeedWorld($, on, { unique: true })
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  expect(slotValues(w)).toEqual([SLOT3])
+  await clock.advance(40_000)
+  w.limits = limitsOf(10, 30, '2026-10-20T03:00:00Z')
+  await respond($, clock, w)
+  await $.classic.StopFailure({ error: 'rate_limit', last_assistant_message: PLAIN_STOPS[0] })
+  await clock.settle()
+  expect(slotValues(w), 'a 5-hour stop needs no Fable room: login 2 has the most room').toEqual([SLOT3, SLOT2])
+})
+
+// https://code.claude.com/docs/en/errors.md: "The Opus and Sonnet limits each apply only to requests to that model family".
+for (const family of ['Opus', 'Sonnet']) {
+  for (const [name, one] of [['with a 5-hour window', [20, 30, 21]], ['that reports no 5-hour window', [null, 30, 21]]] as const) {
+    test(`MODEL-LIMIT: a ${family} limit on a login ${name} marks neither its 5-hour window, its week nor its Fable week, and the session moves on`, async ($, on) => {
+      const w = fresh()
+      w.keychain['Claude Code-credentials'] = blob('tok-1')
+      w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+      w.usage['tok-1'] = [...one]
+      w.usage['tok-2'] = [10, 30, 21]
+      const store = new Map<string, unknown>(Object.entries(TWO_LOGINS))
+      const clock = world(on, w, store)
+      await start($, clock)
+      await $.classic.StopFailure({ error: 'rate_limit', last_assistant_message: `You've hit your ${family} limit · resets 3:45pm` })
+      await clock.settle()
+      expect([store.get('mark:1'), store.get('week-mark:1'), store.get('fable-mark:1')], 'no mark of any window').toEqual([undefined, undefined, undefined])
+      expect(slotValues(w), 'the model family is spent here, so the session tries the next login').toEqual([SLOT2])
+    })
+  }
+}
+
+// ---------------------------------------------------------------- puma-9arph.109.3: read the candidates live before a spent-old pick
+
+/**
+ * Login 1 is in use with its Fable week spent. Logins 2 and 3 hold stored readings two hours old that show their Fable
+ * week and week spent (login 2 frees first), and the usage endpoint says what each is now: `live`. Login 2's token has
+ * run out where `isTwoIdle`. The schedule does not read either login before the stop.
+ */
+async function oldReadings($: Engine, on: On, live: { two: [number, number, number]; three: [number, number, number] }, options: { isTwoIdle?: boolean; isThreeRead?: boolean; isTwoRoomy?: boolean; text?: string; failing?: Record<string, number> } = {}) {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2', options.isTwoIdle ? NOW - HOUR : undefined)
+  w.keychain[await keychainItem(SLOT3)] = blob('tok-3')
+  w.usage['tok-1'] = [20, 30, 100]
+  w.usage['tok-2'] = live.two
+  w.usage['tok-3'] = live.three
+  w.fableResetsBy = { 'tok-1': FABLE_RESET, 'tok-2': FABLE_RESET_2, 'tok-3': FABLE_RESET }
+  w.weekResets = { 'tok-1': '2026-10-18T03:00:00Z', 'tok-2': '2026-10-14T03:00:00Z', 'tok-3': '2026-10-18T03:00:00Z' }
+  if (options.failing !== undefined) w.failing = options.failing
+  const old = (id: string, week: string, fable: string, pct = 100) => ({
+    fiveHour: { pct: 10, resetsAt: '2026-10-12T12:00:00Z' },
+    sevenDay: { pct, resetsAt: week },
+    fable: { pct, resetsAt: fable },
+    at: NOW - 2 * HOUR,
+    by: id,
+    v: 1,
+    src: 'body',
+  })
+  const store = new Map<string, unknown>(
+    Object.entries({
+      ...THREE_LOGINS,
+      'rotate-to': 'room',
+      ...(options.text === undefined ? {} : { 'fable-continue-text': options.text }),
+      'usage:2': old('2', '2026-10-14T03:00:00Z', FABLE_RESET_2, options.isTwoRoomy ? 10 : 100),
+      'usage-due:2': { next: NOW + HOUR, fails: 0, at: NOW - 2 * HOUR, v: 1 },
+      // Login 3 holds an old reading too, unless the test has the boot read it.
+      ...(options.isThreeRead ? {} : { 'usage:3': old('3', '2026-10-18T03:00:00Z', FABLE_RESET), 'usage-due:3': { next: NOW + HOUR, fails: 0, at: NOW - 2 * HOUR, v: 1 } }),
+    }),
+  )
+  const clock = world(on, w, store)
+  await start($, clock)
+  return { w, store, clock }
+}
+
+test('READ-BEFORE-SPENT-OLD: a candidate whose stored reading says spent but whose live read shows room is picked, not the spent one that frees first (06:42:05)', async ($, on) => {
+  const { w, store, clock } = await oldReadings($, on, { two: [100, 100, 100], three: [0, 0, 0] })
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  expect(slotValues(w), 'login 3, live 0, not login 2').toEqual([SLOT3])
+  const log = whats(stopLogOf(store, w))
+  expect(log).toContain('read live before spent-old: 2 (100/100), 3 (0/0)')
+  expect(log.filter(line => line.startsWith('picked '))).toEqual([expect.stringMatching(/^picked 3: fresh, read 0 min ago; tried 1$/)])
+})
+
+test('READ-BEFORE-SPENT-OLD: every candidate read live is spent: each counts as its try, and the session stays, saying when the next frees', async ($, on) => {
+  const { w, store, clock } = await oldReadings($, on, { two: [100, 100, 100], three: [100, 100, 100] })
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  expect(slotValues(w), 'no blind try of a login the read shows spent').toEqual([])
+  expect(whats(stopLogOf(store, w))).toContain('stayed: no untried login (tried 1)')
+})
+
+test('READ-BEFORE-SPENT-OLD: a login that could not be read (its token idle) goes into the blind try, and the log says it was not read live (06:11:51)', async ($, on) => {
+  const { w, store, clock } = await oldReadings($, on, { two: [100, 100, 100], three: [100, 100, 100] }, { isTwoIdle: true })
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  expect(slotValues(w), 'login 2, idle: tried on its old reading').toEqual([SLOT2])
+  const log = whats(stopLogOf(store, w))
+  expect(log).toContain('read live before spent-old: 3 (100/100)')
+  expect(log).toContain('not read live: token idle: 2')
+  expect(log.filter(line => line.startsWith('picked '))).toEqual([expect.stringMatching(/^picked 2: spent-old, read 120 min ago; tried 1$/)])
+})
+
+test('READ-BEFORE-SPENT-OLD: a read that fails keeps the old reading, and that login goes into the blind try (a 429)', async ($, on) => {
+  const { w, store, clock } = await oldReadings($, on, { two: [100, 100, 100], three: [100, 100, 100] }, { failing: { 'tok-3': 429 } })
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  expect(slotValues(w), 'login 3: login 2 read spent, login 3 not read').toEqual([SLOT3])
+  const log = whats(stopLogOf(store, w))
+  expect(log).toContain('read live before spent-old: 2 (100/100)')
+  expect(log).toContain('not read live: usage read failed: 3')
+})
+
+test('guard: a stop with a fresh login with room makes no live read of the others', async ($, on) => {
+  // Login 3's schedule is due: the boot reads it, so it is fresh with room by the stop.
+  const { w, clock } = await oldReadings($, on, { two: [100, 100, 100], three: [0, 0, 0] }, { isThreeRead: true })
+  w.usageCalls.length = 0
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  expect(slotValues(w)).toEqual([SLOT3])
+  expect(w.usageCalls.filter(token => token === 'tok-2'), 'login 2 is not read').toEqual([])
+})
+
+// ---------------------------------------------------------------- puma-9arph.109.4: the carry-on line is honest per pick
+
+const STORED_LINE = 'Go on on Fable-free ground.'
+
+test('HONEST-CARRY-ON: a stale pick (read 2 h ago) never sends the stored line: the mod\'s own line says room is not confirmed and when it was read', async ($, on) => {
+  const { w, clock } = await oldReadings($, on, { two: [10, 10, 10], three: [100, 100, 100] }, { isTwoRoomy: true, text: STORED_LINE })
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  await clock.advance(36_000)
+  expect(slotValues(w), 'login 2, stale with room').toEqual([SLOT2])
+  expect(w.submitted).toHaveLength(1)
+  expect(w.submitted[0]).not.toBe(STORED_LINE)
+  expect(w.submitted[0]).toMatch(/Fable week was last read 120 min ago, so room on it is not confirmed/)
+  expect(w.submitted[0]).toMatch(/Continue where you left off/)
+  expect(w.asUser, 'under the mod\'s name').toEqual([false])
+})
+
+test('HONEST-CARRY-ON: a spent-old pick sends the mod\'s own line naming the reset it was believed spent until, never the stored line', async ($, on) => {
+  const { w, clock } = await oldReadings($, on, { two: [100, 100, 100], three: [100, 100, 100] }, { isTwoIdle: true, text: STORED_LINE })
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  await clock.advance(36_000)
+  expect(slotValues(w), 'login 2, idle, tried blind').toEqual([SLOT2])
+  expect(w.submitted).toHaveLength(1)
+  expect(w.submitted[0]).not.toBe(STORED_LINE)
+  expect(w.submitted[0]).toMatch(/Fable week was believed spent until 2026-10-14 12:00 UTC; it is tried in case that was reset or freed elsewhere/)
+  expect(w.asUser).toEqual([false])
+})
+
+test('HONEST-CARRY-ON: a fresh read that lists no Fable week proves no room, so the stored line is not sent either', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [20, 30, 100]
+  w.usage['tok-2'] = [10, 30]
+  const clock = world(on, w, { ...TWO_LOGINS, 'fable-continue-text': STORED_LINE })
+  await start($, clock)
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  await clock.advance(36_000)
+  expect(slotValues(w)).toEqual([SLOT2])
+  expect(w.submitted).toHaveLength(1)
+  expect(w.submitted[0]).toMatch(/lists no Fable week, so room on it is not confirmed/)
+  expect(w.asUser).toEqual([false])
+})
+
+// ---------------------------------------------------------------- puma-9arph.109.5: a window's marks end on a counter fall
+
+/**
+ * Login 1 is in use with its Fable week spent, login 2 is spent. Login 3 was stopped 15 minutes ago: its mark stands and its
+ * stored body said `before` (week, Fable, 5-hour). Then the operator reset its usage by hand, and the endpoint says `live`
+ * with every reset time as before (seen live: the reset time does not move). Its read is due in three minutes.
+ */
+async function manualResetOnThree($: Engine, on: On, kind: 'fable' | 'week' | 'five', before: { week: number; fable: number; five: number }, live: [number, number, number], isHeld = false) {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.keychain[await keychainItem(SLOT3)] = blob('tok-3')
+  w.usage['tok-1'] = [20, 30, 100]
+  w.usage['tok-2'] = [100, 100, 100]
+  w.usage['tok-3'] = live
+  const FIVE_RESET = '2026-10-12T12:00:00Z'
+  const WEEK_3 = '2026-10-20T03:00:00Z'
+  w.fableResetsBy = { 'tok-1': FABLE_RESET, 'tok-2': FABLE_RESET_2, 'tok-3': FABLE_RESET }
+  w.weekResets = { 'tok-1': '2026-10-18T03:00:00Z', 'tok-2': '2026-10-19T03:00:00Z', 'tok-3': WEEK_3 }
+  const at = NOW - 15 * 60_000
+  const marks = {
+    fable: { 'fable-mark:3': { pct: 100, resetsAt: FABLE_RESET, at } },
+    week: { 'week-mark:3': { pct: 100, resetsAt: WEEK_3, at } },
+    five: { 'mark:3': { pct: 100, resetsAt: FIVE_RESET, at } },
+  }[kind]
+  const store = new Map<string, unknown>(
+    Object.entries({
+      ...THREE_LOGINS,
+      'rotate-to': 'room',
+      ...marks,
+      'usage:3': { fiveHour: { pct: before.five, resetsAt: FIVE_RESET }, sevenDay: { pct: before.week, resetsAt: WEEK_3 }, fable: { pct: before.fable, resetsAt: FABLE_RESET }, at, by: '3', v: 1, src: 'body' },
+      'usage-due:3': { next: NOW + 3 * 60_000, fails: 0, at, v: 1 },
+    }),
+  )
+  const clock = world(on, w, store)
+  await start($, clock)
+  const key = Object.keys(marks)[0] ?? ''
+  if (isHeld) {
+    // Login 3's body is answered, then waits before the mod reads it: another session's body can land meanwhile.
+    const held = { isPaused: false, release: () => {} }
+    const gate = new Promise<void>(resolve => {
+      held.release = resolve
+    })
+    w.afterUsageBody = async token => {
+      if (token !== 'tok-3' || held.isPaused) return
+      held.isPaused = true
+      await gate
+    }
+    // In steps, so the wait of a read stays inside the mod's 10-second limit on an answer.
+    for (let waited = 0; waited < 10 * 60_000 && !held.isPaused; waited += 1_000) await clock.advance(1_000)
+    expect(held.isPaused, 'the read of login 3 waits after its answer').toBe(true)
+    return { w, store, clock, key, held }
+  }
+  // The schedule reads login 3: five minutes on, the read is due and claimed.
+  await clock.advance(5 * 60_000)
+  await clock.settle()
+  await clock.advance(USAGE_CLAIM_WAIT_MS)
+  await clock.settle()
+  return { w, store, clock, key }
+}
+
+const FIVE_RESET_3 = '2026-10-12T12:00:00Z'
+const WEEK_RESET_3 = '2026-10-20T03:00:00Z'
+/** The row another session saves for login 3: its body at `pct`, read at `at`. */
+const bodyRowOfThree = (pct: number, at: number) => ({
+  fiveHour: { pct, resetsAt: FIVE_RESET_3 },
+  sevenDay: { pct, resetsAt: WEEK_RESET_3 },
+  fable: { pct, resetsAt: FABLE_RESET },
+  at,
+  by: '3',
+  v: 1,
+  src: 'body',
+})
+
+for (const kind of ['fable', 'week', 'five'] as const) {
+  test(`RESET-ORDER: a body that began before the stored body was saved ends no ${kind} mark and does not overwrite the newer row (A reads 90, B saves 96)`, async ($, on) => {
+    const { store, clock, key, held } = await manualResetOnThree($, on, kind, { week: 100, fable: 100, five: 100 }, [90, 90, 90], true)
+    await clock.advance(1_000)
+    // Session B read the same login after A's request began, and saved 96 first.
+    store.set('usage:3', bodyRowOfThree(96, clock.now()))
+    held.release()
+    await clock.settle()
+    expect(store.get(key), 'A\'s older 90 is no counter fall: the mark stands').toBeDefined()
+    expect((store.get('usage:3') as { sevenDay?: { pct: number } }).sevenDay?.pct, 'B\'s newer 96 stays').toBe(96)
+  })
+
+  test(`RESET-ORDER: a body that began before the ${kind} mark was written ends nothing`, async ($, on) => {
+    const { store, clock, key, held } = await manualResetOnThree($, on, kind, { week: 100, fable: 100, five: 100 }, [0, 0, 0], true)
+    await clock.advance(1_000)
+    // A stop marks the window after A's request began: A's numbers are from before the stop.
+    store.set(key, { ...(store.get(key) as object), at: clock.now() })
+    held.release()
+    await clock.settle()
+    expect(store.get(key), 'the mark is newer than the body').toBeDefined()
+  })
+}
+
+for (const [kind, stop] of [['fable', FABLE_STOP], ['week', { error: 'rate_limit', last_assistant_message: PLAIN_STOPS[0] }], ['five', { error: 'rate_limit', last_assistant_message: PLAIN_STOPS[0] }]] as const) {
+  test(`MARKS-END-ON-FALL: a manual reset of login 3 (100 to 0, the same reset times) ends its ${kind} mark at the next read, and the next stop picks it fresh`, async ($, on) => {
+    const { w, store, clock, key } = await manualResetOnThree($, on, kind, { week: 100, fable: 100, five: 100 }, [0, 0, 0])
+    expect(store.get(key), 'the mark ended at the read, though it is 20 minutes old').toBeUndefined()
+    await $.classic.StopFailure(stop)
+    await clock.settle()
+    expect(slotValues(w), 'the stop moves to login 3').toEqual([SLOT3])
+    expect(whats(stopLogOf(store, w)).filter(line => line.startsWith('picked '))).toEqual([expect.stringMatching(/^picked 3: fresh, read \d+ min ago; tried 1$/)])
+  })
+
+  test(`guard: a lagging read that sits near its stop (96 then 97) keeps the ${kind} mark`, async ($, on) => {
+    const { store, key } = await manualResetOnThree($, on, kind, { week: 96, fable: 96, five: 96 }, [97, 97, 97])
+    expect(store.get(key), 'the mark stands').toBeDefined()
+  })
+}
+
+test('SPENT-OLD-GATE: a body 30 s old that the minute gate keeps from being read again is no live read: the login is tried blind, not counted spent', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [20, 30, 100]
+  // Login 2's usage was reset since its last body, which said 100 thirty seconds before the stop.
+  w.usage['tok-2'] = [0, 0, 0]
+  w.fableResetsBy = { 'tok-1': FABLE_RESET, 'tok-2': FABLE_RESET_2 }
+  const at = NOW - 30_000
+  const store = new Map<string, unknown>(
+    Object.entries({
+      ...TWO_LOGINS,
+      'usage:2': { fiveHour: { pct: 100, resetsAt: '2026-10-12T12:00:00Z' }, sevenDay: { pct: 100, resetsAt: WEEK_RESET }, fable: { pct: 100, resetsAt: FABLE_RESET_2 }, at, by: '2', v: 1, src: 'body' },
+      'usage-due:2': { next: NOW + HOUR, fails: 0, at, v: 1 },
+      'fable-mark:2': { pct: 100, resetsAt: FABLE_RESET_2, at },
+    }),
+  )
+  const clock = world(on, w, store)
+  await start($, clock)
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  expect(w.usageCalls.filter(token => token === 'tok-2'), 'the gate kept the read from being made').toEqual([])
+  expect(whats(stopLogOf(store, w))).toContain('not read live: read gate: 2')
+  expect(slotValues(w), 'login 2 is the only candidate and is tried').toEqual([SLOT2])
+})
+
+// ---------------------------------------------------------------- Codex final round 2
+
+/**
+ * The session runs on login 3, whose last body read `first` percent of every window, with a mark standing 10 minutes old on
+ * `kind`. A response then stores `response` percent over that row; the next body, due in ten minutes, reads `live`.
+ */
+/** What the body path keeps of a body read, under `usage-body:<id>`: its time and its windows. */
+const bodyOfThree = (pct: number, at: number) => ({ at, fiveHour: { pct, resetsAt: FIVE_RESET_3 }, sevenDay: { pct, resetsAt: WEEK_RESET_3 }, fable: { pct, resetsAt: FABLE_RESET } })
+
+async function markedOnThree($: Engine, on: On, kind: 'week' | 'five', first: number, live: number) {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.keychain[await keychainItem(SLOT3)] = blob('tok-3')
+  w.env.CLAUDE_SECURESTORAGE_CONFIG_DIR = SLOT3
+  w.usage['tok-1'] = [20, 30, 21]
+  w.usage['tok-2'] = [20, 30, 21]
+  w.usage['tok-3'] = [live, live, live]
+  w.fableResetsBy = { 'tok-1': FABLE_RESET, 'tok-2': FABLE_RESET_2, 'tok-3': FABLE_RESET }
+  w.weekResets = { 'tok-1': '2026-10-18T03:00:00Z', 'tok-2': '2026-10-19T03:00:00Z', 'tok-3': WEEK_RESET_3 }
+  const mark = kind === 'week' ? { 'week-mark:3': { pct: 100, resetsAt: WEEK_RESET_3, at: NOW - 10 * 60_000 } } : { 'mark:3': { pct: 100, resetsAt: FIVE_RESET_3, at: NOW - 10 * 60_000 } }
+  const store = new Map<string, unknown>(
+    Object.entries({
+      ...THREE_LOGINS,
+      ...mark,
+      'usage:3': bodyRowOfThree(first, NOW - 15 * 60_000),
+      'usage-body:3': bodyOfThree(first, NOW - 15 * 60_000),
+      'usage-due:3': { next: NOW + 10 * 60_000, fails: 0, at: NOW - 15 * 60_000, v: 1 },
+    }),
+  )
+  const clock = world(on, w, store)
+  await start($, clock, true)
+  await clock.advance(60_000)
+  return { w, store, clock, key: Object.keys(mark)[0] ?? '' }
+}
+
+async function responseBetweenBodies($: Engine, on: On, kind: 'week' | 'five', first: number, response: number, live: number) {
+  const { w, store, clock, key } = await markedOnThree($, on, kind, first, live)
+  w.limits = limitsOf(response, response, WEEK_RESET_3)
+  await respond($, clock, w)
+  expect((store.get('usage:3') as { src?: string }).src, 'a response is stored over the body row').toBe('response')
+  for (let waited = 0; waited < 12 * 60_000; waited += 20_000) await clock.advance(20_000)
+  await clock.settle()
+  expect((store.get('usage:3') as { src?: string }).src, 'the next body is stored').toBe('body')
+  return { store, key }
+}
+
+for (const kind of ['week', 'five'] as const) {
+  test(`BODY-BASELINE-RACE: a response saved over a newer body does not bring the older body back as the baseline (96, 94 saved during the response, 91): the ${kind} mark stands`, async ($, on) => {
+    const { w, store, clock, key } = await markedOnThree($, on, kind, 96, 91)
+    // The response save reads login 3's row (body 96) and waits there.
+    const held = { isArmed: true, isPaused: false, open: () => {} }
+    const gate = new Promise<void>(resolve => {
+      held.open = resolve
+    })
+    w.afterStoreGet = async storeKey => {
+      if (!held.isArmed || storeKey !== 'usage:3') return
+      held.isArmed = false
+      held.isPaused = true
+      await gate
+    }
+    w.limits = limitsOf(100, 100, WEEK_RESET_3)
+    const responding = $.session.measure({ context: { window: 200_000 }, rateLimits: w.limits, changed: ['rateLimits'] })
+    await clock.advance(1_000)
+    expect(held.isPaused, 'the response save waits after reading the row').toBe(true)
+    // Another session's body 94 is saved meanwhile, as the body path saves it: the row and its own baseline key.
+    store.set('usage:3', bodyRowOfThree(94, clock.now()))
+    store.set('usage-body:3', bodyOfThree(94, clock.now()))
+    held.open()
+    await responding
+    await clock.settle()
+    w.afterStoreGet = undefined
+    for (let waited = 0; waited < 12 * 60_000; waited += 20_000) await clock.advance(20_000)
+    await clock.settle()
+    expect((store.get('usage:3') as { src?: string }).src, 'the next body is stored').toBe('body')
+    expect(store.get(key), 'body to body is 94 to 91: no reset').toBeDefined()
+  })
+}
+
+for (const kind of ['week', 'five'] as const) {
+  test(`BODY-BASELINE: a body that fell 2 points from the previous body ends no ${kind} mark, though a response stored 100 between them (96, response 100, 94)`, async ($, on) => {
+    const { store, key } = await responseBetweenBodies($, on, kind, 96, 100, 94)
+    expect(store.get(key), 'body to body is a fall of 2').toBeDefined()
+  })
+
+  test(`guard: a fall from the previous body ends the ${kind} mark, a response between them or not (100, response 98, 0)`, async ($, on) => {
+    const { store, key } = await responseBetweenBodies($, on, kind, 100, 98, 0)
+    expect(store.get(key)).toBeUndefined()
+  })
+}
+
+// A model-family limit marks no window and counts as the login's try. With no login free it owes the ordinary carry-on debt,
+// dated at the reset its words name; with no usable reset it owes nothing and says so once. A freed login is used only at
+// the next stop or Use now.
+const OPUS_AT_4PM = { error: 'rate_limit', last_assistant_message: "You've hit your Opus limit · resets 4pm (Europe/Tallinn)" }
+const OPUS_AT_6PM = { error: 'rate_limit', last_assistant_message: "You've hit your Opus limit · resets 6pm (Europe/Tallinn)" }
+const OPUS_NO_ZONE = { error: 'rate_limit', last_assistant_message: "You've hit your Opus limit · resets 3:45pm" }
+/** 4pm in Tallinn is 13:00Z on the test's day, three hours on, and 6pm is 15:00Z. */
+const AT_1PM_Z = Date.parse('2026-10-12T13:00:00Z')
+
+/** Login 1 in use; login 2 is spent until 11:00Z, an hour on, so it has freed well before the model family's reset. */
+async function modelStopWithTwoSpent(on: On, stop: { error: string; last_assistant_message: string }, $: Engine) {
+  const w = fresh()
+  const { store, clock } = await loggedWorld(on, w)
+  w.usage['tok-1'] = [20, 30, 21]
+  w.usage['tok-2'] = [100, 30, 21]
+  w.fiveHourResets = { 'tok-2': '2026-10-12T11:00:00Z' }
+  let last: View | undefined
+  on('state.set', async (_$, e, next) => {
+    const { key, value } = e as unknown as { key: string; value: View }
+    if (key === 'view') last = value
+    return next(e)
+  })
+  await start($, clock)
+  await $.classic.StopFailure(stop)
+  await clock.settle()
+  return { w, store, clock, view: () => last }
+}
+
+/** Ticks in `step` minutes until `clock` passes `until` (epoch ms). */
+async function tickUntil(clock: MockClock, until: number, step = 5): Promise<void> {
+  while (clock.now() < until) {
+    await clock.advance(step * 60_000)
+    await clock.settle()
+  }
+}
+
+test('MODEL-DEBT-RELOAD: a model stop with a known reset owes the ordinary persisted debt dated at that reset, and sends nothing before it', async ($, on) => {
+  const { w, clock, view } = await modelStopWithTwoSpent(on, OPUS_AT_4PM, $)
+  // The record a reload restores is the view's carryDue: dated at the family's reset, not at the hour login 2 frees.
+  expect(view()?.carryDue, 'what a reload restores').toMatchObject({ at: AT_1PM_Z, from: '1' })
+  await tickUntil(clock, AT_1PM_Z - 5 * 60_000)
+  expect(w.submitted, 'login 2 freed at 11:00Z: no move, no carry-on before the reset').toEqual([])
+  expect(slotValues(w)).toEqual([])
+  await tickUntil(clock, AT_1PM_Z + 10 * 60_000)
+  expect(w.submitted, 'at the reset it carries on, on the same login').toHaveLength(1)
+  expect(slotValues(w)).toEqual([])
+})
+
+test('MODEL-UNKNOWN-RESET: a model stop whose words give no usable reset owes no carry-on, and says so once', async ($, on) => {
+  const { w, clock, view } = await modelStopWithTwoSpent(on, OPUS_NO_ZONE, $)
+  expect(view()?.carryDue, 'nothing owed').toBeUndefined()
+  expect(w.toasts.filter(t => /model limit/.test(t) && /reset/.test(t)), 'told once').toHaveLength(1)
+  await tickUntil(clock, AT_1PM_Z + HOUR)
+  expect(w.submitted, 'no retry loop').toEqual([])
+  expect(slotValues(w)).toEqual([])
+})
+
+test('MODEL-DEBT-STALE: a later model stop on the same login moves the debt\'s date later, and nothing goes at the earlier one', async ($, on) => {
+  const { w, clock, view } = await modelStopWithTwoSpent(on, OPUS_AT_4PM, $)
+  await clock.advance(30 * 60_000)
+  await $.classic.StopFailure(OPUS_AT_6PM)
+  await clock.settle()
+  expect(view()?.carryDue, 'the date moved later').toMatchObject({ at: Date.parse('2026-10-12T15:00:00Z'), from: '1' })
+  await tickUntil(clock, AT_1PM_Z + 20 * 60_000)
+  expect(w.submitted, 'nothing at the earlier reset').toEqual([])
+  await tickUntil(clock, Date.parse('2026-10-12T15:00:00Z') + 10 * 60_000)
+  expect(w.submitted).toHaveLength(1)
+  // An earlier date later never moves it back.
+})
+
+test('GREEN-TICK-MOVE: after a model stop, a person\'s new turn and then a freed login: no tick move and no second carry-on', async ($, on) => {
+  const { w, clock } = await modelStopWithTwoSpent(on, OPUS_AT_4PM, $)
+  await clock.advance(5 * 60_000)
+  await $.turn.start({ text: 'working by hand', turnId: 'by-hand' })
+  await tickUntil(clock, AT_1PM_Z + 30 * 60_000)
+  expect(slotValues(w), 'the freed login is not moved to by a tick').toEqual([])
+  expect(w.submitted, 'the carry-on is not sent over the person\'s own work').toEqual([])
 })

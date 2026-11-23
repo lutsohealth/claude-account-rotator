@@ -2,7 +2,7 @@ import { expect, test } from 'claude-code/testing'
 
 import type { Reading, RotateTo, View } from '../types'
 import { weekLeaveFrom, launchOnFrom, pickLaunch, isSessionStop, isWeeklyStop } from './model'
-import { isSameWeek, whoseWeek } from './model'
+import { isSameWeek, stopResetAt, whoseReset, whoseWeek, wordingClass } from './model'
 import { companyOf, identityFromStatus, planName } from './model'
 import { laterMark, spentMark, withFableMark } from './model'
 import { EMPTY_VIEW, USAGE_IDLE_MS, fitRow, hasRoom, rowOf, rowsOf, rowText, storedLine, storedLineText } from './model'
@@ -10,9 +10,11 @@ import ROWS_FIXTURE from '../tests/fixtures/rows'
 import { REQUEST_TTL_MS, holdsLogin, isLoginOf, sameLogin, requestFrom, requestsDir, slotNumber } from './model'
 import { ESCAPE_GAP_MS, NUDGE_LEAD_MS, NUDGE_TEXT, escapeAfterFill, escapeArgv, escapeHeldBack, isBoxFree, nudgeHeld, pickAfterStop, raisesLimitModal, renudgeDue } from './model'
 import { mayWrite } from './model'
+import * as modelExports from './model'
 import { firstFreeAt, limitNotice } from './model'
 import { OWN_CONTINUE_MARGIN_MS, isCountdownOnScreen, ownContinueAfterLook, ownContinueHeldBack, ownContinueResetAt, screenLinesFrom } from './model'
 import { signInFromStatus } from './model'
+import { endsFableMark } from './model'
 import { USAGE_BACKOFF_MAX_MS, USAGE_CLAIM_MS, USAGE_CLAIM_WAIT_MS, USAGE_EARLY_MS, WRITER_VERSION, afterUsage, claimDueReads, gatingDue, isUsageDue, mayForceUsage, mayReadSince, renewClaim, retryAfterFrom, usageDueFrom } from './model'
 import { DEFAULT_FOOTER, availableNow, claudeAccount, blockedAdvice, braille, browsersFrom, chromeNote, continueTextFrom, counted, fiveHourLimitFrom, credentialFrom, credentialsFile, fableMark, fableSpentNotice, fableStay, footerStyleFrom, healthOf, identityFromProfile, isFableSpent, isFableStop, isNoBrowser, isPolicyRefusal, keepFable, keychainItem, label, legacyMark, markFrom, nextReset, pickTarget, pie, readingFromUsage, restartSteps, rotateToFrom, shouldLeave, roomColor, stuckText, windowPct, withMark, withWeekMark } from './model'
 
@@ -2227,6 +2229,120 @@ test('row a: the spent-old tier goes to the login that frees first for the need,
   expect(wrong).toEqual([])
 })
 
+// puma-9arph.109.3: a login read live in this stop is judged on that read: spent counts as its try, a mark standing or not.
+// Codex final round 2: "take any with room". A login whose read completed in this stop and shows room precedes every blind try.
+test('row a: a live read with room beats a blind spent-old try, though its mark resets later than the blind one\'s', () => {
+  const at = (hours: number) => new Date(NOW + hours * HOUR).toISOString()
+  const v: View = { ...view({ '1': [100, 50], '2': [0, 0], '3': [0, 0] }), weekMarks: { '2': { pct: 100, resetsAt: at(2), at: NOW - 3 * HOUR }, '3': { pct: 100, resetsAt: at(1), at: NOW - 3 * HOUR } } }
+  v.readings['2'] = { fiveHour: { pct: 10, resetsAt: at(1) }, sevenDay: { pct: 10, resetsAt: at(48) }, at: NOW }
+  delete v.readings['3']
+  const raw = { ...v.readings, '3': undefined }
+  const got = pickAfterStop(v, raw, NOW, undefined, ['1'], new Set(), new Set(['2']))
+  expect([got?.account.id, got?.tier]).toEqual(['2', 'spent-old'])
+  expect(pickAfterStop(v, raw, NOW, undefined, ['1'], new Set())?.account.id, 'not read live: by the reset that frees first').toBe('3')
+})
+
+test('row a: a login read live and spent counts as tried even with a mark standing; read live with room it keeps the mark, and a login not read live is tried blind', () => {
+  const at = (hours: number) => new Date(NOW + hours * HOUR).toISOString()
+  const spent = (read: number): Reading => ({ fiveHour: { pct: 100, resetsAt: at(1) }, sevenDay: { pct: 100, resetsAt: at(48) }, at: read })
+  const room = (read: number): Reading => ({ fiveHour: { pct: 10, resetsAt: at(1) }, sevenDay: { pct: 10, resetsAt: at(48) }, at: read })
+  const marked = (reading: Reading): View => {
+    const v: View = { ...view({ '1': [100, 50], '2': [0, 0], '3': [0, 0] }), weekMarks: { '2': { pct: 100, resetsAt: at(48), at: NOW - 3 * HOUR } } }
+    v.readings['2'] = reading
+    return v
+  }
+  const tier = (v: View, tried: string[], live: string[]) => {
+    const got = pickAfterStop(v, v.readings, NOW, undefined, tried, new Set(), new Set(live))
+    return got === undefined ? undefined : `${got.account.id}/${got.tier}`
+  }
+  expect(tier(marked(spent(NOW)), ['1', '3'], ['2']), 'read live, spent: its try').toBeUndefined()
+  expect(tier(marked(spent(NOW)), ['1', '3'], []), 'not read live: the mark sends it to the blind try').toBe('2/spent-old')
+  expect(tier(marked(room(NOW)), ['1', '3'], ['2']), 'read live with room under a mark: the mark stands').toBe('2/spent-old')
+  // The logins the blind try would choose among, for the live reads before it.
+  const v = marked(spent(NOW - 2 * HOUR))
+  v.readings['3'] = spent(NOW - 2 * HOUR)
+  const got = pickAfterStop(v, v.readings, NOW, undefined, ['1'], new Set())
+  expect([got?.tier, got?.spentOld?.map(a => a.id).sort()]).toEqual(['spent-old', ['2', '3']])
+})
+
+// puma-9arph.109.4: the pick says its Fable-room proof, and the carry-on line follows it.
+test('row a: only a fresh read that lists the Fable week with room proves Fable room; a spent-old pick says when it frees', () => {
+  const at = (hours: number) => new Date(NOW + hours * HOUR).toISOString()
+  const window = (pct: number, hours: number) => ({ pct, resetsAt: at(hours) })
+  const proof = (r: Reading, need: 'fable' | undefined = 'fable') => {
+    const v = view({ '1': [100, 50], '2': [0, 0] })
+    v.readings['2'] = r
+    const got = pickAfterStop(v, v.readings, NOW, need, ['1'], new Set())
+    return got === undefined ? undefined : { tier: got.tier, hasFableRoom: got.hasFableRoom, freesAt: got.freesAt, readAgeMs: got.readAgeMs }
+  }
+  expect(proof({ fiveHour: window(10, 1), sevenDay: window(10, 48), fable: window(10, 48), at: NOW - 60_000 })).toEqual({ tier: 'fresh', hasFableRoom: true, freesAt: undefined, readAgeMs: 60_000 })
+  expect(proof({ fiveHour: window(10, 1), sevenDay: window(10, 48), at: NOW - 60_000 })?.hasFableRoom, 'a fresh read that lists no Fable week').toBe(false)
+  expect(proof({ fiveHour: window(10, 1), sevenDay: window(10, 48), fable: window(10, 48), at: NOW - 3 * HOUR })).toMatchObject({ tier: 'stale', hasFableRoom: false, readAgeMs: 3 * HOUR })
+  expect(proof({ fiveHour: window(10, 1), sevenDay: window(10, 48), fable: window(100, 30), at: NOW - 3 * HOUR })).toMatchObject({ tier: 'spent-old', hasFableRoom: false, freesAt: NOW + 30 * HOUR })
+})
+
+test('fableCarryOnNote: no note where a fresh read proved Fable room; otherwise the read age or the reset believed spent until', () => {
+  const note = modelExports.fableCarryOnNote
+  expect(note({ tier: 'fresh', hasFableRoom: true, readAgeMs: 60_000 })).toBeUndefined()
+  expect(note({ tier: 'fresh', hasFableRoom: false, readAgeMs: 60_000 })).toBe('Its usage lists no Fable week, so room on it is not confirmed.')
+  expect(note({ tier: 'stale', hasFableRoom: false, readAgeMs: 2 * HOUR })).toBe('Its Fable week was last read 120 min ago, so room on it is not confirmed.')
+  expect(note({ tier: 'unread', hasFableRoom: false })).toBe('Its usage could not be read, so Fable room on it is not confirmed.')
+  expect(note({ tier: 'spent-old', hasFableRoom: false, freesAt: Date.parse('2026-10-14T12:00:00Z') })).toBe('Its Fable week was believed spent until 2026-10-14 12:00 UTC; it is tried in case that was reset or freed elsewhere.')
+  expect(note({ tier: 'spent-old', hasFableRoom: false })).toBe('Its Fable week was believed spent; it is tried in case it was reset or freed elsewhere.')
+  // No pick behind the carry-on (a retry that lost it, a nudge's): nothing proves room.
+  expect(note(undefined)).toBe('Its Fable room is not confirmed.')
+})
+
+// puma-9arph.109.5 (Council Q10): a same-window body read that falls 5 points or more below the previous read of that window
+// ends the window's marks and kept rows at once; with no earlier read of the window, a read at or below 5% does. The reset
+// time does not move on a manual reset, so it is never relied on.
+{
+  const markAt = (minutesAgo: number, resetsAt = FABLE_END) => ({ pct: 100, resetsAt, at: NOW - minutesAgo * 60_000 })
+  const win = (pct: number, resetsAt = FABLE_END) => ({ pct, resetsAt })
+  // [name, read, previous read of the window, mark, ends]
+  const cases: [string, ReturnType<typeof win> | undefined, ReturnType<typeof win> | undefined, ReturnType<typeof markAt>, boolean][] = [
+    ['0% after a read of 100, the mark 10 min old', win(0), win(100), markAt(10), true],
+    ['0% with no earlier read, the mark 10 min old', win(0), undefined, markAt(10), true],
+    ['5% with no earlier read', win(5), undefined, markAt(10), true],
+    ['6% with no earlier read', win(6), undefined, markAt(10), false],
+    ['a fall of exactly 5 points', win(55), win(60), markAt(10), true],
+    ['a fall of 4 points', win(56), win(60), markAt(10), false],
+    ['a lagging 97% after a stop at a read of 96', win(97), win(96), markAt(5), false],
+    ['a lagging 97% with no earlier read', win(97), undefined, markAt(5), false],
+    ['a lagging 97% after a read of 99 (a fall of 2)', win(97), win(99), markAt(5), false],
+    ['a fall inside another window than the mark\'s', win(0, '2026-10-24T03:00:00Z'), win(100, '2026-10-24T03:00:00Z'), markAt(10), false],
+    ['a previous read of another window: 0% reads as no earlier read', win(0), win(100, '2026-10-10T03:00:00Z'), markAt(10), true],
+    ['a window the body does not list', undefined, win(100), markAt(10), false],
+  ]
+  for (const [name, read, before, mark, ends] of cases) {
+    test(`endsFableMark (Q10): ${name} ${ends ? 'ends' : 'keeps'} the mark`, () => {
+      expect(endsFableMark(read, NOW, mark, before)).toBe(ends)
+    })
+    test(`endsWeekMark (Q10): ${name} ${ends ? 'ends' : 'keeps'} the mark`, () => {
+      expect(modelExports.endsWeekMark?.(read, mark, before)).toBe(ends)
+    })
+    test(`endsFiveHourMark (Q10): ${name} ${ends ? 'ends' : 'keeps'} the mark`, () => {
+      expect(modelExports.endsFiveHourMark?.(read, mark, before)).toBe(ends)
+    })
+  }
+}
+
+test('endsFableMark: the 30-minute lag rule still ends a mark whose week reads below 100 with no fall and no low read', () => {
+  const mark = { pct: 100, resetsAt: FABLE_END, at: NOW - 40 * 60_000 }
+  expect(endsFableMark({ pct: 60, resetsAt: FABLE_END }, NOW, mark, { pct: 60, resetsAt: FABLE_END })).toBe(true)
+  expect(endsFableMark({ pct: 60, resetsAt: FABLE_END }, NOW, { ...mark, at: NOW - 10 * 60_000 }, { pct: 60, resetsAt: FABLE_END })).toBe(false)
+})
+
+test('keepFable keeps no row older than a counter fall: the fresh week fell 5 points or more inside the stored one\'s window', () => {
+  const fresh: Reading = { sevenDay: { pct: 0, resetsAt: WEEK_END }, at: NOW }
+  const stored = (week: number, weekEnd = WEEK_END): Reading => ({ sevenDay: { pct: week, resetsAt: weekEnd }, fable: { pct: 100, resetsAt: FABLE_END }, at: NOW - 20 * 60_000 })
+  expect(keepFable(fresh, stored(100), NOW), 'a fall of 100 drops the row').toEqual(fresh)
+  expect(keepFable({ ...fresh, sevenDay: { pct: 55, resetsAt: WEEK_END } }, stored(60), NOW), 'a fall of 5 drops it').toEqual({ ...fresh, sevenDay: { pct: 55, resetsAt: WEEK_END } })
+  expect(keepFable({ ...fresh, sevenDay: { pct: 56, resetsAt: WEEK_END } }, stored(60), NOW).fable, 'a fall of 4 keeps it').toEqual({ pct: 100, resetsAt: FABLE_END })
+  expect(keepFable({ ...fresh, sevenDay: { pct: 97, resetsAt: WEEK_END } }, stored(96), NOW).fable, 'a lagging 97 keeps it').toEqual({ pct: 100, resetsAt: FABLE_END })
+  expect(keepFable(fresh, stored(100, '2026-10-11T03:00:00Z'), NOW).fable, 'a fall across two windows is no reset: the row stays').toEqual({ pct: 100, resetsAt: FABLE_END })
+})
+
 test('the Escape goes to the one pane named, by a fixed argv with no shell (puma-9arph.34 C1)', () => {
   expect(escapeArgv('term_a')).toEqual(['orca', 'terminal', 'send', '--terminal', 'term_a', '--text', '\u001b', '--json'])
 })
@@ -2267,3 +2383,126 @@ for (const [name, exitCode, stdout, read] of [
     expect(signInFromStatus(exitCode, stdout)).toBe(read)
   })
 }
+
+// F1 defense: a limit stop's own words give the reset of the window that ran out, and each login's stored window has
+// its own. The Fable stop master438 heard at 04:24:56 said "resets 3pm" while the mod believed login 1 was in use.
+const STOP_NOW = Date.parse('2026-11-22T04:24:56Z')
+const STOP_ZONE = '(Europe/Tallinn)'
+for (const [said, now, at] of [
+  [`You've hit your Fable limit · resets Nov 25 at 3pm ${STOP_ZONE}`, STOP_NOW, '2026-11-25T13:00:00Z'],
+  [`You've hit your Fable limit · resets 3pm ${STOP_ZONE}`, STOP_NOW, '2026-11-22T13:00:00Z'],
+  [`You've hit your Fable limit · resets Nov 23 at 7am ${STOP_ZONE}`, STOP_NOW, '2026-11-23T05:00:00Z'],
+  [`You've hit your session limit · resets 3:30pm ${STOP_ZONE}`, STOP_NOW, '2026-11-22T13:30:00Z'],
+  [`You've hit your session limit · resets 12am ${STOP_ZONE}`, STOP_NOW, '2026-11-22T22:00:00Z'],
+  // The time of day passed today: the next one is tomorrow's.
+  [`You've hit your session limit · resets 3pm ${STOP_ZONE}`, Date.parse('2026-11-22T14:00:00Z'), '2026-11-23T13:00:00Z'],
+  // A date this year has passed: next year's, in the summer time of that date.
+  [`You've hit your weekly limit · resets Jul 1 at 3pm ${STOP_ZONE}`, STOP_NOW, '2027-07-01T12:00:00Z'],
+] as const) {
+  test(`stopResetAt reads "${said.slice(said.indexOf('resets'))}" at ${new Date(now).toISOString()} as ${at}`, () => {
+    expect(stopResetAt(said, now)).toBe(Date.parse(at))
+  })
+}
+
+// The weekday form the docs list ("resets Mon 12:00am", https://code.claude.com/docs/en/errors.md): its next occurrence in the
+// zone at or after now. 2026-11-22 is a Sunday, 2026-11-23 a Monday; Tallinn is UTC+2 then.
+for (const [said, now, at] of [
+  [`You've hit your weekly limit · resets Mon 12:00am ${STOP_ZONE}`, STOP_NOW, '2026-11-22T22:00:00Z'],
+  [`You've hit your weekly limit · resets Mon 12am ${STOP_ZONE}`, STOP_NOW, '2026-11-22T22:00:00Z'],
+  [`You've hit your weekly limit · resets Monday 3:45pm ${STOP_ZONE}`, STOP_NOW, '2026-11-23T13:45:00Z'],
+  // A Monday, before the time: that Monday. After it: the next.
+  [`You've hit your weekly limit · resets Mon 3:45pm ${STOP_ZONE}`, Date.parse('2026-11-23T06:00:00Z'), '2026-11-23T13:45:00Z'],
+  [`You've hit your weekly limit · resets Mon 3:45pm ${STOP_ZONE}`, Date.parse('2026-11-23T14:00:00Z'), '2026-11-30T13:45:00Z'],
+  // The same weekday as today, past by minutes only: still that reset.
+  [`You've hit your weekly limit · resets Sun 6:20am ${STOP_ZONE}`, STOP_NOW, '2026-11-22T04:20:00Z'],
+  // A month word that starts like a weekday's is still a month.
+  [`You've hit your Fable limit · resets Mar 3 at 3pm ${STOP_ZONE}`, STOP_NOW, '2027-03-03T13:00:00Z'],
+] as const) {
+  test(`stopResetAt reads "${said.slice(said.indexOf('resets'))}" at ${new Date(now).toISOString()} as ${at}`, () => {
+    expect(stopResetAt(said, now)).toBe(Date.parse(at))
+  })
+}
+
+// https://code.claude.com/docs/en/errors.md lists "You've hit your Opus limit · resets 3:45pm" and the Sonnet one: each
+// applies only to requests to that model family, so neither is the week or the 5-hour window spent.
+for (const [said, class_] of [
+  ["You've hit your Opus limit · resets 3:45pm", 'model'],
+  ["You've hit your Sonnet limit · resets 3:45pm", 'model'],
+  ["You've hit your Fable limit · resets 3:45pm", 'fable'],
+  ["You've hit your session limit · resets 3:45pm", 'session'],
+  ["You've hit your weekly limit · resets Mon 12:00am", 'weekly'],
+  ['Claude usage limit reached.', 'unknown'],
+  [undefined, 'none'],
+] as const) {
+  test(`wordingClass reads "${said}" as ${class_}`, () => {
+    expect(wordingClass(said)).toBe(class_)
+  })
+}
+
+test('stopResetAt: a weekday with no zone names no reset', () => {
+  expect(stopResetAt("You've hit your weekly limit · resets Mon 12:00am", STOP_NOW)).toBeUndefined()
+})
+
+for (const [name, said] of [
+  ['no words', undefined],
+  ['words that name no reset', "You've hit your Fable limit"],
+  ['a reset that names no zone', "You've hit your Fable limit · resets Nov 25 at 3pm"],
+  ['a zone Intl does not know', "You've hit your Fable limit · resets Nov 25 at 3pm (Mars/Olympus)"],
+  ['a day the month lacks', `You've hit your Fable limit · resets Nov 31 at 3pm ${STOP_ZONE}`],
+  ['an hour no clock has', `You've hit your Fable limit · resets 13pm ${STOP_ZONE}`],
+] as const) {
+  test(`stopResetAt answers undefined for ${name}`, () => {
+    expect(stopResetAt(said, STOP_NOW)).toBeUndefined()
+  })
+}
+
+/** Logins whose windows reset at the given times, as the stored readings carry them (seconds included). */
+function resetView(rows: Record<string, { fable?: string; week?: string; five?: string }>): View {
+  const accounts = Object.keys(rows).map(id => ({ id, slot: id === '1' ? '' : `/h/.claude/accounts/${id}` }))
+  const window = (resetsAt: string | undefined) => (resetsAt === undefined ? {} : { pct: 50, resetsAt })
+  const readings = Object.fromEntries(
+    Object.entries(rows).map(([id, r]) => [
+      id,
+      {
+        at: STOP_NOW,
+        ...(r.five === undefined ? {} : { fiveHour: window(r.five) }),
+        ...(r.week === undefined ? {} : { sevenDay: window(r.week) }),
+        ...(r.fable === undefined ? {} : { fable: window(r.fable) }),
+      },
+    ]),
+  )
+  return { ...EMPTY_VIEW, accounts, readings } as unknown as View
+}
+
+const INCIDENT = resetView({
+  '1': { fable: '2026-11-24T09:00:00Z', week: '2026-11-24T09:00:00Z', five: '2026-11-22T08:00:00Z' },
+  '3': { fable: '2026-11-25T13:00:00Z', week: '2026-11-25T13:00:00Z', five: '2026-11-22T08:30:00Z' },
+  '4': { fable: '2026-11-22T13:00:00Z', week: '2026-11-22T13:00:00Z', five: '2026-11-22T09:00:00Z' },
+  '5': { fable: '2026-11-25T12:59:59Z', week: '2026-11-25T12:59:59Z', five: '2026-11-22T09:20:00Z' },
+})
+
+test('whoseReset: "resets 3pm" on 2026-11-22 is login 4 alone (04:24:56)', () => {
+  const at = stopResetAt(`You've hit your Fable limit · resets 3pm ${STOP_ZONE}`, STOP_NOW)
+  expect(at).toBe(Date.parse('2026-11-22T13:00:00Z'))
+  expect(whoseReset(INCIDENT, at as number, 'fable')).toEqual(['4'])
+})
+
+test('whoseReset: "Nov 25 at 3pm" is logins 3 and 5 sharing it, so it proves neither', () => {
+  const at = stopResetAt(`You've hit your Fable limit · resets Nov 25 at 3pm ${STOP_ZONE}`, STOP_NOW)
+  expect(whoseReset(INCIDENT, at as number, 'fable')).toEqual(['3', '5'])
+})
+
+test('whoseReset reads the window the stop names: the week row for a weekly stop, the 5-hour row for a session stop', () => {
+  const view = resetView({
+    '1': { fable: '2026-11-26T09:00:00Z', week: '2026-11-24T09:00:00Z', five: '2026-11-22T08:00:00Z' },
+    '2': { fable: '2026-11-24T09:00:00Z', week: '2026-11-27T09:00:00Z', five: '2026-11-22T11:00:00Z' },
+  })
+  const at = Date.parse('2026-11-24T09:00:00Z')
+  expect([whoseReset(view, at, 'fable'), whoseReset(view, at, 'week'), whoseReset(view, at, 'session')]).toEqual([['2'], ['1'], []])
+  expect(whoseReset(view, Date.parse('2026-11-22T11:00:00Z'), 'session')).toEqual(['2'])
+})
+
+test('whoseReset: a reset an hour and a second from every stored one names no login', () => {
+  expect(whoseReset(INCIDENT, Date.parse('2026-11-22T14:00:01Z'), 'fable')).toEqual([])
+  expect(whoseReset(INCIDENT, Date.parse('2026-11-22T14:00:00Z'), 'fable')).toEqual(['4'])
+})

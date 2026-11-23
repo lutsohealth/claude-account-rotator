@@ -1,4 +1,4 @@
-import type { Account, CheckError, Fill, FiveHourLimit, FooterStyle, Glyphs, Health, Highlight, LaunchOn, LaunchPick, Mark, PlanTier, Reading, RotateTo, RotatorRequest, Row, RowPart, StoredRows, StoredRun, UsageDue, UsageWindow, View } from '../types'
+import type { Account, BodyRead, CheckError, Fill, FiveHourLimit, FooterStyle, Glyphs, Health, Highlight, LaunchOn, LaunchPick, Mark, PlanTier, Reading, RotateTo, RotatorRequest, Row, RowPart, StopProof, StoredRows, StoredRun, UsageDue, UsageWindow, View } from '../types'
 
 /** Leave a login once its 5-hour window is this full (percent). */
 export const LEAVE_FIVE_HOUR = 90
@@ -158,12 +158,21 @@ export function isWeeklyStop(text: string | undefined): boolean {
   return /hit your weekly limit/.test(text ?? '')
 }
 
+/**
+ * Whether the last message of a turn that died on a limit says the limit was one model family's, Opus's or Sonnet's: it
+ * applies only to requests to that family, so no window of the login is spent (https://code.claude.com/docs/en/errors.md).
+ */
+export function isModelStop(text: string | undefined): boolean {
+  return /hit your (Opus|Sonnet) limit/.test(text ?? '')
+}
+
 /** Which limit a stop's last message names, in markStop's order: a message naming two limits is the first of them here. */
-export type Wording = 'none' | 'fable' | 'session' | 'weekly' | 'unknown'
+export type Wording = 'none' | 'fable' | 'model' | 'session' | 'weekly' | 'unknown'
 
 export function wordingClass(said: string | undefined): Wording {
   if (said === undefined || said === '') return 'none'
   if (isFableStop(said)) return 'fable'
+  if (isModelStop(said)) return 'model'
   if (isSessionStop(said)) return 'session'
   return isWeeklyStop(said) ? 'weekly' : 'unknown'
 }
@@ -278,35 +287,72 @@ function freesAt(view: View, id: string, r: Reading | undefined, now: number, ne
  * as its try. Never one in `tried` (the logins this stop's episode already died on), one in `untaken`, one whose health
  * is not ok, or one with no read whose check failed before a profile call named its sign-in. The first tier with a
  * login in it answers; inside it, for the Fable week, a login whose read lists that week with room comes first.
+ * `live`: the logins this stop read from the usage endpoint just now: such a read that shows the login spent counts as its
+ * try, a mark standing or not (only a login that could not be read is tried blind); one that shows room under a mark
+ * leaves the mark, which covers the lag of a read after a stop. A spent-old answer lists the tier (`spentOld`), the logins
+ * a stop reads live before it tries any of them blind.
  */
-export function pickAfterStop(view: View, raw: Readonly<Record<string, Reading | undefined>>, now: number, need: Need | undefined, tried: readonly string[], untaken: ReadonlySet<string>): { account: Account; tier: StopTier; readAgeMs?: number } | undefined {
+export function pickAfterStop(
+  view: View,
+  raw: Readonly<Record<string, Reading | undefined>>,
+  now: number,
+  need: Need | undefined,
+  tried: readonly string[],
+  untaken: ReadonlySet<string>,
+  live: ReadonlySet<string> = new Set(),
+): (StopProof & { account: Account; spentOld?: Account[] }) | undefined {
   const isFable = need === 'fable'
   const counts: Record<string, Reading | undefined> = {}
   for (const a of view.accounts) counts[a.id] = raw[a.id] && counted(raw[a.id] as Reading, view.fiveHourLimit, now)
   const hasRoom = (r: Reading) => !isSpent(r, now, view.weekLeave) && !(isFable && isFableSpent(r, now))
   const tierOf = (a: Account): StopTier | undefined => {
-    if (isMarked(view, a.id, now)) return 'spent-old'
     const r = counts[a.id]
+    if (live.has(a.id) && r !== undefined && !hasRoom(r)) return undefined
+    if (isMarked(view, a.id, now)) return 'spent-old'
     const error = view.checkErrors?.[a.id]
     if (r === undefined) return error === undefined || error.isUsageRead === true ? 'unread' : undefined
     const isFresh = now - r.at <= FRESH_READ_MS && !(error !== undefined && error.at > r.at)
     if (isFresh) return hasRoom(r) ? 'fresh' : undefined
     return hasRoom(r) ? 'stale' : 'spent-old'
   }
+  const isLiveRoom = (a: Account): boolean => live.has(a.id) && counts[a.id] !== undefined && hasRoom(counts[a.id] as Reading)
   const open = view.accounts.filter(a => a.id !== view.activeId && !tried.includes(a.id) && !untaken.has(a.id) && view.health[a.id]?.kind === 'ok')
   for (const tier of STOP_TIERS) {
     const ready = open.filter(a => tierOf(a) === tier)
     if (ready.length === 0) continue
     const account =
       tier === 'spent-old'
-        ? [...ready].sort((a, b) => Math.sign(freesAt(view, a.id, counts[a.id], now, need) - freesAt(view, b.id, counts[b.id], now, need)) || 0)[0]
+        ? // A login read live in this stop that shows room goes before every blind try, whatever its mark's reset: then by the reset that frees first.
+          [...ready].sort((a, b) => Number(isLiveRoom(b)) - Number(isLiveRoom(a)) || Math.sign(freesAt(view, a.id, counts[a.id], now, need) - freesAt(view, b.id, counts[b.id], now, need)) || 0)[0]
         : (isFable ? firstByRotateTo(view, ready.filter(a => counts[a.id]?.fable !== undefined && !isFableSpent(counts[a.id], now)), counts, now, need) : undefined) ??
           firstByRotateTo(view, ready, counts, now, need)
     if (account === undefined) continue
     const read = raw[account.id]
-    return read === undefined ? { account, tier } : { account, tier, readAgeMs: now - read.at }
+    // The Fable week is proven roomy only by a fresh read that lists it; a spent-old pick says when it believed it frees.
+    const hasFableRoom = tier === 'fresh' && counts[account.id]?.fable !== undefined && !isFableSpent(counts[account.id], now)
+    const spentOld = tier === 'spent-old' ? { spentOld: ready, freesAt: finiteOr(freesAt(view, account.id, counts[account.id], now, need)) } : {}
+    return { account, tier, hasFableRoom, ...(read === undefined ? {} : { readAgeMs: now - read.at }), ...spentOld }
   }
   return undefined
+}
+
+const finiteOr = (at: number): number | undefined => (Number.isFinite(at) ? at : undefined)
+
+/**
+ * The sentence a Fable carry-on's own line carries in place of the person's kept line, where the pick does not prove Fable
+ * room (a fresh read that lists the Fable week with room does): what it rests on. Undefined where it does.
+ */
+export function fableCarryOnNote(proof: StopProof | undefined): string | undefined {
+  if (proof === undefined) return 'Its Fable room is not confirmed.'
+  if (proof.hasFableRoom) return undefined
+  if (proof.tier === 'spent-old') {
+    if (proof.freesAt === undefined) return 'Its Fable week was believed spent; it is tried in case it was reset or freed elsewhere.'
+    const when = `${new Date(proof.freesAt).toISOString().slice(0, 16).replace('T', ' ')} UTC`
+    return `Its Fable week was believed spent until ${when}; it is tried in case that was reset or freed elsewhere.`
+  }
+  if (proof.tier === 'unread') return 'Its usage could not be read, so Fable room on it is not confirmed.'
+  if (proof.tier === 'stale' && proof.readAgeMs !== undefined) return `Its Fable week was last read ${Math.round(proof.readAgeMs / 60_000)} min ago, so room on it is not confirmed.`
+  return 'Its usage lists no Fable week, so room on it is not confirmed.'
 }
 
 /** Whether a login has room on every limit it reports: none of its windows, the Fable week among them, is at 100%. */
@@ -476,7 +522,9 @@ export function readingFromUsage(body: unknown, now: number): Reading | undefine
  */
 export function keepFable(fresh: Reading, stored: Reading | undefined, now: number): Reading {
   const kept = stored?.fable
-  if (fresh.fable !== undefined || kept?.resetsAt === undefined || Date.parse(kept.resetsAt) <= now) return fresh
+  // A week counter that fell inside the stored week's window was reset: the Fable row kept from before it is no longer true.
+  const isReset = fresh.sevenDay !== undefined && stored?.sevenDay !== undefined && isSameWindow(fresh.sevenDay.resetsAt, stored.sevenDay.resetsAt) && stored.sevenDay.pct - fresh.sevenDay.pct >= RESET_FALL_PCT
+  if (isReset || fresh.fable !== undefined || kept?.resetsAt === undefined || Date.parse(kept.resetsAt) <= now) return fresh
   return { ...fresh, fable: kept }
 }
 
@@ -533,14 +581,57 @@ export function withFableMark(r: Reading | undefined, mark: Mark | undefined, no
 /** How long a usage read may lag a Fable stop: a read of the mark's own week this long after it, below 100, outweighs the stop. */
 export const FABLE_MARK_LAG_MS = 30 * 60_000
 
+/** A stored `usage-body:<id>`: the time of the body and its windows; anything else is no earlier body. */
+export function bodyReadFrom(value: unknown): BodyRead | undefined {
+  const v = typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : {}
+  if (typeof v.at !== 'number') return undefined
+  const window = (w: unknown): UsageWindow | undefined => (typeof w === 'object' && w !== null && typeof (w as UsageWindow).pct === 'number' ? (w as UsageWindow) : undefined)
+  const [fiveHour, sevenDay, fable] = [window(v.fiveHour), window(v.sevenDay), window(v.fable)]
+  return { at: v.at, ...(fiveHour ? { fiveHour } : {}), ...(sevenDay ? { sevenDay } : {}), ...(fable ? { fable } : {}) }
+}
+
+/** The body a body row is: its time and windows, for `usage-body:<id>` and, where that key is not yet written, for the baseline. */
+export function bodyOfReading(r: Reading): BodyRead {
+  return { at: r.at, ...(r.fiveHour ? { fiveHour: r.fiveHour } : {}), ...(r.sevenDay ? { sevenDay: r.sevenDay } : {}), ...(r.fable ? { fable: r.fable } : {}) }
+}
+
+/** A usage counter only grows inside a window: one that falls this many points between two reads of it was reset (Council Q10). */
+export const RESET_FALL_PCT = 5
+
+/** With no earlier read of a window to compare, a read at or below this many percent reads as reset (Council Q10). */
+export const RESET_LOW_PCT = 5
+
+/** Whether two reset times name one window: within an hour, as a reset moves by seconds between reads. A manual reset keeps the time. */
+const isSameWindow = (a: string | undefined, b: string | undefined): boolean => a !== undefined && b !== undefined && Math.abs(Date.parse(a) - Date.parse(b)) <= SAME_WEEK_MS
+
+/**
+ * Whether a body's window was reset since `before`, the earlier read of that window: it fell RESET_FALL_PCT or more inside
+ * the same window. With no earlier read of this window, a read at or below RESET_LOW_PCT does. A read that lags a stop sits
+ * near it, so it neither falls nor reads low. The reset time is never relied on: a reset by hand leaves it as it was.
+ */
+function hasReset(read: UsageWindow, before: UsageWindow | undefined): boolean {
+  return before !== undefined && isSameWindow(read.resetsAt, before.resetsAt) ? before.pct - read.pct >= RESET_FALL_PCT : read.pct <= RESET_LOW_PCT
+}
+
 /**
  * Whether a usage body read at `readAt` ends a Fable mark: its Fable week is the mark's own (resetting within an hour of
- * the mark's reset), it reads below 100, and the stop is FABLE_MARK_LAG_MS or more behind it. The stop was then
- * another login's, as one that went out before a switch landed.
+ * the mark's reset) and either was reset (`hasReset`, at once), or reads below 100 with the stop FABLE_MARK_LAG_MS or more
+ * behind it, so the stop was another login's, as one that went out before a switch landed. `before`: the earlier read.
  */
-export function endsFableMark(read: UsageWindow | undefined, readAt: number, mark: Mark): boolean {
-  if (read?.resetsAt === undefined || read.pct >= 100 || readAt - mark.at < FABLE_MARK_LAG_MS) return false
-  return Math.abs(Date.parse(read.resetsAt) - Date.parse(mark.resetsAt)) <= SAME_WEEK_MS
+export function endsFableMark(read: UsageWindow | undefined, readAt: number, mark: Mark, before?: UsageWindow): boolean {
+  if (read?.resetsAt === undefined || !isSameWindow(read.resetsAt, mark.resetsAt)) return false
+  if (hasReset(read, before)) return true
+  return read.pct < 100 && readAt - mark.at >= FABLE_MARK_LAG_MS
+}
+
+/** Whether a usage body ends a week mark: its week is the mark's own and was reset since `before`; no lag rule ends it. */
+export function endsWeekMark(read: UsageWindow | undefined, mark: Mark, before?: UsageWindow): boolean {
+  return read !== undefined && isSameWindow(read.resetsAt, mark.resetsAt) && hasReset(read, before)
+}
+
+/** Whether a usage body ends a 5-hour mark: its 5-hour window is the mark's own and was reset since `before`. */
+export function endsFiveHourMark(read: UsageWindow | undefined, mark: Mark, before?: UsageWindow): boolean {
+  return read !== undefined && isSameWindow(read.resetsAt, mark.resetsAt) && hasReset(read, before)
 }
 
 /**
@@ -654,6 +745,91 @@ export function whoseWeek(reading: Reading | undefined, readings: Readonly<Recor
   return Object.entries(readings)
     .filter(([, r]) => isSameWeek(r?.sevenDay?.resetsAt, reset))
     .map(([id]) => id)
+}
+
+const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec']
+const WEEKDAYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat']
+const DAY_MS = 86_400_000
+/** A reset time the clock has passed by no more than this still reads as the one coming: the words carry minutes at best. */
+const RESET_PAST_SLACK_MS = 5 * 60_000
+
+/** The calendar parts of an instant on a time zone's wall clock; undefined for a zone name Intl does not know. */
+function wallClock(at: number, timeZone: string): { year: number; month: number; day: number; hour: number; minute: number; second: number } | undefined {
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', { timeZone, hourCycle: 'h23', year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric', second: 'numeric' }).formatToParts(at)
+    const n = (type: string) => Number(parts.find(p => p.type === type)?.value)
+    return { year: n('year'), month: n('month') - 1, day: n('day'), hour: n('hour'), minute: n('minute'), second: n('second') }
+  } catch {
+    return undefined
+  }
+}
+
+/** The instant a wall-clock time falls on in a zone (the later one where a clock change repeats it); undefined for an unknown zone. */
+function zonedInstant(wall: number, timeZone: string): number | undefined {
+  const offsetAt = (at: number): number | undefined => {
+    const w = wallClock(at, timeZone)
+    return w === undefined ? undefined : Date.UTC(w.year, w.month, w.day, w.hour, w.minute, w.second) - Math.floor(at / 1000) * 1000
+  }
+  const first = offsetAt(wall)
+  if (first === undefined) return undefined
+  const second = offsetAt(wall - first)
+  return second === undefined ? undefined : wall - second
+}
+
+/**
+ * The instant a usage-limit stop's own words give for the reset, as Claude Code writes them: "resets Nov 25 at 3pm
+ * (Europe/Tallinn)", "resets 3pm (Europe/Tallinn)", "resets 3:30pm (Europe/Tallinn)", "resets Mon 12:00am (Europe/Tallinn)".
+ * A date-less time is the next one to come; a weekday is its next occurrence; a date is the next year's when this
+ * year's has passed. A weekday is never read as a month. Minute precision at best, so a match with a stored
+ * reset (`whoseReset`) is within an hour, never exact. Undefined where there is no such wording, where it names no zone
+ * (the wall clock of a zone the words do not name is a guess), or where the zone or date is not one.
+ */
+export function stopResetAt(text: string | undefined, now: number): number | undefined {
+  const m = /resets\s+(?:(?:(Mon|Tue|Wed|Thu|Fri|Sat|Sun)[a-z]*\s+)|(?:([A-Za-z]{3,9})\s+(\d{1,2})(?:,?\s+at)?\s+))?(\d{1,2})(?::(\d{2}))?\s*([ap]m)\s*\(([^)]+)\)/i.exec(text ?? '')
+  if (m === null) return undefined
+  const [, weekdayWord, monthWord, dayWord, hourWord, minuteWord, meridiem, timeZone] = m
+  const hour12 = Number(hourWord)
+  const minute = minuteWord === undefined ? 0 : Number(minuteWord)
+  if (hour12 < 1 || hour12 > 12 || minute > 59 || timeZone === undefined || meridiem === undefined) return undefined
+  const hour = (hour12 % 12) + (meridiem.toLowerCase() === 'pm' ? 12 : 0)
+  const today = wallClock(now, timeZone)
+  if (today === undefined) return undefined
+  const at = (year: number, month: number, day: number) => zonedInstant(Date.UTC(year, month, day, hour, minute), timeZone)
+  if (weekdayWord !== undefined) {
+    // A weekday is the next such day in the zone, today's included while its time has not passed (by more than the slack).
+    const target = WEEKDAYS.indexOf(weekdayWord.slice(0, 3).toLowerCase())
+    const todayDay = new Date(Date.UTC(today.year, today.month, today.day)).getUTCDay()
+    const ahead = (target - todayDay + 7) % 7
+    const first = at(today.year, today.month, today.day + ahead)
+    return first !== undefined && first < now - RESET_PAST_SLACK_MS ? at(today.year, today.month, today.day + ahead + 7) : first
+  }
+  if (monthWord === undefined || dayWord === undefined) {
+    const first = at(today.year, today.month, today.day)
+    return first !== undefined && first < now - RESET_PAST_SLACK_MS ? at(today.year, today.month, today.day + 1) : first
+  }
+  const month = MONTHS.indexOf(monthWord.slice(0, 3).toLowerCase())
+  const day = Number(dayWord)
+  if (month === -1 || day < 1 || new Date(Date.UTC(2000, month, day)).getUTCMonth() !== month) return undefined
+  const first = at(today.year, month, day)
+  return first !== undefined && first < now - RESET_PAST_SLACK_MS - DAY_MS ? at(today.year + 1, month, day) : first
+}
+
+/** Which window a limit stop's words name: the Fable week, the week, or the 5-hour session. */
+export type StopWindow = 'fable' | 'week' | 'session'
+
+/**
+ * The logins whose own window of that kind resets within an hour of `at` (the reset a stop's words gave): one login is
+ * the one that stopped, two or more share a reset and prove neither, none is a reset no stored read knows.
+ */
+export function whoseReset(view: View, at: number, window: StopWindow): string[] {
+  return view.accounts
+    .filter(a => {
+      const r = view.readings[a.id]
+      const w = window === 'fable' ? r?.fable : window === 'week' ? r?.sevenDay : r?.fiveHour
+      const reset = w?.resetsAt === undefined ? NaN : Date.parse(w.resetsAt)
+      return Number.isFinite(reset) && Math.abs(reset - at) <= SAME_WEEK_MS
+    })
+    .map(a => a.id)
 }
 
 /** The part of a stored login Claude Code keeps in the keychain (on Linux, a file) that matters here. */

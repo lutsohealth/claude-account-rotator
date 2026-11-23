@@ -12,6 +12,13 @@ export type UsageWindow = { pct: number; resetsAt?: string; isStop?: true }
 export type Reading = { fiveHour?: UsageWindow; sevenDay?: UsageWindow; fable?: UsageWindow; noFiveHour?: true; at: number; by?: string; v?: number; src?: ReadingSource }
 
 /**
+ * The last usage body read of a login's windows, under its own store key `usage-body:<id>`, written only by the body path:
+ * counters are compared body to body, never against a response row or a mark, which a stop or another session may have
+ * stored between two bodies.
+ */
+export type BodyRead = { at: number; fiveHour?: UsageWindow; sevenDay?: UsageWindow; fable?: UsageWindow }
+
+/**
  * Where a stored reading came from: a usage body (`body`), a response's rate limits (`response`), or a stop that
  * marked a window spent (`stop`). Stored under `usage:<id>` with `v`, the writer's version; `reading:<id>` is an
  * older version's, read only for the stop marks it may carry and to tell that an older version still runs.
@@ -24,6 +31,12 @@ export type ReadingSource = 'body' | 'response' | 'stop'
  * erase it. `at` is when the stop came, in epoch milliseconds.
  */
 export type Mark = { pct: number; resetsAt: string; at: number }
+
+/**
+ * What a stop's pick of a login rests on, which the carry-on's line follows: the tier it was taken in, the age of the read it
+ * was judged on, when a login believed spent frees (epoch ms), and whether a fresh read that lists the Fable week showed room.
+ */
+export type StopProof = { tier: 'fresh' | 'stale' | 'unread' | 'spent-old'; readAgeMs?: number; freesAt?: number; hasFableRoom: boolean }
 
 /** A usage check that failed: what failed (a stage and an HTTP status, or the error), and when, in epoch milliseconds. */
 /** `isUsageRead`: the usage read itself failed, which runs only once a profile call has named the sign-in. */
