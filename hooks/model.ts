@@ -249,7 +249,11 @@ function firstByRotateTo(view: View, ready: Account[], readings: Readonly<Record
   }
 }
 
-/** How old a login's own read may be and still show its room after a stop: the shared schedule reads an idle login every 30 minutes, so an older read means one failed or was skipped. */
+/**
+ * How old a login's own read may be and still show its room after a stop. The shared schedule reads a login whose token is
+ * live more often than this, so an older read means one failed or was skipped. It reads none whose token has run out
+ * (idle): its reading only ages, so it is never fresh, whatever its age.
+ */
 export const FRESH_READ_MS = 35 * 60_000
 
 /** The class a login takes after a usage-limit stop, tried in this order. */
@@ -305,13 +309,21 @@ export function pickAfterStop(
   const counts: Record<string, Reading | undefined> = {}
   for (const a of view.accounts) counts[a.id] = raw[a.id] && counted(raw[a.id] as Reading, view.fiveHourLimit, now)
   const hasRoom = (r: Reading) => !isSpent(r, now, view.weekLeave) && !(isFable && isFableSpent(r, now))
+  const isIdle = (a: Account): boolean => {
+    const health = view.health[a.id]
+    return health?.kind === 'ok' && health.isIdle === true
+  }
+  // The Fable row has a read time of its own: a response save refreshes the reading's and keeps the older body's row. A row
+  // stored before it was stamped has none, and the reading's stands for it.
+  const isFableOld = (r: Reading): boolean => isFable && r.fable !== undefined && now - (r.fable.at ?? r.at) > FRESH_READ_MS
   const tierOf = (a: Account): StopTier | undefined => {
     const r = counts[a.id]
     if (live.has(a.id) && r !== undefined && !hasRoom(r)) return undefined
     if (isMarked(view, a.id, now)) return 'spent-old'
     const error = view.checkErrors?.[a.id]
     if (r === undefined) return error === undefined || error.isUsageRead === true ? 'unread' : undefined
-    const isFresh = now - r.at <= FRESH_READ_MS && !(error !== undefined && error.at > r.at)
+    // An idle login's read is as old as it is and no read will follow: stale, whatever its age.
+    const isFresh = !isIdle(a) && now - r.at <= FRESH_READ_MS && !isFableOld(r) && !(error !== undefined && error.at > r.at)
     if (isFresh) return hasRoom(r) ? 'fresh' : undefined
     return hasRoom(r) ? 'stale' : 'spent-old'
   }
@@ -331,7 +343,7 @@ export function pickAfterStop(
     // The Fable week is proven roomy only by a fresh read that lists it; a spent-old pick says when it believed it frees.
     const hasFableRoom = tier === 'fresh' && counts[account.id]?.fable !== undefined && !isFableSpent(counts[account.id], now)
     const spentOld = tier === 'spent-old' ? { spentOld: ready, freesAt: finiteOr(freesAt(view, account.id, counts[account.id], now, need)) } : {}
-    return { account, tier, hasFableRoom, ...(read === undefined ? {} : { readAgeMs: now - read.at }), ...spentOld }
+    return { account, tier, hasFableRoom, ...(read === undefined ? {} : { readAgeMs: now - read.at }), ...(isIdle(account) ? { isIdle: true as const } : {}), ...spentOld }
   }
   return undefined
 }
@@ -511,14 +523,16 @@ export function readingFromUsage(body: unknown, now: number): Reading | undefine
   if (fiveHour === undefined && sevenDay === undefined && fable === undefined) return undefined
   // Only a body that lists no 5-hour window at all says the account has none; one it cannot read says nothing.
   const isNone = five_hour === null || five_hour === undefined
-  return { ...(fiveHour ? { fiveHour } : isNone ? { noFiveHour: true } : {}), ...(sevenDay ? { sevenDay } : {}), ...(fable ? { fable } : {}), at: now }
+  // The Fable row carries the time of the body that listed it, which a later reading that keeps it does not change.
+  return { ...(fiveHour ? { fiveHour } : isNone ? { noFiveHour: true } : {}), ...(sevenDay ? { sevenDay } : {}), ...(fable ? { fable: { ...fable, at: now } } : {}), at: now }
 }
 
 /**
  * A fresh reading with the Fable week the stored one holds, where the fresh
  * body lists none: a body without the row says nothing of the week, and the
  * mark a stop left stands until its reset time passes. A week with no reset
- * time to go by is not kept. A row in the body replaces it.
+ * time to go by is not kept. A row in the body replaces it. The kept row is
+ * the stored one as it stands, its own read time (`UsageWindow.at`) with it.
  */
 export function keepFable(fresh: Reading, stored: Reading | undefined, now: number): Reading {
   const kept = stored?.fable

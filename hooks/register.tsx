@@ -1706,7 +1706,7 @@ async function maybeRotate($: Host, need?: Need, carry?: CarryOn, modelStop?: { 
       return stays(`no untried login (tried ${tried.join(', ')})`)
     }
     const age = pick.readAgeMs === undefined ? '' : `, read ${Math.round(pick.readAgeMs / 60_000)} min ago`
-    void logStop($, `picked ${pick.account.id}: ${pick.tier}${age}; tried ${tried.join(', ')}`)
+    void logStop($, `picked ${pick.account.id}: ${pick.tier}${pick.isIdle === true ? ' (idle token)' : ''}${age}; tried ${tried.join(', ')}`)
     // The carry-on goes with what the pick rests on: its line says no more than that proves.
     const { tier, readAgeMs, freesAt, hasFableRoom } = pick
     return switchTo($, pick.account, whyLeave(view, now, need), false, { ...carry, proof: { tier, readAgeMs, freesAt, hasFableRoom } }, true)
@@ -2360,7 +2360,8 @@ async function onMeasure($: Host, limits: readonly SessionRateLimit[]): Promise<
   // A response that reports a 5-hour window shows the account has one, whatever the last usage check said: recorded once,
   // in a form the 5h limit does not filter.
   if (reading.fiveHour !== undefined && view.noFiveHour?.[view.activeId] !== false) await saveNoFiveHour($, view.activeId, false)
-  // A response never lists the Fable week: the one the last check stored stays (the view's carries the marks). It touches
+  // A response never lists the Fable week: the one the last check stored stays, with the time that check read it (the
+  // view's carries the marks); the reading's own time moves on, the row's does not. It touches
   // no other key: the last body read of each window lives under its own, written by the body path alone.
   const fable = (await ownedReading($, view.activeId))?.fable
   await saveReading($, view.activeId, { ...reading, ...(fable ? { fable } : {}), by: view.activeId }, 'response')

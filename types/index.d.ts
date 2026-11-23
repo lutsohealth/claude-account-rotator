@@ -1,5 +1,9 @@
-/** One usage window of a login: percent used, and when it resets (ISO 8601); `isStop` where a stop marked it, not a read. */
-export type UsageWindow = { pct: number; resetsAt?: string; isStop?: true }
+/**
+ * One usage window of a login: percent used, and when it resets (ISO 8601); `isStop` where a stop marked it, not a read.
+ * `at`, on a Fable row: when a usage body listed it (epoch ms). A response save refreshes the reading's own `at` and keeps
+ * the older body's Fable row, so the row's own time is the one its age is judged on. A row stored before it was kept has none.
+ */
+export type UsageWindow = { pct: number; resetsAt?: string; isStop?: true; at?: number }
 
 /**
  * A login's usage as last read, `at` in epoch milliseconds. `fable` is the
@@ -36,8 +40,9 @@ export type Mark = { pct: number; resetsAt: string; at: number }
 /**
  * What a stop's pick of a login rests on, which the carry-on's line follows: the tier it was taken in, the age of the read it
  * was judged on, when a login believed spent frees (epoch ms), and whether a fresh read that lists the Fable week showed room.
+ * `isIdle`: the login's token had run out, so nothing reads it until a session refreshes the token.
  */
-export type StopProof = { tier: 'fresh' | 'stale' | 'unread' | 'spent-old'; readAgeMs?: number; freesAt?: number; hasFableRoom: boolean }
+export type StopProof = { tier: 'fresh' | 'stale' | 'unread' | 'spent-old'; readAgeMs?: number; freesAt?: number; hasFableRoom: boolean; isIdle?: true }
 
 /** A usage check that failed: what failed (a stage and an HTTP status, or the error), and when, in epoch milliseconds. */
 /** `isUsageRead`: the usage read itself failed, which runs only once a profile call has named the sign-in. */
