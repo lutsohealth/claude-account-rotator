@@ -17443,7 +17443,7 @@ test('SPENT-OLD-GATE: a body 30 s old that the minute gate keeps from being read
 const THREE_BY = 'three@example.com|org-three@example.com'
 const bodyOfThree = (pct: number, at: number) => ({ at, by: THREE_BY, fiveHour: { pct, resetsAt: FIVE_RESET_3 }, sevenDay: { pct, resetsAt: WEEK_RESET_3 }, fable: { pct, resetsAt: FABLE_RESET } })
 
-async function markedOnThree($: Engine, on: On, kind: 'week' | 'five', first: number, live: number) {
+async function markedOnThree($: Engine, on: On, kind: 'week' | 'five' | 'fable', first: number, live: number) {
   const w = fresh()
   w.keychain['Claude Code-credentials'] = blob('tok-1')
   w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
@@ -17454,7 +17454,12 @@ async function markedOnThree($: Engine, on: On, kind: 'week' | 'five', first: nu
   w.usage['tok-3'] = [live, live, live]
   w.fableResetsBy = { 'tok-1': FABLE_RESET, 'tok-2': FABLE_RESET_2, 'tok-3': FABLE_RESET }
   w.weekResets = { 'tok-1': '2026-10-18T03:00:00Z', 'tok-2': '2026-10-19T03:00:00Z', 'tok-3': WEEK_RESET_3 }
-  const mark = kind === 'week' ? { 'week-mark:3': { pct: 100, resetsAt: WEEK_RESET_3, at: NOW - 10 * 60_000 } } : { 'mark:3': { pct: 100, resetsAt: FIVE_RESET_3, at: NOW - 10 * 60_000 } }
+  const marks = {
+    week: { 'week-mark:3': { pct: 100, resetsAt: WEEK_RESET_3, at: NOW - 10 * 60_000 } },
+    five: { 'mark:3': { pct: 100, resetsAt: FIVE_RESET_3, at: NOW - 10 * 60_000 } },
+    fable: { 'fable-mark:3': { pct: 100, resetsAt: FABLE_RESET, at: NOW - 10 * 60_000 } },
+  }
+  const mark = marks[kind]
   const store = new Map<string, unknown>(
     Object.entries({
       ...THREE_LOGINS,
@@ -17759,6 +17764,107 @@ for (const kind of ['week', 'five'] as const) {
     expect(store.get(key), 'a fall of 2 from the newest body').toBeDefined()
   })
 }
+
+// Codex pr-b-r7 B1: ending a proven mark deletes or rewrites no key another session could have just written: it writes a
+// record naming that exact mark (`mark-end:<kind>:<id>:<mark.at>`), which a mark of another `at` never meets.
+const NEW_WINDOW_MARK_RESET = { week: '2026-10-27T03:00:00Z', five: '2026-10-12T17:00:00Z', fable: '2026-10-24T03:00:00Z' }
+const VIEW_MARKS = { week: 'weekMarks', five: 'marks', fable: 'fableMarks' } as const
+
+for (const kind of ['week', 'five', 'fable'] as const) {
+  test(`MARK-END: the ${kind} mark another session writes for a new window while a proven end of the old one is under way stands`, async ($, on) => {
+    const { w, store, clock, key } = await markedOnThree($, on, kind, 100, 0)
+    const newMark = { pct: 100, resetsAt: NEW_WINDOW_MARK_RESET[kind], at: NOW + 8 * 60_000 }
+    const written = { isDone: false }
+    const writeNew = () => {
+      if (written.isDone) return
+      written.isDone = true
+      store.set(key, newMark)
+    }
+    // Session B writes its mark right after this session's check read the old one and the bodies, as the end is under way.
+    const seen = { hasBodies: false }
+    w.afterStoreGet = async storeKey => {
+      if (storeKey.startsWith('usage-body:3:')) seen.hasBodies = true
+      else if (seen.hasBodies && storeKey === key) writeNew()
+    }
+    for (let waited = 0; waited < 12 * 60_000; waited += 20_000) await clock.advance(20_000)
+    await clock.settle()
+    w.afterStoreGet = undefined
+    writeNew()
+    for (let waited = 0; waited < 3 * 60_000; waited += 20_000) await clock.advance(20_000)
+    await clock.settle()
+    expect((store.get('usage:3') as { src?: string }).src, 'the body is stored').toBe('body')
+    expect(store.get(key), 'the new window\'s mark is whole').toEqual(newMark)
+    expect([...store.keys()].filter(k => k.startsWith('mark-end:') && k.endsWith(`:${newMark.at}`)), 'and no end names it').toEqual([])
+  })
+
+  test(`guard: a proven end of the ${kind} mark removes it from the view across the merge of the minute's tick`, async ($, on) => {
+    let last: View | undefined
+    on('state.set', async (_$, e, next) => {
+      const { key, value } = e as unknown as { key: string; value: View }
+      if (key === 'view') last = value
+      return next(e)
+    })
+    const { clock } = await markedOnThree($, on, kind, 100, 0)
+    expect(last?.[VIEW_MARKS[kind]]?.['3'], 'the mark is in the view before the end').toBeDefined()
+    for (let waited = 0; waited < 15 * 60_000; waited += 20_000) await clock.advance(20_000)
+    await clock.settle()
+    expect(last?.[VIEW_MARKS[kind]]?.['3'], 'the view no longer holds the ended mark').toBeUndefined()
+  })
+}
+
+test('MARK-END: a proven end is a record naming the mark, and the end records whose reset has passed go with the next body', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.usage['tok-1'] = [20, 30, 21]
+  const store = new Map<string, unknown>(
+    Object.entries({
+      ...TWO_LOGINS,
+      'mark-end:week:1:100': { resetsAt: '2026-10-05T03:00:00Z' },
+      'mark-end:week:1:200': { resetsAt: '2026-10-20T03:00:00Z' },
+    }),
+  )
+  const clock = world(on, w, store)
+  await start($, clock)
+  expect([store.has('mark-end:week:1:100'), store.has('mark-end:week:1:200')]).toEqual([false, true])
+})
+
+test('MARK-END: a sign-in as another account deletes the end records of the login', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.usage['tok-1'] = [20, 30, 40]
+  const store = new Map<string, unknown>(
+    Object.entries({
+      ...TWO_LOGINS,
+      'holder:1': { token: 'a-token-that-is-not-this-one', who: { email: 'nine@example.com' } },
+      'mark-end:week:1:200': { resetsAt: '2026-10-20T03:00:00Z' },
+      'mark-end:fable:2:200': { resetsAt: '2026-10-20T03:00:00Z' },
+    }),
+  )
+  const clock = world(on, w, store)
+  await start($, clock)
+  expect([store.has('mark-end:week:1:200'), store.has('mark-end:fable:2:200')], 'another login\'s record stays').toEqual([false, true])
+})
+
+test('MARK-END: removing a login deletes the end records of it', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [null, 40]
+  w.usage['tok-2'] = [null, 30]
+  const store = new Map<string, unknown>(
+    Object.entries({ ...TWO_LOGINS, 'mark-end:five:2:5': { resetsAt: '2026-10-20T03:00:00Z' }, 'mark-end:week:1:5': { resetsAt: '2026-10-20T03:00:00Z' } }),
+  )
+  const clock = world(on, w, store)
+  await start($, clock)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  await pane.press({ key: 'ask-remove-2' })
+  await clock.settle()
+  await pane.redraw()
+  await pane.press({ key: 'remove-2' })
+  await clock.settle()
+  expect([store.has('mark-end:five:2:5'), store.has('mark-end:week:1:5')]).toEqual([false, true])
+  await pane.unmount()
+})
 
 test('BODY-IDENTITY: the key a body read writes names the account, never a token', async ($, on) => {
   const w = fresh()
