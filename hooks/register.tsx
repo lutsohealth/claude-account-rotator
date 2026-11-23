@@ -89,7 +89,6 @@ import {
   isBackedOff,
   windowPct,
   USAGE_CLAIM_WAIT_MS,
-  USAGE_FORCE_AFTER_MS,
   USAGE_IDLE_MS,
   afterUsage,
   claimDueReads,
@@ -1376,8 +1375,10 @@ class UsageCallThrew extends Error {
  * when it is next read. The claim is written as the read starts, so it lasts from the read. Undefined when the gate
  * says no.
  */
-async function requestUsage($: Host, account: Account, accessToken: string, gate: UsageGate): Promise<UsageAnswer | undefined> {
+async function requestUsage($: Host, account: Account, accessToken: string, gate: UsageGate): Promise<(UsageAnswer & { startedAt: number; receivedAt: number }) | undefined> {
   if (gate === 'none') return undefined
+  // Before the gate reads anything: a body saved after this time is newer than, or concurrent with, the one this read gets.
+  const startedAt = await $.clock.now()
   const key = `usage-due:${account.id}`
   const stored = await storedReading($, account.id)
   const due = gatingDue(usageDueFrom(await $.store.get(key)), stored !== undefined)
@@ -1407,7 +1408,7 @@ async function requestUsage($: Host, account: Account, accessToken: string, gate
   const ok = usage.kind === 'ok' ? { kind: readingFromUsage(usage.body, at) === undefined ? ('empty' as const) : ('ok' as const), hasResponded } : undefined
   const outcome = ok ?? (usage.kind === 'rejected' ? usage : { kind: 'failed' as const, retryAfter: usage.retryAfter })
   await $.store.set(key, afterUsage(due, outcome, at))
-  return usage
+  return { ...usage, startedAt, receivedAt: at }
 }
 
 /**
@@ -1471,25 +1472,37 @@ async function checkAccount($: Host, account: Account, gate: UsageGate): Promise
       if (usage?.kind === 'ok') {
         isSignInProven = true
         await saveCheckError($, account.id, undefined)
-        const read = readingFromUsage(usage.body, now)
+        // The body is dated when it came back: a body saved since this read began is read at or after its start.
+        const read = readingFromUsage(usage.body, usage.receivedAt)
         if (read !== undefined) {
           const { noFiveHour, ...reading } = read
-          // A body whose 5-hour window it cannot read leaves what the last one said.
-          if (reading.fiveHour !== undefined || noFiveHour === true) await saveNoFiveHour($, account.id, noFiveHour === true)
-          // The earlier read of each window, as stored (never the view, which carries the marks): what a fall is judged against.
+          // Everything the body is judged against is read first, then the body acts. The earlier read of each window is the
+          // stored one (never the view, which carries the marks).
           const prior = await ownedReading($, account.id)
-          // A mark that this body's own window contradicts ends before the reading is drawn: a counter that fell inside the
-          // window was reset (by hand, which leaves the reset time as it was), and a Fable mark also ends where the week
-          // reads below 100 long enough after the stop.
-          const fableMarked = markFrom(await $.store.get(`fable-mark:${account.id}`))
-          if (fableMarked !== undefined && endsFableMark(reading.fable, now, fableMarked, prior?.fable)) await dropFableMark($, account.id, fableMarked)
-          const weekMarked = markFrom(await $.store.get(`week-mark:${account.id}`))
-          if (weekMarked !== undefined && endsWeekMark(reading.sevenDay, weekMarked, prior?.sevenDay)) await dropWeekMark($, account.id, weekMarked)
-          const fiveMarked = markFrom(await $.store.get(`mark:${account.id}`))
-          if (fiveMarked !== undefined && endsFiveHourMark(reading.fiveHour, fiveMarked, prior?.fiveHour)) await dropMark($, account.id, fiveMarked)
-          // A body with no Fable row keeps the stored one's, unless the week fell: the stored read, never the view.
-          await saveReading($, account.id, { ...keepFable(reading, prior, now), by: account.id }, 'body')
-          hasFreshFable = reading.fable !== undefined
+          const marks = {
+            fable: markFrom(await $.store.get(`fable-mark:${account.id}`)),
+            week: markFrom(await $.store.get(`week-mark:${account.id}`)),
+            five: markFrom(await $.store.get(`mark:${account.id}`)),
+          }
+          // A stored body saved at or after this read began is newer than this body, or came back with it: this body is no
+          // earlier read to fall from, ends no mark, drops no kept row and never overwrites that row.
+          const isOlder = prior?.src === 'body' && prior.at >= usage.startedAt
+          if (!isOlder) {
+            // A body whose 5-hour window it cannot read leaves what the last one said.
+            if (reading.fiveHour !== undefined || noFiveHour === true) await saveNoFiveHour($, account.id, noFiveHour === true)
+            // A mark that this body's own window contradicts ends before the reading is drawn: a counter that fell inside the
+            // window was reset (by hand, which leaves the reset time as it was). A body whose request began before the mark
+            // was written is from before the stop, and ends nothing; a Fable mark also ends where the week reads below 100
+            // long enough after the stop.
+            const isAfter = (mark: Mark) => usage.startedAt >= mark.at
+            const { fable, week, five } = marks
+            if (fable !== undefined && isAfter(fable) && endsFableMark(reading.fable, now, fable, prior?.fable)) await dropFableMark($, account.id, fable)
+            if (week !== undefined && isAfter(week) && endsWeekMark(reading.sevenDay, week, prior?.sevenDay)) await dropWeekMark($, account.id, week)
+            if (five !== undefined && isAfter(five) && endsFiveHourMark(reading.fiveHour, five, prior?.fiveHour)) await dropMark($, account.id, five)
+            // A body with no Fable row keeps the stored one's, unless the week fell: the stored read, never the view.
+            await saveReading($, account.id, { ...keepFable(reading, prior, now), by: account.id }, 'body')
+            hasFreshFable = reading.fable !== undefined
+          }
         }
       }
     }
@@ -1708,6 +1721,7 @@ async function readLiveBeforeSpentOld($: Host, candidates: readonly Account[]): 
   const shown: string[] = []
   const idle: string[] = []
   const failed: string[] = []
+  const gated: string[] = []
   for (const account of candidates) {
     const startedAt = await $.clock.now()
     const stored = await readStored($, account.slot).catch(() => undefined)
@@ -1718,9 +1732,12 @@ async function readLiveBeforeSpentOld($: Host, candidates: readonly Account[]): 
     }
     await stopRead($, account, 'force')
     const read = await ownedReading($, account.id)
-    // A body read made now, or one the gate's own minute still holds: the endpoint's answer, not the old reading kept.
-    if (read?.src !== 'body' || startedAt - read.at > USAGE_FORCE_AFTER_MS) {
-      failed.push(account.id)
+    // Live is a body that came back during this attempt, by this session or another: a body the minute gate kept from being
+    // read again is the old reading, however recent, and says nothing of a reset since.
+    if (read?.src !== 'body' || read.at < startedAt) {
+      const failure = (await getView($)).checkErrors?.[account.id]
+      if (failure !== undefined && failure.at >= startedAt) failed.push(account.id)
+      else gated.push(account.id)
       continue
     }
     live.add(account.id)
@@ -1730,6 +1747,7 @@ async function readLiveBeforeSpentOld($: Host, candidates: readonly Account[]): 
   if (shown.length > 0) void logStop($, `read live before spent-old: ${shown.join(', ')}`)
   if (idle.length > 0) void logStop($, `not read live: token idle: ${idle.join(', ')}`)
   if (failed.length > 0) void logStop($, `not read live: usage read failed: ${failed.join(', ')}`)
+  if (gated.length > 0) void logStop($, `not read live: read gate: ${gated.join(', ')}`)
   return live
 }
 
