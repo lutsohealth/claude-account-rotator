@@ -17431,7 +17431,10 @@ test('SPENT-OLD-GATE: a body 30 s old that the minute gate keeps from being read
  * The session runs on login 3, whose last body read `first` percent of every window, with a mark standing 10 minutes old on
  * `kind`. A response then stores `response` percent over that row; the next body, due in ten minutes, reads `live`.
  */
-async function responseBetweenBodies($: Engine, on: On, kind: 'week' | 'five', first: number, response: number, live: number) {
+/** What the body path keeps of a body read, under `usage-body:<id>`: its time and its windows. */
+const bodyOfThree = (pct: number, at: number) => ({ at, fiveHour: { pct, resetsAt: FIVE_RESET_3 }, sevenDay: { pct, resetsAt: WEEK_RESET_3 }, fable: { pct, resetsAt: FABLE_RESET } })
+
+async function markedOnThree($: Engine, on: On, kind: 'week' | 'five', first: number, live: number) {
   const w = fresh()
   w.keychain['Claude Code-credentials'] = blob('tok-1')
   w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
@@ -17448,19 +17451,57 @@ async function responseBetweenBodies($: Engine, on: On, kind: 'week' | 'five', f
       ...THREE_LOGINS,
       ...mark,
       'usage:3': bodyRowOfThree(first, NOW - 15 * 60_000),
+      'usage-body:3': bodyOfThree(first, NOW - 15 * 60_000),
       'usage-due:3': { next: NOW + 10 * 60_000, fails: 0, at: NOW - 15 * 60_000, v: 1 },
     }),
   )
   const clock = world(on, w, store)
   await start($, clock, true)
   await clock.advance(60_000)
+  return { w, store, clock, key: Object.keys(mark)[0] ?? '' }
+}
+
+async function responseBetweenBodies($: Engine, on: On, kind: 'week' | 'five', first: number, response: number, live: number) {
+  const { w, store, clock, key } = await markedOnThree($, on, kind, first, live)
   w.limits = limitsOf(response, response, WEEK_RESET_3)
   await respond($, clock, w)
   expect((store.get('usage:3') as { src?: string }).src, 'a response is stored over the body row').toBe('response')
   for (let waited = 0; waited < 12 * 60_000; waited += 20_000) await clock.advance(20_000)
   await clock.settle()
   expect((store.get('usage:3') as { src?: string }).src, 'the next body is stored').toBe('body')
-  return { store, key: Object.keys(mark)[0] ?? '' }
+  return { store, key }
+}
+
+for (const kind of ['week', 'five'] as const) {
+  test(`BODY-BASELINE-RACE: a response saved over a newer body does not bring the older body back as the baseline (96, 94 saved during the response, 91): the ${kind} mark stands`, async ($, on) => {
+    const { w, store, clock, key } = await markedOnThree($, on, kind, 96, 91)
+    // The response save reads login 3's row (body 96) and waits there.
+    const held = { isArmed: true, isPaused: false, open: () => {} }
+    const gate = new Promise<void>(resolve => {
+      held.open = resolve
+    })
+    w.afterStoreGet = async storeKey => {
+      if (!held.isArmed || storeKey !== 'usage:3') return
+      held.isArmed = false
+      held.isPaused = true
+      await gate
+    }
+    w.limits = limitsOf(100, 100, WEEK_RESET_3)
+    const responding = $.session.measure({ context: { window: 200_000 }, rateLimits: w.limits, changed: ['rateLimits'] })
+    await clock.advance(1_000)
+    expect(held.isPaused, 'the response save waits after reading the row').toBe(true)
+    // Another session's body 94 is saved meanwhile, as the body path saves it: the row and its own baseline key.
+    store.set('usage:3', bodyRowOfThree(94, clock.now()))
+    store.set('usage-body:3', bodyOfThree(94, clock.now()))
+    held.open()
+    await responding
+    await clock.settle()
+    w.afterStoreGet = undefined
+    for (let waited = 0; waited < 12 * 60_000; waited += 20_000) await clock.advance(20_000)
+    await clock.settle()
+    expect((store.get('usage:3') as { src?: string }).src, 'the next body is stored').toBe('body')
+    expect(store.get(key), 'body to body is 94 to 91: no reset').toBeDefined()
+  })
 }
 
 for (const kind of ['week', 'five'] as const) {
@@ -17475,61 +17516,81 @@ for (const kind of ['week', 'five'] as const) {
   })
 }
 
-// A model-family limit marks no window: nothing frees on the login that stopped, so its carry-on waits for another login
-// to free (and moves there) or for the family's own reset.
-const OPUS_STOP = { error: 'rate_limit', last_assistant_message: "You've hit your Opus limit · resets 3:45pm" }
+// A model-family limit marks no window and counts as the login's try. With no login free it owes the ordinary carry-on debt,
+// dated at the reset its words name; with no usable reset it owes nothing and says so once. A freed login is used only at
+// the next stop or Use now.
+const OPUS_AT_4PM = { error: 'rate_limit', last_assistant_message: "You've hit your Opus limit · resets 4pm (Europe/Tallinn)" }
+const OPUS_AT_6PM = { error: 'rate_limit', last_assistant_message: "You've hit your Opus limit · resets 6pm (Europe/Tallinn)" }
+const OPUS_NO_ZONE = { error: 'rate_limit', last_assistant_message: "You've hit your Opus limit · resets 3:45pm" }
+/** 4pm in Tallinn is 13:00Z on the test's day, three hours on, and 6pm is 15:00Z. */
+const AT_1PM_Z = Date.parse('2026-10-12T13:00:00Z')
 
+/** Login 1 in use; login 2 is spent until 11:00Z, an hour on, so it has freed well before the model family's reset. */
 async function modelStopWithTwoSpent(on: On, stop: { error: string; last_assistant_message: string }, $: Engine) {
   const w = fresh()
-  w.keychain['Claude Code-credentials'] = blob('tok-1')
-  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  const { store, clock } = await loggedWorld(on, w)
   w.usage['tok-1'] = [20, 30, 21]
-  // Login 2 is spent until its 5-hour window resets, two hours on.
   w.usage['tok-2'] = [100, 30, 21]
-  const store = new Map<string, unknown>(Object.entries(TWO_LOGINS))
-  const clock = world(on, w, store)
+  w.fiveHourResets = { 'tok-2': '2026-10-12T11:00:00Z' }
+  let last: View | undefined
+  on('state.set', async (_$, e, next) => {
+    const { key, value } = e as unknown as { key: string; value: View }
+    if (key === 'view') last = value
+    return next(e)
+  })
   await start($, clock)
   await $.classic.StopFailure(stop)
   await clock.settle()
-  return { w, store, clock }
+  return { w, store, clock, view: () => last }
 }
 
-test('MODEL-WAIT: after a model-family stop with every other login spent, the owed carry-on moves to the login that frees and carries on there', async ($, on) => {
-  const { w, store, clock } = await modelStopWithTwoSpent(on, OPUS_STOP, $)
-  expect(slotValues(w), 'nothing to move to yet').toEqual([])
-  expect(whats(stopLogOf(store, w)).some(line => line.startsWith('no login left'))).toBe(true)
-  for (let waited = 0; waited < 2 * HOUR + 10 * 60_000; waited += 5 * 60_000) {
-    await clock.advance(5 * 60_000)
+/** Ticks in `step` minutes until `clock` passes `until` (epoch ms). */
+async function tickUntil(clock: MockClock, until: number, step = 5): Promise<void> {
+  while (clock.now() < until) {
+    await clock.advance(step * 60_000)
     await clock.settle()
   }
-  await clock.advance(40_000)
-  expect(slotValues(w), 'login 2 freed: the session moves there').toEqual([SLOT2])
-  expect(w.submitted, 'and carries on there, once').toHaveLength(1)
-})
+}
 
-test('MODEL-WAIT: where nothing frees before the model family\'s own reset, the carry-on goes on the same login at that reset', async ($, on) => {
-  // 4pm in Tallinn is 13:00Z, three hours on; login 2 stays spent past it.
-  const stop = { error: 'rate_limit', last_assistant_message: "You've hit your Opus limit · resets 4pm (Europe/Tallinn)" }
-  const w = fresh()
-  w.keychain['Claude Code-credentials'] = blob('tok-1')
-  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
-  w.usage['tok-1'] = [20, 30, 21]
-  w.usage['tok-2'] = [100, 30, 21]
-  w.fiveHourResets = { 'tok-2': '2026-10-12T20:00:00Z' }
-  const store = new Map<string, unknown>(Object.entries(TWO_LOGINS))
-  const clock = world(on, w, store)
-  await start($, clock)
-  await $.classic.StopFailure(stop)
-  await clock.settle()
-  for (let waited = 0; waited < 2 * HOUR + 30 * 60_000; waited += 5 * 60_000) {
-    await clock.advance(5 * 60_000)
-    await clock.settle()
-  }
-  expect(w.submitted, 'before the family\'s reset nothing is sent').toEqual([])
-  for (let waited = 0; waited < 40 * 60_000; waited += 5 * 60_000) {
-    await clock.advance(5 * 60_000)
-    await clock.settle()
-  }
+test('MODEL-DEBT-RELOAD: a model stop with a known reset owes the ordinary persisted debt dated at that reset, and sends nothing before it', async ($, on) => {
+  const { w, clock, view } = await modelStopWithTwoSpent(on, OPUS_AT_4PM, $)
+  // The record a reload restores is the view's carryDue: dated at the family's reset, not at the hour login 2 frees.
+  expect(view()?.carryDue, 'what a reload restores').toMatchObject({ at: AT_1PM_Z, from: '1' })
+  await tickUntil(clock, AT_1PM_Z - 5 * 60_000)
+  expect(w.submitted, 'login 2 freed at 11:00Z: no move, no carry-on before the reset').toEqual([])
+  expect(slotValues(w)).toEqual([])
+  await tickUntil(clock, AT_1PM_Z + 10 * 60_000)
   expect(w.submitted, 'at the reset it carries on, on the same login').toHaveLength(1)
   expect(slotValues(w)).toEqual([])
+})
+
+test('MODEL-UNKNOWN-RESET: a model stop whose words give no usable reset owes no carry-on, and says so once', async ($, on) => {
+  const { w, clock, view } = await modelStopWithTwoSpent(on, OPUS_NO_ZONE, $)
+  expect(view()?.carryDue, 'nothing owed').toBeUndefined()
+  expect(w.toasts.filter(t => /model limit/.test(t) && /reset/.test(t)), 'told once').toHaveLength(1)
+  await tickUntil(clock, AT_1PM_Z + HOUR)
+  expect(w.submitted, 'no retry loop').toEqual([])
+  expect(slotValues(w)).toEqual([])
+})
+
+test('MODEL-DEBT-STALE: a later model stop on the same login moves the debt\'s date later, and nothing goes at the earlier one', async ($, on) => {
+  const { w, clock, view } = await modelStopWithTwoSpent(on, OPUS_AT_4PM, $)
+  await clock.advance(30 * 60_000)
+  await $.classic.StopFailure(OPUS_AT_6PM)
+  await clock.settle()
+  expect(view()?.carryDue, 'the date moved later').toMatchObject({ at: Date.parse('2026-10-12T15:00:00Z'), from: '1' })
+  await tickUntil(clock, AT_1PM_Z + 20 * 60_000)
+  expect(w.submitted, 'nothing at the earlier reset').toEqual([])
+  await tickUntil(clock, Date.parse('2026-10-12T15:00:00Z') + 10 * 60_000)
+  expect(w.submitted).toHaveLength(1)
+  // An earlier date later never moves it back.
+})
+
+test('GREEN-TICK-MOVE: after a model stop, a person\'s new turn and then a freed login: no tick move and no second carry-on', async ($, on) => {
+  const { w, clock } = await modelStopWithTwoSpent(on, OPUS_AT_4PM, $)
+  await clock.advance(5 * 60_000)
+  await $.turn.start({ text: 'working by hand', turnId: 'by-hand' })
+  await tickUntil(clock, AT_1PM_Z + 30 * 60_000)
+  expect(slotValues(w), 'the freed login is not moved to by a tick').toEqual([])
+  expect(w.submitted, 'the carry-on is not sent over the person\'s own work').toEqual([])
 })
