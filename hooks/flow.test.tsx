@@ -18045,16 +18045,17 @@ test('BODY-KEYS: a sign-in as another account deletes every body key of the logi
   expect([...store.keys()].filter(k => k.startsWith('usage-body:1'))).toEqual([])
 })
 
-test('BODY-KEYS: a login keeps the body keys of its newest 20 sessions, though none is a week old', async ($, on) => {
+// Codex pr-b-r2: the prune reads a key again right before it deletes it.
+test('BODY-KEYS: a key over a week old that another session rewrites before the prune reaches it is kept', async ($, on) => {
   const w = fresh()
   w.keychain['Claude Code-credentials'] = blob('tok-1')
   w.usage['tok-1'] = [20, 30, 40]
-  const seeded = Object.fromEntries(Array.from({ length: 25 }, (_, k) => [`usage-body:1:session-${k + 1}`, { at: NOW - (k + 1) * 60_000 }]))
-  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, ...seeded }))
+  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'usage-body:1:session-b': { at: NOW - 8 * DAY } }))
+  // Session B's body is saved while this session saves its own: after this session read B's key, and before its prune.
+  w.onStoreSet = key => {
+    if (key.startsWith('usage-body:1:') && key !== 'usage-body:1:session-b') store.set('usage-body:1:session-b', { at: NOW })
+  }
   const clock = world(on, w, store)
   await start($, clock)
-  const kept = [...store.keys()].filter(k => k.startsWith('usage-body:1:')).sort()
-  // This session's own key and the 19 newest others.
-  const expected = [`usage-body:1:${w.otherEnv.ACCOUNT_ROTATOR_SESSION}`, ...Array.from({ length: 19 }, (_, k) => `usage-body:1:session-${k + 1}`)].sort()
-  expect(kept).toEqual(expected)
+  expect(store.get('usage-body:1:session-b'), 'B\'s newer body stands').toEqual({ at: NOW })
 })
