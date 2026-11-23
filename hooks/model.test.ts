@@ -2288,6 +2288,29 @@ for (const [said, now, at] of [
   })
 }
 
+// The weekday form the docs list ("resets Mon 12:00am", https://code.claude.com/docs/en/errors.md): its next occurrence in the
+// zone at or after now. 2026-11-22 is a Sunday, 2026-11-23 a Monday; Tallinn is UTC+2 then.
+for (const [said, now, at] of [
+  [`You've hit your weekly limit · resets Mon 12:00am ${STOP_ZONE}`, STOP_NOW, '2026-11-22T22:00:00Z'],
+  [`You've hit your weekly limit · resets Mon 12am ${STOP_ZONE}`, STOP_NOW, '2026-11-22T22:00:00Z'],
+  [`You've hit your weekly limit · resets Monday 3:45pm ${STOP_ZONE}`, STOP_NOW, '2026-11-23T13:45:00Z'],
+  // A Monday, before the time: that Monday. After it: the next.
+  [`You've hit your weekly limit · resets Mon 3:45pm ${STOP_ZONE}`, Date.parse('2026-11-23T06:00:00Z'), '2026-11-23T13:45:00Z'],
+  [`You've hit your weekly limit · resets Mon 3:45pm ${STOP_ZONE}`, Date.parse('2026-11-23T14:00:00Z'), '2026-11-30T13:45:00Z'],
+  // The same weekday as today, past by minutes only: still that reset.
+  [`You've hit your weekly limit · resets Sun 6:20am ${STOP_ZONE}`, STOP_NOW, '2026-11-22T04:20:00Z'],
+  // A month word that starts like a weekday's is still a month.
+  [`You've hit your Fable limit · resets Mar 3 at 3pm ${STOP_ZONE}`, STOP_NOW, '2027-03-03T13:00:00Z'],
+] as const) {
+  test(`stopResetAt reads "${said.slice(said.indexOf('resets'))}" at ${new Date(now).toISOString()} as ${at}`, () => {
+    expect(stopResetAt(said, now)).toBe(Date.parse(at))
+  })
+}
+
+test('stopResetAt: a weekday with no zone names no reset', () => {
+  expect(stopResetAt("You've hit your weekly limit · resets Mon 12:00am", STOP_NOW)).toBeUndefined()
+})
+
 for (const [name, said] of [
   ['no words', undefined],
   ['words that name no reset', "You've hit your Fable limit"],
