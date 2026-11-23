@@ -260,8 +260,12 @@ let running: HookStream<ProcessSpawnChunk, ProcessSpawnResult> | undefined
 /** The login this session is signing in; a stored 'logging-in' from a session that died is checked again. */
 let signingIn: string | undefined
 let signInQueue: Promise<void> = Promise.resolve()
-/** The carry-on a switch owes: what the turn that stopped died on, which picks the line sent. */
-type CarryOn = { need?: Need }
+/**
+ * The carry-on a switch owes: what the turn that stopped died on, which picks the line sent; and, for a stop's own move,
+ * the failure epoch the stop examined: the move goes only while that failure is still the latest and uncleared
+ * (`isSameFailure`), whatever the stop awaited on the way. A press carries none.
+ */
+type CarryOn = { need?: Need; epoch?: number }
 /** When the switch began whose landing a carry-on already follows: the switch's own, or one for a turn that died before it landed. */
 let carriedFor: number | undefined
 /** The last carry-on sent: when the switch it follows began, and when it went. The turn it starts may answer as the login left. */
@@ -1991,14 +1995,25 @@ async function switchNow($: Host, token: number, target: Account, why: string, i
     if (carry !== undefined) void logStop($, 'stop switch given up on: landed late, no carry-on')
     return false
   }
+  // A stop's own move holds the failure its stop examined, and goes only while that is still the latest and uncleared: a
+  // main turn that began, or a newer failure, since, makes it the old stop's move on another's behalf. Abandoned: no
+  // hold, no slot write, no carry-on. Checked last before each: every move but a press passes it, and a press carries no epoch.
+  const isStale = () => carry?.epoch !== undefined && !isSameFailure(carry.epoch)
+  const dropStaleStop = (): false => {
+    void logStop($, 'stop switch dropped: the failed turn it examined has changed since')
+    return false
+  }
   const active = await refreshingSoon($, await getView($), target, await $.clock.now())
   if (active !== undefined) {
     // Where the held switch goes, what it carries on with and who asked for it are one intent, replaced together:
     // a later stop or press brings its own (a press's carries on with nothing); the retry brings the held one's.
+    // The held switch outlives the failure it was made for (the refresh nudge's own turn clears it), so it carries no
+    // epoch: a stop that went stale holds nothing, and its hold would replace a later stop's.
+    if (isStale()) return dropStaleStop()
     let wasHeld = false
     if (!(await writeSwitch($, mine, v => {
       wasHeld = v.held !== undefined
-      return { ...v, held: { target, why, carry, isRotation } }
+      return { ...v, held: { target, why, carry: carry === undefined ? undefined : { need: carry.need }, isRotation } }
     }))) return givenUp()
     if (!wasHeld) {
       if (carry !== undefined) void logStop($, `held for ${target.id}: the token in use refreshes soon`)
@@ -2014,6 +2029,7 @@ async function switchNow($: Host, token: number, target: Account, why: string, i
   // The awaits since maybeRotate's check can span a main turn start, which clears the failure: a rotation that carries
   // nothing reads it again here, the last point before the slot write, and stays where the session now runs.
   if (isRotation && carry === undefined && !isRed()) return false
+  if (isStale()) return dropStaleStop()
   try {
     await useSlot($, target.slot)
   } catch (error) {
@@ -2791,7 +2807,7 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
   // marked (the stop may have gone out on the login left), and the next untried login is tried.
   if (ep !== undefined && ep.stops > 1 && error === 'rate_limit' && isProvisional) {
     void logStop($, `stop on owed resume: login ${active.id} ${ep.tried.includes(active.id) ? 'tried' : 'in use'}, no response since its switch, no mark`)
-    if (!(await maybeRotate($, ep.need, { need: ep.need })) && isConnectingChrome) isCutByVisit = true
+    if (!(await maybeRotate($, ep.need, { need: ep.need, epoch }))&& isConnectingChrome) isCutByVisit = true
     return
   }
   if (error === 'authentication_failed') {
@@ -2858,7 +2874,7 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
   // The switch sends the carry-on once it lands, held back for a refresh or not. The marks above awaited: a stop that
   // went stale meanwhile moves nothing (its marks stand, as the stop happened).
   if (!(await isCurrent())) return dropStale()
-  if (!(await maybeRotate($, need, { need }))) {
+  if (!(await maybeRotate($, need, { need, epoch }))) {
     if (isConnectingChrome) isCutByVisit = true
     if (need === 'fable') await announceStay($)
   }
@@ -2989,10 +3005,8 @@ async function markStop($: Host, active: Account, said: string | undefined, afte
     await stopRead($, active, 'force')
     // What stands once the stop's own read is in: the stop's writes are judged against it.
     await afterRead?.()
-    // The read awaited: a main turn or a press since makes the stop stale, and it writes no mark, no arm.
-    if (isStillCurrent !== undefined && !(await isStillCurrent())) return 'stale'
-    // A stop that judges no window (its read already shows the account spent) leaves the arm to the newest mark.
-    stopWindow = undefined
+    // Everything the marks are judged on is read first, then the stop is checked, then it writes: no await stands between
+    // the check and the first write, so nothing can make the stop stale after the check and before its mark.
     const now = await $.clock.now()
     const after = await getView($)
     const r = after.readings[active.id]
@@ -3004,6 +3018,10 @@ async function markStop($: Host, active: Account, said: string | undefined, afte
     // where they name no limit this mod knows.
     const wording = wordingClass(said)
     const isFable = wording === 'none' || wording === 'unknown' ? isFableSpent(r, now) : wording === 'fable'
+    // A main turn or a press since the stop began makes it stale, and it writes no mark, no arm.
+    if (isStillCurrent !== undefined && !(await isStillCurrent())) return 'stale'
+    // A stop that judges no window (its read already shows the account spent) leaves the arm to the newest mark.
+    stopWindow = undefined
     if (isFable) {
       need = 'fable'
       stopWindow = { id: active.id, window: 'fable' }
