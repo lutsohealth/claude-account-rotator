@@ -292,6 +292,12 @@ let clearedFor: number | undefined
 let due: { at?: number; from?: string; owedAt?: number; turns?: number } | undefined
 /** How many switches ended the carry-on owed (endDue): one landing while carryOnWhenFree writes is not undone by it. */
 let dueEndings = 0
+/**
+ * How many debts were owed anew (awaitFreeLogin, owedByModelStop: a new one, or its date moved later), never one a tick puts
+ * back, and never a reload's restore, which runs before any tick holds a debt. A tick that selected a debt compares it with
+ * the count it saw: a newer debt came where it differs, though that debt has ended since and `due` is undefined again.
+ */
+let debtSeq = 0
 /** The turns open now, the main loop's and every agent's or teammate's, by id: a key sent while one runs would answer its dialog. */
 const openTurns = new Set<string>()
 /** The main loop's turns started this session, and how many had started at the last usage-limit stop: equal while its modal can stand. */
@@ -1833,6 +1839,7 @@ function awaitFreeLogin($: Host, view: View, now: number): void {
   const owed = at === undefined ? { from: view.activeId, owedAt: now } : { at, from: view.activeId, owedAt: now }
   // The main turns so far, held in this module only: a reload drops it, and the carry-on then goes after the grace.
   due = { ...owed, turns: mainTurns }
+  debtSeq += 1
   const debt = due
   void logStop($, `no login left: one carry-on ${at === undefined ? 'once a login frees up' : `at ${new Date(at).toISOString()}`}`)
   const text = `${limitNotice(view, now, untaken)} This session carries on by itself once one frees up.`
@@ -1865,6 +1872,7 @@ function owedByModelStop($: Host, view: View, now: number, stop: { resetAt?: num
     if (due.from !== view.activeId || (due.at !== undefined && due.at >= at)) return
     due = { ...due, at }
   } else due = { at, from: view.activeId, owedAt: now, turns: mainTurns }
+  debtSeq += 1
   const debt = due
   void logStop($, `model limit: one carry-on at ${new Date(at).toISOString()}`)
   const text = `This account's model limit holds until ${untilText(at, now)}: this session carries on by itself then, on this account.`
@@ -1901,6 +1909,7 @@ async function carryOnWhenFree($: Host): Promise<void> {
   if (due === undefined) return
   const owed = due
   const endings = dueEndings
+  const owedSeq = debtSeq
   const isCleared = await clearCarryDue($)
   // A turn, a switch or a Connect visit can come during that write: the decision is made from what stands after it.
   const after = await getView($).catch(async error => {
@@ -1908,12 +1917,12 @@ async function carryOnWhenFree($: Host): Promise<void> {
     // ended it during the clear, which marks it where the view still holds it, as below. A newer debt a stop set
     // meanwhile stands instead, as in the held branch: this module owes one carry-on at a time.
     if (dueEndings !== endings && !isCleared) await markCarryEnded($, owed)
-    else if (due === undefined && dueEndings === endings) due = owed
+    else if (due === undefined && dueEndings === endings && debtSeq === owedSeq) due = owed
     throw error
   })
   // A later stop can owe a debt of its own during that write, for a later time: it stands, and this debt, ended by the
   // clear, is not sent for it. Where the view still holds this one, the store marks it ended.
-  if (due !== undefined) return isCleared ? undefined : markCarryEnded($, owed)
+  if (debtSeq !== owedSeq) return isCleared ? undefined : markCarryEnded($, owed)
   if (after.activeId !== view.activeId || shouldLeave(after, now) || isConnectingChrome) {
     // A switch that ended what is owed moved it: nothing stays owed, and a view that still holds it is marked.
     if (dueEndings !== endings) return isCleared ? undefined : markCarryEnded($, owed)
@@ -1928,18 +1937,29 @@ async function carryOnWhenFree($: Host): Promise<void> {
   // it no more; marked before the carry-on goes, so one whose submit throws went all the same.
   if (!isCleared) await markCarryEnded($, owed)
   // Checked again after that write, as before the send: a debt a stop owes meanwhile stands for its own time.
-  if (due !== undefined) return
+  if (debtSeq !== owedSeq) return
   const hasTurnRun = isSameLogin && owed.turns !== undefined && mainTurns > owed.turns
-  void logStop($, hasTurnRun ? 'a turn ran since the stop: no carry-on' : `a login is free: carry-on on ${view.activeId}`)
-  if (hasTurnRun) return
+  const freeLine = `a login is free: carry-on on ${view.activeId}`
+  if (hasTurnRun) {
+    void logStop($, 'a turn ran since the stop: no carry-on')
+    return
+  }
   const since = after.pending?.since
   if (since === undefined || now - since >= SETTLE_MS) {
     // Still on the login the stop found spent: nothing switched, so the line says its limit reset. A submit that
     // rejects sends nothing and is not tried again: what was owed is ended and marked above. A Connect visit that begins
     // after the check above, during markCarryEnded's write or carryOn's own reads, meets the carry-on as any running turn.
-    await carryOn($, undefined, view.activeId === owed.from ? CONTINUE_RESET : undefined)
+    // A debt a stop owes during carryOn's reads stands for its own time: carryOn asks this once more before it submits,
+    // and the line is logged only where that answers yes.
+    const isStillOwed = () => {
+      if (debtSeq !== owedSeq) return false
+      void logStop($, freeLine)
+      return true
+    }
+    await carryOn($, undefined, view.activeId === owed.from ? CONTINUE_RESET : undefined, undefined, isStillOwed)
     return
   }
+  void logStop($, freeLine)
   // A stop that rode this switch and armed its carry-on during the clearing write above: no second one.
   if (carriedFor === since) return
   carryOnAfterSettle($, {})
@@ -2411,11 +2431,15 @@ async function onMeasure($: Host, limits: readonly SessionRateLimit[]): Promise<
  * Asks Claude to carry on after a switch. After a switch for the Fable week the
  * line kept in the store goes as the person's own words; every other switch,
  * and a Fable one with no line kept, sends the mod's own line under its name:
- * `own` where the caller names it (a carry-on with no switch), else CONTINUE.
+ * `own` where the caller names it (a carry-on with no switch), else CONTINUE. `isStillOwed`, where the caller names it (the
+ * debt's), is called once, synchronously, after the reads and just before the submit: false sends nothing. It may log the send.
  */
-async function carryOn($: Host, need?: Need, own?: string, proof?: StopProof): Promise<void> {
+async function carryOn($: Host, need?: Need, own?: string, proof?: StopProof, isStillOwed?: () => boolean): Promise<void> {
   const view = await getView($)
-  carriedOn = { since: view.pending?.since, at: await $.clock.now() }
+  const at = await $.clock.now()
+  // The debt path's check, after the reads above and with no await between it and the submit below.
+  if (isStillOwed?.() === false) return
+  carriedOn = { since: view.pending?.since, at }
   // The person's kept line says there is Fable credit: it goes only where a fresh read that lists the Fable week showed
   // room. Any other pick sends the mod's own line, with what the pick rests on.
   const note = need === 'fable' ? fableCarryOnNote(proof) : undefined
