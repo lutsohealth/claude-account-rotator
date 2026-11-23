@@ -1740,7 +1740,7 @@ async function maybeRotate($: Host, need?: Need, carry?: CarryOn, modelStop?: { 
   const isMoved = await switchTo($, target, whyLeave(view, now, need), false, carry, true)
   // A tick or a response may move to a login whose usage read failed and that has no reading; no carry-on follows it.
   if (isMoved && carry === undefined && isUnread(view, target)) {
-    void logStop($, `moved to ${target.id} by the tick or a response, its usage read failed, no carry-on`)
+    void logStop($, `no carry-on after the move to ${target.id}: its usage read failed`)
   }
   return isMoved
 }
@@ -2132,7 +2132,10 @@ async function switchTo($: Host, target: Account, why: string, isQuiet = false, 
       return runOwned($, token, () => switchNow($, token, target, why, isQuiet, carry, isRotation))
     }
     if (isRotation && result) {
-      const since = (await getView($)).pending?.since
+      const ridden = await getView($)
+      const since = ridden.pending?.since
+      // A stop that rides the switch running moves no more than that switch did, and leaves its own line for it.
+      void logStop($, `moved to ${ridden.activeId} (by a stop riding the switch running)`)
       // The check and the write go with no await between, as in switchNow: the switch that ran may carry on itself.
       if (since !== undefined && carriedFor !== since && carry !== undefined) {
         carryOnAfterSettle($, carry)
@@ -2245,7 +2248,7 @@ async function switchNow($: Host, token: number, target: Account, why: string, i
   endDue($, carry, isRotation, isQuiet)
   // The carry-on is armed and carriedFor set straight after pending's write, with no await between, so a second stop
   // cannot arm a second carry-on; the toast reads the view after them.
-  if (carry !== undefined) void logStop($, `moved to ${target.id}`)
+  void logStop($, `moved to ${target.id} (by ${carry !== undefined ? 'a stop' : isRotation ? 'the tick or a response' : isQuiet ? 'a Claude in Chrome visit' : 'a press or a command'})`)
   if (owed !== undefined) {
     carryOnAfterSettle($, owed)
     carriedFor = now
@@ -2324,6 +2327,7 @@ async function settlePending($: Host, isResponse: boolean): Promise<void> {
       if (!(await writeSwitch($, { owner: token }, v => ({ ...v, activeId: from.id, pending: undefined })))) return false
       movedAt = now
       moves += 1
+      void logStop($, `moved to ${from.id} (by a point-back: responses still use login ${from.id})`)
       return true
     })
     if (!isBack) return
@@ -2848,6 +2852,7 @@ async function pointBackTo($: Host, owner: Account, seen: { activeId: string; si
     if (isLate || !isPublished) return false
     movedAt = await $.clock.now()
     moves += 1
+    void logStop($, `moved to ${owner.id} (by a point-back: the stop's reset names login ${owner.id})`)
     return true
   })
   return isLate ? 'stale' : isDone ? 'done' : 'failed'

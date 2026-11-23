@@ -2,8 +2,8 @@ import type { Account, BodyRead, CheckError, Fill, FiveHourLimit, FooterStyle, G
 
 /** Leave a login once its 5-hour window is this full (percent). */
 export const LEAVE_FIVE_HOUR = 90
-/** Leave a login once its weekly window is this full (percent). */
-export const LEAVE_SEVEN_DAY = 95
+/** Leave a login, for the Fable week, once its Fable week is this full (percent). The week itself is left by `weekLeave`. */
+export const LEAVE_FABLE = 95
 /** Warn this long before a login's refresh token runs out. */
 export const SIGN_IN_WARN_MS = 3 * 24 * 3600_000
 
@@ -131,9 +131,9 @@ export function isSpent(r: Reading | undefined, now: number, weekLeave = DEFAULT
   return (windowPct(r?.fiveHour, now) ?? 0) >= LEAVE_FIVE_HOUR || isWeekSpent(r, now, weekLeave)
 }
 
-/** Whether a login's Fable week is as full as the week is when the rotation leaves it. */
+/** Whether a login's Fable week is as full as LEAVE_FABLE, where the rotation leaves it for the Fable week. */
 export function isFableSpent(r: Reading | undefined, now: number): boolean {
-  return (windowPct(r?.fable, now) ?? 0) >= LEAVE_SEVEN_DAY
+  return (windowPct(r?.fable, now) ?? 0) >= LEAVE_FABLE
 }
 
 /**
