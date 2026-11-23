@@ -5,7 +5,7 @@ What each version of the account rotator changed. To get each one as Claude Code
 ## 0.5.53-lutso.1 - 2026-11-23
 
 - **A limit stop is charged to the login it came from**: the reset time in Claude Code's own message names the login. A move that did not land no longer marks or uses up the login the mod believed it was on, and the session is pointed back (#161).
-- **The next login is picked for what stopped you**: a Fable stop only moves to a login with Fable room where one is known. An Opus or Sonnet limit no longer marks the whole week as spent (#161).
+- **The next login is picked for what stopped you**: a Fable stop only moves to a login with Fable room where one is known. An Opus or Sonnet limit no longer marks the whole week as spent, and with no login free the session carries on at the reset that limit names, not before it (#161, #166).
 - **A last-resort try reads first**: before trying a login believed spent, the mod reads the candidates' usage live and takes any with room. A login it cannot read still gets the try, in case it was reset from the dashboard or freed elsewhere (#161).
 - **The line after a switch says only what is known**: your own continue line goes only after a fresh read shows Fable room. Otherwise the mod's line names how old the read is, or the reset the login was believed spent until (#161).
 - **A manual reset shows**: a usage read 5 or more points below the last one of the same account and window ends that window's "spent" mark, without waiting for its old reset time (#161, #162).
