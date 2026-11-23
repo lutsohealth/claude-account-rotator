@@ -37,6 +37,7 @@ import {
   continueTextFrom,
   credentialFrom,
   credentialsFile,
+  credentialsFileText,
   endsFableMark,
   endsFiveHourMark,
   endsWeekMark,
@@ -188,7 +189,7 @@ let isPaneShown = false
  * view, and rebindSession copies these back. Each is set where its value is born; undefined until then. The records
  * of a switch in flight and the Chrome link are copied by setView instead, from every write of a bound view.
  */
-let kept: { slot?: string; mark?: string; hasFontBlocks?: boolean; isSwitchBlocked?: boolean; isFableStopped?: boolean; isStuckTold?: boolean } & InFlight & ChromeLink = {}
+let kept: { slot?: string; mark?: string; hasFontBlocks?: boolean; isSwitchBlocked?: boolean; isFableStopped?: boolean; isStuckTold?: boolean; credentialsNote?: string } & InFlight & ChromeLink = {}
 /** When this session's boot read the store: an older version's reading written after it says that version still runs. */
 let bootedAt: number | undefined
 /** An older version writes its reading at every check, every 10 minutes at most: one this old has stopped. */
@@ -3937,7 +3938,7 @@ async function bindSession($: Host, slot: string): Promise<void> {
  * reset left it unset, a write since being newer; the Connect line only while a Connect is under way.
  */
 async function rebindSession($: Host): Promise<void> {
-  const { slot, mark, hasFontBlocks, isSwitchBlocked, isFableStopped, isStuckTold, pending, provisionalStop, held, hasChrome, chrome: link, chromeConnecting } = kept
+  const { slot, mark, hasFontBlocks, isSwitchBlocked, isFableStopped, isStuckTold, credentialsNote, pending, provisionalStop, held, hasChrome, chrome: link, chromeConnecting } = kept
   // The switch's own records come back only into the reset's view, which names no switch running; with this module's
   // switch still running, its owner comes back with them, so the switch's later writes still apply.
   await writeSwitch($, { claim: undefined }, v => ({
@@ -3953,6 +3954,7 @@ async function rebindSession($: Host): Promise<void> {
     ...(isSwitchBlocked === undefined ? {} : { isSwitchBlocked }),
     ...(isFableStopped === undefined ? {} : { isFableStopped }),
     ...(isStuckTold === undefined ? {} : { isStuckTold }),
+    ...(credentialsNote === undefined ? {} : { credentialsNote }),
     ...(due === undefined ? {} : { carryDue: due }),
     ...(mark === undefined ? {} : { sessionMark: mark }),
     ...(hasChrome === undefined || v.hasChrome !== undefined ? {} : { hasChrome }),
@@ -4013,6 +4015,31 @@ async function refreshLauncherCopy($: Host): Promise<void> {
   debug($, `launcher copy ${copy} replaced by ${LAUNCHER_FILE} of the mod`)
 }
 
+/** Whether this module has warned of a credentials file beside the keychain login: once a session. */
+let isCredentialsFileTold = false
+
+/**
+ * On macOS the normal login is in the keychain, and a `.credentials.json` in its folder beside it can stop a move back to
+ * it from landing: moving the file aside is the way out. Warns once a session, as a toast, a terminal notice and a
+ * line in the pane, naming the file, when it last changed and the command that moves it aside. It reads the folder's
+ * listing for the file's name and time and never the file: no token is read, kept or said. On Linux that file is the
+ * login itself, so nothing is said.
+ */
+async function warnOfCredentialsFile($: Host): Promise<void> {
+  if (isCredentialsFileTold || !(await $.fs.exists(MACOS_MARKER))) return
+  const path = credentialsFile('', await $.env.get('HOME'))
+  if (path === undefined) return
+  const entries = await $.fs.list(path.slice(0, path.lastIndexOf('/'))).catch(() => [])
+  const entry = entries.find(e => e.name === '.credentials.json' && e.kind === 'file')
+  if (entry === undefined || isCredentialsFileTold) return
+  isCredentialsFileTold = true
+  const credentialsNote = credentialsFileText(path, entry.mtimeMs)
+  kept = { ...kept, credentialsNote }
+  await setView($, v => ({ ...v, credentialsNote }))
+  tell($, credentialsNote)
+  notify($, credentialsNote)
+}
+
 /** First run makes the normal login number 1; then: which login this session uses, and Claude in Chrome connected as the extension's account. */
 async function boot($: Host, isInteractive: boolean): Promise<void> {
   // A view still bound outlived a reload of this code, which emptied `kept`: its Fable stop mark and its stuck notice
@@ -4046,6 +4073,7 @@ async function boot($: Host, isInteractive: boolean): Promise<void> {
   await bindSession($, slot)
   await refreshLauncherCopy($).catch(error => debug($, `launcher copy not refreshed: ${errorName(error)}`))
   await pruneStopLogs($).catch(error => debug($, `stop-log prune failed: ${String(error)}`))
+  await warnOfCredentialsFile($).catch(error => debug($, `credentials file not looked at: ${errorName(error)}`))
   await checkSwitching($, slot)
   // A check that lands after a switch moved the session wrote the slot it started on back: set the slot right at once.
   await reconcile($).catch(error => debug($, `slot repair failed: ${errorName(error)}`))

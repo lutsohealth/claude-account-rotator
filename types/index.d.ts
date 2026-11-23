@@ -282,6 +282,8 @@ export type View = {
   isBound?: boolean
   /** This session only: the switch the refresh guard holds back, tried each minute, kept by a reload; `carry`, a Fable stop's carry-on. */
   held?:{ target: Account; why: string; carry?: { need?: 'fable' }; isRotation: boolean }
+  /** This session only: the warning that a credentials file stands beside the keychain login (credentialsFileText), told once and shown in the pane. */
+  credentialsNote?: string
   /** This session only: a stop marked on the login moved to before any response proved the switch; a reload keeps it. */
   provisionalStop?: ProvisionalStop
   /** This session only: the footer draws imitated usage, to judge its look. */

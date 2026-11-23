@@ -1080,6 +1080,15 @@ export function credentialsFile(slot: string, home: string | undefined): string 
   return dir ? `${dir.normalize('NFC')}/.credentials.json` : undefined
 }
 
+/**
+ * What to say of a credentials file that stands beside the keychain login (macOS): its name and the time it last changed
+ * (from the folder's listing, its contents never read), what it can stop, and the way out, which is a command to move it aside.
+ */
+export function credentialsFileText(path: string, mtimeMs: number): string {
+  const changed = `${new Date(mtimeMs).toISOString().slice(0, 16).replace('T', ' ')} UTC`
+  return `${path} exists (last changed ${changed}) and can stop a move back to Claude Code's own login from landing. Move it aside: mv ${path} ${path}.aside`
+}
+
 /** The environment that points a `claude` child at a slot's login. */
 export function slotEnv(slot: string): Record<string, string> {
   return slot === ''
