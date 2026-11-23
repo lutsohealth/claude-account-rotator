@@ -242,6 +242,14 @@ const ran = (exitCode: number, stdout: string): ProcessRunResult => ({
   isStderrTruncated: false,
 })
 
+/** Whether the stop mark under `key` stands: stored, and no end record names it (a proven end writes the record and keeps the key). */
+function markStands(store: Map<string, unknown>, key: string): boolean {
+  const mark = store.get(key) as { at?: number } | undefined
+  const [, prefix, id] = /^(week-|fable-)?mark:(.+)$/.exec(key) ?? []
+  const kind = prefix === undefined ? 'five' : prefix.slice(0, -1)
+  return mark !== undefined && !store.has(`mark-end:${kind}:${id}:${mark.at}`)
+}
+
 /** `$.store` over `entries`, which the test writes mid-run as another session on the Mac would. */
 function sharedStore(on: On, entries: Map<string, unknown>, w: World): void {
   on('store.get', (_$, e) => {
@@ -9770,7 +9778,7 @@ for (const [age, isEnded] of [[31, true], [10, false]] as const) {
     const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off', 'fable-mark:2': mark }))
     const clock = world(on, w, store)
     await start($, clock)
-    expect([age, store.get('fable-mark:2')]).toEqual([age, isEnded ? undefined : mark])
+    expect([age, markStands(store, 'fable-mark:2') ? store.get('fable-mark:2') : undefined]).toEqual([age, isEnded ? undefined : mark])
     expect(await fableRows($)).toEqual([`${longBar(10)}  10%`, isEnded ? `${longBar(35)}  35%` : `${longBar(100)} 100%`])
   })
 }
@@ -17394,7 +17402,7 @@ for (const kind of ['fable', 'week', 'five'] as const) {
 for (const [kind, stop] of [['fable', FABLE_STOP], ['week', { error: 'rate_limit', last_assistant_message: PLAIN_STOPS[0] }], ['five', { error: 'rate_limit', last_assistant_message: PLAIN_STOPS[0] }]] as const) {
   test(`MARKS-END-ON-FALL: a manual reset of login 3 (100 to 0, the same reset times) ends its ${kind} mark at the next read, and the next stop picks it fresh`, async ($, on) => {
     const { w, store, clock, key } = await manualResetOnThree($, on, kind, { week: 100, fable: 100, five: 100 }, [0, 0, 0])
-    expect(store.get(key), 'the mark ended at the read, though it is 20 minutes old').toBeUndefined()
+    expect(markStands(store, key), 'the mark ended at the read, though it is 20 minutes old').toBe(false)
     await $.classic.StopFailure(stop)
     await clock.settle()
     expect(slotValues(w), 'the stop moves to login 3').toEqual([SLOT3])
@@ -17526,7 +17534,7 @@ for (const kind of ['week', 'five'] as const) {
 
   test(`guard: a fall from the previous body ends the ${kind} mark, a response between them or not (100, response 98, 0)`, async ($, on) => {
     const { store, key } = await responseBetweenBodies($, on, kind, 100, 98, 0)
-    expect(store.get(key)).toBeUndefined()
+    expect(markStands(store, key)).toBe(false)
   })
 }
 
@@ -17678,7 +17686,7 @@ for (const kind of ['week', 'five'] as const) {
     for (let waited = 0; waited < 12 * 60_000; waited += 20_000) await clock.advance(20_000)
     await clock.settle()
     expect((store.get('usage:3') as { src?: string }).src, 'the next body is stored').toBe('body')
-    expect(store.get(key), 'the mark ended: 100 to 0').toBeUndefined()
+    expect(markStands(store, key), 'the mark ended: 100 to 0').toBe(false)
     void w
   })
 }
@@ -17723,7 +17731,7 @@ for (const kind of ['week', 'five'] as const) {
     for (let waited = 0; waited < 12 * 60_000; waited += 20_000) await clock.advance(20_000)
     await clock.settle()
     expect((store.get('usage:3') as { src?: string }).src, 'the next body is stored').toBe('body')
-    expect(store.get(key), 'a fall of 6 from the body that holds the kind').toBeUndefined()
+    expect(markStands(store, key), 'a fall of 6 from the body that holds the kind').toBe(false)
   })
 
   test(`guard: a lower read of another window than the only body's ends no ${kind} mark (100 of another window, then 94)`, async ($, on) => {
@@ -17752,7 +17760,7 @@ for (const kind of ['week', 'five'] as const) {
     w.usage['tok-3'] = [80, 80, 80]
     for (let waited = 0; waited < 35 * 60_000; waited += 20_000) await clock.advance(20_000)
     await clock.settle()
-    expect(store.get(key), 'the next read falls from the body the last one wrote').toBeUndefined()
+    expect(markStands(store, key), 'the next read falls from the body the last one wrote').toBe(false)
   })
 
   test(`guard: the shared row is no baseline, so a row written out of order (100) over the newest body (96) leaves a read of 94 to end no ${kind} mark`, async ($, on) => {
@@ -18322,6 +18330,6 @@ for (const kind of ['week', 'five'] as const) {
     for (let waited = 0; waited < 35 * 60_000; waited += 20_000) await clock.advance(20_000)
     await clock.settle()
     expect((store.get('usage:3') as { sevenDay?: { pct: number } }).sevenDay?.pct, 'the next body, 91, is stored').toBe(91)
-    expect(store.get(key), 'it fell 5 from the newest completed body, 96: the mark ends').toBeUndefined()
+    expect(markStands(store, key), 'it fell 5 from the newest completed body, 96: the mark ends').toBe(false)
   })
 }

@@ -566,7 +566,7 @@ async function saveWeekMark($: Host, id: string, weekMark: Mark): Promise<void> 
  * store has no conditional write: it reads the key again first, and a mark there that ends later stands.
  */
 async function saveFableMark($: Host, id: string, mark: Mark): Promise<void> {
-  const fableMark = laterMark(markFrom(await $.store.get(`fable-mark:${id}`)), mark)
+  const fableMark = laterMark(await readMark($, 'fable', id), mark)
   await $.store.set(`fable-mark:${id}`, fableMark)
   const now = await $.clock.now()
   const read = (await ownedReading($, id)) ?? { at: fableMark.at }
@@ -576,38 +576,49 @@ async function saveFableMark($: Host, id: string, mark: Mark): Promise<void> {
   })
 }
 
+/** The three marks a stop can leave on a login: its 5-hour window, its week and its Fable week. */
+type MarkKind = 'five' | 'week' | 'fable'
+
+const MARK_KEY = { five: 'mark', week: 'week-mark', fable: 'fable-mark' } as const
+const VIEW_MARKS = { five: 'marks', week: 'weekMarks', fable: 'fableMarks' } as const
+const MARK_END_PREFIX = 'mark-end:'
+
+/** The write-once record that a proof ended the mark of `kind` that was stamped `at`: it names that exact mark, no other. */
+const markEndKey = (kind: MarkKind, id: string, at: number): string => `${MARK_END_PREFIX}${kind}:${id}:${at}`
+
+/** A login's mark of `kind` as every reader sees it: absent once a record says a proof ended this very mark. */
+async function readMark($: Host, kind: MarkKind, id: string): Promise<Mark | undefined> {
+  const mark = markFrom(await $.store.get(`${MARK_KEY[kind]}:${id}`))
+  return mark === undefined || (await $.store.get(markEndKey(kind, id, mark.at))) === undefined ? mark : undefined
+}
+
 /**
- * Ends a login's Fable mark for every session; the next save of its reading draws it without the mark. Only the mark
- * judged ended goes: a stop another session marked since stands. The store has no conditional write, so this narrows
- * the gap between the read and the delete to one store call.
+ * Ends a login's mark for every session by writing the record that names it (`markEndKey`): no key a session may have
+ * just written is deleted or rewritten, as the store has no conditional write or delete
+ * (https://code.claude.com/docs/en/plugins/mods/interface.md), and a mark another session writes since has another `at`,
+ * which no record names, so it stands. The record keeps the mark's reset time, for the prune.
  */
-async function dropFableMark($: Host, id: string, judged: Mark): Promise<void> {
-  if (!sameValue(markFrom(await $.store.get(`fable-mark:${id}`)), judged)) return
-  await $.store.delete(`fable-mark:${id}`)
+async function endMark($: Host, kind: MarkKind, id: string, judged: Mark): Promise<void> {
+  await $.store.set(markEndKey(kind, id, judged.at), { resetsAt: judged.resetsAt })
+  const field = VIEW_MARKS[kind]
   await setView($, v => {
-    const { [id]: _ended, ...fableMarks } = v.fableMarks ?? {}
-    return { ...v, fableMarks }
+    const { [id]: held, ...rest } = v[field] ?? {}
+    return held !== undefined && !sameValue(held, judged) ? v : { ...v, [field]: rest }
   })
 }
 
-/** Ends a login's week mark for every session, as dropFableMark ends the Fable mark: only the mark judged ended goes. */
-async function dropWeekMark($: Host, id: string, judged: Mark): Promise<void> {
-  if (!sameValue(markFrom(await $.store.get(`week-mark:${id}`)), judged)) return
-  await $.store.delete(`week-mark:${id}`)
-  await setView($, v => {
-    const { [id]: _ended, ...weekMarks } = v.weekMarks ?? {}
-    return { ...v, weekMarks }
-  })
+/** A login's end records, each under its kind's key. */
+async function markEndKeysOf($: Host, id: string): Promise<string[]> {
+  const prefixes = (['five', 'week', 'fable'] as const).map(kind => `${MARK_END_PREFIX}${kind}:${id}:`)
+  return (await $.store.keys()).filter(key => prefixes.some(prefix => key.startsWith(prefix)))
 }
 
-/** Ends a login's 5-hour mark for every session, as dropFableMark ends the Fable mark: only the mark judged ended goes. */
-async function dropMark($: Host, id: string, judged: Mark): Promise<void> {
-  if (!sameValue(markFrom(await $.store.get(`mark:${id}`)), judged)) return
-  await $.store.delete(`mark:${id}`)
-  await setView($, v => {
-    const { [id]: _ended, ...marks } = v.marks ?? {}
-    return { ...v, marks }
-  })
+/** Drops the end records of a login whose mark's reset has passed: such a mark is no longer drawn whatever a record says. */
+async function pruneMarkEnds($: Host, id: string, now: number): Promise<void> {
+  for (const key of await markEndKeysOf($, id)) {
+    const resetsAt = (await $.store.get(key) as { resetsAt?: unknown } | null | undefined)?.resetsAt
+    if (!(typeof resetsAt === 'string' && Date.parse(resetsAt) > now)) await $.store.delete(key)
+  }
 }
 
 /**
@@ -626,7 +637,7 @@ async function saveReading($: Host, id: string, read: Reading, src: ReadingSourc
 
 /** Moves an older version's mark to the mark's own key, unless the mark there already stands longer. */
 async function keepLegacyMark($: Host, id: string, legacy: Mark): Promise<void> {
-  if (laterMark(markFrom(await $.store.get(`mark:${id}`)), legacy) !== legacy) return
+  if (laterMark(await readMark($, 'five', id), legacy) !== legacy) return
   await $.store.set(`mark:${id}`, legacy)
   await setView($, v => ({ ...v, marks: { ...v.marks, [id]: legacy } }))
 }
@@ -684,13 +695,13 @@ async function mergeStore($: Host): Promise<void> {
     if (legacy !== undefined) await keepLegacyMark($, a.id, legacy)
     const now = await $.clock.now()
     if (bootedAt !== undefined && old !== undefined && old.at > bootedAt && now - old.at < OLDER_WRITER_MS) hasOlderWriter = true
-    const m = markFrom(await $.store.get(`mark:${a.id}`))
+    const m = await readMark($, 'five', a.id)
     if (m !== undefined) marks[a.id] = m
     const n = await $.store.get(`no-five-hour:${a.id}`)
     if (typeof n === 'boolean') noFiveHour[a.id] = n
-    const k = markFrom(await $.store.get(`week-mark:${a.id}`))
+    const k = await readMark($, 'week', a.id)
     if (k !== undefined) weekMarks[a.id] = k
-    const f = markFrom(await $.store.get(`fable-mark:${a.id}`))
+    const f = await readMark($, 'fable', a.id)
     if (f !== undefined) fableMarks[a.id] = f
     const e = await $.store.get(`check-error:${a.id}`)
     if (typeof e === 'object' && e !== null && typeof (e as CheckError).why === 'string' && typeof (e as CheckError).at === 'number') checkErrors[a.id] = e as CheckError
@@ -1317,9 +1328,12 @@ async function bodyKeysOf($: Host, id: string): Promise<string[]> {
   return (await $.store.keys()).filter(key => key.startsWith(`usage-body:${id}:`))
 }
 
-/** Drops every session's body of a login, where its reading goes, and the key part A's first version wrote with no session in it. */
+/**
+ * Drops every session's body of a login, where its reading goes, and the key part A's first version wrote with no session
+ * in it, and the records that proofs ended its marks.
+ */
 async function dropBodyKeys($: Host, id: string): Promise<void> {
-  for (const key of [`usage-body:${id}`, ...(await bodyKeysOf($, id))]) await $.store.delete(key)
+  for (const key of [`usage-body:${id}`, ...(await bodyKeysOf($, id)), ...(await markEndKeysOf($, id))]) await $.store.delete(key)
 }
 
 /** Drops what the last sign-in's usage left on a login (its reading, its no-five-hour, its schedule), for every session. */
@@ -1507,9 +1521,9 @@ async function checkAccount($: Host, account: Account, gate: UsageGate): Promise
           // stored one (never the view, which carries the marks).
           const prior = await ownedReading($, account.id)
           const marks = {
-            fable: markFrom(await $.store.get(`fable-mark:${account.id}`)),
-            week: markFrom(await $.store.get(`week-mark:${account.id}`)),
-            five: markFrom(await $.store.get(`mark:${account.id}`)),
+            fable: await readMark($, 'fable', account.id),
+            week: await readMark($, 'week', account.id),
+            five: await readMark($, 'five', account.id),
           }
           // Each kind of window is judged against the newest body holding it, read under this account's identity, that completed
           // before this request began, across the keys of every session (a newest one of another window is no proof): never
@@ -1536,9 +1550,9 @@ async function checkAccount($: Host, account: Account, gate: UsageGate): Promise
             // long enough after the stop.
             const isAfter = (mark: Mark) => usage.startedAt >= mark.at
             const { fable, week, five } = marks
-            if (fable !== undefined && isAfter(fable) && endsFableMark(reading.fable, now, fable, before?.fable)) await dropFableMark($, account.id, fable)
-            if (week !== undefined && isAfter(week) && endsWeekMark(reading.sevenDay, week, before?.sevenDay)) await dropWeekMark($, account.id, week)
-            if (five !== undefined && isAfter(five) && endsFiveHourMark(reading.fiveHour, five, before?.fiveHour)) await dropMark($, account.id, five)
+            if (fable !== undefined && isAfter(fable) && endsFableMark(reading.fable, now, fable, before?.fable)) await endMark($, 'fable', account.id, fable)
+            if (week !== undefined && isAfter(week) && endsWeekMark(reading.sevenDay, week, before?.sevenDay)) await endMark($, 'week', account.id, week)
+            if (five !== undefined && isAfter(five) && endsFiveHourMark(reading.fiveHour, five, before?.fiveHour)) await endMark($, 'five', account.id, five)
             // A body with no Fable row keeps the stored one's, unless the week fell since the last body: the stored read, never the view.
             await saveReading($, account.id, { ...keepFable(reading, prior === undefined ? undefined : { ...prior, sevenDay: before?.sevenDay }, now), by: account.id }, 'body')
             hasFreshFable = reading.fable !== undefined
@@ -1554,6 +1568,7 @@ async function checkAccount($: Host, account: Account, gate: UsageGate): Promise
           } catch (error) {
             await debug($, `account ${account.id}: a body key was not written: ${String(error)}`)
           }
+          await pruneMarkEnds($, account.id, now).catch(error => debug($, `account ${account.id}: the end records of its marks were not pruned: ${String(error)}`))
         }
       }
     }
