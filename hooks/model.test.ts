@@ -2227,6 +2227,30 @@ test('row a: the spent-old tier goes to the login that frees first for the need,
   expect(wrong).toEqual([])
 })
 
+// puma-9arph.109.3: a login read live in this stop is judged on that read: spent counts as its try, a mark standing or not.
+test('row a: a login read live and spent counts as tried even with a mark standing; read live with room it keeps the mark, and a login not read live is tried blind', () => {
+  const at = (hours: number) => new Date(NOW + hours * HOUR).toISOString()
+  const spent = (read: number): Reading => ({ fiveHour: { pct: 100, resetsAt: at(1) }, sevenDay: { pct: 100, resetsAt: at(48) }, at: read })
+  const room = (read: number): Reading => ({ fiveHour: { pct: 10, resetsAt: at(1) }, sevenDay: { pct: 10, resetsAt: at(48) }, at: read })
+  const marked = (reading: Reading): View => {
+    const v: View = { ...view({ '1': [100, 50], '2': [0, 0], '3': [0, 0] }), weekMarks: { '2': { pct: 100, resetsAt: at(48), at: NOW - 3 * HOUR } } }
+    v.readings['2'] = reading
+    return v
+  }
+  const tier = (v: View, tried: string[], live: string[]) => {
+    const got = pickAfterStop(v, v.readings, NOW, undefined, tried, new Set(), new Set(live))
+    return got === undefined ? undefined : `${got.account.id}/${got.tier}`
+  }
+  expect(tier(marked(spent(NOW)), ['1', '3'], ['2']), 'read live, spent: its try').toBeUndefined()
+  expect(tier(marked(spent(NOW)), ['1', '3'], []), 'not read live: the mark sends it to the blind try').toBe('2/spent-old')
+  expect(tier(marked(room(NOW)), ['1', '3'], ['2']), 'read live with room under a mark: the mark stands').toBe('2/spent-old')
+  // The logins the blind try would choose among, for the live reads before it.
+  const v = marked(spent(NOW - 2 * HOUR))
+  v.readings['3'] = spent(NOW - 2 * HOUR)
+  const got = pickAfterStop(v, v.readings, NOW, undefined, ['1'], new Set())
+  expect([got?.tier, got?.spentOld?.map(a => a.id).sort()]).toEqual(['spent-old', ['2', '3']])
+})
+
 test('the Escape goes to the one pane named, by a fixed argv with no shell (puma-9arph.34 C1)', () => {
   expect(escapeArgv('term_a')).toEqual(['orca', 'terminal', 'send', '--terminal', 'term_a', '--text', '\u001b', '--json'])
 })

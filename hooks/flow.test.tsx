@@ -17131,3 +17131,94 @@ for (const family of ['Opus', 'Sonnet']) {
     })
   }
 }
+
+// ---------------------------------------------------------------- puma-9arph.109.3: read the candidates live before a spent-old pick
+
+/**
+ * Login 1 is in use with its Fable week spent. Logins 2 and 3 hold stored readings two hours old that show their Fable
+ * week and week spent (login 2 frees first), and the usage endpoint says what each is now: `live`. Login 2's token has
+ * run out where `isTwoIdle`. The schedule does not read either login before the stop.
+ */
+async function oldReadings($: Engine, on: On, live: { two: [number, number, number]; three: [number, number, number] }, options: { isTwoIdle?: boolean; isThreeRead?: boolean; failing?: Record<string, number> } = {}) {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2', options.isTwoIdle ? NOW - HOUR : undefined)
+  w.keychain[await keychainItem(SLOT3)] = blob('tok-3')
+  w.usage['tok-1'] = [20, 30, 100]
+  w.usage['tok-2'] = live.two
+  w.usage['tok-3'] = live.three
+  w.fableResetsBy = { 'tok-1': FABLE_RESET, 'tok-2': FABLE_RESET_2, 'tok-3': FABLE_RESET }
+  w.weekResets = { 'tok-1': '2026-10-18T03:00:00Z', 'tok-2': '2026-10-14T03:00:00Z', 'tok-3': '2026-10-18T03:00:00Z' }
+  if (options.failing !== undefined) w.failing = options.failing
+  const old = (id: string, week: string, fable: string) => ({
+    fiveHour: { pct: 10, resetsAt: '2026-10-12T12:00:00Z' },
+    sevenDay: { pct: 100, resetsAt: week },
+    fable: { pct: 100, resetsAt: fable },
+    at: NOW - 2 * HOUR,
+    by: id,
+    v: 1,
+    src: 'body',
+  })
+  const store = new Map<string, unknown>(
+    Object.entries({
+      ...THREE_LOGINS,
+      'rotate-to': 'room',
+      'usage:2': old('2', '2026-10-14T03:00:00Z', FABLE_RESET_2),
+      'usage-due:2': { next: NOW + HOUR, fails: 0, at: NOW - 2 * HOUR, v: 1 },
+      // Login 3 holds an old reading too, unless the test has the boot read it.
+      ...(options.isThreeRead ? {} : { 'usage:3': old('3', '2026-10-18T03:00:00Z', FABLE_RESET), 'usage-due:3': { next: NOW + HOUR, fails: 0, at: NOW - 2 * HOUR, v: 1 } }),
+    }),
+  )
+  const clock = world(on, w, store)
+  await start($, clock)
+  return { w, store, clock }
+}
+
+test('READ-BEFORE-SPENT-OLD: a candidate whose stored reading says spent but whose live read shows room is picked, not the spent one that frees first (06:42:05)', async ($, on) => {
+  const { w, store, clock } = await oldReadings($, on, { two: [100, 100, 100], three: [0, 0, 0] })
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  expect(slotValues(w), 'login 3, live 0, not login 2').toEqual([SLOT3])
+  const log = whats(stopLogOf(store, w))
+  expect(log).toContain('read live before spent-old: 2 (100/100), 3 (0/0)')
+  expect(log.filter(line => line.startsWith('picked '))).toEqual([expect.stringMatching(/^picked 3: fresh, read 0 min ago; tried 1$/)])
+})
+
+test('READ-BEFORE-SPENT-OLD: every candidate read live is spent: each counts as its try, and the session stays, saying when the next frees', async ($, on) => {
+  const { w, store, clock } = await oldReadings($, on, { two: [100, 100, 100], three: [100, 100, 100] })
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  expect(slotValues(w), 'no blind try of a login the read shows spent').toEqual([])
+  expect(whats(stopLogOf(store, w))).toContain('stayed: no untried login (tried 1)')
+})
+
+test('READ-BEFORE-SPENT-OLD: a login that could not be read (its token idle) goes into the blind try, and the log says it was not read live (06:11:51)', async ($, on) => {
+  const { w, store, clock } = await oldReadings($, on, { two: [100, 100, 100], three: [100, 100, 100] }, { isTwoIdle: true })
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  expect(slotValues(w), 'login 2, idle: tried on its old reading').toEqual([SLOT2])
+  const log = whats(stopLogOf(store, w))
+  expect(log).toContain('read live before spent-old: 3 (100/100)')
+  expect(log).toContain('not read live: token idle: 2')
+  expect(log.filter(line => line.startsWith('picked '))).toEqual([expect.stringMatching(/^picked 2: spent-old, read 120 min ago; tried 1$/)])
+})
+
+test('READ-BEFORE-SPENT-OLD: a read that fails keeps the old reading, and that login goes into the blind try (a 429)', async ($, on) => {
+  const { w, store, clock } = await oldReadings($, on, { two: [100, 100, 100], three: [100, 100, 100] }, { failing: { 'tok-3': 429 } })
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  expect(slotValues(w), 'login 3: login 2 read spent, login 3 not read').toEqual([SLOT3])
+  const log = whats(stopLogOf(store, w))
+  expect(log).toContain('read live before spent-old: 2 (100/100)')
+  expect(log).toContain('not read live: usage read failed: 3')
+})
+
+test('guard: a stop with a fresh login with room makes no live read of the others', async ($, on) => {
+  // Login 3's schedule is due: the boot reads it, so it is fresh with room by the stop.
+  const { w, clock } = await oldReadings($, on, { two: [100, 100, 100], three: [0, 0, 0] }, { isThreeRead: true })
+  w.usageCalls.length = 0
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  expect(slotValues(w)).toEqual([SLOT3])
+  expect(w.usageCalls.filter(token => token === 'tok-2'), 'login 2 is not read').toEqual([])
+})
