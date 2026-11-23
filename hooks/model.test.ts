@@ -2510,15 +2510,15 @@ test('whoseReset: a reset an hour and a second from every stored one names no lo
 })
 
 // Codex pr-a-final4 BODY-WRITE-ORDER: each session writes only its own body key, so the baseline is read across the keys.
-test('BODY-WRITE-ORDER: the baseline is the newest body that completed before the request began, whichever session wrote it; one that completed after makes the request older', () => {
+test('BODY-WRITE-ORDER: the baseline is the newest body that completed before the request began, whichever session wrote it, and one that completed after is none', () => {
   const body = (at: number, pct: number): BodyRead => ({ at, sevenDay: { pct, resetsAt: WEEK_END } })
   const [a, b, c] = [body(NOW - 3 * HOUR, 50), body(NOW - 15 * 60_000, 98), body(NOW - 5 * 60_000, 94)]
   const baselineBody = modelExports.baselineBody
-  expect(baselineBody([a, b, c], NOW)).toEqual({ before: c, isOlder: false })
-  expect(baselineBody([c, a, b], NOW), 'the order of the keys is no order of the bodies').toEqual({ before: c, isOlder: false })
-  expect(baselineBody([a, b, c], NOW - 10 * 60_000), 'a request that began 10 minutes ago: c completed after it').toEqual({ before: b, isOlder: true })
-  expect(baselineBody([], NOW)).toEqual({ isOlder: false })
-  expect(baselineBody([b], NOW - 15 * 60_000), 'completed at the request\'s start counts as after').toEqual({ isOlder: true })
+  expect(baselineBody([a, b, c], NOW)).toEqual(c)
+  expect(baselineBody([c, a, b], NOW), 'the order of the keys is no order of the bodies').toEqual(c)
+  expect(baselineBody([a, b, c], NOW - 10 * 60_000), 'a request that began 10 minutes ago: c completed after it, and is none').toEqual(b)
+  expect(baselineBody([], NOW)).toBeUndefined()
+  expect(baselineBody([b], NOW - 15 * 60_000), 'completed at the request\'s start counts as after').toBeUndefined()
 })
 
 // ---------------------------------------------------------------- puma-9arph.109.6: a Fable row keeps the time it was read, and an idle login is stale

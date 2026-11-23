@@ -18068,3 +18068,39 @@ test('BODY-KEYS: a body another session saves while the prune runs stands, and t
   await start($, clock)
   expect([store.has(oldKey), store.get(newKey)], 'the old body is pruned, B\'s newer one stands').toEqual([false, { at: NOW }])
 })
+
+// Codex pr-b-r4 B2: every completed body has a key of its own, whatever completed in between; the shared row and the marks
+// go by the order of the requests, the baseline of the next request by the order of the completions.
+for (const kind of ['week', 'five'] as const) {
+  test(`BODY-WRITE-ORDER: a body (96) that began before another's (94) and completed after it has its own key, writes no row and ends no ${kind} mark, and the next body (91) falls from it`, async ($, on) => {
+    const { w, store, clock, key } = await markedOnThree($, on, kind, 98, 96)
+    // This session's body of login 3 is answered, then waits before the mod reads it, as the other session's body lands.
+    const held = { isPaused: false, release: () => {} }
+    const gate = new Promise<void>(resolve => {
+      held.release = resolve
+    })
+    w.afterUsageBody = async token => {
+      if (token !== 'tok-3' || held.isPaused) return
+      held.isPaused = true
+      await gate
+    }
+    for (let waited = 0; waited < 12 * 60_000 && !held.isPaused; waited += 1_000) await clock.advance(1_000)
+    expect(held.isPaused, 'the body of login 3 waits after its answer').toBe(true)
+    await clock.advance(1_000)
+    // The other session's body began after this one's, completed first, and saved the row and its own key.
+    store.set('usage:3', bodyRowOfThree(94, clock.now()))
+    store.set(`usage-body:3:${clock.now()}:session-a`, bodyOfThree(94, clock.now()))
+    w.afterUsageBody = undefined
+    held.release()
+    await clock.settle()
+    const own = [...store.keys()].filter(k => k.startsWith('usage-body:3:') && k.endsWith(`:${w.otherEnv.ACCOUNT_ROTATOR_SESSION}`))
+    expect(own.length, 'the late body has a key of its own').toBe(1)
+    expect((store.get('usage:3') as { sevenDay?: { pct: number } }).sevenDay?.pct, 'and left the newer row as it was').toBe(94)
+    expect(store.get(key), 'the late body ends no mark').toBeDefined()
+    w.usage['tok-3'] = [91, 91, 91]
+    for (let waited = 0; waited < 35 * 60_000; waited += 20_000) await clock.advance(20_000)
+    await clock.settle()
+    expect((store.get('usage:3') as { sevenDay?: { pct: number } }).sevenDay?.pct, 'the next body, 91, is stored').toBe(91)
+    expect(store.get(key), 'it fell 5 from the newest completed body, 96: the mark ends').toBeUndefined()
+  })
+}
