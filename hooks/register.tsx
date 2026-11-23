@@ -1930,17 +1930,27 @@ async function carryOnWhenFree($: Host): Promise<void> {
   // Checked again after that write, as before the send: a debt a stop owes meanwhile stands for its own time.
   if (due !== undefined) return
   const hasTurnRun = isSameLogin && owed.turns !== undefined && mainTurns > owed.turns
-  void logStop($, hasTurnRun ? 'a turn ran since the stop: no carry-on' : `a login is free: carry-on on ${view.activeId}`)
-  if (hasTurnRun) return
+  const freeLine = `a login is free: carry-on on ${view.activeId}`
+  if (hasTurnRun) {
+    void logStop($, 'a turn ran since the stop: no carry-on')
+    return
+  }
   const since = after.pending?.since
   if (since === undefined || now - since >= SETTLE_MS) {
     // Still on the login the stop found spent: nothing switched, so the line says its limit reset. A submit that
     // rejects sends nothing and is not tried again: what was owed is ended and marked above. A Connect visit that begins
     // after the check above, during markCarryEnded's write or carryOn's own reads, meets the carry-on as any running turn.
-    // A debt a stop owes during carryOn's reads stands for its own time: carryOn checks `due` once more before it submits.
-    await carryOn($, undefined, view.activeId === owed.from ? CONTINUE_RESET : undefined, undefined, () => due === undefined)
+    // A debt a stop owes during carryOn's reads stands for its own time: carryOn asks this once more before it submits,
+    // and the line is logged only where that answers yes.
+    const isStillOwed = () => {
+      if (due !== undefined) return false
+      void logStop($, freeLine)
+      return true
+    }
+    await carryOn($, undefined, view.activeId === owed.from ? CONTINUE_RESET : undefined, undefined, isStillOwed)
     return
   }
+  void logStop($, freeLine)
   // A stop that rode this switch and armed its carry-on during the clearing write above: no second one.
   if (carriedFor === since) return
   carryOnAfterSettle($, {})
@@ -2413,7 +2423,7 @@ async function onMeasure($: Host, limits: readonly SessionRateLimit[]): Promise<
  * line kept in the store goes as the person's own words; every other switch,
  * and a Fable one with no line kept, sends the mod's own line under its name:
  * `own` where the caller names it (a carry-on with no switch), else CONTINUE. `isStillOwed`, where the caller names it (the
- * debt's), is asked after the reads and just before the submit: false sends nothing.
+ * debt's), is called once, synchronously, after the reads and just before the submit: false sends nothing. It may log the send.
  */
 async function carryOn($: Host, need?: Need, own?: string, proof?: StopProof, isStillOwed?: () => boolean): Promise<void> {
   const view = await getView($)
