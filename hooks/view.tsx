@@ -728,6 +728,7 @@ export function Pane(ui: Ui, view: View, now: number, act: Actions, columns: num
   return (
     <Box flexDirection="column" rowGap={1}>
       {view.isSwitchBlocked ? <Text color="warning">{blockedRule(view)}</Text> : view.rotateTo === 'off' && <Text dimColor>{ROTATION_OFF}</Text>}
+      {view.credentialsNote !== undefined && <Text color="warning">{`⚠ ${view.credentialsNote}`}</Text>}
       {section(ui, 'accounts', 'Accounts', accounts)}
       {(view.hasChrome === true || view.chromeAccountId !== undefined || (view.chromeAccountIds?.length ?? 0) > 0) && ChromeSettings(ui, view, act)}
       {RotationSettings(ui, view, act)}

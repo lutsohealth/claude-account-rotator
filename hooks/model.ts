@@ -1,9 +1,9 @@
-import type { Account, BodyRead, CheckError, Fill, FiveHourLimit, FooterStyle, Glyphs, Health, Highlight, LaunchOn, LaunchPick, Mark, PlanTier, Reading, RotateTo, RotatorRequest, Row, RowPart, StopProof, StoredRows, StoredRun, UsageDue, UsageWindow, View } from '../types'
+import type { Account, BodyRead, CheckError, Fill, FiveHourLimit, FooterStyle, Glyphs, Health, Highlight, LaunchOn, LaunchPick, Mark, PlanTier, Reading, RotateTo, RotatorRequest, Row, RowPart, ShownWindow, StopProof, StoredRows, StoredRun, StoredWindows, UsageDue, UsageWindow, View } from '../types'
 
 /** Leave a login once its 5-hour window is this full (percent). */
 export const LEAVE_FIVE_HOUR = 90
-/** Leave a login once its weekly window is this full (percent). */
-export const LEAVE_SEVEN_DAY = 95
+/** Leave a login, for the Fable week, once its Fable week is this full (percent). The week itself is left by `weekLeave`. */
+export const LEAVE_FABLE = 95
 /** Warn this long before a login's refresh token runs out. */
 export const SIGN_IN_WARN_MS = 3 * 24 * 3600_000
 
@@ -131,9 +131,9 @@ export function isSpent(r: Reading | undefined, now: number, weekLeave = DEFAULT
   return (windowPct(r?.fiveHour, now) ?? 0) >= LEAVE_FIVE_HOUR || isWeekSpent(r, now, weekLeave)
 }
 
-/** Whether a login's Fable week is as full as the week is when the rotation leaves it. */
+/** Whether a login's Fable week is as full as LEAVE_FABLE, where the rotation leaves it for the Fable week. */
 export function isFableSpent(r: Reading | undefined, now: number): boolean {
-  return (windowPct(r?.fable, now) ?? 0) >= LEAVE_SEVEN_DAY
+  return (windowPct(r?.fable, now) ?? 0) >= LEAVE_FABLE
 }
 
 /**
@@ -249,7 +249,11 @@ function firstByRotateTo(view: View, ready: Account[], readings: Readonly<Record
   }
 }
 
-/** How old a login's own read may be and still show its room after a stop: the shared schedule reads an idle login every 30 minutes, so an older read means one failed or was skipped. */
+/**
+ * How old a login's own read may be and still show its room after a stop. The shared schedule reads a login whose token is
+ * live more often than this, so an older read means one failed or was skipped. It reads none whose token has run out
+ * (idle): its reading only ages, so it is never fresh, whatever its age.
+ */
 export const FRESH_READ_MS = 35 * 60_000
 
 /** The class a login takes after a usage-limit stop, tried in this order. */
@@ -305,13 +309,21 @@ export function pickAfterStop(
   const counts: Record<string, Reading | undefined> = {}
   for (const a of view.accounts) counts[a.id] = raw[a.id] && counted(raw[a.id] as Reading, view.fiveHourLimit, now)
   const hasRoom = (r: Reading) => !isSpent(r, now, view.weekLeave) && !(isFable && isFableSpent(r, now))
+  const isIdle = (a: Account): boolean => {
+    const health = view.health[a.id]
+    return health?.kind === 'ok' && health.isIdle === true
+  }
+  // The Fable row has a read time of its own: a response save refreshes the reading's and keeps the older body's row. A row
+  // stored before it was stamped has none, and the reading's stands for it.
+  const isFableOld = (r: Reading): boolean => isFable && r.fable !== undefined && now - (r.fable.at ?? r.at) > FRESH_READ_MS
   const tierOf = (a: Account): StopTier | undefined => {
     const r = counts[a.id]
     if (live.has(a.id) && r !== undefined && !hasRoom(r)) return undefined
     if (isMarked(view, a.id, now)) return 'spent-old'
     const error = view.checkErrors?.[a.id]
     if (r === undefined) return error === undefined || error.isUsageRead === true ? 'unread' : undefined
-    const isFresh = now - r.at <= FRESH_READ_MS && !(error !== undefined && error.at > r.at)
+    // An idle login's read is as old as it is and no read will follow: stale, whatever its age.
+    const isFresh = !isIdle(a) && now - r.at <= FRESH_READ_MS && !isFableOld(r) && !(error !== undefined && error.at > r.at)
     if (isFresh) return hasRoom(r) ? 'fresh' : undefined
     return hasRoom(r) ? 'stale' : 'spent-old'
   }
@@ -331,7 +343,8 @@ export function pickAfterStop(
     // The Fable week is proven roomy only by a fresh read that lists it; a spent-old pick says when it believed it frees.
     const hasFableRoom = tier === 'fresh' && counts[account.id]?.fable !== undefined && !isFableSpent(counts[account.id], now)
     const spentOld = tier === 'spent-old' ? { spentOld: ready, freesAt: finiteOr(freesAt(view, account.id, counts[account.id], now, need)) } : {}
-    return { account, tier, hasFableRoom, ...(read === undefined ? {} : { readAgeMs: now - read.at }), ...spentOld }
+    // The age is that of what the pick judged: a Fable pick judges the Fable row on its own read time, as isFableOld does.
+    return { account, tier, hasFableRoom, ...(read === undefined ? {} : { readAgeMs: now - (isFable ? read.fable?.at ?? read.at : read.at) }), ...(isIdle(account) ? { isIdle: true as const } : {}), ...spentOld }
   }
   return undefined
 }
@@ -511,14 +524,16 @@ export function readingFromUsage(body: unknown, now: number): Reading | undefine
   if (fiveHour === undefined && sevenDay === undefined && fable === undefined) return undefined
   // Only a body that lists no 5-hour window at all says the account has none; one it cannot read says nothing.
   const isNone = five_hour === null || five_hour === undefined
-  return { ...(fiveHour ? { fiveHour } : isNone ? { noFiveHour: true } : {}), ...(sevenDay ? { sevenDay } : {}), ...(fable ? { fable } : {}), at: now }
+  // The Fable row carries the time of the body that listed it, which a later reading that keeps it does not change.
+  return { ...(fiveHour ? { fiveHour } : isNone ? { noFiveHour: true } : {}), ...(sevenDay ? { sevenDay } : {}), ...(fable ? { fable: { ...fable, at: now } } : {}), at: now }
 }
 
 /**
  * A fresh reading with the Fable week the stored one holds, where the fresh
  * body lists none: a body without the row says nothing of the week, and the
  * mark a stop left stands until its reset time passes. A week with no reset
- * time to go by is not kept. A row in the body replaces it.
+ * time to go by is not kept. A row in the body replaces it. The kept row is
+ * the stored one as it stands, its own read time (`UsageWindow.at`) with it.
  */
 export function keepFable(fresh: Reading, stored: Reading | undefined, now: number): Reading {
   const kept = stored?.fable
@@ -587,12 +602,41 @@ export function bodyReadFrom(value: unknown): BodyRead | undefined {
   if (typeof v.at !== 'number') return undefined
   const window = (w: unknown): UsageWindow | undefined => (typeof w === 'object' && w !== null && typeof (w as UsageWindow).pct === 'number' ? (w as UsageWindow) : undefined)
   const [fiveHour, sevenDay, fable] = [window(v.fiveHour), window(v.sevenDay), window(v.fable)]
-  return { at: v.at, ...(fiveHour ? { fiveHour } : {}), ...(sevenDay ? { sevenDay } : {}), ...(fable ? { fable } : {}) }
+  return { at: v.at, ...(typeof v.by === 'string' ? { by: v.by } : {}), ...(fiveHour ? { fiveHour } : {}), ...(sevenDay ? { sevenDay } : {}), ...(fable ? { fable } : {}) }
 }
 
-/** The body a body row is: its time and windows, for `usage-body:<id>` and, where that key is not yet written, for the baseline. */
-export function bodyOfReading(r: Reading): BodyRead {
-  return { at: r.at, ...(r.fiveHour ? { fiveHour: r.fiveHour } : {}), ...(r.sevenDay ? { sevenDay: r.sevenDay } : {}), ...(r.fable ? { fable: r.fable } : {}) }
+/** The account a body was read under: its email and organization, which a token refresh leaves as they were. Never a token. */
+export const bodyIdentity = (who: { email: string; orgId?: string }): string => `${who.email}|${who.orgId ?? ''}`
+
+/**
+ * The body a usage request that began at `startedAt` is judged against, among the bodies the sessions keep, each under a key
+ * of its own, written once (`usage-body:<id>:<read time>:<session mark>`: the store has no atomic read and write or delete
+ * of one key, so none is ever rewritten): the newest that completed before the request began, whichever session wrote it;
+ * a body that completed at or after the request began is none.
+ */
+export function baselineBody(bodies: readonly BodyRead[], startedAt: number): BodyRead | undefined {
+  return bodies.filter(b => b.at < startedAt).reduce<BodyRead | undefined>((newest, b) => (newest === undefined || b.at > newest.at ? b : newest), undefined)
+}
+
+/**
+ * What each window of `read`, a body of account `by`, is judged against: the newest body of that same account that
+ * completed before the request began and holds that kind of window (`baselineBody`). Each kind has its own baseline; a body
+ * of another account, or one with no account, is none. A newest body whose reset is not within an hour of this read's
+ * is of another window: the kind has no baseline and no proof, and no older body of the read's window stands in.
+ */
+export function baselineWindows(bodies: readonly BodyRead[], startedAt: number, by: string, read: Pick<Reading, 'fiveHour' | 'sevenDay' | 'fable'>): Pick<BodyRead, 'fiveHour' | 'sevenDay' | 'fable'> {
+  const own = bodies.filter(b => b.by === by)
+  const baseline = (kind: 'fiveHour' | 'sevenDay' | 'fable'): UsageWindow | undefined => {
+    const newest = baselineBody(own.filter(b => b[kind] !== undefined), startedAt)?.[kind]
+    return isSameWindow(newest?.resetsAt, read[kind]?.resetsAt) ? newest : undefined
+  }
+  const [fiveHour, sevenDay, fable] = [baseline('fiveHour'), baseline('sevenDay'), baseline('fable')]
+  return { ...(fiveHour ? { fiveHour } : {}), ...(sevenDay ? { sevenDay } : {}), ...(fable ? { fable } : {}) }
+}
+
+/** The body a body read is: its account, time and windows, as its own key `usage-body:<id>:<read time>:<session mark>` holds it. */
+export function bodyOfReading(r: Reading, by: string): BodyRead {
+  return { at: r.at, by, ...(r.fiveHour ? { fiveHour: r.fiveHour } : {}), ...(r.sevenDay ? { sevenDay: r.sevenDay } : {}), ...(r.fable ? { fable: r.fable } : {}) }
 }
 
 /** A usage counter only grows inside a window: one that falls this many points between two reads of it was reset (Council Q10). */
@@ -674,6 +718,9 @@ export function markFrom(value: unknown): Mark | undefined {
 export const WEEK_MS = 7 * 24 * 3600_000
 export const FABLE_WEEK_MS = WEEK_MS
 
+/** How long a session's body key is kept: the longest window a body can fall inside is a week, so an older body is no baseline. */
+export const BODY_KEEP_MS = WEEK_MS
+
 /**
  * The mark a Fable stop leaves on a login: its Fable week spent, until the
  * reset time the last read gave, else a week from the stop, so that a check
@@ -720,10 +767,16 @@ export function readingFromLimits(
 }
 
 /**
- * The version of the store's shapes this mod writes, stamped as `v` on `usage:<id>`, `usage-due:<id>` and `rows`,
- * whose lines it does not version (`StoredRows`).
+ * The version of the store's shapes this mod writes, stamped as `v` on `usage:<id>` and `usage-due:<id>`.
  */
 export const WRITER_VERSION = 1
+
+/**
+ * The version of the stored rows' shape with each login's windows as numbers (`StoredRows`), stamped as `v` on `rows2`,
+ * the key only a session that writes the windows writes. `rows` stays version 1 (`WRITER_VERSION`), for the older readers,
+ * and an older session still running rewrites it alone, so it can never take the windows away.
+ */
+export const ROWS_VERSION = 2
 
 /**
  * Two week resets name one account's week: within an hour of each other, or a whole number of weeks apart (a
@@ -1048,6 +1101,15 @@ export async function fingerprint(token: string): Promise<string> {
 export function credentialsFile(slot: string, home: string | undefined): string | undefined {
   const dir = slot === '' ? home && `${home}/.claude` : slot
   return dir ? `${dir.normalize('NFC')}/.credentials.json` : undefined
+}
+
+/**
+ * What to say of a credentials file that stands beside the keychain login (macOS): its name and the time it last changed
+ * (from the folder's listing, its contents never read), what it can stop, and the way out, which is a command to move it aside.
+ */
+export function credentialsFileText(path: string, mtimeMs: number): string {
+  const changed = `${new Date(mtimeMs).toISOString().slice(0, 16).replace('T', ' ')} UTC`
+  return `${path} exists (last changed ${changed}) and can stop a move back to Claude Code's own login from landing. Move it aside: mv ${path} ${path}.aside`
 }
 
 /** The environment that points a `claude` child at a slot's login. */
@@ -1385,18 +1447,73 @@ function resetsPart(pieces: (string | Reset)[]): RowPart {
 const USED_CELLS = 15
 /** The cells of a usage line's label: "Used", and "5h" padded to it, so each bar starts at one column. */
 const LABEL_CELLS = 'Used'.length
+/** The words of the Fable bar: it is used, as the week's is. */
+const FABLE_LABEL = ' Fable used'
 /** The cells of the Fable part: a plan with none leaves them blank, so "resets" stands at one column on every plan. */
-const FABLE_CELLS = ' Fable '.length + USED_CELLS
+const FABLE_CELLS = `${FABLE_LABEL} `.length + USED_CELLS
 
 /**
- * A window as the row draws it: its label, then a ten-cell bar and the percent used, whatever the footer fills with;
- * a dash, dim, in the same cells, where none is read.
+ * A window as the row draws it: its label, then a ten-cell bar and the percent used, whatever the footer fills with, in the
+ * warning tone where the window is `isSpent`, never in the look of room; a dash, dim, in the same cells, where none is read.
  */
-function usedParts(label: string, w: UsageWindow | undefined, now: number): RowPart[] {
+function usedParts(label: string, w: UsageWindow | undefined, now: number, isSpent = false): RowPart[] {
   const pct = windowPct(w, now)
   if (pct === undefined) return [{ text: `${label} ${'–'.padEnd(USED_CELLS)}`, tone: 'dim' }]
   const used = Math.round(pct)
-  return [{ text: `${label} ` }, { text: `${longBar(used)} ${String(used).padStart(3)}%` }]
+  return [{ text: `${label} ` }, { text: `${longBar(used)} ${String(used).padStart(3)}%`, ...(isSpent ? { tone: 'warning' as const } : {}) }]
+}
+
+/** How old a window's number may be before its row says its age. */
+const AGE_SHOWN_MS = 3600_000
+
+/** An age as a row says it, whole hours under two days, then whole days: it changes no more than once an hour. */
+function ageText(ms: number): string {
+  const hours = Math.floor(ms / 3600_000)
+  return hours >= 48 ? `${Math.floor(hours / 24)}d` : `${hours}h`
+}
+
+/**
+ * A window's number as the row shows it, with where it comes from: a stop's mark (`isStop`, with the time of the stop), a
+ * Fable row kept from a read older than the reading around it, or a read, a body's or a response's. Undefined where the
+ * login shows no such window.
+ */
+function shownWindow(view: View, id: string, kind: 'sevenDay' | 'fable' | 'fiveHour', now: number): ShownWindow | undefined {
+  const r = view.readings[id]
+  const w = r?.[kind]
+  const pct = windowPct(w, now)
+  if (r === undefined || w === undefined || pct === undefined) return undefined
+  if (w.isStop === true) {
+    const mark = { sevenDay: view.weekMarks, fable: view.fableMarks, fiveHour: view.marks }[kind]?.[id]
+    return { pct, source: 'stop', ...(mark === undefined ? {} : { readAt: mark.at }) }
+  }
+  // Only the Fable row carries a read time of its own: the other windows are written whole with the reading.
+  const own = kind === 'fable' ? w.at : undefined
+  return { pct, source: own !== undefined && own < r.at ? 'kept' : 'read', readAt: own ?? r.at }
+}
+
+/** What a row says of one window that is no fresh read: a stop's mark, a kept value, or a read over an hour old. Nothing for a fresh read. */
+function noteOf(name: string, shown: ShownWindow | undefined, now: number): string | undefined {
+  if (shown === undefined) return undefined
+  const old = shown.readAt !== undefined && now - shown.readAt > AGE_SHOWN_MS ? ageText(now - shown.readAt) : undefined
+  if (shown.source === 'stop') return `${name}: stop mark${old === undefined ? '' : ` ${old} ago`}`
+  if (shown.source === 'kept') return `${name}: kept from ${old === undefined ? 'an earlier read' : `a read ${old} ago`}`
+  return old === undefined ? undefined : `${name}: read ${old} ago`
+}
+
+/** The line after a row's windows that says which numbers are no fresh read; none where every one is. */
+function provenanceLine(view: View, a: Account, now: number): RowPart[] | undefined {
+  const notes = [
+    noteOf('Used', shownWindow(view, a.id, 'sevenDay', now), now),
+    noteOf('Fable used', shownWindow(view, a.id, 'fable', now), now),
+    noteOf('5h', shownWindow(view, a.id, 'fiveHour', now), now),
+  ].filter((note): note is string => note !== undefined)
+  return notes.length === 0 ? undefined : [{ text: notes.join(' · '), tone: 'dim' }]
+}
+
+/** A login's week and Fable week as numbers with their source, for the stored row. */
+function windowsOf(view: View, id: string, now: number): StoredWindows {
+  const [week, fable] = [shownWindow(view, id, 'sevenDay', now), shownWindow(view, id, 'fable', now)]
+  return { ...(week === undefined ? {} : { week }), ...(fable === undefined ? {} : { fable }) }
 }
 
 /** A line with its last part's trailing pad cut, so a dash that ends the line leaves no blank cells after it. */
@@ -1477,13 +1594,13 @@ function usageLine(view: View, a: Account, now: number): RowPart[] {
   if (r === undefined) return [{ text: `Used ${longBar(0)} no reading yet`, tone: 'dim' }]
   const plan = planName(a, hasNoFiveHour(view, a.id))
   const isFable = r.fable !== undefined || (plan !== undefined && HAS_FABLE_WEEK.test(plan))
-  const fable = isFable ? usedParts(' Fable', r.fable, now) : [{ text: ' '.repeat(FABLE_CELLS) }]
+  const fable = isFable ? usedParts(FABLE_LABEL, r.fable, now, isFableSpent(r, now)) : [{ text: ' '.repeat(FABLE_CELLS) }]
   const [week, fableReset] = [resetAhead(r.sevenDay, now), resetAhead(r.fable, now)]
   const resets =
     week === undefined
       ? fableReset === undefined ? undefined : ['  Fable resets ', fableReset]
       : ['  resets ', week, ...(fableReset === undefined || Math.abs(fableReset.at - week.at) < SAME_RESET_MS ? [] : [' · Fable ', fableReset])]
-  return trimEnd([...usedParts('Used', r.sevenDay, now), ...fable, ...(resets === undefined ? [] : [resetsPart(resets)])])
+  return trimEnd([...usedParts('Used', r.sevenDay, now, isWeekSpent(r, now, view.weekLeave)), ...fable, ...(resets === undefined ? [] : [resetsPart(resets)])])
 }
 
 /**
@@ -1498,7 +1615,7 @@ function fiveHourLine(view: View, a: Account, now: number): RowPart[] | undefine
   // "5h" is shorter than "Used": the cells between keep each bar, or the dash of an unread percent, at one column. A
   // bar's label part stays "5h "; the dash is one part with its label, so the label is padded there.
   const isRead = windowPct(w, now) !== undefined
-  const [name, ...used] = usedParts(isRead ? '5h' : '5h'.padEnd(LABEL_CELLS), w, now)
+  const [name, ...used] = usedParts(isRead ? '5h' : '5h'.padEnd(LABEL_CELLS), w, now, (windowPct(w, now) ?? 0) >= LEAVE_FIVE_HOUR)
   const parts = name === undefined ? [] : isRead ? [name, { text: ' '.repeat(LABEL_CELLS - '5h'.length) }, ...used] : [name]
   return trimEnd([...parts, { text: ' '.repeat(FABLE_CELLS) }, ...(reset === undefined ? [] : [resetsPart(['  resets ', reset])])])
 }
@@ -1522,7 +1639,8 @@ export function rowOf(view: View, a: Account, now: number, timeZone?: string): R
   const isFailed = state[0]?.tone === 'warning' && view.health[a.id]?.kind !== 'login-needed'
   const dim = (line: RowPart[]): RowPart[] => (isFailed ? line.map(p => ({ ...p, tone: 'dim' })) : line)
   const five = fiveHourLine(view, a, now)
-  return { id: a.id, lines: [line1, dim(usageLine(view, a, now)), ...(five === undefined ? [] : [dim(five)])] }
+  const provenance = provenanceLine(view, a, now)
+  return { id: a.id, lines: [line1, dim(usageLine(view, a, now)), ...(five === undefined ? [] : [dim(five)]), ...(provenance === undefined ? [] : [provenance])] }
 }
 
 /** A row's lines as text. */
@@ -1545,7 +1663,12 @@ export function storedLine(line: readonly RowPart[]): StoredRun[] {
 
 /** Every login's row, as the merge stores it under `rows`. */
 export function rowsOf(view: View, now: number): StoredRows['rows'] {
-  return view.accounts.map(a => ({ id: a.id, lines: rowOf(view, a, now).lines.map(storedLine) }))
+  return view.accounts.map(a => ({ id: a.id, lines: rowOf(view, a, now).lines.map(storedLine), windows: windowsOf(view, a.id, now) }))
+}
+
+/** The rows an older reader reads, under `rows`: every login's lines, with no windows. */
+export function rowsV1Of(view: View, now: number): StoredRows['rows'] {
+  return rowsOf(view, now).map(({ id, lines }) => ({ id, lines }))
 }
 
 /**

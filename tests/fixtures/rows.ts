@@ -34,16 +34,45 @@ export default {
           "id": "1",
           "lines": [
             ["andres@lutsohealth.com · Company · Ultra  updated ", { "clock": 1794155640000 }],
-            ["Used ▰▰▰▱▱▱▱▱▱▱  31% Fable ▰▰▰▰▱▱▱▱▱▱  38%  resets ", { "until": 1794340440000 }, " · Fable ", { "until": 1794254040000 }]
+            ["Used ▰▰▰▱▱▱▱▱▱▱  31% Fable used ▰▰▰▰▱▱▱▱▱▱  38%  resets ", { "until": 1794340440000 }, " · Fable ", { "until": 1794254040000 }]
           ]
         },
         {
           "id": "2",
           "lines": [
             ["two@example.com · Max  ", { "clock": 1794155940000 }, " Failed to update (HTTP 429)"],
-            ["Used ▰▰▰▰▰▰▱▱▱▱  60% Fable ▰▱▱▱▱▱▱▱▱▱  10%  resets ", { "until": 1794588000000 }],
-            ["5h   ▰▰▰▰▰▱▱▱▱▱  50%                        resets ", { "until": 1794160830000 }]
+            ["Used ▰▰▰▰▰▰▱▱▱▱  60% Fable used ▰▱▱▱▱▱▱▱▱▱  10%  resets ", { "until": 1794588000000 }],
+            ["5h   ▰▰▰▰▰▱▱▱▱▱  50%                             resets ", { "until": 1794160830000 }]
           ]
+        }
+      ]
+    },
+    "rows2": {
+      "v": 2,
+      "at": 1794156000000,
+      "rows": [
+        {
+          "id": "1",
+          "lines": [
+            ["andres@lutsohealth.com · Company · Ultra  updated ", { "clock": 1794155640000 }],
+            ["Used ▰▰▰▱▱▱▱▱▱▱  31% Fable used ▰▰▰▰▱▱▱▱▱▱  38%  resets ", { "until": 1794340440000 }, " · Fable ", { "until": 1794254040000 }]
+          ],
+          "windows": {
+            "week": { "pct": 31, "source": "read", "readAt": 1794155640000 },
+            "fable": { "pct": 38, "source": "read", "readAt": 1794155640000 }
+          }
+        },
+        {
+          "id": "2",
+          "lines": [
+            ["two@example.com · Max  ", { "clock": 1794155940000 }, " Failed to update (HTTP 429)"],
+            ["Used ▰▰▰▰▰▰▱▱▱▱  60% Fable used ▰▱▱▱▱▱▱▱▱▱  10%  resets ", { "until": 1794588000000 }],
+            ["5h   ▰▰▰▰▰▱▱▱▱▱  50%                             resets ", { "until": 1794160830000 }]
+          ],
+          "windows": {
+            "week": { "pct": 60, "source": "read", "readAt": 1794153840000 },
+            "fable": { "pct": 10, "source": "read", "readAt": 1794153840000 }
+          }
         }
       ]
     }
@@ -51,12 +80,12 @@ export default {
   "lines": {
     "1": [
       "andres@lutsohealth.com · Company · Ultra  updated 18:34",
-      "Used ▰▰▰▱▱▱▱▱▱▱  31% Fable ▰▰▰▰▱▱▱▱▱▱  38%  resets 2d 3h 14m · Fable 1d 3h 14m"
+      "Used ▰▰▰▱▱▱▱▱▱▱  31% Fable used ▰▰▰▰▱▱▱▱▱▱  38%  resets 2d 3h 14m · Fable 1d 3h 14m"
     ],
     "2": [
       "two@example.com · Max  18:39 Failed to update (HTTP 429)",
-      "Used ▰▰▰▰▰▰▱▱▱▱  60% Fable ▰▱▱▱▱▱▱▱▱▱  10%  resets 5d 0h 0m",
-      "5h   ▰▰▰▰▰▱▱▱▱▱  50%                        resets 1h 21m"
+      "Used ▰▰▰▰▰▰▱▱▱▱  60% Fable used ▰▱▱▱▱▱▱▱▱▱  10%  resets 5d 0h 0m",
+      "5h   ▰▰▰▰▰▱▱▱▱▱  50%                             resets 1h 21m"
     ]
   }
 }

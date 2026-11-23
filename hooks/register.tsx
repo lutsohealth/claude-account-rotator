@@ -9,7 +9,7 @@ import type {
   SessionRateLimit,
 } from 'claude-code'
 
-import type { Account, CheckError, FiveHourLimit, FooterStyle, Health, Holder, LaunchOn, LaunchPick, Mark, ProvisionalStop, Reading, ReadingSource, RotateTo, RotatorRequest, StopProof, UsageDue, View } from '../types'
+import type { Account, BodyRead, CheckError, FiveHourLimit, FooterStyle, Health, Holder, LaunchOn, LaunchPick, Mark, ProvisionalStop, Reading, ReadingSource, RotateTo, RotatorRequest, StopProof, UsageDue, View } from '../types'
 import {
   CHROME_SERVER,
   CHROME_TOOL,
@@ -37,6 +37,7 @@ import {
   continueTextFrom,
   credentialFrom,
   credentialsFile,
+  credentialsFileText,
   endsFableMark,
   endsFiveHourMark,
   endsWeekMark,
@@ -65,6 +66,9 @@ import {
   isNoBrowser,
   isPolicyRefusal,
   keepFable,
+  BODY_KEEP_MS,
+  baselineWindows,
+  bodyIdentity,
   bodyOfReading,
   bodyReadFrom,
   isSpent,
@@ -81,6 +85,7 @@ import {
   holdsLogin,
   slotNumber,
   shouldLeave,
+  ROWS_VERSION,
   WRITER_VERSION,
   whoseWeek,
   whoseReset,
@@ -103,6 +108,7 @@ import {
   usageDueFrom,
   isSameRows,
   rowsOf,
+  rowsV1Of,
   REQUEST_MAX_BYTES,
   isRequestNonce,
   REQUEST_POLL_MS,
@@ -185,7 +191,7 @@ let isPaneShown = false
  * view, and rebindSession copies these back. Each is set where its value is born; undefined until then. The records
  * of a switch in flight and the Chrome link are copied by setView instead, from every write of a bound view.
  */
-let kept: { slot?: string; mark?: string; hasFontBlocks?: boolean; isSwitchBlocked?: boolean; isFableStopped?: boolean; isStuckTold?: boolean } & InFlight & ChromeLink = {}
+let kept: { slot?: string; mark?: string; hasFontBlocks?: boolean; isSwitchBlocked?: boolean; isFableStopped?: boolean; isStuckTold?: boolean; credentialsNote?: string } & InFlight & ChromeLink = {}
 /** When this session's boot read the store: an older version's reading written after it says that version still runs. */
 let bootedAt: number | undefined
 /** An older version writes its reading at every check, every 10 minutes at most: one this old has stopped. */
@@ -560,7 +566,7 @@ async function saveWeekMark($: Host, id: string, weekMark: Mark): Promise<void> 
  * store has no conditional write: it reads the key again first, and a mark there that ends later stands.
  */
 async function saveFableMark($: Host, id: string, mark: Mark): Promise<void> {
-  const fableMark = laterMark(markFrom(await $.store.get(`fable-mark:${id}`)), mark)
+  const fableMark = laterMark(await readMark($, 'fable', id), mark)
   await $.store.set(`fable-mark:${id}`, fableMark)
   const now = await $.clock.now()
   const read = (await ownedReading($, id)) ?? { at: fableMark.at }
@@ -570,38 +576,49 @@ async function saveFableMark($: Host, id: string, mark: Mark): Promise<void> {
   })
 }
 
+/** The three marks a stop can leave on a login: its 5-hour window, its week and its Fable week. */
+type MarkKind = 'five' | 'week' | 'fable'
+
+const MARK_KEY = { five: 'mark', week: 'week-mark', fable: 'fable-mark' } as const
+const VIEW_MARKS = { five: 'marks', week: 'weekMarks', fable: 'fableMarks' } as const
+const MARK_END_PREFIX = 'mark-end:'
+
+/** The write-once record that a proof ended the mark of `kind` that was stamped `at`: it names that exact mark, no other. */
+const markEndKey = (kind: MarkKind, id: string, at: number): string => `${MARK_END_PREFIX}${kind}:${id}:${at}`
+
+/** A login's mark of `kind` as every reader sees it: absent once a record says a proof ended this very mark. */
+async function readMark($: Host, kind: MarkKind, id: string): Promise<Mark | undefined> {
+  const mark = markFrom(await $.store.get(`${MARK_KEY[kind]}:${id}`))
+  return mark === undefined || (await $.store.get(markEndKey(kind, id, mark.at))) === undefined ? mark : undefined
+}
+
 /**
- * Ends a login's Fable mark for every session; the next save of its reading draws it without the mark. Only the mark
- * judged ended goes: a stop another session marked since stands. The store has no conditional write, so this narrows
- * the gap between the read and the delete to one store call.
+ * Ends a login's mark for every session by writing the record that names it (`markEndKey`): no key a session may have
+ * just written is deleted or rewritten, as the store has no conditional write or delete
+ * (https://code.claude.com/docs/en/plugins/mods/interface.md), and a mark another session writes since has another `at`,
+ * which no record names, so it stands. The record keeps the mark's reset time, for the prune.
  */
-async function dropFableMark($: Host, id: string, judged: Mark): Promise<void> {
-  if (!sameValue(markFrom(await $.store.get(`fable-mark:${id}`)), judged)) return
-  await $.store.delete(`fable-mark:${id}`)
+async function endMark($: Host, kind: MarkKind, id: string, judged: Mark): Promise<void> {
+  await $.store.set(markEndKey(kind, id, judged.at), { resetsAt: judged.resetsAt })
+  const field = VIEW_MARKS[kind]
   await setView($, v => {
-    const { [id]: _ended, ...fableMarks } = v.fableMarks ?? {}
-    return { ...v, fableMarks }
+    const { [id]: held, ...rest } = v[field] ?? {}
+    return held !== undefined && !sameValue(held, judged) ? v : { ...v, [field]: rest }
   })
 }
 
-/** Ends a login's week mark for every session, as dropFableMark ends the Fable mark: only the mark judged ended goes. */
-async function dropWeekMark($: Host, id: string, judged: Mark): Promise<void> {
-  if (!sameValue(markFrom(await $.store.get(`week-mark:${id}`)), judged)) return
-  await $.store.delete(`week-mark:${id}`)
-  await setView($, v => {
-    const { [id]: _ended, ...weekMarks } = v.weekMarks ?? {}
-    return { ...v, weekMarks }
-  })
+/** A login's end records, each under its kind's key. */
+async function markEndKeysOf($: Host, id: string): Promise<string[]> {
+  const prefixes = (['five', 'week', 'fable'] as const).map(kind => `${MARK_END_PREFIX}${kind}:${id}:`)
+  return (await $.store.keys()).filter(key => prefixes.some(prefix => key.startsWith(prefix)))
 }
 
-/** Ends a login's 5-hour mark for every session, as dropFableMark ends the Fable mark: only the mark judged ended goes. */
-async function dropMark($: Host, id: string, judged: Mark): Promise<void> {
-  if (!sameValue(markFrom(await $.store.get(`mark:${id}`)), judged)) return
-  await $.store.delete(`mark:${id}`)
-  await setView($, v => {
-    const { [id]: _ended, ...marks } = v.marks ?? {}
-    return { ...v, marks }
-  })
+/** Drops the end records of a login whose mark's reset has passed: such a mark is no longer drawn whatever a record says. */
+async function pruneMarkEnds($: Host, id: string, now: number): Promise<void> {
+  for (const key of await markEndKeysOf($, id)) {
+    const resetsAt = (await $.store.get(key) as { resetsAt?: unknown } | null | undefined)?.resetsAt
+    if (!(typeof resetsAt === 'string' && Date.parse(resetsAt) > now)) await $.store.delete(key)
+  }
 }
 
 /**
@@ -620,7 +637,7 @@ async function saveReading($: Host, id: string, read: Reading, src: ReadingSourc
 
 /** Moves an older version's mark to the mark's own key, unless the mark there already stands longer. */
 async function keepLegacyMark($: Host, id: string, legacy: Mark): Promise<void> {
-  if (laterMark(markFrom(await $.store.get(`mark:${id}`)), legacy) !== legacy) return
+  if (laterMark(await readMark($, 'five', id), legacy) !== legacy) return
   await $.store.set(`mark:${id}`, legacy)
   await setView($, v => ({ ...v, marks: { ...v.marks, [id]: legacy } }))
 }
@@ -678,13 +695,13 @@ async function mergeStore($: Host): Promise<void> {
     if (legacy !== undefined) await keepLegacyMark($, a.id, legacy)
     const now = await $.clock.now()
     if (bootedAt !== undefined && old !== undefined && old.at > bootedAt && now - old.at < OLDER_WRITER_MS) hasOlderWriter = true
-    const m = markFrom(await $.store.get(`mark:${a.id}`))
+    const m = await readMark($, 'five', a.id)
     if (m !== undefined) marks[a.id] = m
     const n = await $.store.get(`no-five-hour:${a.id}`)
     if (typeof n === 'boolean') noFiveHour[a.id] = n
-    const k = markFrom(await $.store.get(`week-mark:${a.id}`))
+    const k = await readMark($, 'week', a.id)
     if (k !== undefined) weekMarks[a.id] = k
-    const f = markFrom(await $.store.get(`fable-mark:${a.id}`))
+    const f = await readMark($, 'fable', a.id)
     if (f !== undefined) fableMarks[a.id] = f
     const e = await $.store.get(`check-error:${a.id}`)
     if (typeof e === 'object' && e !== null && typeof (e as CheckError).why === 'string' && typeof (e as CheckError).at === 'number') checkErrors[a.id] = e as CheckError
@@ -1003,13 +1020,17 @@ function parsed(text: string | undefined): unknown {
 }
 
 /**
- * Stores every login's row under `rows`, for the CLI, when the lines differ from what the store holds: whichever
- * session wrote them, so sessions that see the same store write them once between them.
+ * Stores every login's row for the CLI, when it differs from what the store holds: whichever session wrote it, so sessions
+ * that see the same store write it once between them. Twice: under `rows2` with each login's windows as numbers, a key an
+ * older version never writes, and under `rows`, the lines alone, for the older readers; an older session still running
+ * rewrites `rows` only, so it cannot take the windows away.
  */
 async function saveRows($: Host, now: number): Promise<void> {
-  const rows = rowsOf(await getView($), now)
-  if (isSameRows(await $.store.get('rows'), rows)) return
-  await $.store.set('rows', { v: WRITER_VERSION, at: now, rows })
+  const view = await getView($)
+  const rows2 = rowsOf(view, now)
+  if (!isSameRows(await $.store.get('rows2'), rows2)) await $.store.set('rows2', { v: ROWS_VERSION, at: now, rows: rows2 })
+  const rows = rowsV1Of(view, now)
+  if (!isSameRows(await $.store.get('rows'), rows)) await $.store.set('rows', { v: WRITER_VERSION, at: now, rows })
 }
 
 /** Changes the footer's look for every session. */
@@ -1299,9 +1320,27 @@ function withSignIn(account: Account, who: Identity): Account {
   return { ...rest, ...who }
 }
 
+/**
+ * Every body read of a login, each under a key of its own, `usage-body:<id>:<read time>:<session mark>`, written once and
+ * never rewritten, as a get followed by a set is no atomic write (https://code.claude.com/docs/en/plugins/mods/interface.md).
+ */
+async function bodyKeysOf($: Host, id: string): Promise<string[]> {
+  return (await $.store.keys()).filter(key => key.startsWith(`usage-body:${id}:`))
+}
+
+/**
+ * Drops every session's body of a login, where its reading goes, and the key part A's first version wrote with no session
+ * in it. The records that proofs ended its marks stay, so an ended mark does not come back on another sign-in: they go with
+ * the marks (`dropAccountKeys`) or once their reset has passed (`pruneMarkEnds`).
+ */
+async function dropBodyKeys($: Host, id: string): Promise<void> {
+  for (const key of [`usage-body:${id}`, ...(await bodyKeysOf($, id))]) await $.store.delete(key)
+}
+
 /** Drops what the last sign-in's usage left on a login (its reading, its no-five-hour, its schedule), for every session. */
 async function dropSignInUsage($: Host, id: string): Promise<void> {
-  for (const key of [`usage:${id}`, `usage-body:${id}`, `no-five-hour:${id}`, `usage-due:${id}`]) await $.store.delete(key)
+  for (const key of [`usage:${id}`, `no-five-hour:${id}`, `usage-due:${id}`]) await $.store.delete(key)
+  await dropBodyKeys($, id)
   await setView($, v => {
     const { [id]: _reading, ...readings } = v.readings
     const { [id]: _noFive, ...noFiveHour } = v.noFiveHour ?? {}
@@ -1483,16 +1522,26 @@ async function checkAccount($: Host, account: Account, gate: UsageGate): Promise
           // stored one (never the view, which carries the marks).
           const prior = await ownedReading($, account.id)
           const marks = {
-            fable: markFrom(await $.store.get(`fable-mark:${account.id}`)),
-            week: markFrom(await $.store.get(`week-mark:${account.id}`)),
-            five: markFrom(await $.store.get(`mark:${account.id}`)),
+            fable: await readMark($, 'fable', account.id),
+            week: await readMark($, 'week', account.id),
+            five: await readMark($, 'five', account.id),
           }
-          // A stored body saved at or after this read began is newer than this body, or came back with it: this body is no
-          // earlier read to fall from, ends no mark, drops no kept row and never overwrites that row.
-          // Judged against the last body read, kept under its own key that only this path writes: never a response row stored
-          // since. A row an earlier version left, a body, stands in until the key is first written.
-          const before = bodyReadFrom(await $.store.get(`usage-body:${account.id}`)) ?? (prior?.src === 'body' ? bodyOfReading(prior) : undefined)
-          const isOlder = before !== undefined && before.at >= usage.startedAt
+          // Each kind of window is judged against the newest body holding it, read under this account's identity, that completed
+          // before this request began, across the keys of every session (a newest one of another window is no proof): never
+          // the shared row, whichever session wrote it last,
+          // and never a body of another account or of none (the council's rule, COUNCIL-store-races). A completed body whose key
+          // is not yet visible only delays the end of a mark to the next read.
+          const by = bodyIdentity(holder.who)
+          const bodies = new Map<string, BodyRead>()
+          for (const key of await bodyKeysOf($, account.id)) {
+            const body = bodyReadFrom(await $.store.get(key))
+            if (body !== undefined) bodies.set(key, body)
+          }
+          const before = baselineWindows([...bodies.values()], usage.startedAt, by, reading)
+          // The row every session shares goes by the order of the requests: a body whose request began at or before the stored
+          // row's time is older than that row, so it ends no mark, drops no kept row and never overwrites the row. Its body
+          // still has its key below: a completed body is a baseline for the next request whatever completed in between.
+          const isOlder = prior !== undefined && usage.startedAt <= prior.at
           if (!isOlder) {
             // A body whose 5-hour window it cannot read leaves what the last one said.
             if (reading.fiveHour !== undefined || noFiveHour === true) await saveNoFiveHour($, account.id, noFiveHour === true)
@@ -1502,15 +1551,25 @@ async function checkAccount($: Host, account: Account, gate: UsageGate): Promise
             // long enough after the stop.
             const isAfter = (mark: Mark) => usage.startedAt >= mark.at
             const { fable, week, five } = marks
-            if (fable !== undefined && isAfter(fable) && endsFableMark(reading.fable, now, fable, before?.fable)) await dropFableMark($, account.id, fable)
-            if (week !== undefined && isAfter(week) && endsWeekMark(reading.sevenDay, week, before?.sevenDay)) await dropWeekMark($, account.id, week)
-            if (five !== undefined && isAfter(five) && endsFiveHourMark(reading.fiveHour, five, before?.fiveHour)) await dropMark($, account.id, five)
+            if (fable !== undefined && isAfter(fable) && endsFableMark(reading.fable, now, fable, before?.fable)) await endMark($, 'fable', account.id, fable)
+            if (week !== undefined && isAfter(week) && endsWeekMark(reading.sevenDay, week, before?.sevenDay)) await endMark($, 'week', account.id, week)
+            if (five !== undefined && isAfter(five) && endsFiveHourMark(reading.fiveHour, five, before?.fiveHour)) await endMark($, 'five', account.id, five)
             // A body with no Fable row keeps the stored one's, unless the week fell since the last body: the stored read, never the view.
             await saveReading($, account.id, { ...keepFable(reading, prior === undefined ? undefined : { ...prior, sevenDay: before?.sevenDay }, now), by: account.id }, 'body')
-            // This body is the baseline of the next, whichever rows are stored over the reading meanwhile.
-            await $.store.set(`usage-body:${account.id}`, { ...before, ...bodyOfReading(reading) })
             hasFreshFable = reading.fable !== undefined
           }
+          // This body is a baseline of the next, whichever rows are stored over the reading meanwhile, under a key of its own,
+          // named by its read time and this session, and written once: no key is rewritten, so deleting one can lose no newer
+          // body. One key a body read, at most about 336 a login a week at the 30-minute schedule, and a key over a week old
+          // is a baseline of no window still running: it goes.
+          // A refused write loses one baseline and is logged: the read stands.
+          try {
+            await $.store.set(`usage-body:${account.id}:${reading.at}:${(await getView($)).sessionMark ?? SELF}`, bodyOfReading(reading, by))
+            for (const [key, body] of bodies) if (body.at < now - BODY_KEEP_MS) await $.store.delete(key)
+          } catch (error) {
+            await debug($, `account ${account.id}: a body key was not written: ${String(error)}`)
+          }
+          await pruneMarkEnds($, account.id, now).catch(error => debug($, `account ${account.id}: the end records of its marks were not pruned: ${String(error)}`))
         }
       }
     }
@@ -1682,7 +1741,7 @@ async function maybeRotate($: Host, need?: Need, carry?: CarryOn, modelStop?: { 
       return stays(`no untried login (tried ${tried.join(', ')})`)
     }
     const age = pick.readAgeMs === undefined ? '' : `, read ${Math.round(pick.readAgeMs / 60_000)} min ago`
-    void logStop($, `picked ${pick.account.id}: ${pick.tier}${age}; tried ${tried.join(', ')}`)
+    void logStop($, `picked ${pick.account.id}: ${pick.tier}${pick.isIdle === true ? ' (idle token)' : ''}${age}; tried ${tried.join(', ')}`)
     // The carry-on goes with what the pick rests on: its line says no more than that proves.
     const { tier, readAgeMs, freesAt, hasFableRoom } = pick
     return switchTo($, pick.account, whyLeave(view, now, need), false, { ...carry, proof: { tier, readAgeMs, freesAt, hasFableRoom } }, true)
@@ -1715,7 +1774,7 @@ async function maybeRotate($: Host, need?: Need, carry?: CarryOn, modelStop?: { 
   const isMoved = await switchTo($, target, whyLeave(view, now, need), false, carry, true)
   // A tick or a response may move to a login whose usage read failed and that has no reading; no carry-on follows it.
   if (isMoved && carry === undefined && isUnread(view, target)) {
-    void logStop($, `moved to ${target.id} by the tick or a response, its usage read failed, no carry-on`)
+    void logStop($, `no carry-on after the move to ${target.id}: its usage read failed`)
   }
   return isMoved
 }
@@ -1852,6 +1911,9 @@ async function carryOnWhenFree($: Host): Promise<void> {
     else if (due === undefined && dueEndings === endings) due = owed
     throw error
   })
+  // A later stop can owe a debt of its own during that write, for a later time: it stands, and this debt, ended by the
+  // clear, is not sent for it. Where the view still holds this one, the store marks it ended.
+  if (due !== undefined) return isCleared ? undefined : markCarryEnded($, owed)
   if (after.activeId !== view.activeId || shouldLeave(after, now) || isConnectingChrome) {
     // A switch that ended what is owed moved it: nothing stays owed, and a view that still holds it is marked.
     if (dueEndings !== endings) return isCleared ? undefined : markCarryEnded($, owed)
@@ -1865,6 +1927,8 @@ async function carryOnWhenFree($: Host): Promise<void> {
   // Every exit from here ends what is owed. Where the view still holds it, the store marks it, so a reload's boot owes
   // it no more; marked before the carry-on goes, so one whose submit throws went all the same.
   if (!isCleared) await markCarryEnded($, owed)
+  // Checked again after that write, as before the send: a debt a stop owes meanwhile stands for its own time.
+  if (due !== undefined) return
   const hasTurnRun = isSameLogin && owed.turns !== undefined && mainTurns > owed.turns
   void logStop($, hasTurnRun ? 'a turn ran since the stop: no carry-on' : `a login is free: carry-on on ${view.activeId}`)
   if (hasTurnRun) return
@@ -2102,7 +2166,10 @@ async function switchTo($: Host, target: Account, why: string, isQuiet = false, 
       return runOwned($, token, () => switchNow($, token, target, why, isQuiet, carry, isRotation))
     }
     if (isRotation && result) {
-      const since = (await getView($)).pending?.since
+      const ridden = await getView($)
+      const since = ridden.pending?.since
+      // A stop that rides the switch running moves no more than that switch did, and leaves its own line for it.
+      void logStop($, `moved to ${ridden.activeId} (by a stop riding the switch running)`)
       // The check and the write go with no await between, as in switchNow: the switch that ran may carry on itself.
       if (since !== undefined && carriedFor !== since && carry !== undefined) {
         carryOnAfterSettle($, carry)
@@ -2215,7 +2282,7 @@ async function switchNow($: Host, token: number, target: Account, why: string, i
   endDue($, carry, isRotation, isQuiet)
   // The carry-on is armed and carriedFor set straight after pending's write, with no await between, so a second stop
   // cannot arm a second carry-on; the toast reads the view after them.
-  if (carry !== undefined) void logStop($, `moved to ${target.id}`)
+  void logStop($, `moved to ${target.id} (by ${carry !== undefined ? 'a stop' : isRotation ? 'the tick or a response' : isQuiet ? 'a Claude in Chrome visit' : 'a press or a command'})`)
   if (owed !== undefined) {
     carryOnAfterSettle($, owed)
     carriedFor = now
@@ -2294,6 +2361,7 @@ async function settlePending($: Host, isResponse: boolean): Promise<void> {
       if (!(await writeSwitch($, { owner: token }, v => ({ ...v, activeId: from.id, pending: undefined })))) return false
       movedAt = now
       moves += 1
+      void logStop($, `moved to ${from.id} (by a point-back: responses still use login ${from.id})`)
       return true
     })
     if (!isBack) return
@@ -2331,7 +2399,8 @@ async function onMeasure($: Host, limits: readonly SessionRateLimit[]): Promise<
   // A response that reports a 5-hour window shows the account has one, whatever the last usage check said: recorded once,
   // in a form the 5h limit does not filter.
   if (reading.fiveHour !== undefined && view.noFiveHour?.[view.activeId] !== false) await saveNoFiveHour($, view.activeId, false)
-  // A response never lists the Fable week: the one the last check stored stays (the view's carries the marks). It touches
+  // A response never lists the Fable week: the one the last check stored stays, with the time that check read it (the
+  // view's carries the marks); the reading's own time moves on, the row's does not. It touches
   // no other key: the last body read of each window lives under its own, written by the body path alone.
   const fable = (await ownedReading($, view.activeId))?.fable
   await saveReading($, view.activeId, { ...reading, ...(fable ? { fable } : {}), by: view.activeId }, 'response')
@@ -2817,6 +2886,7 @@ async function pointBackTo($: Host, owner: Account, seen: { activeId: string; si
     if (isLate || !isPublished) return false
     movedAt = await $.clock.now()
     moves += 1
+    void logStop($, `moved to ${owner.id} (by a point-back: the stop's reset names login ${owner.id})`)
     return true
   })
   return isLate ? 'stale' : isDone ? 'done' : 'failed'
@@ -3723,9 +3793,12 @@ async function adoptSlot($: Host, slot: string): Promise<{ ok: boolean; message:
 
 /** Every store key of one account's own, each dropped when an account goes and before a row takes its id. */
 async function dropAccountKeys($: Host, id: string): Promise<void> {
-  for (const key of ['reading', 'usage', 'usage-body', 'mark', 'no-five-hour', 'week-mark', 'fable-mark', 'check-error', 'health', 'holder', 'usage-due']) {
+  for (const key of ['reading', 'usage', 'mark', 'no-five-hour', 'week-mark', 'fable-mark', 'check-error', 'health', 'holder', 'usage-due']) {
     await $.store.delete(`${key}:${id}`)
   }
+  await dropBodyKeys($, id)
+  // The marks went above, so the records that ended them have nothing left to hold ended.
+  for (const key of await markEndKeysOf($, id)) await $.store.delete(key)
 }
 
 /**
@@ -3900,7 +3973,7 @@ async function bindSession($: Host, slot: string): Promise<void> {
  * reset left it unset, a write since being newer; the Connect line only while a Connect is under way.
  */
 async function rebindSession($: Host): Promise<void> {
-  const { slot, mark, hasFontBlocks, isSwitchBlocked, isFableStopped, isStuckTold, pending, provisionalStop, held, hasChrome, chrome: link, chromeConnecting } = kept
+  const { slot, mark, hasFontBlocks, isSwitchBlocked, isFableStopped, isStuckTold, credentialsNote, pending, provisionalStop, held, hasChrome, chrome: link, chromeConnecting } = kept
   // The switch's own records come back only into the reset's view, which names no switch running; with this module's
   // switch still running, its owner comes back with them, so the switch's later writes still apply.
   await writeSwitch($, { claim: undefined }, v => ({
@@ -3916,6 +3989,7 @@ async function rebindSession($: Host): Promise<void> {
     ...(isSwitchBlocked === undefined ? {} : { isSwitchBlocked }),
     ...(isFableStopped === undefined ? {} : { isFableStopped }),
     ...(isStuckTold === undefined ? {} : { isStuckTold }),
+    ...(credentialsNote === undefined ? {} : { credentialsNote }),
     ...(due === undefined ? {} : { carryDue: due }),
     ...(mark === undefined ? {} : { sessionMark: mark }),
     ...(hasChrome === undefined || v.hasChrome !== undefined ? {} : { hasChrome }),
@@ -3976,6 +4050,31 @@ async function refreshLauncherCopy($: Host): Promise<void> {
   debug($, `launcher copy ${copy} replaced by ${LAUNCHER_FILE} of the mod`)
 }
 
+/** Whether this module has warned of a credentials file beside the keychain login: once a session. */
+let isCredentialsFileTold = false
+
+/**
+ * On macOS the normal login is in the keychain, and a `.credentials.json` in its folder beside it can stop a move back to
+ * it from landing: moving the file aside is the way out. Warns once a session, as a toast, a terminal notice and a
+ * line in the pane, naming the file, when it last changed and the command that moves it aside. It reads the folder's
+ * listing for the file's name and time and never the file: no token is read, kept or said. On Linux that file is the
+ * login itself, so nothing is said.
+ */
+async function warnOfCredentialsFile($: Host): Promise<void> {
+  if (isCredentialsFileTold || !(await $.fs.exists(MACOS_MARKER))) return
+  const path = credentialsFile('', await $.env.get('HOME'))
+  if (path === undefined) return
+  const entries = await $.fs.list(path.slice(0, path.lastIndexOf('/'))).catch(() => [])
+  const entry = entries.find(e => e.name === '.credentials.json' && e.kind === 'file')
+  if (entry === undefined || isCredentialsFileTold) return
+  isCredentialsFileTold = true
+  const credentialsNote = credentialsFileText(path, entry.mtimeMs)
+  kept = { ...kept, credentialsNote }
+  await setView($, v => ({ ...v, credentialsNote }))
+  tell($, credentialsNote)
+  notify($, credentialsNote)
+}
+
 /** First run makes the normal login number 1; then: which login this session uses, and Claude in Chrome connected as the extension's account. */
 async function boot($: Host, isInteractive: boolean): Promise<void> {
   // A view still bound outlived a reload of this code, which emptied `kept`: its Fable stop mark and its stuck notice
@@ -3983,6 +4082,11 @@ async function boot($: Host, isInteractive: boolean): Promise<void> {
   const survived = await getView($)
   if (survived.isBound === true && survived.isFableStopped !== undefined) kept = { ...kept, isFableStopped: survived.isFableStopped }
   if (survived.isBound === true && survived.isStuckTold !== undefined) kept = { ...kept, isStuckTold: survived.isStuckTold }
+  // So does the warning of a credentials file: the session was told, and a reload does not tell it again.
+  if (survived.isBound === true && survived.credentialsNote !== undefined) {
+    kept = { ...kept, credentialsNote: survived.credentialsNote }
+    isCredentialsFileTold = true
+  }
   // So does a carry-on owed once a login frees up: the tick, armed again by the reload, sends it. The reload zeroed the
   // count of main turns, so the grace counts from here: a turn after the reload shows Claude Code carried on by itself.
   // One this session ended though the view kept it, which the store marks by when it was owed, is cleared again instead.
@@ -4009,6 +4113,7 @@ async function boot($: Host, isInteractive: boolean): Promise<void> {
   await bindSession($, slot)
   await refreshLauncherCopy($).catch(error => debug($, `launcher copy not refreshed: ${errorName(error)}`))
   await pruneStopLogs($).catch(error => debug($, `stop-log prune failed: ${String(error)}`))
+  await warnOfCredentialsFile($).catch(error => debug($, `credentials file not looked at: ${errorName(error)}`))
   await checkSwitching($, slot)
   // A check that lands after a switch moved the session wrote the slot it started on back: set the slot right at once.
   await reconcile($).catch(error => debug($, `slot repair failed: ${errorName(error)}`))

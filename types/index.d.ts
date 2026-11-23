@@ -1,5 +1,9 @@
-/** One usage window of a login: percent used, and when it resets (ISO 8601); `isStop` where a stop marked it, not a read. */
-export type UsageWindow = { pct: number; resetsAt?: string; isStop?: true }
+/**
+ * One usage window of a login: percent used, and when it resets (ISO 8601); `isStop` where a stop marked it, not a read.
+ * `at`, on a Fable row: when a usage body listed it (epoch ms). A response save refreshes the reading's own `at` and keeps
+ * the older body's Fable row, so the row's own time is the one its age is judged on. A row stored before it was kept has none.
+ */
+export type UsageWindow = { pct: number; resetsAt?: string; isStop?: true; at?: number }
 
 /**
  * A login's usage as last read, `at` in epoch milliseconds. `fable` is the
@@ -12,11 +16,12 @@ export type UsageWindow = { pct: number; resetsAt?: string; isStop?: true }
 export type Reading = { fiveHour?: UsageWindow; sevenDay?: UsageWindow; fable?: UsageWindow; noFiveHour?: true; at: number; by?: string; v?: number; src?: ReadingSource }
 
 /**
- * The last usage body read of a login's windows, under its own store key `usage-body:<id>`, written only by the body path:
- * counters are compared body to body, never against a response row or a mark, which a stop or another session may have
- * stored between two bodies.
+ * A usage body read of a login's windows, under its own store key `usage-body:<id>:<read time>:<session mark>`, written once
+ * by the body path and never rewritten: counters are compared body to body (the newest of every session's
+ * that completed before the request began), never against a response row or a mark, which a stop or another session may have
+ * stored between two bodies. `by` is the account identity it was read under (`bodyIdentity`); a body without one is no baseline.
  */
-export type BodyRead = { at: number; fiveHour?: UsageWindow; sevenDay?: UsageWindow; fable?: UsageWindow }
+export type BodyRead = { at: number; by?: string; fiveHour?: UsageWindow; sevenDay?: UsageWindow; fable?: UsageWindow }
 
 /**
  * Where a stored reading came from: a usage body (`body`), a response's rate limits (`response`), or a stop that
@@ -35,8 +40,9 @@ export type Mark = { pct: number; resetsAt: string; at: number }
 /**
  * What a stop's pick of a login rests on, which the carry-on's line follows: the tier it was taken in, the age of the read it
  * was judged on, when a login believed spent frees (epoch ms), and whether a fresh read that lists the Fable week showed room.
+ * `isIdle`: the login's token had run out, so nothing reads it until a session refreshes the token.
  */
-export type StopProof = { tier: 'fresh' | 'stale' | 'unread' | 'spent-old'; readAgeMs?: number; freesAt?: number; hasFableRoom: boolean }
+export type StopProof = { tier: 'fresh' | 'stale' | 'unread' | 'spent-old'; readAgeMs?: number; freesAt?: number; hasFableRoom: boolean; isIdle?: true }
 
 /** A usage check that failed: what failed (a stage and an HTTP status, or the error), and when, in epoch milliseconds. */
 /** `isUsageRead`: the usage read itself failed, which runs only once a profile call has named the sign-in. */
@@ -77,12 +83,22 @@ export type RotatorRequest =
   | { kind: 'continue-text'; nonce: string; at: number; id: string; store: string; text: unknown }
 
 /**
- * The rows every session's merge stores under `rows`, for the CLI: each login's lines as runs, when, and the writer's
- * version. A session older than this shape stored each line as one string, its times rendered by the writer.
- * `v` does not version the lines: both shapes carry 1, so a reader tells them by each line's type. A new line shape
- * takes a new key, as `usage:<id>` did, or versions on one store rewrite each other's rows until the older restarts.
+ * The rows every session's merge stores under `rows`, for the CLI: each login's lines as runs, its windows as numbers,
+ * and when. A session older than this shape stored each line as one string, its times rendered by the writer.
+ * `v` versions the rows: 1 holds lines alone, 2 adds each login's `windows`. It does not version the lines: both shapes
+ * of a line carry 1 or 2, so a reader tells them by each line's type. A new line shape takes a new key, as `usage:<id>`
+ * did, or versions on one store rewrite each other's rows until the older restarts.
  */
-export type StoredRows = { v: number; at: number; rows: { id: string; lines: StoredRun[][] }[] }
+export type StoredRows = { v: number; at: number; rows: { id: string; lines: StoredRun[][]; windows?: StoredWindows }[] }
+
+/** Where a window's number comes from: a read (a usage body, or a response's rate limits), a value kept from an earlier read, or a stop's mark. */
+export type WindowSource = 'read' | 'kept' | 'stop'
+
+/** A window's percent used as a row shows it, its source, and when that was read or marked (epoch ms; absent where unknown). */
+export type ShownWindow = { pct: number; source: WindowSource; readAt?: number }
+
+/** What a login's stored row says of its week and its Fable week, as numbers, for the CLI's `list --json`. */
+export type StoredWindows = { week?: ShownWindow; fable?: ShownWindow }
 
 /**
  * When a login's usage is next read, for every session, under `usage-due:<id>`: every usage call goes through it.
@@ -266,6 +282,8 @@ export type View = {
   isBound?: boolean
   /** This session only: the switch the refresh guard holds back, tried each minute, kept by a reload; `carry`, a Fable stop's carry-on. */
   held?:{ target: Account; why: string; carry?: { need?: 'fable' }; isRotation: boolean }
+  /** This session only: the warning that a credentials file stands beside the keychain login (credentialsFileText), told once and shown in the pane. */
+  credentialsNote?: string
   /** This session only: a stop marked on the login moved to before any response proved the switch; a reload keeps it. */
   provisionalStop?: ProvisionalStop
   /** This session only: the footer draws imitated usage, to judge its look. */

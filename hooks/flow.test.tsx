@@ -68,6 +68,10 @@ type World = {
   linkFiles?: string[]
   /** A look at a folder is refused. */
   listFails?: boolean
+  /** path -> the modification time `$.fs.list` gives a listed file, epoch ms; 0 where unset. */
+  mtimes?: Record<string, number>
+  /** Every path `$.fs.read` was asked for, in order. */
+  readPaths?: string[]
   /** The folders that exist under the accounts folder, signed in or not. */
   folders?: string[]
   /** How a `mkdir` fails, where it does. */
@@ -78,6 +82,8 @@ type World = {
   storeIdFails?: 'write' | 'read'
   /** The store refuses the read of every key that starts with this. */
   storeReadFails?: string
+  /** The store refuses the write of every key that starts with this. */
+  storeWriteFails?: string
   /** puma-9arph.26: the text of the mod's own bin/account-rotator-claude, as `$.fs.read` finds it under the plugin's folder. */
   ownLauncher?: string
   /** puma-9arph.26: every chmod, test, mv and rm the mod ran, as typed. */
@@ -236,6 +242,14 @@ const ran = (exitCode: number, stdout: string): ProcessRunResult => ({
   isStderrTruncated: false,
 })
 
+/** Whether the stop mark under `key` stands: stored, and no end record names it (a proven end writes the record and keeps the key). */
+function markStands(store: Map<string, unknown>, key: string): boolean {
+  const mark = store.get(key) as { at?: number } | undefined
+  const [, prefix, id] = /^(week-|fable-)?mark:(.+)$/.exec(key) ?? []
+  const kind = prefix === undefined ? 'five' : prefix.slice(0, -1)
+  return mark !== undefined && !store.has(`mark-end:${kind}:${id}:${mark.at}`)
+}
+
 /** `$.store` over `entries`, which the test writes mid-run as another session on the Mac would. */
 function sharedStore(on: On, entries: Map<string, unknown>, w: World): void {
   on('store.get', (_$, e) => {
@@ -246,6 +260,7 @@ function sharedStore(on: On, entries: Map<string, unknown>, w: World): void {
   })
   on('store.set', (_$, e) => {
     if (e.key === 'store-id' && w.storeIdFails !== undefined) return { deny: 'store: refused' }
+    if (w.storeWriteFails !== undefined && e.key.startsWith(w.storeWriteFails)) return { deny: 'store: refused' }
     w.onStoreSet?.(e.key, e.value)
     entries.set(e.key, e.value)
     w.afterStoreSet?.(e.key)
@@ -483,13 +498,14 @@ function world(on: On, w: World, store: Record<string, unknown> | Map<string, un
     const names = Object.keys(w.files).filter(p => p.startsWith(`${e.path}/`) && !p.slice(e.path.length + 1).includes('/'))
     if (w.listFails) return { deny: `EACCES: permission denied, scandir '${e.path}'` }
     if (names.length === 0) return { deny: `ENOENT: no such file or directory, scandir '${e.path}'` }
-    return { value: names.map(p => ({ name: p.slice(e.path.length + 1), kind: (w.linkFiles ?? []).includes(p.slice(e.path.length + 1)) ? 'other' : 'file', size: (w.files[p] ?? '').length, mtimeMs: 0, isLink: false })) }
+    return { value: names.map(p => ({ name: p.slice(e.path.length + 1), kind: (w.linkFiles ?? []).includes(p.slice(e.path.length + 1)) ? 'other' : 'file', size: (w.files[p] ?? '').length, mtimeMs: w.mtimes?.[p] ?? 0, isLink: false })) }
   })
   on('fs.exists', async (_$, e) => {
     await w.existsGate
     return { value: (e.path === '/System/Library/CoreServices/SystemVersion.plist' && w.system === 'macOS') || (w.folders ?? []).includes(e.path) }
   })
   on('fs.read', async (_$, e) => {
+    w.readPaths = [...(w.readPaths ?? []), e.path]
     await w.readGate
     // puma-9arph.26: the mod's own launcher file, wherever the host puts the plugin's folder.
     if (w.ownLauncher !== undefined && e.path.endsWith('/bin/account-rotator-claude')) return { value: w.ownLauncher }
@@ -6907,7 +6923,7 @@ for (const status of [503, 429, 500]) {
 /** What the pane draws after each `Fable` row's label, in order: one entry per row. */
 async function fableRows($: Engine): Promise<string[]> {
   const texts = (await paneText($)).split('\n')
-  return texts.flatMap((t, i) => (t === ' Fable ' ? [texts[i + 1] ?? ''] : t.trimEnd() === ' Fable –' ? ['–'] : []))
+  return texts.flatMap((t, i) => (t === ' Fable used ' ? [texts[i + 1] ?? ''] : t.trimEnd() === ' Fable used –' ? ['–'] : []))
 }
 
 test('a reading with Fable 66% draws a Fable row under the week with its bar at 66%', async ($, on) => {
@@ -6959,14 +6975,14 @@ test('a Fable stop marks its week spent under fable-mark:<id>, and neither the s
   await $.classic.StopFailure(FABLE_STOP)
   await clock.settle()
   expect(markOf(store.get('fable-mark:1'))).toEqual([100, FABLE_RESET])
-  expect(fableOf(store.get('usage:1'))).toEqual({ pct: 60, resetsAt: FABLE_RESET })
+  expect(fableOf(store.get('usage:1'))).toEqual({ pct: 60, resetsAt: FABLE_RESET, at: expect.any(Number) })
   w.limits = [
     { kind: 'five_hour', percentUsed: 21, resetsAt: '2026-10-12T12:00:00Z' },
     { kind: 'seven_day', percentUsed: 30, resetsAt: WEEK_RESET },
   ]
   await respond($, clock, w)
   expect((store.get('usage:1') as { src?: unknown } | undefined)?.src).toBe('response')
-  expect(fableOf(store.get('usage:1'))).toEqual({ pct: 60, resetsAt: FABLE_RESET })
+  expect(fableOf(store.get('usage:1'))).toEqual({ pct: 60, resetsAt: FABLE_RESET, at: expect.any(Number) })
   // The pane still draws login 1's Fable week spent, by the mark.
   expect((await fableRows($))[0]).toBe(`${longBar(100)} 100%`)
 })
@@ -7015,7 +7031,7 @@ test('a check whose usage lists no Fable week after a Fable stop keeps the store
   w.usage['tok-1'] = [20, 30]
   await pastNextRead(clock)
   expect(w.usageCalls.filter(t => t === 'tok-1').length).toBeGreaterThan(calls)
-  expect(fableOf(store.get('usage:1'))).toEqual({ pct: 60, resetsAt: FABLE_RESET })
+  expect(fableOf(store.get('usage:1'))).toEqual({ pct: 60, resetsAt: FABLE_RESET, at: expect.any(Number) })
 })
 
 test('a Fable mark another session stored on a login with no reading yet counts: the pane draws that login\'s Fable week spent', async ($, on) => {
@@ -7294,7 +7310,7 @@ test('the merge stores each login\'s row lines under rows, stamped with when and
   const rows = rowsOf(store)
   expect([rows?.v, typeof rows?.at, rows?.rows?.map(r => r.id)]).toEqual([1, 'number', ['1', '2']])
   expect(lineOne(store, '1')).toMatch(new RegExp(`^one@example\\.com.*  updated ${localTime(goodReadAt(store, '1'))}$`))
-  expect(rowsText(store, clock.now())?.[0]?.lines[1]).toBe('Used ▰▰▰▱▱▱▱▱▱▱  30% Fable ▰▰▰▰▱▱▱▱▱▱  40%  resets 5d 16h 59m · Fable 4d 16h 59m')
+  expect(rowsText(store, clock.now())?.[0]?.lines[1]).toBe('Used ▰▰▰▱▱▱▱▱▱▱  30% Fable used ▰▰▰▰▱▱▱▱▱▱  40%  resets 5d 16h 59m · Fable 4d 16h 59m')
   expect(clock.now()).toBeLessThan(NOW + 2 * 60_000)
 })
 
@@ -9762,7 +9778,7 @@ for (const [age, isEnded] of [[31, true], [10, false]] as const) {
     const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off', 'fable-mark:2': mark }))
     const clock = world(on, w, store)
     await start($, clock)
-    expect([age, store.get('fable-mark:2')]).toEqual([age, isEnded ? undefined : mark])
+    expect([age, markStands(store, 'fable-mark:2') ? store.get('fable-mark:2') : undefined]).toEqual([age, isEnded ? undefined : mark])
     expect(await fableRows($)).toEqual([`${longBar(10)}  10%`, isEnded ? `${longBar(35)}  35%` : `${longBar(100)} 100%`])
   })
 }
@@ -10114,7 +10130,7 @@ test('a stop, its switch and its carry-on write their entries in order under thi
   await clock.settle()
   await clock.advance(36_000)
   expect(w.submitted).toHaveLength(1)
-  expect(whats(stopLogOf(store, w))).toEqual([STOP_RATE_LIMIT, PICKED_TWO, 'moved to 2', 'carry-on armed', 'carry-on queued', 'carry-on resolved'])
+  expect(whats(stopLogOf(store, w))).toEqual([STOP_RATE_LIMIT, PICKED_TWO, 'moved to 2 (by a stop)', 'carry-on armed', 'carry-on queued', 'carry-on resolved'])
   expect(stopLogOf(store, w).every(e => typeof e.at === 'number' && e.at >= NOW)).toBe(true)
 })
 
@@ -10135,7 +10151,7 @@ test('a stop held back for a token about to refresh logs the hold, then the move
   refresh(w)
   await clock.advance(60_000)
   await clock.advance(36_000)
-  expect(whats(stopLogOf(store, w))).toEqual([STOP_SESSION, PICKED_TWO, 'held for 2: the token in use refreshes soon', 'moved to 2', 'carry-on armed', 'carry-on queued', 'carry-on resolved'])
+  expect(whats(stopLogOf(store, w))).toEqual([STOP_SESSION, PICKED_TWO, 'held for 2: the token in use refreshes soon', 'moved to 2 (by a stop)', 'carry-on armed', 'carry-on queued', 'carry-on resolved'])
 })
 
 test('a switch made after the carry-on was armed logs that the carry-on was skipped (puma-9arph.34 B3)', async ($, on) => {
@@ -10151,7 +10167,7 @@ test('a switch made after the carry-on was armed logs that the carry-on was skip
   await pane.unmount()
   await clock.advance(36_000)
   expect(w.submitted).toEqual([])
-  expect(whats(stopLogOf(store, w))).toEqual([STOP_RATE_LIMIT, PICKED_TWO, 'moved to 2', 'carry-on armed', 'carry-on skipped: another switch since'])
+  expect(whats(stopLogOf(store, w))).toEqual([STOP_RATE_LIMIT, PICKED_TWO, 'moved to 2 (by a stop)', 'carry-on armed', 'moved to 1 (by a press or a command)', 'carry-on skipped: another switch since'])
 })
 
 for (const [name, setup, reasons] of [
@@ -10633,7 +10649,7 @@ test('a usage-limit stop whose own forced usage read throws still marks the logi
   const lines = whats(stopLogOf(store, w))
   expect(lines[0]).toBe(STOP_SESSION)
   expect(lines.filter(isReadFailed('1'))).toHaveLength(1)
-  expect(lines.filter(l => !isReadFailed('1')(l))).toEqual([STOP_SESSION, PICKED_ONE_MIN, 'moved to 2', 'carry-on armed', 'carry-on queued', 'carry-on resolved'])
+  expect(lines.filter(l => !isReadFailed('1')(l))).toEqual([STOP_SESSION, PICKED_ONE_MIN, 'moved to 2 (by a stop)', 'carry-on armed', 'carry-on queued', 'carry-on resolved'])
   expect(store.get('mark:1')).toBeDefined()
   expect(w.submitted).toHaveLength(1)
 })
@@ -10651,7 +10667,7 @@ test('a usage-limit stop whose profile call throws, its sign-in new since the la
   await clock.advance(36_000)
   const lines = whats(stopLogOf(store, w))
   expect(lines.filter(isReadFailed('1'))).toHaveLength(1)
-  expect(lines.filter(l => !isReadFailed('1')(l))).toEqual([STOP_SESSION, PICKED_ONE_MIN, 'moved to 2', 'carry-on armed', 'carry-on queued', 'carry-on resolved'])
+  expect(lines.filter(l => !isReadFailed('1')(l))).toEqual([STOP_SESSION, PICKED_ONE_MIN, 'moved to 2 (by a stop)', 'carry-on armed', 'carry-on queued', 'carry-on resolved'])
   expect(store.get('mark:1')).toBeDefined()
   expect(w.submitted).toHaveLength(1)
 })
@@ -10681,7 +10697,7 @@ test('Review HOST-FAULT-MISCLASSIFIED: a store write refused inside the stop\'s 
   await $.classic.StopFailure(PLAIN)
   await clock.settle()
   await clock.advance(36_000)
-  expect(whats(stopLogOf(store, w))).toEqual([STOP_SESSION, 'stop read failed: HooksError, login 1', PICKED_ONE_MIN, 'moved to 2', 'carry-on armed', 'carry-on queued', 'carry-on resolved'])
+  expect(whats(stopLogOf(store, w))).toEqual([STOP_SESSION, 'stop read failed: HooksError, login 1', PICKED_ONE_MIN, 'moved to 2 (by a stop)', 'carry-on armed', 'carry-on queued', 'carry-on resolved'])
   expect(store.get('mark:1')).toBeDefined()
   expect(w.submitted).toHaveLength(1)
 })
@@ -10746,7 +10762,7 @@ test('puma-9arph.59: a stop whose profile call hangs, its sign-in new since the 
   await clock.advance(READ_TIMEOUT + 36_000)
   const lines = whats(stopLogOf(store, w))
   expect(lines.filter(isReadFailed('1'))).toEqual(['stop read failed: ProfileReadTimedOut, login 1'])
-  expect(lines.filter(l => !isReadFailed('1')(l))).toEqual([STOP_SESSION, PICKED_ONE_MIN, 'moved to 2', 'carry-on armed', 'carry-on queued', 'carry-on resolved'])
+  expect(lines.filter(l => !isReadFailed('1')(l))).toEqual([STOP_SESSION, PICKED_ONE_MIN, 'moved to 2 (by a stop)', 'carry-on armed', 'carry-on queued', 'carry-on resolved'])
   expect(store.get('mark:1')).toBeDefined()
   expect(w.submitted).toHaveLength(1)
 })
@@ -11034,7 +11050,7 @@ test('a tick that moves to a login whose usage read failed, with no reading, log
   await clock.advance(36_000)
   expect(slots(w)).toEqual([SLOT2])
   expect(w.submitted).toEqual([])
-  expect(whats(stopLogOf(store, w))).toEqual(['moved to 2 by the tick or a response, its usage read failed, no carry-on'])
+  expect(whats(stopLogOf(store, w))).toEqual(['moved to 2 (by the tick or a response)', 'no carry-on after the move to 2: its usage read failed'])
 })
 
 test('a stop-log write that fails, its debug line failing too, leaves the stop-log writing the next entries (puma-9arph.34 C)', async ($, on) => {
@@ -11579,7 +11595,7 @@ test('a carry-on whose turn dies on the usage limit again moves to the next logi
     STOP_RATE_LIMIT,
     'owed resume: turns closed',
     PICKED_TWO,
-    'moved to 2',
+    'moved to 2 (by a stop)',
     'carry-on armed',
     'carry-on queued',
     'carry-on resolved',
@@ -11590,7 +11606,7 @@ test('a carry-on whose turn dies on the usage limit again moves to the next logi
     // A wordless stop on a switch no response has proven is login 2's only at its second: this first one may have gone out on login 1.
     'stop on owed resume: login 2 in use, no response since its switch, no mark',
     'picked 3: fresh, read 1 min ago; tried 1',
-    'moved to 3',
+    'moved to 3 (by a stop)',
     'carry-on armed',
     'carry-on queued',
     FILL_NO_CAUSE,
@@ -12144,7 +12160,7 @@ test('row v: a held stop with no turn open sends one nudge NUDGE_LEAD_MS before 
   await $.turn.complete({ turnId: 'turn-nudge', reason: 'error', answer: '', durationMs: 1, isAborted: false })
   await clock.settle()
   expect(slots(w)).toEqual([SLOT2])
-  expect(whats(stopLogOf(store, w)).filter(l => ['refresh nudge entered on login 1', 'moved to 2', 'resume entered'].includes(l))).toEqual(['refresh nudge entered on login 1', 'moved to 2'])
+  expect(whats(stopLogOf(store, w)).filter(l => ['refresh nudge entered on login 1', 'moved to 2 (by a stop)', 'resume entered'].includes(l))).toEqual(['refresh nudge entered on login 1', 'moved to 2 (by a stop)'])
   await clock.advance(36_000)
   expect(w.submitted).toHaveLength(2)
   const carry = w.submitted[1] ?? ''
@@ -13329,7 +13345,7 @@ test('a stop\'s switch given up on by a press says so in the stop-log when it la
   await settleReal(clock)
   await settleReal(clock)
   await pane.unmount()
-  expect([slots(w).at(-1), whats(stopLogOf(store, w))]).toEqual([SLOT3, [STOP_RATE_LIMIT, PICKED_TWO, 'stop switch given up on: landed late, no carry-on']])
+  expect([slots(w).at(-1), whats(stopLogOf(store, w))]).toEqual([SLOT3, [STOP_RATE_LIMIT, PICKED_TWO, 'moved to 3 (by a press or a command)', 'stop switch given up on: landed late, no carry-on']])
 })
 
 test('a switch given up on after SWITCH_WAIT_MS that lands late leaves the session on the login a person pressed for since (puma-9arph.39)', async ($, on) => {
@@ -17217,7 +17233,7 @@ test('READ-BEFORE-SPENT-OLD: a login that could not be read (its token idle) goe
   const log = whats(stopLogOf(store, w))
   expect(log).toContain('read live before spent-old: 3 (100/100)')
   expect(log).toContain('not read live: token idle: 2')
-  expect(log.filter(line => line.startsWith('picked '))).toEqual([expect.stringMatching(/^picked 2: spent-old, read 120 min ago; tried 1$/)])
+  expect(log.filter(line => line.startsWith('picked '))).toEqual([expect.stringMatching(/^picked 2: spent-old \(idle token\), read 120 min ago; tried 1$/)])
 })
 
 test('READ-BEFORE-SPENT-OLD: a read that fails keeps the old reading, and that login goes into the blind try (a 429)', async ($, on) => {
@@ -17386,7 +17402,7 @@ for (const kind of ['fable', 'week', 'five'] as const) {
 for (const [kind, stop] of [['fable', FABLE_STOP], ['week', { error: 'rate_limit', last_assistant_message: PLAIN_STOPS[0] }], ['five', { error: 'rate_limit', last_assistant_message: PLAIN_STOPS[0] }]] as const) {
   test(`MARKS-END-ON-FALL: a manual reset of login 3 (100 to 0, the same reset times) ends its ${kind} mark at the next read, and the next stop picks it fresh`, async ($, on) => {
     const { w, store, clock, key } = await manualResetOnThree($, on, kind, { week: 100, fable: 100, five: 100 }, [0, 0, 0])
-    expect(store.get(key), 'the mark ended at the read, though it is 20 minutes old').toBeUndefined()
+    expect(markStands(store, key), 'the mark ended at the read, though it is 20 minutes old').toBe(false)
     await $.classic.StopFailure(stop)
     await clock.settle()
     expect(slotValues(w), 'the stop moves to login 3').toEqual([SLOT3])
@@ -17431,10 +17447,11 @@ test('SPENT-OLD-GATE: a body 30 s old that the minute gate keeps from being read
  * The session runs on login 3, whose last body read `first` percent of every window, with a mark standing 10 minutes old on
  * `kind`. A response then stores `response` percent over that row; the next body, due in ten minutes, reads `live`.
  */
-/** What the body path keeps of a body read, under `usage-body:<id>`: its time and its windows. */
-const bodyOfThree = (pct: number, at: number) => ({ at, fiveHour: { pct, resetsAt: FIVE_RESET_3 }, sevenDay: { pct, resetsAt: WEEK_RESET_3 }, fable: { pct, resetsAt: FABLE_RESET } })
+/** What the body path keeps of a body read, under its session's own key `usage-body:<id>:<session mark>`: its time and its windows. */
+const THREE_BY = 'three@example.com|org-three@example.com'
+const bodyOfThree = (pct: number, at: number) => ({ at, by: THREE_BY, fiveHour: { pct, resetsAt: FIVE_RESET_3 }, sevenDay: { pct, resetsAt: WEEK_RESET_3 }, fable: { pct, resetsAt: FABLE_RESET } })
 
-async function markedOnThree($: Engine, on: On, kind: 'week' | 'five', first: number, live: number) {
+async function markedOnThree($: Engine, on: On, kind: 'week' | 'five' | 'fable', first: number, live: number) {
   const w = fresh()
   w.keychain['Claude Code-credentials'] = blob('tok-1')
   w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
@@ -17445,13 +17462,18 @@ async function markedOnThree($: Engine, on: On, kind: 'week' | 'five', first: nu
   w.usage['tok-3'] = [live, live, live]
   w.fableResetsBy = { 'tok-1': FABLE_RESET, 'tok-2': FABLE_RESET_2, 'tok-3': FABLE_RESET }
   w.weekResets = { 'tok-1': '2026-10-18T03:00:00Z', 'tok-2': '2026-10-19T03:00:00Z', 'tok-3': WEEK_RESET_3 }
-  const mark = kind === 'week' ? { 'week-mark:3': { pct: 100, resetsAt: WEEK_RESET_3, at: NOW - 10 * 60_000 } } : { 'mark:3': { pct: 100, resetsAt: FIVE_RESET_3, at: NOW - 10 * 60_000 } }
+  const marks = {
+    week: { 'week-mark:3': { pct: 100, resetsAt: WEEK_RESET_3, at: NOW - 10 * 60_000 } },
+    five: { 'mark:3': { pct: 100, resetsAt: FIVE_RESET_3, at: NOW - 10 * 60_000 } },
+    fable: { 'fable-mark:3': { pct: 100, resetsAt: FABLE_RESET, at: NOW - 10 * 60_000 } },
+  }
+  const mark = marks[kind]
   const store = new Map<string, unknown>(
     Object.entries({
       ...THREE_LOGINS,
       ...mark,
       'usage:3': bodyRowOfThree(first, NOW - 15 * 60_000),
-      'usage-body:3': bodyOfThree(first, NOW - 15 * 60_000),
+      'usage-body:3:session-other': bodyOfThree(first, NOW - 15 * 60_000),
       'usage-due:3': { next: NOW + 10 * 60_000, fails: 0, at: NOW - 15 * 60_000, v: 1 },
     }),
   )
@@ -17492,7 +17514,7 @@ for (const kind of ['week', 'five'] as const) {
     expect(held.isPaused, 'the response save waits after reading the row').toBe(true)
     // Another session's body 94 is saved meanwhile, as the body path saves it: the row and its own baseline key.
     store.set('usage:3', bodyRowOfThree(94, clock.now()))
-    store.set('usage-body:3', bodyOfThree(94, clock.now()))
+    store.set('usage-body:3:session-y', bodyOfThree(94, clock.now()))
     held.open()
     await responding
     await clock.settle()
@@ -17512,7 +17534,7 @@ for (const kind of ['week', 'five'] as const) {
 
   test(`guard: a fall from the previous body ends the ${kind} mark, a response between them or not (100, response 98, 0)`, async ($, on) => {
     const { store, key } = await responseBetweenBodies($, on, kind, 100, 98, 0)
-    expect(store.get(key)).toBeUndefined()
+    expect(markStands(store, key)).toBe(false)
   })
 }
 
@@ -17594,3 +17616,738 @@ test('GREEN-TICK-MOVE: after a model stop, a person\'s new turn and then a freed
   expect(slotValues(w), 'the freed login is not moved to by a tick').toEqual([])
   expect(w.submitted, 'the carry-on is not sent over the person\'s own work').toEqual([])
 })
+
+// ---------------------------------------------------------------- PR A follow-ups: the two BLOCKs of Codex's last round on #161
+// https://code.claude.com/docs/en/plugins/mods/interface.md: "A `get` followed by a `set` isn't atomic": no two sessions write one key.
+
+/**
+ * Login 3's body, read by this session, answers `live` where `first` was the last body's percent (another session's key),
+ * and waits after it read its baseline, for a test that saves another session's newer body then. A mark stands 10 minutes old.
+ */
+async function heldBody($: Engine, on: On, kind: 'week' | 'five', first: number, live: number) {
+  const { w, store, clock, key } = await markedOnThree($, on, kind, first, live)
+  const held = { isPaused: false, open: () => {} }
+  const gate = new Promise<void>(resolve => {
+    held.open = resolve
+  })
+  const written: string[] = []
+  w.onStoreSet = storeKey => {
+    if (storeKey.startsWith('usage-body:3')) written.push(storeKey)
+  }
+  w.afterStoreGet = async storeKey => {
+    if (held.isPaused || !storeKey.startsWith('usage-body:3')) return
+    held.isPaused = true
+    await gate
+  }
+  for (let waited = 0; waited < 12 * 60_000 && !held.isPaused; waited += 1_000) await clock.advance(1_000)
+  expect(held.isPaused, 'the body of login 3 waits after reading its baseline').toBe(true)
+  await clock.advance(1_000)
+  return { w, store, clock, key, written, release: () => { w.afterStoreGet = undefined; held.open() } }
+}
+
+for (const kind of ['week', 'five'] as const) {
+  test(`BODY-WRITE-ORDER: a body (96) that waits after reading its baseline (98) while another session saves a newer one (94) leaves 94 the baseline of the next body (91): the ${kind} mark stands`, async ($, on) => {
+    const { w, store, clock, key, release } = await heldBody($, on, kind, 98, 96)
+    store.set('usage-body:3:session-y', bodyOfThree(94, clock.now()))
+    store.set('usage:3', bodyRowOfThree(94, clock.now()))
+    release()
+    await clock.settle()
+    const heldAt = (store.get('usage:3') as { at: number }).at
+    w.usage['tok-3'] = [91, 91, 91]
+    // No response since the held body: the schedule reads login 3 again 30 minutes after it.
+    for (let waited = 0; waited < 35 * 60_000; waited += 20_000) await clock.advance(20_000)
+    await clock.settle()
+    expect((store.get('usage:3') as { at: number; sevenDay?: { pct: number } }).sevenDay?.pct, 'the next body, 91, is stored').toBe(91)
+    expect((store.get('usage:3') as { at: number }).at).toBeGreaterThan(heldAt)
+    expect(store.get(key), 'body to body is 94 to 91: no reset').toBeDefined()
+  })
+
+  // Codex pr-b-r3: a key is written once, named by the time of its body and its session, and never rewritten by anyone.
+  test(`BODY-WRITE-ORDER class: the ${kind} body path writes each body under a new key of its read time and its session, and no key twice`, async ($, on) => {
+    const { w, store, clock, written, release } = await heldBody($, on, kind, 98, 96)
+    store.set('usage-body:3:session-y', bodyOfThree(94, clock.now()))
+    release()
+    await clock.settle()
+    // The next body, 30 minutes on with no response between.
+    for (let waited = 0; waited < 35 * 60_000; waited += 20_000) await clock.advance(20_000)
+    await clock.settle()
+    expect(written.length, 'two bodies were saved').toBeGreaterThanOrEqual(2)
+    expect(new Set(written).size, 'no key was written twice').toBe(written.length)
+    const own = new RegExp(`^usage-body:3:\\d+:${w.otherEnv.ACCOUNT_ROTATOR_SESSION}$`)
+    expect(written.filter(key => !own.test(key)), 'every key is this session\'s own, named by its time').toEqual([])
+  })
+}
+
+for (const kind of ['week', 'five'] as const) {
+  test(`guard: of two other sessions' bodies the newest is the baseline, so a fall from it ends the ${kind} mark (100 at -15 min, 50 at -3 h, then 0)`, async ($, on) => {
+    const { w, store, clock, key } = await markedOnThree($, on, kind, 100, 0)
+    // Before the next body, due in nine minutes.
+    store.set('usage-body:3:session-old', bodyOfThree(50, NOW - 3 * HOUR))
+    for (let waited = 0; waited < 12 * 60_000; waited += 20_000) await clock.advance(20_000)
+    await clock.settle()
+    expect((store.get('usage:3') as { src?: string }).src, 'the next body is stored').toBe('body')
+    expect(markStands(store, key), 'the mark ended: 100 to 0').toBe(false)
+    void w
+  })
+}
+
+// Council store-races: a mark ends only on the newest visible body of the SAME account identity and the SAME window, 5 or more
+// points higher. https://code.claude.com/docs/en/plugins/mods/interface.md: "A `get` followed by a `set` isn't atomic".
+const OTHER_BY = 'other@example.com|org-other@example.com'
+/** A body of login 3 whose windows reset a week and a day on from the mark's own: another window of each kind. */
+const bodyOfAnotherWindow = (pct: number, at: number, by: string = THREE_BY) => ({
+  at,
+  by,
+  fiveHour: { pct, resetsAt: '2026-10-12T17:00:00Z' },
+  sevenDay: { pct, resetsAt: '2026-10-27T03:00:00Z' },
+  fable: { pct, resetsAt: '2026-10-24T03:00:00Z' },
+})
+
+for (const kind of ['week', 'five'] as const) {
+  for (const why of ['another account', 'no identity'] as const) {
+    test(`BODY-IDENTITY: a body read under ${why} is no baseline, so a lower read (100, then 94) ends no ${kind} mark`, async ($, on) => {
+      const { store, clock, key } = await markedOnThree($, on, kind, 100, 94)
+      const { by: _by, ...unnamed } = bodyOfThree(100, NOW - 15 * 60_000)
+      store.set('usage-body:3:session-other', why === 'no identity' ? unnamed : { ...unnamed, by: OTHER_BY })
+      for (let waited = 0; waited < 12 * 60_000; waited += 20_000) await clock.advance(20_000)
+      await clock.settle()
+      expect((store.get('usage:3') as { src?: string }).src, 'the next body is stored').toBe('body')
+      expect(store.get(key), 'a fall of 6 from no account\'s own body: the mark stands').toBeDefined()
+    })
+  }
+
+  test(`BODY-WINDOW: the baseline is the newest body that holds the kind, whatever its window: a newer body of another window leaves a lagging read of the older one (96, new window 20, then 90) no proof, so the ${kind} mark stands`, async ($, on) => {
+    const { store, clock, key } = await markedOnThree($, on, kind, 96, 90)
+    store.set('usage-body:3:session-newer', bodyOfAnotherWindow(20, NOW - 5 * 60_000))
+    for (let waited = 0; waited < 12 * 60_000; waited += 20_000) await clock.advance(20_000)
+    await clock.settle()
+    expect((store.get('usage:3') as { src?: string }).src, 'the next body is stored').toBe('body')
+    expect(store.get(key), 'the newest body is of another window: no baseline, no proof').toBeDefined()
+  })
+
+  test(`guard: a newer body that lacks the kind does not hide an older body that holds it, so 100 then 94 ends the ${kind} mark`, async ($, on) => {
+    const { store, clock, key } = await markedOnThree($, on, kind, 100, 94)
+    store.set('usage-body:3:session-newer', { at: NOW - 5 * 60_000, by: THREE_BY, fable: { pct: 20, resetsAt: FABLE_RESET } })
+    for (let waited = 0; waited < 12 * 60_000; waited += 20_000) await clock.advance(20_000)
+    await clock.settle()
+    expect((store.get('usage:3') as { src?: string }).src, 'the next body is stored').toBe('body')
+    expect(markStands(store, key), 'a fall of 6 from the body that holds the kind').toBe(false)
+  })
+
+  test(`guard: a lower read of another window than the only body's ends no ${kind} mark (100 of another window, then 94)`, async ($, on) => {
+    const { store, clock, key } = await markedOnThree($, on, kind, 100, 94)
+    store.set('usage-body:3:session-other', bodyOfAnotherWindow(100, NOW - 15 * 60_000))
+    for (let waited = 0; waited < 12 * 60_000; waited += 20_000) await clock.advance(20_000)
+    await clock.settle()
+    expect((store.get('usage:3') as { src?: string }).src, 'the next body is stored').toBe('body')
+    expect(store.get(key)).toBeDefined()
+  })
+
+  test(`guard: after a real reset and a new stop the newest body, not the highest, is the baseline, so a lagging read (2 at -15 min, 100 at -3 h, then 90) ends no ${kind} mark`, async ($, on) => {
+    const { store, clock, key } = await markedOnThree($, on, kind, 2, 90)
+    store.set('usage-body:3:session-old', bodyOfThree(100, NOW - 3 * HOUR))
+    for (let waited = 0; waited < 12 * 60_000; waited += 20_000) await clock.advance(20_000)
+    await clock.settle()
+    expect((store.get('usage:3') as { src?: string }).src, 'the next body is stored').toBe('body')
+    expect(store.get(key), 'a rise from the newest body, a fall only from the highest').toBeDefined()
+  })
+
+  test(`guard: a completed read whose key is not visible only delays the ${kind} mark's end to the next read (visible 98, invisible 100, reads 94 then 80)`, async ($, on) => {
+    const { w, store, clock, key } = await markedOnThree($, on, kind, 98, 94)
+    for (let waited = 0; waited < 12 * 60_000; waited += 20_000) await clock.advance(20_000)
+    await clock.settle()
+    expect(store.get(key), 'a fall of 4 from the visible body: delayed, not ended').toBeDefined()
+    w.usage['tok-3'] = [80, 80, 80]
+    for (let waited = 0; waited < 35 * 60_000; waited += 20_000) await clock.advance(20_000)
+    await clock.settle()
+    expect(markStands(store, key), 'the next read falls from the body the last one wrote').toBe(false)
+  })
+
+  test(`guard: the shared row is no baseline, so a row written out of order (100) over the newest body (96) leaves a read of 94 to end no ${kind} mark`, async ($, on) => {
+    const { store, clock, key } = await markedOnThree($, on, kind, 96, 94)
+    store.set('usage:3', bodyRowOfThree(100, NOW - 14 * 60_000))
+    for (let waited = 0; waited < 12 * 60_000; waited += 20_000) await clock.advance(20_000)
+    await clock.settle()
+    expect((store.get('usage:3') as { src?: string }).src, 'the next body is stored').toBe('body')
+    expect(store.get(key), 'a fall of 2 from the newest body').toBeDefined()
+  })
+}
+
+// Codex pr-b-r7 B1: ending a proven mark deletes or rewrites no key another session could have just written: it writes a
+// record naming that exact mark (`mark-end:<kind>:<id>:<mark.at>`), which a mark of another `at` never meets.
+const NEW_WINDOW_MARK_RESET = { week: '2026-10-27T03:00:00Z', five: '2026-10-12T17:00:00Z', fable: '2026-10-24T03:00:00Z' }
+const VIEW_MARKS = { week: 'weekMarks', five: 'marks', fable: 'fableMarks' } as const
+
+for (const kind of ['week', 'five', 'fable'] as const) {
+  test(`MARK-END: the ${kind} mark another session writes for a new window while a proven end of the old one is under way stands`, async ($, on) => {
+    const { w, store, clock, key } = await markedOnThree($, on, kind, 100, 0)
+    const newMark = { pct: 100, resetsAt: NEW_WINDOW_MARK_RESET[kind], at: NOW + 8 * 60_000 }
+    const written = { isDone: false }
+    const writeNew = () => {
+      if (written.isDone) return
+      written.isDone = true
+      store.set(key, newMark)
+    }
+    // Session B writes its mark right after this session's check read the old one and the bodies, as the end is under way.
+    const seen = { hasBodies: false }
+    w.afterStoreGet = async storeKey => {
+      if (storeKey.startsWith('usage-body:3:')) seen.hasBodies = true
+      else if (seen.hasBodies && storeKey === key) writeNew()
+    }
+    for (let waited = 0; waited < 12 * 60_000; waited += 20_000) await clock.advance(20_000)
+    await clock.settle()
+    w.afterStoreGet = undefined
+    writeNew()
+    for (let waited = 0; waited < 3 * 60_000; waited += 20_000) await clock.advance(20_000)
+    await clock.settle()
+    expect((store.get('usage:3') as { src?: string }).src, 'the body is stored').toBe('body')
+    expect(store.get(key), 'the new window\'s mark is whole').toEqual(newMark)
+    expect([...store.keys()].filter(k => k.startsWith('mark-end:') && k.endsWith(`:${newMark.at}`)), 'and no end names it').toEqual([])
+  })
+
+  test(`guard: a proven end of the ${kind} mark removes it from the view across the merge of the minute's tick`, async ($, on) => {
+    let last: View | undefined
+    on('state.set', async (_$, e, next) => {
+      const { key, value } = e as unknown as { key: string; value: View }
+      if (key === 'view') last = value
+      return next(e)
+    })
+    const { clock } = await markedOnThree($, on, kind, 100, 0)
+    expect(last?.[VIEW_MARKS[kind]]?.['3'], 'the mark is in the view before the end').toBeDefined()
+    for (let waited = 0; waited < 15 * 60_000; waited += 20_000) await clock.advance(20_000)
+    await clock.settle()
+    expect(last?.[VIEW_MARKS[kind]]?.['3'], 'the view no longer holds the ended mark').toBeUndefined()
+  })
+}
+
+test('MARK-END: a proven end is a record naming the mark, and the end records whose reset has passed go with the next body', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.usage['tok-1'] = [20, 30, 21]
+  const store = new Map<string, unknown>(
+    Object.entries({
+      ...TWO_LOGINS,
+      'mark-end:week:1:100': { resetsAt: '2026-10-05T03:00:00Z' },
+      'mark-end:week:1:200': { resetsAt: '2026-10-20T03:00:00Z' },
+    }),
+  )
+  const clock = world(on, w, store)
+  await start($, clock)
+  expect([store.has('mark-end:week:1:100'), store.has('mark-end:week:1:200')]).toEqual([false, true])
+})
+
+test('MARK-END: a sign-in as another account keeps the end records, so an ended mark stays ended and a new mark stands', async ($, on) => {
+  let last: View | undefined
+  on('state.set', async (_$, e, next) => {
+    const { key, value } = e as unknown as { key: string; value: View }
+    if (key === 'view') last = value
+    return next(e)
+  })
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.usage['tok-1'] = [20, 30, 40]
+  const ended = { pct: 100, resetsAt: '2026-10-20T03:00:00Z', at: NOW - HOUR }
+  const store = new Map<string, unknown>(
+    Object.entries({
+      ...TWO_LOGINS,
+      'holder:1': { token: 'a-token-that-is-not-this-one', who: { email: 'nine@example.com' } },
+      'week-mark:1': ended,
+      [`mark-end:week:1:${ended.at}`]: { resetsAt: ended.resetsAt },
+    }),
+  )
+  const clock = world(on, w, store)
+  await start($, clock)
+  expect(store.has(`mark-end:week:1:${ended.at}`), 'the record stays until its reset has passed').toBe(true)
+  expect(last?.weekMarks?.['1'], 'the ended mark does not come back on the new account').toBeUndefined()
+  const fresher = { pct: 100, resetsAt: '2026-10-21T03:00:00Z', at: NOW + 60_000 }
+  store.set('week-mark:1', fresher)
+  await clock.advance(2 * 60_000)
+  await clock.settle()
+  expect(last?.weekMarks?.['1'], 'a new mark stands').toEqual(fresher)
+})
+
+test('MARK-END: removing a login deletes the end records of it', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [null, 40]
+  w.usage['tok-2'] = [null, 30]
+  const store = new Map<string, unknown>(
+    Object.entries({
+      ...TWO_LOGINS,
+      'mark:2': { pct: 100, resetsAt: '2026-10-20T03:00:00Z', at: 5 },
+      'mark-end:five:2:5': { resetsAt: '2026-10-20T03:00:00Z' },
+      'mark-end:week:1:5': { resetsAt: '2026-10-20T03:00:00Z' },
+    }),
+  )
+  const clock = world(on, w, store)
+  await start($, clock)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  await pane.press({ key: 'ask-remove-2' })
+  await clock.settle()
+  await pane.redraw()
+  await pane.press({ key: 'remove-2' })
+  await clock.settle()
+  expect([store.has('mark-end:five:2:5'), store.has('mark:2'), store.has('mark-end:week:1:5')], 'its marks and their end records go, another login\'s record stays').toEqual([false, false, true])
+  await pane.unmount()
+})
+
+test('BODY-IDENTITY: the key a body read writes names the account, never a token', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.usage['tok-1'] = [20, 30, 21]
+  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  const own = [...store.entries()].filter(([k]) => k.startsWith('usage-body:1:'))
+  expect(own).toHaveLength(1)
+  const by = (own[0]?.[1] as { by?: unknown }).by
+  expect([typeof by, String(by).includes('example.com'), String(by).includes('tok-1')]).toEqual(['string', true, false])
+})
+
+test('BODY-KEYS: a refused write of the body key is logged and the read stands, with no check error and the health stored', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.usage['tok-1'] = [20, 30, 21]
+  w.storeWriteFails = 'usage-body:'
+  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  expect((store.get('usage:1') as { sevenDay?: { pct: number } } | undefined)?.sevenDay?.pct, 'the read is stored').toBe(30)
+  expect(store.get('check-error:1'), 'no failed check').toBeUndefined()
+  expect(store.has('health:1'), 'the check went on to store the health').toBe(true)
+  expect((w.logged ?? []).filter(line => line.includes('body key') && line.includes('not written'))).toHaveLength(1)
+})
+
+test('BODY-KEYS: a body check deletes the body keys of a login that are over a week old and keeps the newer ones', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.usage['tok-1'] = [20, 30, 21]
+  const store = new Map<string, unknown>(
+    Object.entries({
+      ...TWO_LOGINS,
+      'usage-body:1:session-old': { at: NOW - 8 * DAY, sevenDay: { pct: 5, resetsAt: '2026-10-05T03:00:00Z' } },
+      'usage-body:1:session-recent': { at: NOW - HOUR, sevenDay: { pct: 5, resetsAt: WEEK_RESET } },
+    }),
+  )
+  const clock = world(on, w, store)
+  await start($, clock)
+  const keys = [...store.keys()].filter(k => k.startsWith('usage-body:1:'))
+  const own = new RegExp(`^usage-body:1:\\d+:${w.otherEnv.ACCOUNT_ROTATOR_SESSION}$`)
+  expect([keys.includes('usage-body:1:session-old'), keys.includes('usage-body:1:session-recent'), keys.filter(k => own.test(k)).length]).toEqual([false, true, 1])
+})
+
+test('BODY-KEYS: removing a login deletes every session\'s body key of it', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [null, 40]
+  w.usage['tok-2'] = [null, 30]
+  const store = new Map<string, unknown>(
+    // `usage-body:2` is the key part A's first version wrote, with no session in it.
+    Object.entries({ ...TWO_LOGINS, 'usage-body:2': { at: NOW - HOUR }, 'usage-body:2:session-a': { at: NOW - HOUR }, 'usage-body:2:session-b': { at: NOW - HOUR }, 'usage-body:1:session-a': { at: NOW - HOUR } }),
+  )
+  const clock = world(on, w, store)
+  await start($, clock)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  await pane.press({ key: 'ask-remove-2' })
+  await clock.settle()
+  await pane.redraw()
+  await pane.press({ key: 'remove-2' })
+  await clock.settle()
+  expect([...store.keys()].filter(k => k.startsWith('usage-body:2'))).toEqual([])
+  expect(store.has('usage-body:1:session-a'), 'another login\'s key stays').toBe(true)
+  await pane.unmount()
+})
+
+/**
+ * A Fable stop's twin: login 1's Opus limit with login 2 spent owes a carry-on dated 13:00Z. A tick at that time begins to
+ * clear it, and its write of the view waits, while a later Opus stop owes one for 15:00Z.
+ */
+test('MODEL-DEBT-CLEAR: a tick clearing the model debt it read sends nothing when a later model stop owes a later debt during the clear', async ($, on) => {
+  // modelStopWithTwoSpent's world, with a view write that can wait: a hook is registered before the first call on `$`.
+  const w = fresh()
+  const { clock, store } = await loggedWorld(on, w)
+  w.usage['tok-1'] = [20, 30, 21]
+  // Login 2 stays spent past the later stop, so that stop finds no login to move to and owes a debt of its own.
+  w.usage['tok-2'] = [100, 30, 21]
+  w.fiveHourResets = { 'tok-2': '2026-10-12T17:00:00Z' }
+  let last: View | undefined
+  const held = { isPaused: false, open: () => {} }
+  const gate = new Promise<void>(resolve => {
+    held.open = resolve
+  })
+  on('state.set', async (_$, e, next) => {
+    const { key, value } = e as unknown as { key: string; value: View }
+    if (key !== 'view') return next(e)
+    last = value
+    if (!held.isPaused && value.carryDue === undefined && clock.now() >= AT_1PM_Z) {
+      held.isPaused = true
+      await gate
+    }
+    return next(e)
+  })
+  const view = () => last
+  await start($, clock)
+  await $.classic.StopFailure(OPUS_AT_4PM)
+  await clock.settle()
+  await tickUntil(clock, AT_1PM_Z - 3 * 60_000)
+  for (let waited = 0; waited < 20 * 60_000 && !held.isPaused; waited += 1_000) await clock.advance(1_000)
+  expect(held.isPaused, 'the tick at the debt\'s date waits while it clears the debt').toBe(true)
+  await $.classic.StopFailure(OPUS_AT_6PM)
+  await clock.settle()
+  held.open()
+  await clock.settle()
+  // Past the settle a carry-on takes before it is submitted.
+  await clock.advance(60_000)
+  await clock.settle()
+  expect(whats(stopLogOf(store, w)).filter(line => line.startsWith('moved to')), 'no login to move to').toEqual([])
+  expect(w.submitted, 'the debt the tick read is not sent: a later one stands').toEqual([])
+  expect(view()?.carryDue, 'the later debt stands').toMatchObject({ at: Date.parse('2026-10-12T15:00:00Z'), from: '1' })
+  await tickUntil(clock, Date.parse('2026-10-12T15:00:00Z') + 10 * 60_000)
+  expect(w.submitted, 'the later debt goes at its own date').toHaveLength(1)
+})
+
+// ---------------------------------------------------------------- PR B, epic puma-9arph.109: readings that show what they are
+// ---------------------------------------------------------------- puma-9arph.109.6: read ages
+
+test('READ-AGE: a body check and a response save keep the Fable row\'s own read time, though each refreshes the reading\'s', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [20, 30, 40]
+  w.usage['tok-2'] = [10, 30]
+  w.weekResets = { 'tok-2': OTHER_WEEK }
+  const store = new Map<string, unknown>(Object.entries(TWO_LOGINS))
+  const clock = world(on, w, store)
+  await start($, clock)
+  const first = store.get('usage:1') as { at: number; fable?: { pct: number; at?: number } }
+  expect(first.fable, 'the body that listed the Fable week stamps it').toMatchObject({ pct: 40, at: first.at })
+  // Later bodies list no Fable week: its row is kept, with the time it was read.
+  w.usage['tok-1'] = [25, 31]
+  await clock.advance(40 * 60_000)
+  const afterBody = store.get('usage:1') as { at: number; src: string; fable?: { pct: number; at?: number } }
+  expect([afterBody.src, afterBody.at > first.at, afterBody.fable?.at]).toEqual(['body', true, first.at])
+  w.limits = limitsOf(26, 32)
+  await respond($, clock, w)
+  const afterResponse = store.get('usage:1') as { at: number; src: string; fable?: { pct: number; at?: number } }
+  expect([afterResponse.src, afterResponse.at > first.at, afterResponse.fable]).toEqual(['response', true, { pct: 40, resetsAt: FABLE_RESET, at: first.at }])
+})
+
+/**
+ * Login 1 is in use with its Fable week spent. Login 2 holds a stored reading with room, read `readAgo` ms ago, its Fable
+ * row `fableAgo` ms ago; its token has run out where `isTwoIdle`. The schedule does not read login 2 before the stop.
+ */
+async function agedReadings($: Engine, on: On, options: { readAgo: number; fableAgo?: number; isTwoIdle?: boolean }) {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2', options.isTwoIdle ? NOW - HOUR : undefined)
+  w.usage['tok-1'] = [20, 30, 100]
+  w.usage['tok-2'] = [10, 10, 10]
+  const store = new Map<string, unknown>(
+    Object.entries({
+      ...TWO_LOGINS,
+      'rotate-to': 'room',
+      'usage:2': {
+        fiveHour: { pct: 10, resetsAt: '2026-10-12T12:00:00Z' },
+        sevenDay: { pct: 10, resetsAt: '2026-10-18T03:00:00Z' },
+        fable: { pct: 10, resetsAt: FABLE_RESET, at: NOW - (options.fableAgo ?? options.readAgo) },
+        at: NOW - options.readAgo,
+        by: '2',
+        v: 1,
+        src: 'body',
+      },
+      'usage-due:2': { next: NOW + HOUR, fails: 0, at: NOW - options.readAgo, v: 1 },
+    }),
+  )
+  const clock = world(on, w, store)
+  await start($, clock)
+  return { w, store, clock }
+}
+
+test('READ-AGE: a login read 5 minutes ago whose Fable row is 40 minutes old is picked as stale for a Fable stop, and the log says so', async ($, on) => {
+  const { w, store, clock } = await agedReadings($, on, { readAgo: 5 * 60_000, fableAgo: 40 * 60_000 })
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  expect(slotValues(w)).toEqual([SLOT2])
+  // The pick was judged on the Fable row, read 40 minutes ago, though a response refreshed the reading 5 minutes ago: the log
+  // and the carry-on line both say 40.
+  expect(whats(stopLogOf(store, w)).filter(line => line.startsWith('picked '))).toEqual(['picked 2: stale, read 40 min ago; tried 1'])
+  await clock.advance(36_000)
+  expect(w.submitted).toHaveLength(1)
+  expect(w.submitted[0]).toMatch(/Fable week was last read 40 min ago/)
+})
+
+test('READ-AGE: an idle login is picked as stale with its true age, in the log and not as spent (06:11:51)', async ($, on) => {
+  const { w, store, clock } = await agedReadings($, on, { readAgo: 2360 * 60_000, isTwoIdle: true })
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  expect(slotValues(w)).toEqual([SLOT2])
+  expect(whats(stopLogOf(store, w)).filter(line => line.startsWith('picked '))).toEqual(['picked 2: stale (idle token), read 2360 min ago; tried 1'])
+})
+
+test('READ-AGE guard: a login with a live token read 5 minutes ago, Fable row included, is still picked as fresh', async ($, on) => {
+  const { w, store, clock } = await agedReadings($, on, { readAgo: 5 * 60_000 })
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  expect(slotValues(w)).toEqual([SLOT2])
+  expect(whats(stopLogOf(store, w)).filter(line => line.startsWith('picked '))).toEqual(['picked 2: fresh, read 5 min ago; tried 1'])
+})
+
+// ---------------------------------------------------------------- puma-9arph.109.7: readings that show what they are
+
+test('PROVENANCE: the rows every session stores are at version 2 and carry each login\'s windows with their source and read time', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [20, 30, 40]
+  w.usage['tok-2'] = [10, 30]
+  const store = new Map<string, unknown>(Object.entries(TWO_LOGINS))
+  const clock = world(on, w, store)
+  await start($, clock)
+  await clock.advance(61_000)
+  const read = store.get('usage:1') as { at: number }
+  // Rows version 2 has a key of its own, which an older session never writes; `rows` stays version 1, for older readers.
+  const rows = store.get('rows2') as { v: number; rows: { id: string; windows?: unknown }[] }
+  expect(rows.v).toBe(2)
+  expect(rows.rows.find(r => r.id === '1')?.windows).toEqual({ week: { pct: 30, source: 'read', readAt: read.at }, fable: { pct: 40, source: 'read', readAt: read.at } })
+  const v1 = store.get('rows') as { v: number; rows: { id: string; lines: unknown[]; windows?: unknown }[] }
+  expect([v1.v, v1.rows.map(r => r.windows), v1.rows.map(r => r.lines)]).toEqual([1, [undefined, undefined], rows.rows.map(r => r.lines)])
+})
+
+test('PROVENANCE: the pane draws a spent window in the warning colour and one with room in none', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.usage['tok-1'] = [20, 100, 40]
+  const clock = world(on, w, { accounts: [TWO_LOGINS.accounts[0]] })
+  await start($, clock)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  const spent = await pane.find({ text: /^▰{10} 100%$/ })
+  const room = await pane.find({ text: /^▰{4}▱{6}  40%$/ })
+  expect([painted(spent)[0]?.color, painted(room)[0]?.color], 'the spent week is in the warning colour, the Fable week with room in none').toEqual(['warning', undefined])
+  await pane.unmount()
+})
+
+// ---------------------------------------------------------------- puma-9arph.109.8: every move leaves a line in the stop-log
+
+const movesOf = (store: Map<string, unknown>, w: World) => whats(stopLogOf(store, w)).filter(line => line.startsWith('moved to '))
+
+test('MOVE-LOG: a move by a press leaves "moved to N (by a press or a command)"', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [10, 40]
+  w.usage['tok-2'] = [10, 41]
+  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off' }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  await pane.press({ key: 'use-2' })
+  await clock.settle()
+  await pane.unmount()
+  expect(movesOf(store, w)).toEqual(['moved to 2 (by a press or a command)'])
+})
+
+test('MOVE-LOG: a move by the tick or a response leaves "moved to N (by the tick or a response)"', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await loggedWorld(on, w)
+  w.usage['tok-1'] = [92, 40]
+  await start($, clock)
+  expect(slotValues(w)).toEqual([SLOT2])
+  expect(movesOf(store, w)).toEqual(['moved to 2 (by the tick or a response)'])
+})
+
+test('MOVE-LOG: a stop that rides the switch running leaves its own line beside the switch\'s', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await loggedWorld(on, w)
+  let open: () => void = () => undefined
+  const gate = new Promise<void>(resolve => { open = resolve })
+  let writes = 0
+  w.beforeEnv = () => (writes++ === 0 ? gate : Promise.resolve())
+  w.usage['tok-1'] = [100, 41]
+  await start($, clock)
+  await settleReal(clock)
+  await $.classic.StopFailure(PLAIN)
+  await settleReal(clock)
+  open()
+  await settleReal(clock)
+  expect(movesOf(store, w)).toEqual(['moved to 2 (by the tick or a response)', 'moved to 2 (by a stop riding the switch running)'])
+})
+
+test('MOVE-LOG: the point-back of a switch that did not take leaves "moved to N (by a point-back: ...)"', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [10, 40]
+  w.usage['tok-2'] = [10, 41]
+  w.weekResets = { 'tok-2': OTHER_WEEK }
+  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off' }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  await pane.press({ key: 'use-2' })
+  await clock.settle()
+  await pane.unmount()
+  // The switch did not take: responses still carry login 1's week.
+  w.limits = [{ kind: 'seven_day', percentUsed: 42, resetsAt: WEEK_RESET }]
+  await clock.advance(60_000)
+  await respond($, clock, w)
+  await clock.advance(4 * 60_000)
+  await respond($, clock, w)
+  expect(movesOf(store, w)).toEqual(['moved to 2 (by a press or a command)', 'moved to 1 (by a point-back: responses still use login 1)'])
+})
+
+test('MOVE-LOG: a stop whose reset names another login points back, and leaves its own "moved to" line', async ($, on) => {
+  const ctx = await fableOnTwo($, on, '2')
+  await movedToOneThenStoppedOnTwo($, ctx)
+  expect(movesOf(ctx.store, ctx.w)).toEqual(['moved to 1 (by a stop)', "moved to 2 (by a point-back: the stop's reset names login 2)", 'moved to 1 (by a stop)'])
+})
+
+// ---------------------------------------------------------------- puma-9arph.109.9: a credentials file beside the keychain login
+
+const SECRET_FILE = '{"claudeAiOauth":{"accessToken":"SECRET-ACCESS-TOKEN","refreshToken":"SECRET-REFRESH-TOKEN","expiresAt":0},"mcpOAuth":{}}'
+const FILE_MTIME = Date.parse('2026-11-03T21:46:53Z')
+
+/** A macOS session whose normal login is in the keychain, with the file `files` holds beside it. */
+async function credentialsFileWorld($: Engine, on: On, files: Record<string, string>, system: World['system'] = 'macOS') {
+  const w = fresh(system)
+  if (system === 'macOS') w.keychain['Claude Code-credentials'] = blob('tok-1')
+  else w.files[FILE1] = blob('tok-1')
+  Object.assign(w.files, files)
+  w.mtimes = { [FILE1]: FILE_MTIME }
+  w.usage['tok-1'] = [20, 30]
+  const s = clearable(on)
+  const clock = world(on, w, { accounts: [TWO_LOGINS.accounts[0]] })
+  on('classic.SessionStart', () => ({}))
+  await start($, clock)
+  return { w, s, clock }
+}
+
+const warned = (texts: string[]) => texts.filter(t => /\.credentials\.json/.test(t))
+
+test('CREDENTIALS-FILE: a credentials file beside the keychain login is warned of once, as a toast, a notice and a pane line that name its time and moving it aside, and is never read', async ($, on) => {
+  const { w, clock } = await credentialsFileWorld($, on, { [FILE1]: SECRET_FILE })
+  expect([warned(w.toasts).length, warned(w.notices).length]).toEqual([1, 1])
+  const text = warned(w.toasts)[0] ?? ''
+  expect(text).toContain('2026-11-03 21:46 UTC')
+  expect(text).toContain(`mv ${FILE1} ${FILE1}.aside`)
+  expect(text).toMatch(/move back to Claude Code's own login/)
+  await clock.advance(30 * 60_000)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  const line = await pane.find({ text: /\.credentials\.json/ })
+  expect(painted(line)[0]?.color, 'the pane line is a warning').toBe('warning')
+  await pane.unmount()
+  expect([warned(w.toasts).length, warned(w.notices).length], 'once a session').toEqual([1, 1])
+  expect(w.readPaths ?? [], 'only its name and time are read, never its contents').not.toContain(FILE1)
+  expect(w.writes ?? []).not.toContain(FILE1)
+  expect(JSON.stringify([w.toasts, w.notices, w.logged, line]), 'no token value anywhere it was said').not.toContain('SECRET')
+})
+
+test('CREDENTIALS-FILE: with no such file nothing is warned, and on Linux, where the file is the login itself, nothing either', async ($, on) => {
+  const none = await credentialsFileWorld($, on, {})
+  expect([warned(none.w.toasts), warned(none.w.notices)]).toEqual([[], []])
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  expect(await pane.find({ text: /\.credentials\.json/ })).toBeUndefined()
+  await pane.unmount()
+})
+
+test('CREDENTIALS-FILE: on Linux the file is the login itself and is not warned of', async ($, on) => {
+  const { w } = await credentialsFileWorld($, on, {}, 'Linux')
+  expect([warned(w.toasts), warned(w.notices)]).toEqual([[], []])
+})
+
+test('CREDENTIALS-FILE: a /clear keeps the pane line and warns no second time', async ($, on) => {
+  const { w, s, clock } = await credentialsFileWorld($, on, { [FILE1]: SECRET_FILE })
+  await clearSession($, clock, s.clear)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  expect(await pane.find({ text: /\.credentials\.json/ })).toBeDefined()
+  await pane.unmount()
+  expect([warned(w.toasts).length, warned(w.notices).length]).toEqual([1, 1])
+})
+
+// Codex pr-b-r1 C2: a reload of the mod empties its memory, and the session goes on: its view, still bound, says it was told.
+test('CREDENTIALS-FILE: a reload of the mod in the same session warns no second time, and the pane line stays', async ($, on) => {
+  const w = fresh()
+  w.files[FILE1] = SECRET_FILE
+  w.mtimes = { [FILE1]: FILE_MTIME }
+  const told = '/Users/tester/.claude/.credentials.json exists (told before the reload)'
+  await reloadedWorld($, on, { credentialsNote: told }, {}, undefined, w)
+  expect([warned(w.toasts), warned(w.notices)]).toEqual([[], []])
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  expect(await pane.find({ text: /told before the reload/ })).toBeDefined()
+  await pane.unmount()
+})
+
+// Codex pr-b-r1 NOTE and C1: part A's first key, `usage-body:<id>`, goes with the others where a sign-in is replaced, and a login keeps the newest keys only.
+test('BODY-KEYS: a sign-in as another account deletes every body key of the login, the first version\'s with no session among them', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.usage['tok-1'] = [20, 30, 40]
+  const store = new Map<string, unknown>(
+    Object.entries({
+      ...TWO_LOGINS,
+      'holder:1': { token: 'a-token-that-is-not-this-one', who: { email: 'nine@example.com' } },
+      'usage-body:1': { at: NOW - HOUR },
+      'usage-body:1:session-old': { at: NOW - HOUR },
+    }),
+  )
+  const clock = world(on, w, store)
+  await start($, clock)
+  // The sign-in's usage is dropped and not read again in the same check: no body key stands.
+  expect([...store.keys()].filter(k => k.startsWith('usage-body:1'))).toEqual([])
+})
+
+// Codex pr-b-r3: no key is ever rewritten, so the prune of an old key can lose no newer body: B's newer body has a key of its own.
+test('BODY-KEYS: a body another session saves while the prune runs stands, and the week-old key of that session goes', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.usage['tok-1'] = [20, 30, 40]
+  const oldKey = `usage-body:1:${NOW - 8 * DAY}:session-b`
+  const newKey = `usage-body:1:${NOW}:session-b`
+  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, [oldKey]: { at: NOW - 8 * DAY } }))
+  // Session B saves its body, as session B does: under a key of its own, while this session saves its own.
+  w.onStoreSet = key => {
+    if (key.startsWith('usage-body:1:') && !key.includes(':session-b')) store.set(newKey, { at: NOW })
+  }
+  const clock = world(on, w, store)
+  await start($, clock)
+  expect([store.has(oldKey), store.get(newKey)], 'the old body is pruned, B\'s newer one stands').toEqual([false, { at: NOW }])
+})
+
+// Codex pr-b-r4 B2: every completed body has a key of its own, whatever completed in between; the shared row and the marks
+// go by the order of the requests, the baseline of the next request by the order of the completions.
+for (const kind of ['week', 'five'] as const) {
+  test(`BODY-WRITE-ORDER: a body (96) that began before another's (94) and completed after it has its own key, writes no row and ends no ${kind} mark, and the next body (91) falls from it`, async ($, on) => {
+    const { w, store, clock, key } = await markedOnThree($, on, kind, 98, 96)
+    // This session's body of login 3 is answered, then waits before the mod reads it, as the other session's body lands.
+    const held = { isPaused: false, release: () => {} }
+    const gate = new Promise<void>(resolve => {
+      held.release = resolve
+    })
+    w.afterUsageBody = async token => {
+      if (token !== 'tok-3' || held.isPaused) return
+      held.isPaused = true
+      await gate
+    }
+    for (let waited = 0; waited < 12 * 60_000 && !held.isPaused; waited += 1_000) await clock.advance(1_000)
+    expect(held.isPaused, 'the body of login 3 waits after its answer').toBe(true)
+    await clock.advance(1_000)
+    // The other session's body began after this one's, completed first, and saved the row and its own key.
+    store.set('usage:3', bodyRowOfThree(94, clock.now()))
+    store.set(`usage-body:3:${clock.now()}:session-a`, bodyOfThree(94, clock.now()))
+    w.afterUsageBody = undefined
+    // This session's body completes after the other's.
+    await clock.advance(1_000)
+    held.release()
+    await clock.settle()
+    const own =[...store.keys()].filter(k => k.startsWith('usage-body:3:') && k.endsWith(`:${w.otherEnv.ACCOUNT_ROTATOR_SESSION}`))
+    expect(own.length, 'the late body has a key of its own').toBe(1)
+    expect((store.get('usage:3') as { sevenDay?: { pct: number } }).sevenDay?.pct, 'and left the newer row as it was').toBe(94)
+    expect(store.get(key), 'the late body ends no mark').toBeDefined()
+    w.usage['tok-3'] = [91, 91, 91]
+    for (let waited = 0; waited < 35 * 60_000; waited += 20_000) await clock.advance(20_000)
+    await clock.settle()
+    expect((store.get('usage:3') as { sevenDay?: { pct: number } }).sevenDay?.pct, 'the next body, 91, is stored').toBe(91)
+    expect(markStands(store, key), 'it fell 5 from the newest completed body, 96: the mark ends').toBe(false)
+  })
+}
