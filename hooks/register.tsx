@@ -66,7 +66,6 @@ import {
   isNoBrowser,
   isPolicyRefusal,
   keepFable,
-  BODY_KEEP_COUNT,
   BODY_KEEP_MS,
   baselineBody,
   bodyOfReading,
@@ -1537,12 +1536,15 @@ async function checkAccount($: Host, account: Account, gate: UsageGate): Promise
             // A body with no Fable row keeps the stored one's, unless the week fell since the last body: the stored read, never the view.
             await saveReading($, account.id, { ...keepFable(reading, prior === undefined ? undefined : { ...prior, sevenDay: before?.sevenDay }, now), by: account.id }, 'body')
             // This body is a baseline of the next, whichever rows are stored over the reading meanwhile, under this session's
-            // own key. A key over a week old, of a session gone, is a baseline of no window still running: it goes. So do all
-            // but the newest BODY_KEEP_COUNT, as the store holds 4 MiB in all and sessions come and go.
+            // own key. A key over a week old, of a session gone, is a baseline of no window still running: it goes, once a read
+            // of that key just before the delete says it is still over a week old (another session may have saved it since).
             const ownKey = `usage-body:${account.id}:${(await getView($)).sessionMark ?? SELF}`
             await $.store.set(ownKey, { ...before, ...bodyOfReading(reading) })
-            const newest = [...bodies].filter(([key]) => key !== ownKey).sort(([, a], [, b]) => b.at - a.at).slice(0, BODY_KEEP_COUNT - 1)
-            for (const [key, body] of bodies) if (key !== ownKey && (body.at < now - BODY_KEEP_MS || !newest.some(([kept]) => kept === key))) await $.store.delete(key)
+            for (const [key, body] of bodies) {
+              if (key === ownKey || body.at >= now - BODY_KEEP_MS) continue
+              const latest = bodyReadFrom(await $.store.get(key))
+              if (latest !== undefined && latest.at < now - BODY_KEEP_MS) await $.store.delete(key)
+            }
             hasFreshFable = reading.fable !== undefined
           }
         }

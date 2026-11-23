@@ -760,9 +760,6 @@ export const WRITER_VERSION = 1
  */
 export const ROWS_VERSION = 2
 
-/** How many sessions' bodies of one login are kept, the newest: sessions come and go, and a week of them would otherwise pile up. */
-export const BODY_KEEP_COUNT = 20
-
 /**
  * Two week resets name one account's week: within an hour of each other, or a whole number of weeks apart (a
  * reading from before a reset against one after it). Each account's week resets at a time of its own.
