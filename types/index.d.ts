@@ -16,8 +16,8 @@ export type UsageWindow = { pct: number; resetsAt?: string; isStop?: true; at?: 
 export type Reading = { fiveHour?: UsageWindow; sevenDay?: UsageWindow; fable?: UsageWindow; noFiveHour?: true; at: number; by?: string; v?: number; src?: ReadingSource }
 
 /**
- * A session's last usage body read of a login's windows, under that session's own store key `usage-body:<id>:<session mark>`,
- * written only by the body path and only by that session: counters are compared body to body (the newest of every session's
+ * A usage body read of a login's windows, under its own store key `usage-body:<id>:<read time>:<session mark>`, written once
+ * by the body path and never rewritten: counters are compared body to body (the newest of every session's
  * that completed before the request began), never against a response row or a mark, which a stop or another session may have
  * stored between two bodies.
  */

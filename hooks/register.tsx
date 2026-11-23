@@ -1309,8 +1309,8 @@ function withSignIn(account: Account, who: Identity): Account {
 }
 
 /**
- * Every session's last body of a login, each under a key of its own, `usage-body:<id>:<session mark>`: no two sessions
- * write one key, as a get followed by a set is no atomic write (https://code.claude.com/docs/en/plugins/mods/interface.md).
+ * Every body read of a login, each under a key of its own, `usage-body:<id>:<read time>:<session mark>`, written once and
+ * never rewritten, as a get followed by a set is no atomic write (https://code.claude.com/docs/en/plugins/mods/interface.md).
  */
 async function bodyKeysOf($: Host, id: string): Promise<string[]> {
   return (await $.store.keys()).filter(key => key.startsWith(`usage-body:${id}:`))
@@ -1535,16 +1535,12 @@ async function checkAccount($: Host, account: Account, gate: UsageGate): Promise
             if (five !== undefined && isAfter(five) && endsFiveHourMark(reading.fiveHour, five, before?.fiveHour)) await dropMark($, account.id, five)
             // A body with no Fable row keeps the stored one's, unless the week fell since the last body: the stored read, never the view.
             await saveReading($, account.id, { ...keepFable(reading, prior === undefined ? undefined : { ...prior, sevenDay: before?.sevenDay }, now), by: account.id }, 'body')
-            // This body is a baseline of the next, whichever rows are stored over the reading meanwhile, under this session's
-            // own key. A key over a week old, of a session gone, is a baseline of no window still running: it goes, once a read
-            // of that key just before the delete says it is still over a week old (another session may have saved it since).
-            const ownKey = `usage-body:${account.id}:${(await getView($)).sessionMark ?? SELF}`
-            await $.store.set(ownKey, { ...before, ...bodyOfReading(reading) })
-            for (const [key, body] of bodies) {
-              if (key === ownKey || body.at >= now - BODY_KEEP_MS) continue
-              const latest = bodyReadFrom(await $.store.get(key))
-              if (latest !== undefined && latest.at < now - BODY_KEEP_MS) await $.store.delete(key)
-            }
+            // This body is a baseline of the next, whichever rows are stored over the reading meanwhile, under a key of its own,
+            // named by its read time and this session, and written once: no key is rewritten, so deleting one can lose no newer
+            // body. One key a body read, at most about 336 a login a week at the 30-minute schedule, and a key over a week old
+            // is a baseline of no window still running: it goes.
+            await $.store.set(`usage-body:${account.id}:${reading.at}:${(await getView($)).sessionMark ?? SELF}`, { ...before, ...bodyOfReading(reading) })
+            for (const [key, body] of bodies) if (body.at < now - BODY_KEEP_MS) await $.store.delete(key)
             hasFreshFable = reading.fable !== undefined
           }
         }

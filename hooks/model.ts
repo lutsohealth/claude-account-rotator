@@ -607,8 +607,8 @@ export function bodyReadFrom(value: unknown): BodyRead | undefined {
 
 /**
  * The body a usage request that began at `startedAt` is judged against, among the bodies the sessions keep, each under a key
- * of its own (`usage-body:<id>:<session mark>`: a `set` changes only its own key, and the store has no atomic read and write
- * of one key): the newest that completed before the request began, whichever session wrote it. `isOlder`: a body completed
+ * of its own, written once (`usage-body:<id>:<read time>:<session mark>`: the store has no atomic read and write or delete
+ * of one key, so none is ever rewritten): the newest that completed before the request began, whichever session wrote it. `isOlder`: a body completed
  * at or after the request began, so the request is no later read to fall from.
  */
 export function baselineBody(bodies: readonly BodyRead[], startedAt: number): { before?: BodyRead; isOlder: boolean } {
