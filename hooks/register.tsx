@@ -1937,7 +1937,8 @@ async function carryOnWhenFree($: Host): Promise<void> {
     // Still on the login the stop found spent: nothing switched, so the line says its limit reset. A submit that
     // rejects sends nothing and is not tried again: what was owed is ended and marked above. A Connect visit that begins
     // after the check above, during markCarryEnded's write or carryOn's own reads, meets the carry-on as any running turn.
-    await carryOn($, undefined, view.activeId === owed.from ? CONTINUE_RESET : undefined)
+    // A debt a stop owes during carryOn's reads stands for its own time: carryOn checks `due` once more before it submits.
+    await carryOn($, undefined, view.activeId === owed.from ? CONTINUE_RESET : undefined, undefined, () => due === undefined)
     return
   }
   // A stop that rode this switch and armed its carry-on during the clearing write above: no second one.
@@ -2411,11 +2412,15 @@ async function onMeasure($: Host, limits: readonly SessionRateLimit[]): Promise<
  * Asks Claude to carry on after a switch. After a switch for the Fable week the
  * line kept in the store goes as the person's own words; every other switch,
  * and a Fable one with no line kept, sends the mod's own line under its name:
- * `own` where the caller names it (a carry-on with no switch), else CONTINUE.
+ * `own` where the caller names it (a carry-on with no switch), else CONTINUE. `isStillOwed`, where the caller names it (the
+ * debt's), is asked after the reads and just before the submit: false sends nothing.
  */
-async function carryOn($: Host, need?: Need, own?: string, proof?: StopProof): Promise<void> {
+async function carryOn($: Host, need?: Need, own?: string, proof?: StopProof, isStillOwed?: () => boolean): Promise<void> {
   const view = await getView($)
-  carriedOn = { since: view.pending?.since, at: await $.clock.now() }
+  const at = await $.clock.now()
+  // The debt path's check, after the reads above and with no await between it and the submit below.
+  if (isStillOwed?.() === false) return
+  carriedOn = { since: view.pending?.since, at }
   // The person's kept line says there is Fable credit: it goes only where a fresh read that lists the Fable week showed
   // room. Any other pick sends the mod's own line, with what the pick rests on.
   const note = need === 'fable' ? fableCarryOnNote(proof) : undefined
