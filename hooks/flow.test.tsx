@@ -17645,13 +17645,19 @@ for (const kind of ['week', 'five'] as const) {
     expect(store.get(key), 'body to body is 94 to 91: no reset').toBeDefined()
   })
 
-  test(`BODY-WRITE-ORDER class: the ${kind} body path writes no key but its own session's, whatever the order of the bodies`, async ($, on) => {
+  // Codex pr-b-r3: a key is written once, named by the time of its body and its session, and never rewritten by anyone.
+  test(`BODY-WRITE-ORDER class: the ${kind} body path writes each body under a new key of its read time and its session, and no key twice`, async ($, on) => {
     const { w, store, clock, written, release } = await heldBody($, on, kind, 98, 96)
     store.set('usage-body:3:session-y', bodyOfThree(94, clock.now()))
     release()
     await clock.settle()
-    expect(written.length, 'the held body wrote its baseline').toBeGreaterThan(0)
-    expect([...new Set(written)]).toEqual([`usage-body:3:${w.otherEnv.ACCOUNT_ROTATOR_SESSION}`])
+    // The next body, 30 minutes on with no response between.
+    for (let waited = 0; waited < 35 * 60_000; waited += 20_000) await clock.advance(20_000)
+    await clock.settle()
+    expect(written.length, 'two bodies were saved').toBeGreaterThanOrEqual(2)
+    expect(new Set(written).size, 'no key was written twice').toBe(written.length)
+    const own = new RegExp(`^usage-body:3:\\d+:${w.otherEnv.ACCOUNT_ROTATOR_SESSION}$`)
+    expect(written.filter(key => !own.test(key)), 'every key is this session\'s own, named by its time').toEqual([])
   })
 }
 
@@ -17681,8 +17687,9 @@ test('BODY-KEYS: a body check deletes the body keys of a login that are over a w
   )
   const clock = world(on, w, store)
   await start($, clock)
-  const keys = [...store.keys()].filter(k => k.startsWith('usage-body:1:')).sort()
-  expect(keys).toEqual(['usage-body:1:session-recent', `usage-body:1:${w.otherEnv.ACCOUNT_ROTATOR_SESSION}`].sort())
+  const keys = [...store.keys()].filter(k => k.startsWith('usage-body:1:'))
+  const own = new RegExp(`^usage-body:1:\\d+:${w.otherEnv.ACCOUNT_ROTATOR_SESSION}$`)
+  expect([keys.includes('usage-body:1:session-old'), keys.includes('usage-body:1:session-recent'), keys.filter(k => own.test(k)).length]).toEqual([false, true, 1])
 })
 
 test('BODY-KEYS: removing a login deletes every session\'s body key of it', async ($, on) => {
@@ -18045,17 +18052,19 @@ test('BODY-KEYS: a sign-in as another account deletes every body key of the logi
   expect([...store.keys()].filter(k => k.startsWith('usage-body:1'))).toEqual([])
 })
 
-// Codex pr-b-r2: the prune reads a key again right before it deletes it.
-test('BODY-KEYS: a key over a week old that another session rewrites before the prune reaches it is kept', async ($, on) => {
+// Codex pr-b-r3: no key is ever rewritten, so the prune of an old key can lose no newer body: B's newer body has a key of its own.
+test('BODY-KEYS: a body another session saves while the prune runs stands, and the week-old key of that session goes', async ($, on) => {
   const w = fresh()
   w.keychain['Claude Code-credentials'] = blob('tok-1')
   w.usage['tok-1'] = [20, 30, 40]
-  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'usage-body:1:session-b': { at: NOW - 8 * DAY } }))
-  // Session B's body is saved while this session saves its own: after this session read B's key, and before its prune.
+  const oldKey = `usage-body:1:${NOW - 8 * DAY}:session-b`
+  const newKey = `usage-body:1:${NOW}:session-b`
+  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, [oldKey]: { at: NOW - 8 * DAY } }))
+  // Session B saves its body, as session B does: under a key of its own, while this session saves its own.
   w.onStoreSet = key => {
-    if (key.startsWith('usage-body:1:') && key !== 'usage-body:1:session-b') store.set('usage-body:1:session-b', { at: NOW })
+    if (key.startsWith('usage-body:1:') && !key.includes(':session-b')) store.set(newKey, { at: NOW })
   }
   const clock = world(on, w, store)
   await start($, clock)
-  expect(store.get('usage-body:1:session-b'), 'B\'s newer body stands').toEqual({ at: NOW })
+  expect([store.has(oldKey), store.get(newKey)], 'the old body is pruned, B\'s newer one stands').toEqual([false, { at: NOW }])
 })
