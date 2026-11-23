@@ -5782,6 +5782,9 @@ test('Use now on login 1 ends an unproven switch, gives back its provisional mar
   await respond($, clock, w)
   await useNow($, clock, '1')
   expect(store.get('mark:2'), 'the press gave the provisional mark back').toBeUndefined()
+  // A response carrying login 1's week proves the press's switch, then a Fable stop on it.
+  await clock.advance(SETTLE_WAIT)
+  await respond($, clock, w)
   await $.classic.StopFailure(FABLE_STOP)
   await clock.settle()
   expect(store.get('fable-mark:1'), "the proven Fable stop's mark stands once the provisional one is gone").toBeDefined()
