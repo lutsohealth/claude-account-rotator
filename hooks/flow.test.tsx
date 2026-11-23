@@ -17049,3 +17049,85 @@ test('guard: a press moves a session whose failure a main turn cleared (a press 
   await pane.unmount()
   expect(slotValues(w)).toEqual([undefined])
 })
+
+// ---------------------------------------------------------------- puma-9arph.109.2: a Fable stop's need reaches every pick path
+
+/**
+ * Three logins, rotation by room. Login 1 (in use) has its Fable week spent, as login 2 does, with the most 5-hour room;
+ * login 3 has the Fable room. A pick that forgets the Fable need takes login 2.
+ */
+async function fableNeedWorld($: Engine, on: On, options: { unique?: boolean; one?: [number, number, number]; three?: [number, number, number] } = {}) {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.keychain[await keychainItem(SLOT3)] = blob('tok-3')
+  w.usage['tok-1'] = options.one ?? [20, 30, 100]
+  w.usage['tok-2'] = [5, 30, 100]
+  w.usage['tok-3'] = options.three ?? [10, 30, 21]
+  // Every login's week resets together unless the test needs a response to prove one login.
+  if (options.unique) w.weekResets = { 'tok-1': '2026-10-18T03:00:00Z', 'tok-2': '2026-10-19T03:00:00Z', 'tok-3': '2026-10-20T03:00:00Z' }
+  const store = new Map<string, unknown>(Object.entries({ ...THREE_LOGINS, 'rotate-to': 'room' }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  return { w, store, clock }
+}
+
+test('NEED-OWNER-UNDEFINED: a Fable stop whose owner no response proves keeps the Fable need: the pick never takes a login whose Fable week is spent', async ($, on) => {
+  const { w, clock } = await fableNeedWorld($, on)
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  expect(slotValues(w), 'the first stop moves to login 3, the one with Fable room').toEqual([SLOT3])
+  await clock.advance(40_000)
+  // A response whose week all three logins share proves none of them: the second stop has no owner.
+  w.limits = limitsOf(50, 40)
+  await respond($, clock, w)
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  expect(slotValues(w), 'no move to login 2, whose Fable week is spent').toEqual([SLOT3])
+})
+
+test('NEED-OWED-RESUME: a Fable stop on an owed resume takes its own need, though the episode held none before it', async ($, on) => {
+  const { w, clock } = await fableNeedWorld($, on, { one: [100, 30, 21], three: [10, 30, 100] })
+  await $.classic.StopFailure({ error: 'rate_limit', last_assistant_message: PLAIN_STOPS[0] })
+  await clock.settle()
+  expect(slotValues(w), 'the plain stop moves to login 2, the most 5-hour room').toEqual([SLOT2])
+  await clock.advance(40_000)
+  // Past the settle, no response since the switch: a stop on an owed resume, now a Fable one. Login 3's Fable week is spent.
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  expect(slotValues(w), 'no move to login 3, whose Fable week is spent').toEqual([SLOT2])
+})
+
+test('NEED-STICKY: a later stop of the same episode that names no Fable week keeps the Fable need', async ($, on) => {
+  const { w, clock } = await fableNeedWorld($, on, { unique: true })
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  expect(slotValues(w)).toEqual([SLOT3])
+  await clock.advance(40_000)
+  // Login 3's own week answers: the switch is proven, and the next stop is login 3's.
+  w.limits = limitsOf(10, 30, '2026-10-20T03:00:00Z')
+  await respond($, clock, w)
+  await $.classic.StopFailure({ error: 'rate_limit', last_assistant_message: PLAIN_STOPS[0] })
+  await clock.settle()
+  expect(slotValues(w), 'the episode still needs the Fable week: login 2 has none').toEqual([SLOT3])
+})
+
+// https://code.claude.com/docs/en/errors.md: "The Opus and Sonnet limits each apply only to requests to that model family".
+for (const family of ['Opus', 'Sonnet']) {
+  for (const [name, one] of [['with a 5-hour window', [20, 30, 21]], ['that reports no 5-hour window', [null, 30, 21]]] as const) {
+    test(`MODEL-LIMIT: a ${family} limit on a login ${name} marks neither its 5-hour window, its week nor its Fable week, and the session moves on`, async ($, on) => {
+      const w = fresh()
+      w.keychain['Claude Code-credentials'] = blob('tok-1')
+      w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+      w.usage['tok-1'] = [...one]
+      w.usage['tok-2'] = [10, 30, 21]
+      const store = new Map<string, unknown>(Object.entries(TWO_LOGINS))
+      const clock = world(on, w, store)
+      await start($, clock)
+      await $.classic.StopFailure({ error: 'rate_limit', last_assistant_message: `You've hit your ${family} limit · resets 3:45pm` })
+      await clock.settle()
+      expect([store.get('mark:1'), store.get('week-mark:1'), store.get('fable-mark:1')], 'no mark of any window').toEqual([undefined, undefined, undefined])
+      expect(slotValues(w), 'the model family is spent here, so the session tries the next login').toEqual([SLOT2])
+    })
+  }
+}

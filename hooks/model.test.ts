@@ -2,7 +2,7 @@ import { expect, test } from 'claude-code/testing'
 
 import type { Reading, RotateTo, View } from '../types'
 import { weekLeaveFrom, launchOnFrom, pickLaunch, isSessionStop, isWeeklyStop } from './model'
-import { isSameWeek, stopResetAt, whoseReset, whoseWeek } from './model'
+import { isSameWeek, stopResetAt, whoseReset, whoseWeek, wordingClass } from './model'
 import { companyOf, identityFromStatus, planName } from './model'
 import { laterMark, spentMark, withFableMark } from './model'
 import { EMPTY_VIEW, USAGE_IDLE_MS, fitRow, hasRoom, rowOf, rowsOf, rowText, storedLine, storedLineText } from './model'
@@ -2304,6 +2304,22 @@ for (const [said, now, at] of [
 ] as const) {
   test(`stopResetAt reads "${said.slice(said.indexOf('resets'))}" at ${new Date(now).toISOString()} as ${at}`, () => {
     expect(stopResetAt(said, now)).toBe(Date.parse(at))
+  })
+}
+
+// https://code.claude.com/docs/en/errors.md lists "You've hit your Opus limit · resets 3:45pm" and the Sonnet one: each
+// applies only to requests to that model family, so neither is the week or the 5-hour window spent.
+for (const [said, class_] of [
+  ["You've hit your Opus limit · resets 3:45pm", 'model'],
+  ["You've hit your Sonnet limit · resets 3:45pm", 'model'],
+  ["You've hit your Fable limit · resets 3:45pm", 'fable'],
+  ["You've hit your session limit · resets 3:45pm", 'session'],
+  ["You've hit your weekly limit · resets Mon 12:00am", 'weekly'],
+  ['Claude usage limit reached.', 'unknown'],
+  [undefined, 'none'],
+] as const) {
+  test(`wordingClass reads "${said}" as ${class_}`, () => {
+    expect(wordingClass(said)).toBe(class_)
   })
 }
 
