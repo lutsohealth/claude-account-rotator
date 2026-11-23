@@ -82,6 +82,8 @@ type World = {
   storeIdFails?: 'write' | 'read'
   /** The store refuses the read of every key that starts with this. */
   storeReadFails?: string
+  /** The store refuses the write of every key that starts with this. */
+  storeWriteFails?: string
   /** puma-9arph.26: the text of the mod's own bin/account-rotator-claude, as `$.fs.read` finds it under the plugin's folder. */
   ownLauncher?: string
   /** puma-9arph.26: every chmod, test, mv and rm the mod ran, as typed. */
@@ -250,6 +252,7 @@ function sharedStore(on: On, entries: Map<string, unknown>, w: World): void {
   })
   on('store.set', (_$, e) => {
     if (e.key === 'store-id' && w.storeIdFails !== undefined) return { deny: 'store: refused' }
+    if (w.storeWriteFails !== undefined && e.key.startsWith(w.storeWriteFails)) return { deny: 'store: refused' }
     w.onStoreSet?.(e.key, e.value)
     entries.set(e.key, e.value)
     w.afterStoreSet?.(e.key)
@@ -17437,7 +17440,8 @@ test('SPENT-OLD-GATE: a body 30 s old that the minute gate keeps from being read
  * `kind`. A response then stores `response` percent over that row; the next body, due in ten minutes, reads `live`.
  */
 /** What the body path keeps of a body read, under its session's own key `usage-body:<id>:<session mark>`: its time and its windows. */
-const bodyOfThree = (pct: number, at: number) => ({ at, fiveHour: { pct, resetsAt: FIVE_RESET_3 }, sevenDay: { pct, resetsAt: WEEK_RESET_3 }, fable: { pct, resetsAt: FABLE_RESET } })
+const THREE_BY = 'three@example.com|org-three@example.com'
+const bodyOfThree = (pct: number, at: number) => ({ at, by: THREE_BY, fiveHour: { pct, resetsAt: FIVE_RESET_3 }, sevenDay: { pct, resetsAt: WEEK_RESET_3 }, fable: { pct, resetsAt: FABLE_RESET } })
 
 async function markedOnThree($: Engine, on: On, kind: 'week' | 'five', first: number, live: number) {
   const w = fresh()
@@ -17673,6 +17677,106 @@ for (const kind of ['week', 'five'] as const) {
     void w
   })
 }
+
+// Council store-races: a mark ends only on the newest visible body of the SAME account identity and the SAME window, 5 or more
+// points higher. https://code.claude.com/docs/en/plugins/mods/interface.md: "A `get` followed by a `set` isn't atomic".
+const OTHER_BY = 'other@example.com|org-other@example.com'
+/** A body of login 3 whose windows reset a week and a day on from the mark's own: another window of each kind. */
+const bodyOfAnotherWindow = (pct: number, at: number, by: string = THREE_BY) => ({
+  at,
+  by,
+  fiveHour: { pct, resetsAt: '2026-10-12T17:00:00Z' },
+  sevenDay: { pct, resetsAt: '2026-10-27T03:00:00Z' },
+  fable: { pct, resetsAt: '2026-10-24T03:00:00Z' },
+})
+
+for (const kind of ['week', 'five'] as const) {
+  for (const why of ['another account', 'no identity'] as const) {
+    test(`BODY-IDENTITY: a body read under ${why} is no baseline, so a lower read (100, then 94) ends no ${kind} mark`, async ($, on) => {
+      const { store, clock, key } = await markedOnThree($, on, kind, 100, 94)
+      const { by: _by, ...unnamed } = bodyOfThree(100, NOW - 15 * 60_000)
+      store.set('usage-body:3:session-other', why === 'no identity' ? unnamed : { ...unnamed, by: OTHER_BY })
+      for (let waited = 0; waited < 12 * 60_000; waited += 20_000) await clock.advance(20_000)
+      await clock.settle()
+      expect((store.get('usage:3') as { src?: string }).src, 'the next body is stored').toBe('body')
+      expect(store.get(key), 'a fall of 6 from no account\'s own body: the mark stands').toBeDefined()
+    })
+  }
+
+  test(`BODY-WINDOW: the baseline is the newest body of the read's own window: a newer body of another window neither stands in for it nor hides it, so 100 then 94 ends the ${kind} mark`, async ($, on) => {
+    const { store, clock, key } = await markedOnThree($, on, kind, 100, 94)
+    store.set('usage-body:3:session-newer', bodyOfAnotherWindow(20, NOW - 5 * 60_000))
+    for (let waited = 0; waited < 12 * 60_000; waited += 20_000) await clock.advance(20_000)
+    await clock.settle()
+    expect((store.get('usage:3') as { src?: string }).src, 'the next body is stored').toBe('body')
+    expect(store.get(key), 'a fall of 6 from the body of its own window').toBeUndefined()
+  })
+
+  test(`guard: a lower read of another window than the only body's ends no ${kind} mark (100 of another window, then 94)`, async ($, on) => {
+    const { store, clock, key } = await markedOnThree($, on, kind, 100, 94)
+    store.set('usage-body:3:session-other', bodyOfAnotherWindow(100, NOW - 15 * 60_000))
+    for (let waited = 0; waited < 12 * 60_000; waited += 20_000) await clock.advance(20_000)
+    await clock.settle()
+    expect((store.get('usage:3') as { src?: string }).src, 'the next body is stored').toBe('body')
+    expect(store.get(key)).toBeDefined()
+  })
+
+  test(`guard: after a real reset and a new stop the newest body, not the highest, is the baseline, so a lagging read (2 at -15 min, 100 at -3 h, then 90) ends no ${kind} mark`, async ($, on) => {
+    const { store, clock, key } = await markedOnThree($, on, kind, 2, 90)
+    store.set('usage-body:3:session-old', bodyOfThree(100, NOW - 3 * HOUR))
+    for (let waited = 0; waited < 12 * 60_000; waited += 20_000) await clock.advance(20_000)
+    await clock.settle()
+    expect((store.get('usage:3') as { src?: string }).src, 'the next body is stored').toBe('body')
+    expect(store.get(key), 'a rise from the newest body, a fall only from the highest').toBeDefined()
+  })
+
+  test(`guard: a completed read whose key is not visible only delays the ${kind} mark's end to the next read (visible 98, invisible 100, reads 94 then 80)`, async ($, on) => {
+    const { w, store, clock, key } = await markedOnThree($, on, kind, 98, 94)
+    for (let waited = 0; waited < 12 * 60_000; waited += 20_000) await clock.advance(20_000)
+    await clock.settle()
+    expect(store.get(key), 'a fall of 4 from the visible body: delayed, not ended').toBeDefined()
+    w.usage['tok-3'] = [80, 80, 80]
+    for (let waited = 0; waited < 35 * 60_000; waited += 20_000) await clock.advance(20_000)
+    await clock.settle()
+    expect(store.get(key), 'the next read falls from the body the last one wrote').toBeUndefined()
+  })
+
+  test(`guard: the shared row is no baseline, so a row written out of order (100) over the newest body (96) leaves a read of 94 to end no ${kind} mark`, async ($, on) => {
+    const { store, clock, key } = await markedOnThree($, on, kind, 96, 94)
+    store.set('usage:3', bodyRowOfThree(100, NOW - 14 * 60_000))
+    for (let waited = 0; waited < 12 * 60_000; waited += 20_000) await clock.advance(20_000)
+    await clock.settle()
+    expect((store.get('usage:3') as { src?: string }).src, 'the next body is stored').toBe('body')
+    expect(store.get(key), 'a fall of 2 from the newest body').toBeDefined()
+  })
+}
+
+test('BODY-IDENTITY: the key a body read writes names the account, never a token', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.usage['tok-1'] = [20, 30, 21]
+  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  const own = [...store.entries()].filter(([k]) => k.startsWith('usage-body:1:'))
+  expect(own).toHaveLength(1)
+  const by = (own[0]?.[1] as { by?: unknown }).by
+  expect([typeof by, String(by).includes('example.com'), String(by).includes('tok-1')]).toEqual(['string', true, false])
+})
+
+test('BODY-KEYS: a refused write of the body key is logged and the read stands, with no check error and the health stored', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.usage['tok-1'] = [20, 30, 21]
+  w.storeWriteFails = 'usage-body:'
+  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  expect((store.get('usage:1') as { sevenDay?: { pct: number } } | undefined)?.sevenDay?.pct, 'the read is stored').toBe(30)
+  expect(store.get('check-error:1'), 'no failed check').toBeUndefined()
+  expect(store.has('health:1'), 'the check went on to store the health').toBe(true)
+  expect((w.logged ?? []).filter(line => line.includes('body key') && line.includes('not written'))).toHaveLength(1)
+})
 
 test('BODY-KEYS: a body check deletes the body keys of a login that are over a week old and keeps the newer ones', async ($, on) => {
   const w = fresh()
