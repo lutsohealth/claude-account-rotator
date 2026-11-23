@@ -19,9 +19,9 @@ export type Reading = { fiveHour?: UsageWindow; sevenDay?: UsageWindow; fable?: 
  * A usage body read of a login's windows, under its own store key `usage-body:<id>:<read time>:<session mark>`, written once
  * by the body path and never rewritten: counters are compared body to body (the newest of every session's
  * that completed before the request began), never against a response row or a mark, which a stop or another session may have
- * stored between two bodies.
+ * stored between two bodies. `by` is the account identity it was read under (`bodyIdentity`); a body without one is no baseline.
  */
-export type BodyRead = { at: number; fiveHour?: UsageWindow; sevenDay?: UsageWindow; fable?: UsageWindow }
+export type BodyRead = { at: number; by?: string; fiveHour?: UsageWindow; sevenDay?: UsageWindow; fable?: UsageWindow }
 
 /**
  * Where a stored reading came from: a usage body (`body`), a response's rate limits (`response`), or a stop that

@@ -602,8 +602,11 @@ export function bodyReadFrom(value: unknown): BodyRead | undefined {
   if (typeof v.at !== 'number') return undefined
   const window = (w: unknown): UsageWindow | undefined => (typeof w === 'object' && w !== null && typeof (w as UsageWindow).pct === 'number' ? (w as UsageWindow) : undefined)
   const [fiveHour, sevenDay, fable] = [window(v.fiveHour), window(v.sevenDay), window(v.fable)]
-  return { at: v.at, ...(fiveHour ? { fiveHour } : {}), ...(sevenDay ? { sevenDay } : {}), ...(fable ? { fable } : {}) }
+  return { at: v.at, ...(typeof v.by === 'string' ? { by: v.by } : {}), ...(fiveHour ? { fiveHour } : {}), ...(sevenDay ? { sevenDay } : {}), ...(fable ? { fable } : {}) }
 }
+
+/** The account a body was read under: its email and organization, which a token refresh leaves as they were. Never a token. */
+export const bodyIdentity = (who: { email: string; orgId?: string }): string => `${who.email}|${who.orgId ?? ''}`
 
 /**
  * The body a usage request that began at `startedAt` is judged against, among the bodies the sessions keep, each under a key
@@ -615,9 +618,23 @@ export function baselineBody(bodies: readonly BodyRead[], startedAt: number): Bo
   return bodies.filter(b => b.at < startedAt).reduce<BodyRead | undefined>((newest, b) => (newest === undefined || b.at > newest.at ? b : newest), undefined)
 }
 
-/** The body a body row is: its time and windows, for a session's `usage-body:<id>:<mark>` and, where none is written, for the baseline. */
-export function bodyOfReading(r: Reading): BodyRead {
-  return { at: r.at, ...(r.fiveHour ? { fiveHour: r.fiveHour } : {}), ...(r.sevenDay ? { sevenDay: r.sevenDay } : {}), ...(r.fable ? { fable: r.fable } : {}) }
+/**
+ * What each window of `read`, a body of account `by`, is judged against: the newest body of that same account that
+ * completed before the request began and holds that window with a reset within an hour of this one's (`baselineBody`).
+ * Each window has its own baseline; a body of another account, or one with no account, is none, and so is a body of another
+ * window, which neither stands in for the window nor hides an older body of it.
+ */
+export function baselineWindows(bodies: readonly BodyRead[], startedAt: number, by: string, read: Pick<Reading, 'fiveHour' | 'sevenDay' | 'fable'>): Pick<BodyRead, 'fiveHour' | 'sevenDay' | 'fable'> {
+  const own = bodies.filter(b => b.by === by)
+  const baseline = (kind: 'fiveHour' | 'sevenDay' | 'fable'): UsageWindow | undefined =>
+    baselineBody(own.filter(b => isSameWindow(b[kind]?.resetsAt, read[kind]?.resetsAt)), startedAt)?.[kind]
+  const [fiveHour, sevenDay, fable] = [baseline('fiveHour'), baseline('sevenDay'), baseline('fable')]
+  return { ...(fiveHour ? { fiveHour } : {}), ...(sevenDay ? { sevenDay } : {}), ...(fable ? { fable } : {}) }
+}
+
+/** The body a body read is: its account, time and windows, as its own key `usage-body:<id>:<read time>:<session mark>` holds it. */
+export function bodyOfReading(r: Reading, by: string): BodyRead {
+  return { at: r.at, by, ...(r.fiveHour ? { fiveHour: r.fiveHour } : {}), ...(r.sevenDay ? { sevenDay: r.sevenDay } : {}), ...(r.fable ? { fable: r.fable } : {}) }
 }
 
 /** A usage counter only grows inside a window: one that falls this many points between two reads of it was reset (Council Q10). */

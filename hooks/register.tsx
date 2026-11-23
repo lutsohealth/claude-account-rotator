@@ -67,7 +67,8 @@ import {
   isPolicyRefusal,
   keepFable,
   BODY_KEEP_MS,
-  baselineBody,
+  baselineWindows,
+  bodyIdentity,
   bodyOfReading,
   bodyReadFrom,
   isSpent,
@@ -1510,14 +1511,17 @@ async function checkAccount($: Host, account: Account, gate: UsageGate): Promise
             week: markFrom(await $.store.get(`week-mark:${account.id}`)),
             five: markFrom(await $.store.get(`mark:${account.id}`)),
           }
-          // Judged against the newest body that completed before this request began, across the keys of every session: never
-          // a response row stored since. A row an earlier version left, a body, stands in while no session has written a key.
+          // Each window is judged against the newest body of its own window, read under this account's identity, that completed
+          // before this request began, across the keys of every session: never the shared row, whichever session wrote it last,
+          // and never a body of another account or of none (the council's rule, COUNCIL-store-races). A completed body whose key
+          // is not yet visible only delays the end of a mark to the next read.
+          const by = bodyIdentity(holder.who)
           const bodies = new Map<string, BodyRead>()
           for (const key of await bodyKeysOf($, account.id)) {
             const body = bodyReadFrom(await $.store.get(key))
             if (body !== undefined) bodies.set(key, body)
           }
-          const before = baselineBody(bodies.size > 0 ? [...bodies.values()] : prior?.src === 'body' ? [bodyOfReading(prior)] : [], usage.startedAt)
+          const before = baselineWindows([...bodies.values()], usage.startedAt, by, reading)
           // The row every session shares goes by the order of the requests: a body whose request began at or before the stored
           // row's time is older than that row, so it ends no mark, drops no kept row and never overwrites the row. Its body
           // still has its key below: a completed body is a baseline for the next request whatever completed in between.
@@ -1542,8 +1546,13 @@ async function checkAccount($: Host, account: Account, gate: UsageGate): Promise
           // named by its read time and this session, and written once: no key is rewritten, so deleting one can lose no newer
           // body. One key a body read, at most about 336 a login a week at the 30-minute schedule, and a key over a week old
           // is a baseline of no window still running: it goes.
-          await $.store.set(`usage-body:${account.id}:${reading.at}:${(await getView($)).sessionMark ?? SELF}`, { ...before, ...bodyOfReading(reading) })
-          for (const [key, body] of bodies) if (body.at < now - BODY_KEEP_MS) await $.store.delete(key)
+          // A refused write loses one baseline and is logged: the read stands.
+          try {
+            await $.store.set(`usage-body:${account.id}:${reading.at}:${(await getView($)).sessionMark ?? SELF}`, bodyOfReading(reading, by))
+            for (const [key, body] of bodies) if (body.at < now - BODY_KEEP_MS) await $.store.delete(key)
+          } catch (error) {
+            await debug($, `account ${account.id}: a body key was not written: ${String(error)}`)
+          }
         }
       }
     }
