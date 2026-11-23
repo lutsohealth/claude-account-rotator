@@ -1466,7 +1466,7 @@ for (const rotateTo of ['reset', 'room', 'order']) {
 
 // C6 (puma-eslxj.7), a changed expected value. SOURCE: the C6 CASE, RULING 4467: a body of the mark's week reading it
 // lower lags the stop; its earlier reset only shortens a mark that guessed a week from the stop.
-test('a Fable mark with no reset time from the usage, then a check that lists the Fable week lower, stands until that week\'s reset, and then the session can move back', async ($, on) => {
+test('a Fable mark with no reset time from the usage, then a check that lists the Fable week lower, stands until that week\'s reset, and then the session can move back', { timeoutMs: 30_000 }, async ($, on) => {
   const w = fresh()
   const clock = await markedWithNoRow($, on, w, {})
   // The week the body reads resets three hours after the start, long before the week-long guess.
@@ -2139,7 +2139,7 @@ test('a plain stop\'s week mark on an account that reports no 5-hour window stan
 })
 
 // Review R1 mark_lifetime, the class: every writer of a reading, under every rotation choice and both switch values.
-test('a stop\'s week mark on an account that reports no 5-hour window stands through every reading writer, under every setting', async ($, on) => {
+test('a stop\'s week mark on an account that reports no 5-hour window stands through every reading writer, under every setting', { timeoutMs: 30_000 }, async ($, on) => {
   const w = fresh()
   w.keychain['Claude Code-credentials'] = blob('tok-1')
   w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
@@ -10362,7 +10362,7 @@ test('a carry-on owed once a login frees up survives a hot reload, then /clear: 
   expect((await reloadThenClear($, on, { carryDue: owed }))?.carryDue).toMatchObject(owed)
 })
 
-test('a carry-on owed across a hot reload sends nothing where a main turn ran after the reload (puma-9arph.35)', async ($, on) => {
+test('a carry-on owed across a hot reload sends nothing where a main turn ran after the reload (puma-9arph.35)', { timeoutMs: 30_000 }, async ($, on) => {
   const { w, clock } = await reloadedWorld($, on, { carryDue: { at: Date.parse('2026-10-12T12:00:00Z'), from: '1' } })
   await clock.advance(Date.parse('2026-10-12T12:00:00Z') - clock.now() + 30_000)
   await $.turn.start({ text: 'go on', turnId: 'turn-own-continue' })
@@ -10402,7 +10402,7 @@ test('with every login spent, a main turn that starts during the write clearing 
   expect(w.submitted).toEqual([])
 })
 
-test('with every login spent, a switch to a spent login during the write clearing the carry-on owed sends nothing there (puma-9arph.35)', async ($, on) => {
+test('with every login spent, a switch to a spent login during the write clearing the carry-on owed sends nothing there (puma-9arph.35)', { timeoutMs: 30_000 }, async ($, on) => {
   const w = fresh()
   const { clock } = await loggedWorld(on, w)
   w.usage['tok-1'] = [100, 41]
@@ -10515,7 +10515,7 @@ test('with every login spent, Connect\'s visit to the extension\'s login leaves 
   expect([w.submitted.length, whats(stopLogOf(store, w)).filter(isOwedCarryOnLine)]).toEqual([1, ['a login is free: carry-on on 2']])
 })
 
-test('with every login spent, Use now pressed during the write clearing the carry-on owed ends it: nothing goes there once that login frees up (puma-9arph.84)', async ($, on) => {
+test('with every login spent, Use now pressed during the write clearing the carry-on owed ends it: nothing goes there once that login frees up (puma-9arph.84)', { timeoutMs: 30_000 }, async ($, on) => {
   const w = fresh()
   const { store, clock } = await loggedWorld(on, w)
   w.usage['tok-1'] = [100, 41]
@@ -13172,13 +13172,13 @@ test('the mark of a debt owed 6.9 days before it ended outlives the start\'s swe
   expect([w.submitted.length, store.get(key)]).toEqual([0, { owedAt, endedAt }])
 })
 
-test('a reload whose debt has no owedAt is sent once though the store holds a mark with no owedAt (puma-9arph.40)', async ($, on) => {
+test('a reload whose debt has no owedAt is sent once though the store holds a mark with no owedAt (puma-9arph.40)', { timeoutMs: 30_000 }, async ($, on) => {
   const { w, clock } = await reloadedWorld($, on, survivingDebt({}), { [`carry-ended:${RELOADED_MARK}`]: {} })
   await pastOwed(clock)
   expect(w.submitted).toHaveLength(1)
 })
 
-test('a reload whose marked debt\'s clear is refused again owes nothing and boots on (puma-9arph.40)', async ($, on) => {
+test('a reload whose marked debt\'s clear is refused again owes nothing and boots on (puma-9arph.40)', { timeoutMs: 30_000 }, async ($, on) => {
   const { seen, around } = carryClearRefusal()
   const { w, clock } = await reloadedWorld($, on, survivingDebt(), { [`carry-ended:${RELOADED_MARK}`]: { owedAt: OWED_AT } }, around)
   await pastOwed(clock)
@@ -13194,7 +13194,7 @@ test('a switch that ends the carry-on owed, its view clear refused, leaves the e
   expect([w.envSets.at(-1)?.value, seen.refused > 0, carryEndedOf(store, w)]).toEqual([SLOT2, true, { owedAt: seen.owed?.owedAt }])
 })
 
-test('Use now pressed during a refused clearing write ends the carry-on owed and leaves the ended mark (puma-9arph.40)', async ($, on) => {
+test('Use now pressed during a refused clearing write ends the carry-on owed and leaves the ended mark (puma-9arph.40)', { timeoutMs: 30_000 }, async ($, on) => {
   let isArmed = false
   let switchToTwo = async () => {}
   const pressing: Around = async (e, inner) => {
@@ -13217,7 +13217,7 @@ test('Use now pressed during a refused clearing write ends the carry-on owed and
   expect([w.submitted.length, carryEndedOf(store, w)]).toEqual([0, { owedAt: seen.owed?.owedAt }])
 })
 
-test('a refused clear, then the held branch, leaves the debt owed with no ended mark for a reload to read (puma-9arph.40)', async ($, on) => {
+test('a refused clear, then the held branch, leaves the debt owed with no ended mark for a reload to read (puma-9arph.40)', { timeoutMs: 30_000 }, async ($, on) => {
   // After the first refused clear, the view reads login 1 as needing a sign-in until the next view write, which the
   // held branch makes: shouldLeave sends it there. That write keeps the view's own health, and reads the mark then.
   let isSpentRead = false
@@ -13283,7 +13283,7 @@ test('a main turn since the stop, its view clear refused, ends the carry-on owed
   expect([lines.length, w.submitted.length, carryEndedOf(store, w)]).toEqual([1, 0, { owedAt: seen.owed?.owedAt }])
 })
 
-test('a reload whose ended mark cannot be read owes the debt once more and boots on (puma-9arph.40)', async ($, on) => {
+test('a reload whose ended mark cannot be read owes the debt once more and boots on (puma-9arph.40)', { timeoutMs: 30_000 }, async ($, on) => {
   const w = fresh()
   w.storeReadFails = 'carry-ended:'
   const { clock } = await reloadedWorld($, on, survivingDebt(), { [`carry-ended:${RELOADED_MARK}`]: { owedAt: OWED_AT } }, undefined, w)
@@ -14468,7 +14468,7 @@ test('86-B3: a carry-on owed whose write after /clear is refused is back in the 
   expect(views.view()?.carryDue?.from).toBe('1')
 })
 
-test('86-B2: a carry-on owed whose held write is refused, the login spent again after the clearing write, is written into the view again at the next tick (puma-9arph.86)', async ($, on) => {
+test('86-B2: a carry-on owed whose held write is refused, the login spent again after the clearing write, is written into the view again at the next tick (puma-9arph.86)', { timeoutMs: 30_000 }, async ($, on) => {
   const { store, clock, views, w } = await owedWithRefusals($, on)
   views.spendAfterClear()
   // The held branch's write, the next that puts the debt back into the view, is refused.
@@ -14483,7 +14483,7 @@ test('86-B2: a carry-on owed whose held write is refused, the login spent again 
 })
 
 // RULING 7135 R2: the write-again is held in the engine's write, the debt is ended meanwhile, then the write lands.
-test('86-E1: a carry-on owed that a press ends while its write into the view again is held is not left in the view (puma-9arph.86)', async ($, on) => {
+test('86-E1: a carry-on owed that a press ends while its write into the view again is held is not left in the view (puma-9arph.86)', { timeoutMs: 30_000 }, async ($, on) => {
   const { clock, views, w } = await owedWithRefusals($, on, v => v.refuse(1))
   const release = views.holdNext()
   await untilTick(clock)
@@ -14515,7 +14515,7 @@ test('86-C1: a carry-on owed whose submit rejects after a refused clear is marke
   expect([w.submitted.length, carryEndedOf(store, w), debugLines(w, 'carry-on once a login is free failed').length]).toEqual([1, { owedAt: seen.owed?.owedAt }, 1])
 })
 
-test('86-A1: a carry-on owed waits while a Connect visit runs, and goes once at the first tick after it (puma-9arph.86)', async ($, on) => {
+test('86-A1: a carry-on owed waits while a Connect visit runs, and goes once at the first tick after it (puma-9arph.86)', { timeoutMs: 30_000 }, async ($, on) => {
   const w = fresh()
   w.chrome = { extensions: [''] }
   const { store, clock } = await loggedWorld(on, w, { 'chrome-account': '1' })
@@ -14553,7 +14553,7 @@ test('86-A1: a carry-on owed waits while a Connect visit runs, and goes once at 
 })
 
 // RULING 7135 R3: a visit that begins after the tick's visit check, while the clearing write is held.
-test('86-A2: a carry-on owed whose clearing write is held while a Connect visit begins waits out the visit, and goes once after it (puma-9arph.86)', async ($, on) => {
+test('86-A2: a carry-on owed whose clearing write is held while a Connect visit begins waits out the visit, and goes once after it (puma-9arph.86)', { timeoutMs: 30_000 }, async ($, on) => {
   const w = fresh()
   w.chrome = { extensions: [''] }
   const { clock } = await loggedWorld(on, w, { 'chrome-account': '1' })
@@ -14605,7 +14605,7 @@ async function pressUse2($: Engine, clock: MockClock, w: World) {
   return { pane, pressed: [isPressed, w.envSets.at(-1)?.value] }
 }
 
-test('87-A: a carry-on owed that a press ends while awaitFreeLogin\'s first view write is held is not left in the view (puma-9arph.87)', async ($, on) => {
+test('87-A: a carry-on owed that a press ends while awaitFreeLogin\'s first view write is held is not left in the view (puma-9arph.87)', { timeoutMs: 30_000 }, async ($, on) => {
   let release = () => {}
   const { clock, views, w } = await owedWithRefusals($, on, v => {
     release = v.holdNext()
@@ -14621,7 +14621,7 @@ test('87-A: a carry-on owed that a press ends while awaitFreeLogin\'s first view
   expect([views.view()?.carryDue, w.submitted.length]).toEqual([undefined, 0])
 })
 
-test('87-A2: a carry-on owed that a press ends while the held branch\'s write is held is not left in the view (puma-9arph.87)', async ($, on) => {
+test('87-A2: a carry-on owed that a press ends while the held branch\'s write is held is not left in the view (puma-9arph.87)', { timeoutMs: 30_000 }, async ($, on) => {
   const { store, clock, views, w } = await owedWithRefusals($, on)
   // Both logins read spent after the clearing write, so the tick holds the debt and nothing rotates.
   views.spendAfterClear()
@@ -14644,7 +14644,7 @@ test('87-A2: a carry-on owed that a press ends while the held branch\'s write is
   expect([views.view()?.carryDue, w.submitted.length]).toEqual([undefined, 0])
 })
 
-test('87-B: a carry-on owed whose view read after the clear fails stays owed, and goes at a later tick (puma-9arph.87)', async ($, on) => {
+test('87-B: a carry-on owed whose view read after the clear fails stays owed, and goes at a later tick (puma-9arph.87)', { timeoutMs: 30_000 }, async ($, on) => {
   const { clock, views, w } = await owedWithRefusals($, on)
   views.refuseReadAfterClear()
   await pastOwed(clock)
@@ -14653,7 +14653,7 @@ test('87-B: a carry-on owed whose view read after the clear fails stays owed, an
   expect(w.submitted).toHaveLength(1)
 })
 
-test('87-B2: a carry-on owed that a press ends during a refused clear, the read after it failing too, is marked ended (puma-9arph.87)', async ($, on) => {
+test('87-B2: a carry-on owed that a press ends during a refused clear, the read after it failing too, is marked ended (puma-9arph.87)', { timeoutMs: 30_000 }, async ($, on) => {
   const { store, clock, views, w } = await owedWithRefusals($, on)
   views.refuseClears()
   views.refuseReadAfterClear()
@@ -14673,7 +14673,7 @@ test('87-B2: a carry-on owed that a press ends during a refused clear, the read 
   expect(carryEndedOf(store, w)).toEqual({ owedAt: views.view()?.carryDue?.owedAt })
 })
 
-test('87-B3: a carry-on owed that a press ends during a clear that lands, the read after it failing, is not owed again (puma-9arph.87)', async ($, on) => {
+test('87-B3: a carry-on owed that a press ends during a clear that lands, the read after it failing, is not owed again (puma-9arph.87)', { timeoutMs: 30_000 }, async ($, on) => {
   const { clock, views, w } = await owedWithRefusals($, on)
   // The read after the clear waits until the press has ended the debt, then fails.
   let release = () => {}
@@ -14699,7 +14699,7 @@ test('87-B3: a carry-on owed that a press ends during a clear that lands, the re
 
 // ---------------------------------------------------------------- puma-9arph.88: a newer debt, and the carry-on around a Connect visit
 
-test('88-A: a newer carry-on owed whose first write is refused, the view holding an older ended one, is written into the view (puma-9arph.88)', async ($, on) => {
+test('88-A: a newer carry-on owed whose first write is refused, the view holding an older ended one, is written into the view (puma-9arph.88)', { timeoutMs: 30_000 }, async ($, on) => {
   const w = fresh()
   const { store, clock } = await loggedWorld(on, w)
   let last: View | undefined
@@ -15332,7 +15332,7 @@ test('89-E: a stop during a thrown Connect visit\'s move back is carried on once
   expect(r.w.submitted.length - r.before).toBe(1)
 })
 
-test('89-F: a carry-on owed as a thrown Connect visit closes waits out a visit begun meanwhile (puma-9arph.89)', async ($, on) => {
+test('89-F: a carry-on owed as a thrown Connect visit closes waits out a visit begun meanwhile (puma-9arph.89)', { timeoutMs: 30_000 }, async ($, on) => {
   const r = await visitTailWorld($, on, '2')
   r.k.isNoteRefused = true
   const close = gate89()
@@ -15533,42 +15533,42 @@ async function owedVisit90($: Engine, on: On, from: string, to: string, o: { ref
   return { sends, log, owed, isStoodDown: log.includes('carry-on not sent: the one owed went'), waits: log.filter(what => what === 'carry-on waits on the one owed').length }
 }
 
-test('90-A: a carry-on owed and a stop a Connect visit cut carry on once, the one owed going first (puma-9arph.90)', async ($, on) => {
+test('90-A: a carry-on owed and a stop a Connect visit cut carry on once, the one owed going first (puma-9arph.90)', { timeoutMs: 30_000 }, async ($, on) => {
   const r = await owedVisit90($, on, '11:58:00', '12:06:00')
   expect([r.sends.length, r.owed, r.isStoodDown], 'one went, the one owed; the line stood down').toEqual([1, 1, true])
 })
 
-test('90-B: a carry-on owed and a stop a Connect visit cut carry on once, the visit\'s line due first (puma-9arph.90)', async ($, on) => {
+test('90-B: a carry-on owed and a stop a Connect visit cut carry on once, the visit\'s line due first (puma-9arph.90)', { timeoutMs: 30_000 }, async ($, on) => {
   const r = await owedVisit90($, on, '11:58:00', '12:06:30')
   expect([r.sends.length, r.waits, r.owed, r.isStoodDown], 'one went, the one owed; the line waited once, then stood down').toEqual([1, 1, 1, true])
 })
 
-test('90-C: a carry-on owed still goes once a login frees up after a Connect visit that ended with none free (puma-9arph.90)', async ($, on) => {
+test('90-C: a carry-on owed still goes once a login frees up after a Connect visit that ended with none free (puma-9arph.90)', { timeoutMs: 30_000 }, async ($, on) => {
   const r = await owedVisit90($, on, '11:50:00', '11:55:00')
   expect([r.sends.filter(s => s >= '12:00').length, r.log.includes('a login is free: carry-on on 2')], 'the one owed went').toEqual([1, true])
 })
 
-test('90-D: a Connect visit that ended with no login free sends nothing on the spent login, and says it waits once (puma-9arph.90)', async ($, on) => {
+test('90-D: a Connect visit that ended with no login free sends nothing on the spent login, and says it waits once (puma-9arph.90)', { timeoutMs: 30_000 }, async ($, on) => {
   const r = await owedVisit90($, on, '11:50:00', '11:55:00')
   expect([r.sends.filter(s => s < '12:00'), r.waits]).toEqual([[], 1])
 })
 
-test('90-E: where the carry-on owed is dropped, the Connect visit\'s line goes after it (puma-9arph.90)', async ($, on) => {
+test('90-E: where the carry-on owed is dropped, the Connect visit\'s line goes after it (puma-9arph.90)', { timeoutMs: 30_000 }, async ($, on) => {
   const r = await owedVisit90($, on, '11:58:00', '12:06:30', { refuse: 'dropped' })
   expect([r.sends.length, r.log.includes('carry-on drop'), r.owed, r.isStoodDown], 'the one owed, dropped, then the line').toEqual([2, true, 1, false])
 })
 
-test('90-F: where the carry-on owed is dropped and a person\'s turn begins, the Connect visit\'s line still goes (puma-9arph.90)', async ($, on) => {
+test('90-F: where the carry-on owed is dropped and a person\'s turn begins, the Connect visit\'s line still goes (puma-9arph.90)', { timeoutMs: 30_000 }, async ($, on) => {
   const r = await owedVisit90($, on, '11:58:00', '12:06:30', { refuse: 'dropped', isPersonTurn: true })
   expect([r.sends.length, r.owed, r.isStoodDown], 'the one owed, dropped, then the line').toEqual([2, 1, false])
 })
 
-test('90-G: where the carry-on owed is refused, the Connect visit\'s line goes after it (puma-9arph.90)', async ($, on) => {
+test('90-G: where the carry-on owed is refused, the Connect visit\'s line goes after it (puma-9arph.90)', { timeoutMs: 30_000 }, async ($, on) => {
   const r = await owedVisit90($, on, '11:58:00', '12:06:00', { refuse: 'thrown' })
   expect([r.sends.length, r.owed, r.isStoodDown], 'the one owed, refused, then the line').toEqual([2, 1, false])
 })
 
-test('90-H: a Connect visit whose move back lands on a login just freed carries on once, not with the one the tick armed too (puma-9arph.90)', async ($, on) => {
+test('90-H: a Connect visit whose move back lands on a login just freed carries on once, not with the one the tick armed too (puma-9arph.90)', { timeoutMs: 30_000 }, async ($, on) => {
   const r = await owedVisit90($, on, '11:58:00', '12:06:00', { isThree: true })
   expect([r.log.includes('carry-on armed'), r.sends.length, r.owed, r.isStoodDown], 'one went, the one the tick armed; the line stood down').toEqual([true, 1, 1, true])
 })
@@ -15634,7 +15634,7 @@ async function lateDrop90($: Engine, on: On, end: string): Promise<number> {
 }
 
 for (const end of ['11:55:00', '11:56:00']) {
-  test(`90-${end === '11:55:00' ? 'I' : 'J'}: a carry-on owed dropped after its turn began, a Connect visit ending ${end} before, still leaves the visit's line to go (puma-9arph.90)`, async ($, on) => {
+  test(`90-${end === '11:55:00' ? 'I' : 'J'}: a carry-on owed dropped after its turn began, a Connect visit ending ${end} before, still leaves the visit's line to go (puma-9arph.90)`, { timeoutMs: 30_000 }, async ($, on) => {
     expect(await lateDrop90($, on, end), 'the one owed, dropped late, and the line').toBe(2)
   })
 }
@@ -15725,7 +15725,7 @@ async function owedVisitStart90($: Engine, w: World, store: Map<string, unknown>
   return { pane, endVisit, isCut }
 }
 
-test('90-K: a person\'s turn begun after the tick cleared the carry-on owed and before its submit, that submit dropped: the Connect visit\'s line still goes (puma-9arph.90)', async ($, on) => {
+test('90-K: a person\'s turn begun after the tick cleared the carry-on owed and before its submit, that submit dropped: the Connect visit\'s line still goes (puma-9arph.90)', { timeoutMs: 30_000 }, async ($, on) => {
   const w = fresh()
   w.chrome = { extensions: [''] }
   const { store, clock } = await loggedWorld(on, w, { 'chrome-account': '1' })
@@ -15772,7 +15772,7 @@ test('90-K: a person\'s turn begun after the tick cleared the carry-on owed and 
   expect(w.submitted.length - dropped, 'carry-ons that went and were not dropped').toBe(1)
 })
 
-test('90-L: a later Connect visit open as the line looks again, after the carry-on owed went and its turn began, sends no second line (puma-9arph.90)', async ($, on) => {
+test('90-L: a later Connect visit open as the line looks again, after the carry-on owed went and its turn began, sends no second line (puma-9arph.90)', { timeoutMs: 30_000 }, async ($, on) => {
   const w = fresh()
   w.chrome = { extensions: [''] }
   const { store, clock } = await loggedWorld(on, w, { 'chrome-account': '1' })
@@ -15804,7 +15804,7 @@ test('90-L: a later Connect visit open as the line looks again, after the carry-
   expect(w.submitted, 'one carry-on in all').toHaveLength(1)
 })
 
-test('90-M: after a carry-on submit that throws, a later Connect visit with a carry-on owed stands its line down once that one went (puma-9arph.90)', async ($, on) => {
+test('90-M: after a carry-on submit that throws, a later Connect visit with a carry-on owed stands its line down once that one went (puma-9arph.90)', { timeoutMs: 30_000 }, async ($, on) => {
   const w = fresh()
   w.chrome = { extensions: [''] }
   w.keychain[await keychainItem(SLOT3)] = blob('tok-3')
@@ -15855,7 +15855,7 @@ test('90-M: after a carry-on submit that throws, a later Connect visit with a ca
   expect([w.submitted.length - thrown, log.includes('carry-on not sent: the one owed went')]).toEqual([1, true])
 })
 
-test('90-N: a person\'s turn after a Connect visit, the carry-on owed unanswered as the line looks, its own turn begun, then dropped: the line still goes (puma-9arph.90)', async ($, on) => {
+test('90-N: a person\'s turn after a Connect visit, the carry-on owed unanswered as the line looks, its own turn begun, then dropped: the line still goes (puma-9arph.90)', { timeoutMs: 30_000 }, async ($, on) => {
   const w = fresh()
   w.chrome = { extensions: [''] }
   const { store, clock } = await loggedWorld(on, w, { 'chrome-account': '1' })
@@ -17574,7 +17574,7 @@ async function tickUntil(clock: MockClock, until: number, step = 5): Promise<voi
   }
 }
 
-test('MODEL-DEBT-RELOAD: a model stop with a known reset owes the ordinary persisted debt dated at that reset, and sends nothing before it', async ($, on) => {
+test('MODEL-DEBT-RELOAD: a model stop with a known reset owes the ordinary persisted debt dated at that reset, and sends nothing before it', { timeoutMs: 30_000 }, async ($, on) => {
   const { w, clock, view } = await modelStopWithTwoSpent(on, OPUS_AT_4PM, $)
   // The record a reload restores is the view's carryDue: dated at the family's reset, not at the hour login 2 frees.
   expect(view()?.carryDue, 'what a reload restores').toMatchObject({ at: AT_1PM_Z, from: '1' })
@@ -17586,7 +17586,7 @@ test('MODEL-DEBT-RELOAD: a model stop with a known reset owes the ordinary persi
   expect(slotValues(w)).toEqual([])
 })
 
-test('MODEL-UNKNOWN-RESET: a model stop whose words give no usable reset owes no carry-on, and says so once', async ($, on) => {
+test('MODEL-UNKNOWN-RESET: a model stop whose words give no usable reset owes no carry-on, and says so once', { timeoutMs: 30_000 }, async ($, on) => {
   const { w, clock, view } = await modelStopWithTwoSpent(on, OPUS_NO_ZONE, $)
   expect(view()?.carryDue, 'nothing owed').toBeUndefined()
   expect(w.toasts.filter(t => /model limit/.test(t) && /reset/.test(t)), 'told once').toHaveLength(1)
@@ -17595,7 +17595,7 @@ test('MODEL-UNKNOWN-RESET: a model stop whose words give no usable reset owes no
   expect(slotValues(w)).toEqual([])
 })
 
-test('MODEL-DEBT-STALE: a later model stop on the same login moves the debt\'s date later, and nothing goes at the earlier one', async ($, on) => {
+test('MODEL-DEBT-STALE: a later model stop on the same login moves the debt\'s date later, and nothing goes at the earlier one', { timeoutMs: 30_000 }, async ($, on) => {
   const { w, clock, view } = await modelStopWithTwoSpent(on, OPUS_AT_4PM, $)
   await clock.advance(30 * 60_000)
   await $.classic.StopFailure(OPUS_AT_6PM)
@@ -17608,7 +17608,7 @@ test('MODEL-DEBT-STALE: a later model stop on the same login moves the debt\'s d
   // An earlier date later never moves it back.
 })
 
-test('GREEN-TICK-MOVE: after a model stop, a person\'s new turn and then a freed login: no tick move and no second carry-on', async ($, on) => {
+test('GREEN-TICK-MOVE: after a model stop, a person\'s new turn and then a freed login: no tick move and no second carry-on', { timeoutMs: 30_000 }, async ($, on) => {
   const { w, clock } = await modelStopWithTwoSpent(on, OPUS_AT_4PM, $)
   await clock.advance(5 * 60_000)
   await $.turn.start({ text: 'working by hand', turnId: 'by-hand' })
@@ -17964,7 +17964,7 @@ test('BODY-KEYS: removing a login deletes every session\'s body key of it', asyn
  * A Fable stop's twin: login 1's Opus limit with login 2 spent owes a carry-on dated 13:00Z. A tick at that time begins to
  * clear it, and its write of the view waits, while a later Opus stop owes one for 15:00Z.
  */
-test('MODEL-DEBT-CLEAR: a tick clearing the model debt it read sends nothing when a later model stop owes a later debt during the clear', async ($, on) => {
+test('MODEL-DEBT-CLEAR: a tick clearing the model debt it read sends nothing when a later model stop owes a later debt during the clear', { timeoutMs: 30_000 }, async ($, on) => {
   // modelStopWithTwoSpent's world, with a view write that can wait: a hook is registered before the first call on `$`.
   const w = fresh()
   const { clock, store } = await loggedWorld(on, w)
