@@ -6959,14 +6959,14 @@ test('a Fable stop marks its week spent under fable-mark:<id>, and neither the s
   await $.classic.StopFailure(FABLE_STOP)
   await clock.settle()
   expect(markOf(store.get('fable-mark:1'))).toEqual([100, FABLE_RESET])
-  expect(fableOf(store.get('usage:1'))).toEqual({ pct: 60, resetsAt: FABLE_RESET })
+  expect(fableOf(store.get('usage:1'))).toEqual({ pct: 60, resetsAt: FABLE_RESET, at: expect.any(Number) })
   w.limits = [
     { kind: 'five_hour', percentUsed: 21, resetsAt: '2026-10-12T12:00:00Z' },
     { kind: 'seven_day', percentUsed: 30, resetsAt: WEEK_RESET },
   ]
   await respond($, clock, w)
   expect((store.get('usage:1') as { src?: unknown } | undefined)?.src).toBe('response')
-  expect(fableOf(store.get('usage:1'))).toEqual({ pct: 60, resetsAt: FABLE_RESET })
+  expect(fableOf(store.get('usage:1'))).toEqual({ pct: 60, resetsAt: FABLE_RESET, at: expect.any(Number) })
   // The pane still draws login 1's Fable week spent, by the mark.
   expect((await fableRows($))[0]).toBe(`${longBar(100)} 100%`)
 })
@@ -7015,7 +7015,7 @@ test('a check whose usage lists no Fable week after a Fable stop keeps the store
   w.usage['tok-1'] = [20, 30]
   await pastNextRead(clock)
   expect(w.usageCalls.filter(t => t === 'tok-1').length).toBeGreaterThan(calls)
-  expect(fableOf(store.get('usage:1'))).toEqual({ pct: 60, resetsAt: FABLE_RESET })
+  expect(fableOf(store.get('usage:1'))).toEqual({ pct: 60, resetsAt: FABLE_RESET, at: expect.any(Number) })
 })
 
 test('a Fable mark another session stored on a login with no reading yet counts: the pane draws that login\'s Fable week spent', async ($, on) => {
@@ -17217,7 +17217,7 @@ test('READ-BEFORE-SPENT-OLD: a login that could not be read (its token idle) goe
   const log = whats(stopLogOf(store, w))
   expect(log).toContain('read live before spent-old: 3 (100/100)')
   expect(log).toContain('not read live: token idle: 2')
-  expect(log.filter(line => line.startsWith('picked '))).toEqual([expect.stringMatching(/^picked 2: spent-old, read 120 min ago; tried 1$/)])
+  expect(log.filter(line => line.startsWith('picked '))).toEqual([expect.stringMatching(/^picked 2: spent-old \(idle token\), read 120 min ago; tried 1$/)])
 })
 
 test('READ-BEFORE-SPENT-OLD: a read that fails keeps the old reading, and that login goes into the blind try (a 429)', async ($, on) => {
@@ -17748,4 +17748,85 @@ test('MODEL-DEBT-CLEAR: a tick clearing the model debt it read sends nothing whe
   expect(view()?.carryDue, 'the later debt stands').toMatchObject({ at: Date.parse('2026-10-12T15:00:00Z'), from: '1' })
   await tickUntil(clock, Date.parse('2026-10-12T15:00:00Z') + 10 * 60_000)
   expect(w.submitted, 'the later debt goes at its own date').toHaveLength(1)
+})
+
+// ---------------------------------------------------------------- PR B, epic puma-9arph.109: readings that show what they are
+// ---------------------------------------------------------------- puma-9arph.109.6: read ages
+
+test('READ-AGE: a body check and a response save keep the Fable row\'s own read time, though each refreshes the reading\'s', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [20, 30, 40]
+  w.usage['tok-2'] = [10, 30]
+  w.weekResets = { 'tok-2': OTHER_WEEK }
+  const store = new Map<string, unknown>(Object.entries(TWO_LOGINS))
+  const clock = world(on, w, store)
+  await start($, clock)
+  const first = store.get('usage:1') as { at: number; fable?: { pct: number; at?: number } }
+  expect(first.fable, 'the body that listed the Fable week stamps it').toMatchObject({ pct: 40, at: first.at })
+  // Later bodies list no Fable week: its row is kept, with the time it was read.
+  w.usage['tok-1'] = [25, 31]
+  await clock.advance(40 * 60_000)
+  const afterBody = store.get('usage:1') as { at: number; src: string; fable?: { pct: number; at?: number } }
+  expect([afterBody.src, afterBody.at > first.at, afterBody.fable?.at]).toEqual(['body', true, first.at])
+  w.limits = limitsOf(26, 32)
+  await respond($, clock, w)
+  const afterResponse = store.get('usage:1') as { at: number; src: string; fable?: { pct: number; at?: number } }
+  expect([afterResponse.src, afterResponse.at > first.at, afterResponse.fable]).toEqual(['response', true, { pct: 40, resetsAt: FABLE_RESET, at: first.at }])
+})
+
+/**
+ * Login 1 is in use with its Fable week spent. Login 2 holds a stored reading with room, read `readAgo` ms ago, its Fable
+ * row `fableAgo` ms ago; its token has run out where `isTwoIdle`. The schedule does not read login 2 before the stop.
+ */
+async function agedReadings($: Engine, on: On, options: { readAgo: number; fableAgo?: number; isTwoIdle?: boolean }) {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2', options.isTwoIdle ? NOW - HOUR : undefined)
+  w.usage['tok-1'] = [20, 30, 100]
+  w.usage['tok-2'] = [10, 10, 10]
+  const store = new Map<string, unknown>(
+    Object.entries({
+      ...TWO_LOGINS,
+      'rotate-to': 'room',
+      'usage:2': {
+        fiveHour: { pct: 10, resetsAt: '2026-10-12T12:00:00Z' },
+        sevenDay: { pct: 10, resetsAt: '2026-10-18T03:00:00Z' },
+        fable: { pct: 10, resetsAt: FABLE_RESET, at: NOW - (options.fableAgo ?? options.readAgo) },
+        at: NOW - options.readAgo,
+        by: '2',
+        v: 1,
+        src: 'body',
+      },
+      'usage-due:2': { next: NOW + HOUR, fails: 0, at: NOW - options.readAgo, v: 1 },
+    }),
+  )
+  const clock = world(on, w, store)
+  await start($, clock)
+  return { w, store, clock }
+}
+
+test('READ-AGE: a login read 5 minutes ago whose Fable row is 40 minutes old is picked as stale for a Fable stop, and the log says so', async ($, on) => {
+  const { w, store, clock } = await agedReadings($, on, { readAgo: 5 * 60_000, fableAgo: 40 * 60_000 })
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  expect(slotValues(w)).toEqual([SLOT2])
+  expect(whats(stopLogOf(store, w)).filter(line => line.startsWith('picked '))).toEqual(['picked 2: stale, read 5 min ago; tried 1'])
+})
+
+test('READ-AGE: an idle login is picked as stale with its true age, in the log and not as spent (06:11:51)', async ($, on) => {
+  const { w, store, clock } = await agedReadings($, on, { readAgo: 2360 * 60_000, isTwoIdle: true })
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  expect(slotValues(w)).toEqual([SLOT2])
+  expect(whats(stopLogOf(store, w)).filter(line => line.startsWith('picked '))).toEqual(['picked 2: stale (idle token), read 2360 min ago; tried 1'])
+})
+
+test('READ-AGE guard: a login with a live token read 5 minutes ago, Fable row included, is still picked as fresh', async ($, on) => {
+  const { w, store, clock } = await agedReadings($, on, { readAgo: 5 * 60_000 })
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  expect(slotValues(w)).toEqual([SLOT2])
+  expect(whats(stopLogOf(store, w)).filter(line => line.startsWith('picked '))).toEqual(['picked 2: fresh, read 5 min ago; tried 1'])
 })

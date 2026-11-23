@@ -411,9 +411,9 @@ const fableRow = (display_name: string, percent: unknown = 100) => ({
 test('reads the Fable week from the usage body\'s limits rows: Fable and its numbered versions, no other model, no surface, no row without a percent', () => {
   const five_hour = { utilization: 20, resets_at: LATER }
   const read = (...limits: unknown[]) => readingFromUsage({ five_hour, limits }, NOW)?.fable
-  expect(read(fableRow('Fable', 100))).toEqual({ pct: 100, resetsAt: FABLE_END })
-  expect(read(fableRow('Fable 5.1', 40))).toEqual({ pct: 40, resetsAt: FABLE_END })
-  expect(read(fableRow('fable 5', 7))).toEqual({ pct: 7, resetsAt: FABLE_END })
+  expect(read(fableRow('Fable', 100))).toEqual({ pct: 100, resetsAt: FABLE_END, at: NOW })
+  expect(read(fableRow('Fable 5.1', 40))).toEqual({ pct: 40, resetsAt: FABLE_END, at: NOW })
+  expect(read(fableRow('fable 5', 7))).toEqual({ pct: 7, resetsAt: FABLE_END, at: NOW })
   expect(read(fableRow('Sonnet', 100))).toBeUndefined()
   expect(read(fableRow('Fabled', 100))).toBeUndefined()
   expect(read({ kind: 'weekly_scoped', percent: 100, resets_at: FABLE_END, scope: { surface: { display_name: 'Fable' } } })).toBeUndefined()
@@ -423,7 +423,7 @@ test('reads the Fable week from the usage body\'s limits rows: Fable and its num
 })
 
 test('a usage body with only limits answers a reading holding the Fable week alone', () => {
-  expect(readingFromUsage({ limits: [fableRow('Fable 5.1', 62)] }, NOW)).toEqual({ fable: { pct: 62, resetsAt: FABLE_END }, noFiveHour: true, at: NOW })
+  expect(readingFromUsage({ limits: [fableRow('Fable 5.1', 62)] }, NOW)).toEqual({ fable: { pct: 62, resetsAt: FABLE_END, at: NOW }, noFiveHour: true, at: NOW })
   expect(readingFromUsage({ limits: [fableRow('Sonnet', 62)] }, NOW)).toBeUndefined()
 })
 
@@ -501,7 +501,7 @@ test('a Fable stop\'s mark with no reset time of its own stands a week: a check 
   expect(isFableSpent(stored, MARK_END)).toBe(false)
   // A Fable row in a later check replaces it.
   const read = readingFromUsage({ limits: [fableRow('Fable', 40)] }, NOW + HOUR)!
-  expect(keepFable(read, stored, NOW + HOUR).fable).toEqual({ pct: 40, resetsAt: FABLE_END })
+  expect(keepFable(read, stored, NOW + HOUR).fable).toEqual({ pct: 40, resetsAt: FABLE_END, at: NOW + HOUR })
 })
 
 test('a Fable stop\'s mark takes the reset time the last read gave while it lies ahead, else a week from the stop', () => {
@@ -522,7 +522,7 @@ test('a fresh reading with its own Fable week replaces the stored one, whatever 
     for (const percent of [0, 40, 94, 95, 100]) {
       const fresh = readingFromUsage({ five_hour, limits: [fableRow('Fable 5.1', percent)] }, NOW)!
       const kept = keepFable(fresh, { fable: { pct: stored, resetsAt: FABLE_END }, at: NOW - 60_000 }, NOW)
-      expect([stored, percent, kept.fable]).toEqual([stored, percent, { pct: percent, resetsAt: FABLE_END }])
+      expect([stored, percent, kept.fable]).toEqual([stored, percent, { pct: percent, resetsAt: FABLE_END, at: NOW }])
     }
   }
 })
@@ -1194,7 +1194,7 @@ const c0Body = (limits: unknown[]) => ({
 const c0Row = (model: string, percent: number) => ({ kind: 'weekly_scoped', group: 'weekly', percent, resets_at: FABLE_END, scope: { model: { display_name: model } } })
 
 test('a C0-shaped usage body yields its Fable week, and one with no Fable row yields none: account 4 read from a response alone', () => {
-  expect(readingFromUsage(c0Body([c0Row('Sonnet', 100), c0Row('Fable 5.1', 34)]), NOW)?.fable).toEqual({ pct: 34, resetsAt: FABLE_END })
+  expect(readingFromUsage(c0Body([c0Row('Sonnet', 100), c0Row('Fable 5.1', 34)]), NOW)?.fable).toEqual({ pct: 34, resetsAt: FABLE_END, at: NOW })
   expect(readingFromUsage(c0Body([c0Row('Sonnet', 100)]), NOW)?.fable).toBeUndefined()
 })
 
@@ -2517,4 +2517,51 @@ test('BODY-WRITE-ORDER: the baseline is the newest body that completed before th
   expect(baselineBody([a, b, c], NOW - 10 * 60_000), 'a request that began 10 minutes ago: c completed after it').toEqual({ before: b, isOlder: true })
   expect(baselineBody([], NOW)).toEqual({ isOlder: false })
   expect(baselineBody([b], NOW - 15 * 60_000), 'completed at the request\'s start counts as after').toEqual({ isOlder: true })
+})
+
+// ---------------------------------------------------------------- puma-9arph.109.6: a Fable row keeps the time it was read, and an idle login is stale
+
+test('READ-AGE: a body stamps its Fable row with the time it was read, and keepFable keeps that time while the reading around it is read again', () => {
+  const first = readingFromUsage({ five_hour: { utilization: 20, resets_at: LATER }, limits: [fableRow('Fable', 40)] }, NOW)!
+  expect(first.fable).toEqual({ pct: 40, resetsAt: FABLE_END, at: NOW })
+  const later = readingFromUsage({ five_hour: { utilization: 25, resets_at: LATER } }, NOW + 40 * MIN)!
+  const kept = keepFable(later, first, NOW + 40 * MIN)
+  expect([kept.at, kept.fable]).toEqual([NOW + 40 * MIN, { pct: 40, resetsAt: FABLE_END, at: NOW }])
+})
+
+test('READ-AGE: a login read 5 minutes ago whose Fable row was read 40 minutes ago is stale for a Fable stop and fresh for any other', () => {
+  const v = view({ '1': [100, 50], '2': [0, 0] })
+  v.readings['2'] = {
+    fiveHour: { pct: 10, resetsAt: LATER },
+    sevenDay: { pct: 10, resetsAt: WEEK_END },
+    fable: { pct: 10, resetsAt: FABLE_END, at: NOW - 40 * MIN },
+    at: NOW - 5 * MIN,
+  }
+  const fable = pickAfterStop(v, v.readings, NOW, 'fable', ['1'], new Set())
+  expect([fable?.account.id, fable?.tier, fable?.hasFableRoom], 'the Fable row is 40 minutes old').toEqual(['2', 'stale', false])
+  expect(pickAfterStop(v, v.readings, NOW, undefined, ['1'], new Set())?.tier, 'a stop that needs no Fable room reads the week and the 5-hour window').toBe('fresh')
+  v.readings['2'] = { ...v.readings['2'], fable: { pct: 10, resetsAt: FABLE_END, at: NOW - 5 * MIN } }
+  expect(pickAfterStop(v, v.readings, NOW, 'fable', ['1'], new Set())).toMatchObject({ tier: 'fresh', hasFableRoom: true })
+})
+
+test('READ-AGE: an idle login (its token run out) is stale with the true age of its read, however recent, and says so; a spent one is still the last resort', () => {
+  const room = (at: number): Reading => ({ fiveHour: { pct: 10, resetsAt: LATER }, sevenDay: { pct: 10, resetsAt: WEEK_END }, at })
+  const idle = (r: Reading) => {
+    const v = view({ '1': [100, 50], '2': [0, 0] }, { '2': { kind: 'ok', isIdle: true } })
+    v.readings['2'] = r
+    const got = pickAfterStop(v, v.readings, NOW, undefined, ['1'], new Set())
+    return got === undefined ? undefined : { tier: got.tier, isIdle: got.isIdle, readAgeMs: got.readAgeMs }
+  }
+  expect(idle(room(NOW - 2360 * MIN)), 'login 2 of 11-21: read 2360 minutes ago').toEqual({ tier: 'stale', isIdle: true, readAgeMs: 2360 * MIN })
+  expect(idle(room(NOW - 5 * MIN)), 'read 5 minutes ago, nothing reads it again').toEqual({ tier: 'stale', isIdle: true, readAgeMs: 5 * MIN })
+  const spent: Reading = { fiveHour: { pct: 100, resetsAt: LATER }, sevenDay: { pct: 100, resetsAt: WEEK_END }, at: NOW - 5 * MIN }
+  expect(idle(spent), 'a spent reading still ranks last').toEqual({ tier: 'spent-old', isIdle: true, readAgeMs: 5 * MIN })
+  const live = view({ '1': [100, 50], '2': [0, 0] })
+  expect(pickAfterStop(live, live.readings, NOW, undefined, ['1'], new Set())?.isIdle, 'a login with a live token is not idle').toBeUndefined()
+})
+
+test('READ-AGE guard: a Fable week read spent whose stated reset has passed counts as room', () => {
+  const v = view({ '1': [100, 50], '2': [0, 0] })
+  v.readings['2'] = { fiveHour: { pct: 10, resetsAt: LATER }, sevenDay: { pct: 10, resetsAt: WEEK_END }, fable: { pct: 100, resetsAt: new Date(NOW - MIN).toISOString(), at: NOW - 5 * MIN }, at: NOW - 5 * MIN }
+  expect(pickAfterStop(v, v.readings, NOW, 'fable', ['1'], new Set())).toMatchObject({ tier: 'fresh', hasFableRoom: true })
 })
