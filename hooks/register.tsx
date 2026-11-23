@@ -1876,6 +1876,9 @@ async function carryOnWhenFree($: Host): Promise<void> {
     else if (due === undefined && dueEndings === endings) due = owed
     throw error
   })
+  // A later stop can owe a debt of its own during that write, for a later time: it stands, and this debt, ended by the
+  // clear, is not sent for it. Where the view still holds this one, the store marks it ended.
+  if (due !== undefined) return isCleared ? undefined : markCarryEnded($, owed)
   if (after.activeId !== view.activeId || shouldLeave(after, now) || isConnectingChrome) {
     // A switch that ended what is owed moved it: nothing stays owed, and a view that still holds it is marked.
     if (dueEndings !== endings) return isCleared ? undefined : markCarryEnded($, owed)
@@ -1889,6 +1892,8 @@ async function carryOnWhenFree($: Host): Promise<void> {
   // Every exit from here ends what is owed. Where the view still holds it, the store marks it, so a reload's boot owes
   // it no more; marked before the carry-on goes, so one whose submit throws went all the same.
   if (!isCleared) await markCarryEnded($, owed)
+  // Checked again after that write, as before the send: a debt a stop owes meanwhile stands for its own time.
+  if (due !== undefined) return
   const hasTurnRun = isSameLogin && owed.turns !== undefined && mainTurns > owed.turns
   void logStop($, hasTurnRun ? 'a turn ran since the stop: no carry-on' : `a login is free: carry-on on ${view.activeId}`)
   if (hasTurnRun) return
