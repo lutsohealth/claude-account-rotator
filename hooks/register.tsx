@@ -2691,6 +2691,7 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
   // the visit ends. A rejected sign-in after a response with the moved-to login's week went out on that login: the
   // switch has landed.
   const isFable = isFableStop(stop.last_assistant_message)
+  const wordNeed: Need | undefined = isFable ? 'fable' : undefined
   // Not awaited, as no stop-log line is: an await here would let a second stop act on a view read before this one's switch.
   void logStop($, `stop heard: ${error} (wording: ${wordingClass(stop.last_assistant_message)}), login ${active.id} in use`)
   // The login each usage-limit stop of the episode died on is never tried again in it.
@@ -2760,6 +2761,9 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
       ep.need = was.need
     }
     ep.stops += 1
+    // A Fable stop's own words set the episode's need whatever else the stop finds (no owner, no mark, a settling switch):
+    // it stays for the episode, and every pick path below reads it from here. Given back with the rest if the stop is dropped.
+    if (wordNeed !== undefined) ep.need = wordNeed
     // Who the stop died on: its owner; where the owner is only provisional, the login moved to only at its second such
     // stop (the first may have gone out on the login left, and nothing says); nobody where a response since the switch
     // proves two logins alike.
@@ -2792,6 +2796,8 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
       seen = { activeId: owner.id, since, epoch }
     }
   } else charge()
+  // What every pick below is for: this stop's own words, or the need an earlier stop of the episode set (sticky).
+  need = ep?.need ?? wordNeed
   const isProvenRejection = error === 'authentication_failed' && hasResponseSince && provenStopper(view, lastMeasured?.reading)?.id === active.id
   const isSettling = view.pending !== undefined && (await $.clock.now()) - view.pending.since < SETTLE_MS
   // The awaits above (the clock, the point-back's view read) can span a press or a main turn: the stop acts below only
@@ -2799,7 +2805,7 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
   if (!(await isCurrent())) return dropStale()
   if (isSettling && !isProvenRejection) {
     if (isConnectingChrome) isCutByVisit = true
-    else if (carriedFor !== view.pending?.since) carryOnAfterSettle($, isFable ? { need: 'fable' } : {})
+    else if (carriedFor !== view.pending?.since) carryOnAfterSettle($, { need })
     carriedFor = view.pending?.since
     return
   }
@@ -2807,7 +2813,7 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
   // marked (the stop may have gone out on the login left), and the next untried login is tried.
   if (ep !== undefined && ep.stops > 1 && error === 'rate_limit' && isProvisional) {
     void logStop($, `stop on owed resume: login ${active.id} ${ep.tried.includes(active.id) ? 'tried' : 'in use'}, no response since its switch, no mark`)
-    if (!(await maybeRotate($, ep.need, { need: ep.need, epoch }))&& isConnectingChrome) isCutByVisit = true
+    if (!(await maybeRotate($, need, { need, epoch })) && isConnectingChrome) isCutByVisit = true
     return
   }
   if (error === 'authentication_failed') {
@@ -2859,7 +2865,7 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
       if (marked === 'stale') return dropStale()
       // Marks written: the charge stands with them.
       undoCharge = undefined
-      need = marked
+      need = marked ?? need
       if (ep !== undefined) ep.need = need
     }
     if (isProvisional && owner !== undefined) {
@@ -3022,6 +3028,9 @@ async function markStop($: Host, active: Account, said: string | undefined, afte
     if (isStillCurrent !== undefined && !(await isStillCurrent())) return 'stale'
     // A stop that judges no window (its read already shows the account spent) leaves the arm to the newest mark.
     stopWindow = undefined
+    // An Opus or Sonnet limit applies only to that model family: no window of the login is spent, so nothing is marked.
+    // The stop still counts as the login's try, and the session moves on to a login that may have the family's room.
+    if (wording === 'model') return undefined
     if (isFable) {
       need = 'fable'
       stopWindow = { id: active.id, window: 'fable' }

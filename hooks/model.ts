@@ -158,12 +158,21 @@ export function isWeeklyStop(text: string | undefined): boolean {
   return /hit your weekly limit/.test(text ?? '')
 }
 
+/**
+ * Whether the last message of a turn that died on a limit says the limit was one model family's, Opus's or Sonnet's: it
+ * applies only to requests to that family, so no window of the login is spent (https://code.claude.com/docs/en/errors.md).
+ */
+export function isModelStop(text: string | undefined): boolean {
+  return /hit your (Opus|Sonnet) limit/.test(text ?? '')
+}
+
 /** Which limit a stop's last message names, in markStop's order: a message naming two limits is the first of them here. */
-export type Wording = 'none' | 'fable' | 'session' | 'weekly' | 'unknown'
+export type Wording = 'none' | 'fable' | 'model' | 'session' | 'weekly' | 'unknown'
 
 export function wordingClass(said: string | undefined): Wording {
   if (said === undefined || said === '') return 'none'
   if (isFableStop(said)) return 'fable'
+  if (isModelStop(said)) return 'model'
   if (isSessionStop(said)) return 'session'
   return isWeeklyStop(said) ? 'weekly' : 'unknown'
 }
