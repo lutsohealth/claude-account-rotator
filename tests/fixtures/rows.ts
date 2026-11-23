@@ -27,6 +27,27 @@ export default {
     "launch-on": "room",
     "launch-slot": { "id": "1", "slot": "", "why": "the most room", "at": 1794155700000 },
     "rows": {
+      "v": 1,
+      "at": 1794156000000,
+      "rows": [
+        {
+          "id": "1",
+          "lines": [
+            ["andres@lutsohealth.com · Company · Ultra  updated ", { "clock": 1794155640000 }],
+            ["Used ▰▰▰▱▱▱▱▱▱▱  31% Fable used ▰▰▰▰▱▱▱▱▱▱  38%  resets ", { "until": 1794340440000 }, " · Fable ", { "until": 1794254040000 }]
+          ]
+        },
+        {
+          "id": "2",
+          "lines": [
+            ["two@example.com · Max  ", { "clock": 1794155940000 }, " Failed to update (HTTP 429)"],
+            ["Used ▰▰▰▰▰▰▱▱▱▱  60% Fable used ▰▱▱▱▱▱▱▱▱▱  10%  resets ", { "until": 1794588000000 }],
+            ["5h   ▰▰▰▰▰▱▱▱▱▱  50%                             resets ", { "until": 1794160830000 }]
+          ]
+        }
+      ]
+    },
+    "rows2": {
       "v": 2,
       "at": 1794156000000,
       "rows": [

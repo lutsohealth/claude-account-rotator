@@ -152,6 +152,7 @@ class ListText(StoreCase):
 
     def test_a_line_an_older_session_stored_as_text_prints_as_is_and_says_so(self) -> None:
         store = json.loads(json.dumps(self.fixture["store"]))
+        del store["rows2"]
         store["rows"]["rows"][0]["lines"] = ["older line 1", "older line 2"]
         _, out = self.list_in_process(store=self.write("older.json", store))
         self.assertTrue(out.startswith("older line 1\nolder line 2\n\n"), out)
@@ -205,16 +206,16 @@ class ListJsonNumbers(StoreCase):
 
     def test_json_says_a_kept_value_and_a_stop_mark_for_what_they_are(self) -> None:
         store = json.loads(json.dumps(self.fixture["store"]))
-        store["rows"]["rows"][0]["windows"]["fable"] = {"pct": 38, "source": "kept", "readAt": 1794150000000}
-        store["rows"]["rows"][0]["windows"]["week"] = {"pct": 100, "source": "stop", "readAt": 1794152400000}
+        store["rows2"]["rows"][0]["windows"]["fable"] = {"pct": 38, "source": "kept", "readAt": 1794150000000}
+        store["rows2"]["rows"][0]["windows"]["week"] = {"pct": 100, "source": "stop", "readAt": 1794152400000}
         one = self.accounts(self.write("sources.json", store))[0]
         self.assertEqual((one["fable"]["source"], one["fable"]["readAgeMinutes"]), ("kept", 100))
         self.assertEqual((one["week"]["percent"], one["week"]["source"], one["week"]["readAgeMinutes"]), (100, "stop", 60))
 
     def test_a_row_stored_without_windows_or_without_a_window_has_none(self) -> None:
         store = json.loads(json.dumps(self.fixture["store"]))
-        del store["rows"]["rows"][0]["windows"]
-        del store["rows"]["rows"][1]["windows"]["fable"]
+        del store["rows2"]["rows"][0]["windows"]
+        del store["rows2"]["rows"][1]["windows"]["fable"]
         store["accounts"].append({"id": "3", "slot": "/home/test/.claude/accounts/3", "email": "three@example.com"})
         one, two, three = self.accounts(self.write("older.json", store))
         self.assertEqual((one["week"], one["fable"]), (None, None))
@@ -225,10 +226,26 @@ class ListJsonNumbers(StoreCase):
         for name, window in {"a percent that is no number": {"pct": "lots", "source": "read"}, "an unknown source": {"pct": 5, "source": "guessed"}, "a read time that is no instant": {"pct": 5, "source": "read", "readAt": "yesterday"}}.items():
             with self.subTest(name):
                 store = json.loads(json.dumps(self.fixture["store"]))
-                store["rows"]["rows"][0]["windows"]["week"] = window
+                store["rows2"]["rows"][0]["windows"]["week"] = window
                 path = self.write("damaged.json", store)
                 done = run(CLI, "account", "list", "--json", "--store", str(path), env=self.env())
                 self.assertEqual((done.returncode, str(path) in done.stderr, "Traceback" in done.stderr), (1, True, False), done.stderr)
+
+    def test_an_older_session_saving_the_old_rows_after_a_newer_one_leaves_the_numbers(self) -> None:
+        # Codex pr-b-r1 B3: the older mod writes `rows` (version 1) alone, whatever a newer one wrote beside it under `rows2`.
+        store = json.loads(json.dumps(self.fixture["store"]))
+        older = json.loads(json.dumps(store["rows"]))
+        older["at"] += 60_000
+        store["rows"] = older
+        one, two = self.accounts(self.write("mixed.json", store))
+        self.assertEqual((one["week"]["percent"], one["fable"]["percent"], two["week"]["percent"]), (31, 38, 60))
+        self.assertEqual(one["lines"], self.fixture["lines"]["1"])
+
+    def test_a_store_with_the_old_rows_alone_lists_them_with_no_numbers(self) -> None:
+        store = json.loads(json.dumps(self.fixture["store"]))
+        del store["rows2"]
+        one, two = self.accounts(self.write("old-only.json", store))
+        self.assertEqual((one["week"], one["fable"], two["week"], one["lines"]), (None, None, None, self.fixture["lines"]["1"]))
 
 
 class ReadOnly(StoreCase):

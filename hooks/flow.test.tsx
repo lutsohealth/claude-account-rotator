@@ -7297,7 +7297,7 @@ async function rowsWorld($: Engine, on: On, isFailing = false): Promise<{ w: Wor
 test('the merge stores each login\'s row lines under rows, stamped with when and the writer\'s version', async ($, on) => {
   const { store, clock } = await rowsWorld($, on)
   const rows = rowsOf(store)
-  expect([rows?.v, typeof rows?.at, rows?.rows?.map(r => r.id)]).toEqual([2, 'number', ['1', '2']])
+  expect([rows?.v, typeof rows?.at, rows?.rows?.map(r => r.id)]).toEqual([1, 'number', ['1', '2']])
   expect(lineOne(store, '1')).toMatch(new RegExp(`^one@example\\.com.*  updated ${localTime(goodReadAt(store, '1'))}$`))
   expect(rowsText(store, clock.now())?.[0]?.lines[1]).toBe('Used ▰▰▰▱▱▱▱▱▱▱  30% Fable used ▰▰▰▰▱▱▱▱▱▱  40%  resets 5d 16h 59m · Fable 4d 16h 59m')
   expect(clock.now()).toBeLessThan(NOW + 2 * 60_000)
@@ -17692,7 +17692,8 @@ test('BODY-KEYS: removing a login deletes every session\'s body key of it', asyn
   w.usage['tok-1'] = [null, 40]
   w.usage['tok-2'] = [null, 30]
   const store = new Map<string, unknown>(
-    Object.entries({ ...TWO_LOGINS, 'usage-body:2:session-a': { at: NOW - HOUR }, 'usage-body:2:session-b': { at: NOW - HOUR }, 'usage-body:1:session-a': { at: NOW - HOUR } }),
+    // `usage-body:2` is the key part A's first version wrote, with no session in it.
+    Object.entries({ ...TWO_LOGINS, 'usage-body:2': { at: NOW - HOUR }, 'usage-body:2:session-a': { at: NOW - HOUR }, 'usage-body:2:session-b': { at: NOW - HOUR }, 'usage-body:1:session-a': { at: NOW - HOUR } }),
   )
   const clock = world(on, w, store)
   await start($, clock)
@@ -17817,7 +17818,12 @@ test('READ-AGE: a login read 5 minutes ago whose Fable row is 40 minutes old is 
   await $.classic.StopFailure(FABLE_STOP)
   await clock.settle()
   expect(slotValues(w)).toEqual([SLOT2])
-  expect(whats(stopLogOf(store, w)).filter(line => line.startsWith('picked '))).toEqual(['picked 2: stale, read 5 min ago; tried 1'])
+  // The pick was judged on the Fable row, read 40 minutes ago, though a response refreshed the reading 5 minutes ago: the log
+  // and the carry-on line both say 40.
+  expect(whats(stopLogOf(store, w)).filter(line => line.startsWith('picked '))).toEqual(['picked 2: stale, read 40 min ago; tried 1'])
+  await clock.advance(36_000)
+  expect(w.submitted).toHaveLength(1)
+  expect(w.submitted[0]).toMatch(/Fable week was last read 40 min ago/)
 })
 
 test('READ-AGE: an idle login is picked as stale with its true age, in the log and not as spent (06:11:51)', async ($, on) => {
@@ -17849,9 +17855,12 @@ test('PROVENANCE: the rows every session stores are at version 2 and carry each 
   await start($, clock)
   await clock.advance(61_000)
   const read = store.get('usage:1') as { at: number }
-  const rows = store.get('rows') as { v: number; rows: { id: string; windows?: unknown }[] }
+  // Rows version 2 has a key of its own, which an older session never writes; `rows` stays version 1, for older readers.
+  const rows = store.get('rows2') as { v: number; rows: { id: string; windows?: unknown }[] }
   expect(rows.v).toBe(2)
   expect(rows.rows.find(r => r.id === '1')?.windows).toEqual({ week: { pct: 30, source: 'read', readAt: read.at }, fable: { pct: 40, source: 'read', readAt: read.at } })
+  const v1 = store.get('rows') as { v: number; rows: { id: string; lines: unknown[]; windows?: unknown }[] }
+  expect([v1.v, v1.rows.map(r => r.windows), v1.rows.map(r => r.lines)]).toEqual([1, [undefined, undefined], rows.rows.map(r => r.lines)])
 })
 
 test('PROVENANCE: the pane draws a spent window in the warning colour and one with room in none', async ($, on) => {
@@ -18002,4 +18011,49 @@ test('CREDENTIALS-FILE: a /clear keeps the pane line and warns no second time', 
   expect(await pane.find({ text: /\.credentials\.json/ })).toBeDefined()
   await pane.unmount()
   expect([warned(w.toasts).length, warned(w.notices).length]).toEqual([1, 1])
+})
+
+// Codex pr-b-r1 C2: a reload of the mod empties its memory, and the session goes on: its view, still bound, says it was told.
+test('CREDENTIALS-FILE: a reload of the mod in the same session warns no second time, and the pane line stays', async ($, on) => {
+  const w = fresh()
+  w.files[FILE1] = SECRET_FILE
+  w.mtimes = { [FILE1]: FILE_MTIME }
+  const told = '/Users/tester/.claude/.credentials.json exists (told before the reload)'
+  await reloadedWorld($, on, { credentialsNote: told }, {}, undefined, w)
+  expect([warned(w.toasts), warned(w.notices)]).toEqual([[], []])
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  expect(await pane.find({ text: /told before the reload/ })).toBeDefined()
+  await pane.unmount()
+})
+
+// Codex pr-b-r1 NOTE and C1: part A's first key, `usage-body:<id>`, goes with the others where a sign-in is replaced, and a login keeps the newest keys only.
+test('BODY-KEYS: a sign-in as another account deletes every body key of the login, the first version\'s with no session among them', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.usage['tok-1'] = [20, 30, 40]
+  const store = new Map<string, unknown>(
+    Object.entries({
+      ...TWO_LOGINS,
+      'holder:1': { token: 'a-token-that-is-not-this-one', who: { email: 'nine@example.com' } },
+      'usage-body:1': { at: NOW - HOUR },
+      'usage-body:1:session-old': { at: NOW - HOUR },
+    }),
+  )
+  const clock = world(on, w, store)
+  await start($, clock)
+  expect([...store.keys()].filter(k => k.startsWith('usage-body:1'))).toEqual([`usage-body:1:${w.otherEnv.ACCOUNT_ROTATOR_SESSION}`])
+})
+
+test('BODY-KEYS: a login keeps the body keys of its newest 20 sessions, though none is a week old', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.usage['tok-1'] = [20, 30, 40]
+  const seeded = Object.fromEntries(Array.from({ length: 25 }, (_, k) => [`usage-body:1:session-${k + 1}`, { at: NOW - (k + 1) * 60_000 }]))
+  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, ...seeded }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  const kept = [...store.keys()].filter(k => k.startsWith('usage-body:1:')).sort()
+  // This session's own key and the 19 newest others.
+  const expected = [`usage-body:1:${w.otherEnv.ACCOUNT_ROTATOR_SESSION}`, ...Array.from({ length: 19 }, (_, k) => `usage-body:1:session-${k + 1}`)].sort()
+  expect(kept).toEqual(expected)
 })

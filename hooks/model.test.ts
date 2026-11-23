@@ -1703,7 +1703,9 @@ const storedLines = (v: View, now: number) => rowsOf(v, now).map(r => ({ id: r.i
 
 test('the merge stores the fixture\'s rows: text runs, each time of day and each reset as epoch ms', () => {
   expect(FIXTURE_VIEW.accounts).toEqual(ROWS_FIXTURE.store.accounts)
-  expect(rowsOf(FIXTURE_VIEW, ROWS_FIXTURE.now)).toEqual(ROWS_FIXTURE.store.rows.rows)
+  expect(rowsOf(FIXTURE_VIEW, ROWS_FIXTURE.now)).toEqual(ROWS_FIXTURE.store.rows2.rows)
+  // The rows an older reader reads stay as they were: the same lines, no windows (the store's `rows`, rows version 1).
+  expect(modelExports.rowsV1Of(FIXTURE_VIEW, ROWS_FIXTURE.now)).toEqual(ROWS_FIXTURE.store.rows.rows)
 })
 
 test('the pane draws the fixture\'s lines, and the stored rows read at the same clock and zone are those lines', () => {
@@ -2610,6 +2612,17 @@ test('PROVENANCE: a read under an hour old adds no line; a read over an hour, a 
   const max = { ...ANDRES, tier: 'default_claude_max_5x' }
   const five = rowView({ readings: { '1': { sevenDay: { pct: 31, resetsAt: ROW_WEEK_END }, fiveHour: { pct: 100, resetsAt: ahead(0, 1, 20), isStop: true }, at: READ_AT, by: '1' } }, noFiveHour: { '1': false }, marks: { '1': { pct: 100, resetsAt: ahead(0, 1, 20), at: ROW_NOW - 10 * 60_000 } } }, max)
   expect(rowText(rowOf(five, max, ROW_NOW, TALLINN)).slice(3)).toEqual(['5h: stop mark'])
+})
+
+// Codex pr-b-r1 B2: the age a pick reports is the age of what it judged on.
+test('READ-AGE: a pick judged on the Fable row reports that row\'s age, any other pick the reading\'s, and a row with no time of its own the reading\'s', () => {
+  const v = view({ '1': [100, 50], '2': [0, 0] })
+  const row = (fable: object): Reading => ({ fiveHour: { pct: 10, resetsAt: LATER }, sevenDay: { pct: 10, resetsAt: WEEK_END }, fable: { pct: 10, resetsAt: FABLE_END, ...fable }, at: NOW - 5 * MIN })
+  v.readings['2'] = row({ at: NOW - 40 * MIN })
+  const age = (need: 'fable' | undefined) => pickAfterStop(v, v.readings, NOW, need, ['1'], new Set())?.readAgeMs
+  expect([age('fable'), age(undefined)]).toEqual([40 * MIN, 5 * MIN])
+  v.readings['2'] = row({})
+  expect(age('fable'), 'a legacy row: the reading\'s time').toBe(5 * MIN)
 })
 
 // puma-9arph.109.8: the constant that is the Fable week's line is named for it (it was LEAVE_SEVEN_DAY, whose comment said weekly).
