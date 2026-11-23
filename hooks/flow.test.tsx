@@ -18091,9 +18091,11 @@ for (const kind of ['week', 'five'] as const) {
     store.set('usage:3', bodyRowOfThree(94, clock.now()))
     store.set(`usage-body:3:${clock.now()}:session-a`, bodyOfThree(94, clock.now()))
     w.afterUsageBody = undefined
+    // This session's body completes after the other's.
+    await clock.advance(1_000)
     held.release()
     await clock.settle()
-    const own = [...store.keys()].filter(k => k.startsWith('usage-body:3:') && k.endsWith(`:${w.otherEnv.ACCOUNT_ROTATOR_SESSION}`))
+    const own =[...store.keys()].filter(k => k.startsWith('usage-body:3:') && k.endsWith(`:${w.otherEnv.ACCOUNT_ROTATOR_SESSION}`))
     expect(own.length, 'the late body has a key of its own').toBe(1)
     expect((store.get('usage:3') as { sevenDay?: { pct: number } }).sevenDay?.pct, 'and left the newer row as it was').toBe(94)
     expect(store.get(key), 'the late body ends no mark').toBeDefined()
