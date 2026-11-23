@@ -190,7 +190,17 @@ let lastMeasured: { at: number; reading: Reading | undefined } | undefined
  * start. A tick or a response moves a session only while it is failed; a sub-agent's stop or turn changes nothing here.
  * It starts false: a session holds until its main loop fails, a lost sign-in included (the next request fails).
  */
-let isFailed = false
+let isUncleared = false
+/**
+ * How many failed main-loop stops this session has had: each StopFailure of the main loop adds one, and a stop snapshots
+ * the count it examined. Work a stop awaits before it acts is void once the count moved: a newer failure is another
+ * stop's to handle, even where the session is red again (the boolean alone cannot tell the two failures apart).
+ */
+let failureEpoch = 0
+/** Whether the main loop is red now: failed, and no main turn started since. */
+const isRed = (): boolean => isUncleared
+/** Whether the failure a stop examined (`epoch`) is still the latest, and still uncleared. */
+const isSameFailure = (epoch: number): boolean => failureEpoch === epoch && isUncleared
 /** The login whose hold (a tick or a response left it be, its stored usage saying leave) the stop-log already told: one line a hold. */
 let heldTold: string | undefined
 /**
@@ -1541,7 +1551,7 @@ function whyLeave(view: View, now: number, need?: Need): string {
  * turn that died on the Fable week (`need`), it leaves for that too, and only
  * for a login with Fable room: the ticks and responses pass none, so a session
  * that never hit the Fable week stays on a login whose Fable week is spent.
- * A tick or a response moves a session only while its main loop is failed (isFailed): otherwise only a usage-limit stop does.
+ * A tick or a response moves a session only while its main loop is failed (isRed): otherwise only a usage-limit stop does.
  */
 async function maybeRotate($: Host, need?: Need, carry?: CarryOn): Promise<boolean> {
   // A view at its defaults names login 1 in use, whichever login this session runs on.
@@ -1603,7 +1613,7 @@ async function maybeRotate($: Host, need?: Need, carry?: CarryOn): Promise<boole
   // A tick or a response moves a session only while it is failed (red in Orca): otherwise it stays where it runs,
   // whatever the stored numbers say (a login reset by hand keeps its old 100 until the next read), a sign-in mark
   // included: a lost sign-in fails the next request, which turns the session red.
-  if (carry === undefined && !isFailed) {
+  if (carry === undefined && !isRed()) {
     if (heldTold !== view.activeId) {
       heldTold = view.activeId
       void logStop($, `held on login ${view.activeId}: the session is answering, its stored usage says leave`)
@@ -1809,7 +1819,7 @@ async function retryHeld($: Host): Promise<void> {
     if (isConnectingChrome) return
     // A rotation that carries nothing (a tick's or a response's) goes only while the session is red: a main turn since
     // has cleared it, so the hold ends and the next tick decides again.
-    if (h.carry === undefined && !isFailed) {
+    if (h.carry === undefined && !isRed()) {
       await writeSwitch($, { idle: true }, v => ({ ...v, held: undefined }))
       return
     }
@@ -1994,7 +2004,7 @@ async function switchNow($: Host, token: number, target: Account, why: string, i
   await keepChrome($)
   // The awaits since maybeRotate's check can span a main turn start, which clears the failure: a rotation that carries
   // nothing reads it again here, the last point before the slot write, and stays where the session now runs.
-  if (isRotation && carry === undefined && !isFailed) return false
+  if (isRotation && carry === undefined && !isRed()) return false
   try {
     await useSlot($, target.slot)
   } catch (error) {
@@ -2582,12 +2592,12 @@ async function countNonLanding($: Host, target: Account, owner: Account): Promis
 /**
  * Points the session's slot and view back at `owner`, the login a stop's words showed its requests go out on, ending a
  * switch that never landed as settlePending's give-up does. It acts only on what the stop examined: the login believed in
- * use and the switch pending (`seen`), and a main loop still failed. 'stale' where either changed (a press's switch, a
- * new main turn) before the write, and nothing is written; 'failed' where another switch runs or the slot write fails,
- * and the stop then goes on with the login believed.
+ * use, the switch pending and the failure (`seen`: its epoch, still the latest and still red). 'stale' where any
+ * changed (a press's switch, a new main turn, a newer failure) before the write, and nothing is written; 'failed' where
+ * another switch runs or the slot write fails, and the stop then goes on with the login believed.
  */
-async function pointBackTo($: Host, owner: Account, seen: { activeId: string; since: number | undefined }): Promise<'done' | 'failed' | 'stale'> {
-  if (!isFailed) return 'stale'
+async function pointBackTo($: Host, owner: Account, seen: { activeId: string; since: number | undefined; epoch: number }): Promise<'done' | 'failed' | 'stale'> {
+  if (!isSameFailure(seen.epoch)) return 'stale'
   const token = ++lastToken
   let isStale = false
   const isClaimed = await writeSwitch($, { claim: undefined }, v => {
@@ -2600,7 +2610,7 @@ async function pointBackTo($: Host, owner: Account, seen: { activeId: string; si
   const isDone = await runOwned($, token, async () => {
     if (!(await undoProvisionalStop($, { owner: token }))) return false
     // A main turn that began meanwhile cleared the failure: the stop is no longer the session's.
-    if (!isFailed) {
+    if (!isSameFailure(seen.epoch)) {
       isLate = true
       return false
     }
@@ -2614,7 +2624,7 @@ async function pointBackTo($: Host, owner: Account, seen: { activeId: string; si
     // nothing is published, and the release's reconcile puts the slot back on the login the view names. The check is
     // inside the write, the last point before the view changes.
     const isPublished = await writeSwitch($, { owner: token }, v => {
-      isLate = !isFailed || v.activeId !== seen.activeId || v.pending?.since !== seen.since
+      isLate = !isSameFailure(seen.epoch) || v.activeId !== seen.activeId || v.pending?.since !== seen.since
       return isLate ? v : { ...v, activeId: owner.id, pending: undefined }
     })
     if (isLate || !isPublished) return false
@@ -2634,7 +2644,7 @@ const isSwitchingStop = (error: string): boolean => error === 'rate_limit' || er
  * room, and leaves the 5-hour window alone: the window is not what ran out, and
  * a mark on it, stored for every session, would move them all off the login.
  */
-async function onStopFailure($: Host, stop: { error: string; last_assistant_message?: string }): Promise<void> {
+async function onStopFailure($: Host, stop: { error: string; last_assistant_message?: string }, epoch: number): Promise<void> {
   const { error } = stop
   if (!isSwitchingStop(error)) return
   let view = await getView($)
@@ -2692,7 +2702,17 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
   const words = error === 'rate_limit' ? await stopNamed($, view, stop.last_assistant_message) : undefined
   const { owner, isProvisional } =
     error === 'rate_limit' ? ownerOfStop(view, active, words, hasResponseSince ? lastMeasured?.reading : undefined, hasResponseSince) : { owner: active, isProvisional: false }
-  if (ep !== undefined && error === 'rate_limit') {
+  // The stop read the view, the failure and the pending switch before the awaits above; it acts on them only while they
+  // stand. A stop dropped here, or by the point-back below, has changed no episode state, mark or count: those are
+  // written only after the last check.
+  const seen = { activeId: view.activeId, since, epoch }
+  const dropStale = () => void logStop($, 'stop dropped: the switch or the failed turn it examined has changed since')
+  const isCurrent = async () => {
+    const now = await getView($)
+    return isSameFailure(epoch) && now.activeId === seen.activeId && now.pending?.since === seen.since
+  }
+  const charge = () => {
+    if (ep === undefined || error !== 'rate_limit') return
     ep.stops += 1
     // Who the stop died on: its owner; where the owner is only provisional, the login moved to only at its second such
     // stop (the first may have gone out on the login left, and nothing says); nobody where a response since the switch
@@ -2701,19 +2721,18 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
     if (died !== undefined && !ep.tried.includes(died)) ep.tried.push(died)
     ep.budget ??= 2 * view.accounts.length + 2
   }
+  if (!(await isCurrent())) return dropStale()
   // The owner is not the login the mod believes in use, whatever the switch's age and whether the words or a response
   // proved it: the move to the believed login never landed (the requests still go out on the owner). The believed login
   // is charged nothing; the session is pointed back at the owner, as a give-up of the switch does, and the stop goes on
   // as the owner's. A believed login that fails to land twice in a session is left be. The point-back acts only on the
-  // switch and the failed turn this stop examined: where either has changed since, the stop is dropped.
+  // switch and the failure this stop examined: where either has changed since, the stop is dropped.
   if (owner !== undefined && owner.id !== active.id) {
+    const back = await pointBackTo($, owner, seen)
+    if (back === 'stale') return dropStale()
     const proof = words === undefined ? `a response since the switch is login ${owner.id}'s` : `stop names login ${owner.id}'s reset`
     void logStop($, `${proof}, not login ${active.id}'s: the move to ${active.id} has not landed`)
-    const back = await pointBackTo($, owner, { activeId: active.id, since })
-    if (back === 'stale') {
-      void logStop($, `stop dropped: the switch or the failed turn it examined has changed since`)
-      return
-    }
+    charge()
     await countNonLanding($, active, owner)
     if (back === 'done') {
       view = await getView($)
@@ -2721,7 +2740,7 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
       since = view.pending?.since
       hasResponseSince = false
     }
-  }
+  } else charge()
   const isProvenRejection = error === 'authentication_failed' && hasResponseSince && provenStopper(view, lastMeasured?.reading)?.id === active.id
   const isSettling = view.pending !== undefined && (await $.clock.now()) - view.pending.since < SETTLE_MS
   if (isSettling && !isProvenRejection) {
@@ -3811,7 +3830,11 @@ export const register: Register = on => {
   on('classic.StopFailure', async ($, e, next) => {
     // The main loop's failed stop, whatever the error, turns the session red. Set here, before any await and outside
     // the stop's queued work, so the next tick finds it; a sub-agent's stop never does.
-    if (e.agent_id === undefined) isFailed = true
+    if (e.agent_id === undefined) {
+      failureEpoch += 1
+      isUncleared = true
+    }
+    const epoch = failureEpoch
     // A subagent's stop switches nothing: the main loop's own stop, which follows it, does the work.
     if (e.agent_id !== undefined) {
       void logStop($, `stop heard from agent ${e.agent_type ?? 'unknown'}: ${e.error}, no switch`)
@@ -3832,7 +3855,7 @@ export const register: Register = on => {
       // This stop's countdown is cancelled only by a person's prompt from here on.
       episode.personPrompts = personPrompts
     }
-    void withLock(() => onStopFailure($, e)).catch(error => {
+    void withLock(() => onStopFailure($, e, epoch)).catch(error => {
       // A fault of the host itself (its store, its view) outside the stop's own read: the recovery ends here, and the
       // stop-log says so.
       void logStop($, `stop handling failed: ${errorName(error)}`)
@@ -3863,7 +3886,7 @@ export const register: Register = on => {
     openTurns.add(e.turnId)
     if (e.agentId === undefined) {
       // A new main turn clears the failure, as Orca's next prompt clears the red.
-      isFailed = false
+      isUncleared = false
       // A main turn leaves the own-continue arm: only a person's prompt (prompt.submit below) cancels the countdown.
       const ep = episode
       // The refresh nudge's own turn is no entry (council B2): the resume stays owed and the held switch stands.
