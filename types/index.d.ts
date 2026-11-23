@@ -83,12 +83,22 @@ export type RotatorRequest =
   | { kind: 'continue-text'; nonce: string; at: number; id: string; store: string; text: unknown }
 
 /**
- * The rows every session's merge stores under `rows`, for the CLI: each login's lines as runs, when, and the writer's
- * version. A session older than this shape stored each line as one string, its times rendered by the writer.
- * `v` does not version the lines: both shapes carry 1, so a reader tells them by each line's type. A new line shape
- * takes a new key, as `usage:<id>` did, or versions on one store rewrite each other's rows until the older restarts.
+ * The rows every session's merge stores under `rows`, for the CLI: each login's lines as runs, its windows as numbers,
+ * and when. A session older than this shape stored each line as one string, its times rendered by the writer.
+ * `v` versions the rows: 1 holds lines alone, 2 adds each login's `windows`. It does not version the lines: both shapes
+ * of a line carry 1 or 2, so a reader tells them by each line's type. A new line shape takes a new key, as `usage:<id>`
+ * did, or versions on one store rewrite each other's rows until the older restarts.
  */
-export type StoredRows = { v: number; at: number; rows: { id: string; lines: StoredRun[][] }[] }
+export type StoredRows = { v: number; at: number; rows: { id: string; lines: StoredRun[][]; windows?: StoredWindows }[] }
+
+/** Where a window's number comes from: a read (a usage body, or a response's rate limits), a value kept from an earlier read, or a stop's mark. */
+export type WindowSource = 'read' | 'kept' | 'stop'
+
+/** A window's percent used as a row shows it, its source, and when that was read or marked (epoch ms; absent where unknown). */
+export type ShownWindow = { pct: number; source: WindowSource; readAt?: number }
+
+/** What a login's stored row says of its week and its Fable week, as numbers, for the CLI's `list --json`. */
+export type StoredWindows = { week?: ShownWindow; fable?: ShownWindow }
 
 /**
  * When a login's usage is next read, for every session, under `usage-due:<id>`: every usage call goes through it.

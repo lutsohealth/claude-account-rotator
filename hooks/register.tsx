@@ -83,6 +83,7 @@ import {
   holdsLogin,
   slotNumber,
   shouldLeave,
+  ROWS_VERSION,
   WRITER_VERSION,
   whoseWeek,
   whoseReset,
@@ -1011,7 +1012,7 @@ function parsed(text: string | undefined): unknown {
 async function saveRows($: Host, now: number): Promise<void> {
   const rows = rowsOf(await getView($), now)
   if (isSameRows(await $.store.get('rows'), rows)) return
-  await $.store.set('rows', { v: WRITER_VERSION, at: now, rows })
+  await $.store.set('rows', { v: ROWS_VERSION, at: now, rows })
 }
 
 /** Changes the footer's look for every session. */

@@ -86,6 +86,23 @@ def is_run(run: object) -> bool:
     return isinstance(run, dict) and len(run) == 1 and any(is_instant(run.get(key)) for key in ("clock", "until"))
 
 
+# hooks/model.ts WindowSource: where a stored window's number comes from.
+WINDOW_SOURCES = ("read", "kept", "stop")
+
+
+def is_window(window: object) -> bool:
+    """Whether a stored window is one the mod writes: its percent, its source, and where known when it was read."""
+    if not isinstance(window, dict) or window.get("source") not in WINDOW_SOURCES:
+        return False
+    pct = window.get("pct")
+    return isinstance(pct, (int, float)) and not isinstance(pct, bool) and ("readAt" not in window or is_instant(window["readAt"]))
+
+
+def are_windows(windows: object) -> bool:
+    """Whether a row's stored windows are the week's and the Fable week's, each one the mod writes."""
+    return isinstance(windows, dict) and all(key in ("week", "fable") and is_window(window) for key, window in windows.items())
+
+
 def check(data: dict, path: str) -> None:
     """Every value `list` reads, by type and range; a StoreError names the first the mod would never write."""
 
@@ -106,6 +123,8 @@ def check(data: dict, path: str) -> None:
                 raise damaged("a row has no id or no lines")
             if not all(isinstance(line, str) or (isinstance(line, list) and all(map(is_run, line))) for line in row["lines"]):
                 raise damaged(f"row {row['id']} holds a line of no known shape")
+            if "windows" in row and not are_windows(row["windows"]):
+                raise damaged(f"row {row['id']} holds windows of no known shape")
     pick = data.get("launch-slot")
     if pick is not None and (not isinstance(pick, dict) or ("at" in pick and not is_instant(pick["at"]))):
         raise damaged("launch-slot is no pick")
@@ -181,6 +200,21 @@ def rows_by_id(data: dict) -> dict[str, list]:
     return {r["id"]: r["lines"] for r in stored["rows"]} if isinstance(stored, dict) else {}
 
 
+def window_json(window: object, now_ms: float) -> dict | None:
+    """A stored window as `list --json` gives it: its percent, its source, when it was read and how many minutes ago, as numbers.
+    None where the row stored none: an older version of the mod, or a login with no such window."""
+    if not isinstance(window, dict):
+        return None
+    read_at = window.get("readAt")
+    return {"percent": window["pct"], "source": window["source"], "readAt": read_at,
+            "readAgeMinutes": round((now_ms - read_at) / MINUTE_MS) if read_at is not None else None}
+
+
+def windows_by_id(data: dict) -> dict[str, dict]:
+    stored = data.get("rows")
+    return {r["id"]: r.get("windows") or {} for r in stored["rows"]} if isinstance(stored, dict) else {}
+
+
 def listed(data: dict, now_ms: float, zone: tzinfo | None) -> list[tuple[dict, list[str], bool, bool]]:
     rows = rows_by_id(data)
     return [(a, *account_lines(a, rows, now_ms, zone)) for a in data["accounts"]]
@@ -206,14 +240,16 @@ def list_json(data: dict, store: str, now_ms: float, zone: tzinfo | None) -> dic
     """Orca's envelope (`orca account list --json`), with the mod's own fields per account."""
     accounts = []
     rows = rows_by_id(data)
+    windows = windows_by_id(data)
     for a, lines, older, passed in listed(data, now_ms, zone):
         health = data.get(f"health:{a['id']}")
         has_row = bool(rows.get(a["id"]))
+        shown = windows.get(a["id"], {})
         accounts.append({
             "id": a["id"], "email": a.get("email"), "orgId": a.get("orgId"), "orgName": a.get("orgName"), "plan": a.get("plan"),
             "tier": a.get("tier"), "slot": a.get("slot"), "system": a.get("slot") == "",
             "health": health.get("kind") if isinstance(health, dict) else None, "lines": lines if has_row else [], "hasRow": has_row, "olderLines": older,
-            "resetPassed": passed,
+            "resetPassed": passed, "week": window_json(shown.get("week"), now_ms), "fable": window_json(shown.get("fable"), now_ms),
         })
     pick = data.get("launch-slot")
     active = pick.get("id") if isinstance(pick, dict) and isinstance(pick.get("id"), str) else None

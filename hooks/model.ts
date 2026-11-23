@@ -1,4 +1,4 @@
-import type { Account, BodyRead, CheckError, Fill, FiveHourLimit, FooterStyle, Glyphs, Health, Highlight, LaunchOn, LaunchPick, Mark, PlanTier, Reading, RotateTo, RotatorRequest, Row, RowPart, StopProof, StoredRows, StoredRun, UsageDue, UsageWindow, View } from '../types'
+import type { Account, BodyRead, CheckError, Fill, FiveHourLimit, FooterStyle, Glyphs, Health, Highlight, LaunchOn, LaunchPick, Mark, PlanTier, Reading, RotateTo, RotatorRequest, Row, RowPart, ShownWindow, StopProof, StoredRows, StoredRun, StoredWindows, UsageDue, UsageWindow, View } from '../types'
 
 /** Leave a login once its 5-hour window is this full (percent). */
 export const LEAVE_FIVE_HOUR = 90
@@ -748,10 +748,12 @@ export function readingFromLimits(
 }
 
 /**
- * The version of the store's shapes this mod writes, stamped as `v` on `usage:<id>`, `usage-due:<id>` and `rows`,
- * whose lines it does not version (`StoredRows`).
+ * The version of the store's shapes this mod writes, stamped as `v` on `usage:<id>` and `usage-due:<id>`.
  */
 export const WRITER_VERSION = 1
+
+/** The version of the stored rows' shape, stamped as `v` on `rows` (`StoredRows`): 2 adds each login's windows as numbers. */
+export const ROWS_VERSION = 2
 
 /**
  * Two week resets name one account's week: within an hour of each other, or a whole number of weeks apart (a
@@ -1413,18 +1415,73 @@ function resetsPart(pieces: (string | Reset)[]): RowPart {
 const USED_CELLS = 15
 /** The cells of a usage line's label: "Used", and "5h" padded to it, so each bar starts at one column. */
 const LABEL_CELLS = 'Used'.length
+/** The words of the Fable bar: it is used, as the week's is. */
+const FABLE_LABEL = ' Fable used'
 /** The cells of the Fable part: a plan with none leaves them blank, so "resets" stands at one column on every plan. */
-const FABLE_CELLS = ' Fable '.length + USED_CELLS
+const FABLE_CELLS = `${FABLE_LABEL} `.length + USED_CELLS
 
 /**
- * A window as the row draws it: its label, then a ten-cell bar and the percent used, whatever the footer fills with;
- * a dash, dim, in the same cells, where none is read.
+ * A window as the row draws it: its label, then a ten-cell bar and the percent used, whatever the footer fills with, in the
+ * warning tone where the window is `isSpent`, never in the look of room; a dash, dim, in the same cells, where none is read.
  */
-function usedParts(label: string, w: UsageWindow | undefined, now: number): RowPart[] {
+function usedParts(label: string, w: UsageWindow | undefined, now: number, isSpent = false): RowPart[] {
   const pct = windowPct(w, now)
   if (pct === undefined) return [{ text: `${label} ${'–'.padEnd(USED_CELLS)}`, tone: 'dim' }]
   const used = Math.round(pct)
-  return [{ text: `${label} ` }, { text: `${longBar(used)} ${String(used).padStart(3)}%` }]
+  return [{ text: `${label} ` }, { text: `${longBar(used)} ${String(used).padStart(3)}%`, ...(isSpent ? { tone: 'warning' as const } : {}) }]
+}
+
+/** How old a window's number may be before its row says its age. */
+const AGE_SHOWN_MS = 3600_000
+
+/** An age as a row says it, whole hours under two days, then whole days: it changes no more than once an hour. */
+function ageText(ms: number): string {
+  const hours = Math.floor(ms / 3600_000)
+  return hours >= 48 ? `${Math.floor(hours / 24)}d` : `${hours}h`
+}
+
+/**
+ * A window's number as the row shows it, with where it comes from: a stop's mark (`isStop`, with the time of the stop), a
+ * Fable row kept from a read older than the reading around it, or a read, a body's or a response's. Undefined where the
+ * login shows no such window.
+ */
+function shownWindow(view: View, id: string, kind: 'sevenDay' | 'fable' | 'fiveHour', now: number): ShownWindow | undefined {
+  const r = view.readings[id]
+  const w = r?.[kind]
+  const pct = windowPct(w, now)
+  if (r === undefined || w === undefined || pct === undefined) return undefined
+  if (w.isStop === true) {
+    const mark = { sevenDay: view.weekMarks, fable: view.fableMarks, fiveHour: view.marks }[kind]?.[id]
+    return { pct, source: 'stop', ...(mark === undefined ? {} : { readAt: mark.at }) }
+  }
+  // Only the Fable row carries a read time of its own: the other windows are written whole with the reading.
+  const own = kind === 'fable' ? w.at : undefined
+  return { pct, source: own !== undefined && own < r.at ? 'kept' : 'read', readAt: own ?? r.at }
+}
+
+/** What a row says of one window that is no fresh read: a stop's mark, a kept value, or a read over an hour old. Nothing for a fresh read. */
+function noteOf(name: string, shown: ShownWindow | undefined, now: number): string | undefined {
+  if (shown === undefined) return undefined
+  const old = shown.readAt !== undefined && now - shown.readAt > AGE_SHOWN_MS ? ageText(now - shown.readAt) : undefined
+  if (shown.source === 'stop') return `${name}: stop mark${old === undefined ? '' : ` ${old} ago`}`
+  if (shown.source === 'kept') return `${name}: kept from ${old === undefined ? 'an earlier read' : `a read ${old} ago`}`
+  return old === undefined ? undefined : `${name}: read ${old} ago`
+}
+
+/** The line after a row's windows that says which numbers are no fresh read; none where every one is. */
+function provenanceLine(view: View, a: Account, now: number): RowPart[] | undefined {
+  const notes = [
+    noteOf('Used', shownWindow(view, a.id, 'sevenDay', now), now),
+    noteOf('Fable used', shownWindow(view, a.id, 'fable', now), now),
+    noteOf('5h', shownWindow(view, a.id, 'fiveHour', now), now),
+  ].filter((note): note is string => note !== undefined)
+  return notes.length === 0 ? undefined : [{ text: notes.join(' · '), tone: 'dim' }]
+}
+
+/** A login's week and Fable week as numbers with their source, for the stored row. */
+function windowsOf(view: View, id: string, now: number): StoredWindows {
+  const [week, fable] = [shownWindow(view, id, 'sevenDay', now), shownWindow(view, id, 'fable', now)]
+  return { ...(week === undefined ? {} : { week }), ...(fable === undefined ? {} : { fable }) }
 }
 
 /** A line with its last part's trailing pad cut, so a dash that ends the line leaves no blank cells after it. */
@@ -1505,13 +1562,13 @@ function usageLine(view: View, a: Account, now: number): RowPart[] {
   if (r === undefined) return [{ text: `Used ${longBar(0)} no reading yet`, tone: 'dim' }]
   const plan = planName(a, hasNoFiveHour(view, a.id))
   const isFable = r.fable !== undefined || (plan !== undefined && HAS_FABLE_WEEK.test(plan))
-  const fable = isFable ? usedParts(' Fable', r.fable, now) : [{ text: ' '.repeat(FABLE_CELLS) }]
+  const fable = isFable ? usedParts(FABLE_LABEL, r.fable, now, isFableSpent(r, now)) : [{ text: ' '.repeat(FABLE_CELLS) }]
   const [week, fableReset] = [resetAhead(r.sevenDay, now), resetAhead(r.fable, now)]
   const resets =
     week === undefined
       ? fableReset === undefined ? undefined : ['  Fable resets ', fableReset]
       : ['  resets ', week, ...(fableReset === undefined || Math.abs(fableReset.at - week.at) < SAME_RESET_MS ? [] : [' · Fable ', fableReset])]
-  return trimEnd([...usedParts('Used', r.sevenDay, now), ...fable, ...(resets === undefined ? [] : [resetsPart(resets)])])
+  return trimEnd([...usedParts('Used', r.sevenDay, now, isWeekSpent(r, now, view.weekLeave)), ...fable, ...(resets === undefined ? [] : [resetsPart(resets)])])
 }
 
 /**
@@ -1526,7 +1583,7 @@ function fiveHourLine(view: View, a: Account, now: number): RowPart[] | undefine
   // "5h" is shorter than "Used": the cells between keep each bar, or the dash of an unread percent, at one column. A
   // bar's label part stays "5h "; the dash is one part with its label, so the label is padded there.
   const isRead = windowPct(w, now) !== undefined
-  const [name, ...used] = usedParts(isRead ? '5h' : '5h'.padEnd(LABEL_CELLS), w, now)
+  const [name, ...used] = usedParts(isRead ? '5h' : '5h'.padEnd(LABEL_CELLS), w, now, (windowPct(w, now) ?? 0) >= LEAVE_FIVE_HOUR)
   const parts = name === undefined ? [] : isRead ? [name, { text: ' '.repeat(LABEL_CELLS - '5h'.length) }, ...used] : [name]
   return trimEnd([...parts, { text: ' '.repeat(FABLE_CELLS) }, ...(reset === undefined ? [] : [resetsPart(['  resets ', reset])])])
 }
@@ -1550,7 +1607,8 @@ export function rowOf(view: View, a: Account, now: number, timeZone?: string): R
   const isFailed = state[0]?.tone === 'warning' && view.health[a.id]?.kind !== 'login-needed'
   const dim = (line: RowPart[]): RowPart[] => (isFailed ? line.map(p => ({ ...p, tone: 'dim' })) : line)
   const five = fiveHourLine(view, a, now)
-  return { id: a.id, lines: [line1, dim(usageLine(view, a, now)), ...(five === undefined ? [] : [dim(five)])] }
+  const provenance = provenanceLine(view, a, now)
+  return { id: a.id, lines: [line1, dim(usageLine(view, a, now)), ...(five === undefined ? [] : [dim(five)]), ...(provenance === undefined ? [] : [provenance])] }
 }
 
 /** A row's lines as text. */
@@ -1573,7 +1631,7 @@ export function storedLine(line: readonly RowPart[]): StoredRun[] {
 
 /** Every login's row, as the merge stores it under `rows`. */
 export function rowsOf(view: View, now: number): StoredRows['rows'] {
-  return view.accounts.map(a => ({ id: a.id, lines: rowOf(view, a, now).lines.map(storedLine) }))
+  return view.accounts.map(a => ({ id: a.id, lines: rowOf(view, a, now).lines.map(storedLine), windows: windowsOf(view, a.id, now) }))
 }
 
 /**
