@@ -2985,7 +2985,7 @@ test('BODY-KEYS: a body another session saves while the prune runs stands, and t
   const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, [oldKey]: { at: NOW - 8 * DAY } }))
   // Session B saves its body, as session B does: under a key of its own, while this session saves its own.
   w.onStoreSet = key => {
-    if (key.startsWith('usage-body:1:') && !key.includes(':session-b')) store.set(newKey, { at: NOW })
+    if (key.startsWith('usage-body:1:') && !key.endsWith(':session-b')) store.set(newKey, { at: NOW })
   }
   const clock = world(on, w, store)
   await start($, clock)
