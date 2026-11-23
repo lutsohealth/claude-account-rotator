@@ -17703,13 +17703,22 @@ for (const kind of ['week', 'five'] as const) {
     })
   }
 
-  test(`BODY-WINDOW: the baseline is the newest body of the read's own window: a newer body of another window neither stands in for it nor hides it, so 100 then 94 ends the ${kind} mark`, async ($, on) => {
-    const { store, clock, key } = await markedOnThree($, on, kind, 100, 94)
+  test(`BODY-WINDOW: the baseline is the newest body that holds the kind, whatever its window: a newer body of another window leaves a lagging read of the older one (96, new window 20, then 90) no proof, so the ${kind} mark stands`, async ($, on) => {
+    const { store, clock, key } = await markedOnThree($, on, kind, 96, 90)
     store.set('usage-body:3:session-newer', bodyOfAnotherWindow(20, NOW - 5 * 60_000))
     for (let waited = 0; waited < 12 * 60_000; waited += 20_000) await clock.advance(20_000)
     await clock.settle()
     expect((store.get('usage:3') as { src?: string }).src, 'the next body is stored').toBe('body')
-    expect(store.get(key), 'a fall of 6 from the body of its own window').toBeUndefined()
+    expect(store.get(key), 'the newest body is of another window: no baseline, no proof').toBeDefined()
+  })
+
+  test(`guard: a newer body that lacks the kind does not hide an older body that holds it, so 100 then 94 ends the ${kind} mark`, async ($, on) => {
+    const { store, clock, key } = await markedOnThree($, on, kind, 100, 94)
+    store.set('usage-body:3:session-newer', { at: NOW - 5 * 60_000, by: THREE_BY, fable: { pct: 20, resetsAt: FABLE_RESET } })
+    for (let waited = 0; waited < 12 * 60_000; waited += 20_000) await clock.advance(20_000)
+    await clock.settle()
+    expect((store.get('usage:3') as { src?: string }).src, 'the next body is stored').toBe('body')
+    expect(store.get(key), 'a fall of 6 from the body that holds the kind').toBeUndefined()
   })
 
   test(`guard: a lower read of another window than the only body's ends no ${kind} mark (100 of another window, then 94)`, async ($, on) => {
