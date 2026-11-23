@@ -1511,8 +1511,9 @@ async function checkAccount($: Host, account: Account, gate: UsageGate): Promise
             week: markFrom(await $.store.get(`week-mark:${account.id}`)),
             five: markFrom(await $.store.get(`mark:${account.id}`)),
           }
-          // Each window is judged against the newest body of its own window, read under this account's identity, that completed
-          // before this request began, across the keys of every session: never the shared row, whichever session wrote it last,
+          // Each kind of window is judged against the newest body holding it, read under this account's identity, that completed
+          // before this request began, across the keys of every session (a newest one of another window is no proof): never
+          // the shared row, whichever session wrote it last,
           // and never a body of another account or of none (the council's rule, COUNCIL-store-races). A completed body whose key
           // is not yet visible only delays the end of a mark to the next read.
           const by = bodyIdentity(holder.who)

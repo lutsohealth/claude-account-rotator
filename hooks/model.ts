@@ -620,14 +620,16 @@ export function baselineBody(bodies: readonly BodyRead[], startedAt: number): Bo
 
 /**
  * What each window of `read`, a body of account `by`, is judged against: the newest body of that same account that
- * completed before the request began and holds that window with a reset within an hour of this one's (`baselineBody`).
- * Each window has its own baseline; a body of another account, or one with no account, is none, and so is a body of another
- * window, which neither stands in for the window nor hides an older body of it.
+ * completed before the request began and holds that kind of window (`baselineBody`). Each kind has its own baseline; a body
+ * of another account, or one with no account, is none. A newest body whose reset is not within an hour of this read's
+ * is of another window: the kind has no baseline and no proof, and no older body of the read's window stands in.
  */
 export function baselineWindows(bodies: readonly BodyRead[], startedAt: number, by: string, read: Pick<Reading, 'fiveHour' | 'sevenDay' | 'fable'>): Pick<BodyRead, 'fiveHour' | 'sevenDay' | 'fable'> {
   const own = bodies.filter(b => b.by === by)
-  const baseline = (kind: 'fiveHour' | 'sevenDay' | 'fable'): UsageWindow | undefined =>
-    baselineBody(own.filter(b => isSameWindow(b[kind]?.resetsAt, read[kind]?.resetsAt)), startedAt)?.[kind]
+  const baseline = (kind: 'fiveHour' | 'sevenDay' | 'fable'): UsageWindow | undefined => {
+    const newest = baselineBody(own.filter(b => b[kind] !== undefined), startedAt)?.[kind]
+    return isSameWindow(newest?.resetsAt, read[kind]?.resetsAt) ? newest : undefined
+  }
   const [fiveHour, sevenDay, fable] = [baseline('fiveHour'), baseline('sevenDay'), baseline('fable')]
   return { ...(fiveHour ? { fiveHour } : {}), ...(sevenDay ? { sevenDay } : {}), ...(fable ? { fable } : {}) }
 }
