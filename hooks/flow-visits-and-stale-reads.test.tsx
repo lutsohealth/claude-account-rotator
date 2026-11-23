@@ -2583,7 +2583,7 @@ test('MODEL-DEBT-CLEAR: a tick clearing the model debt it read sends nothing whe
  * 'after-read' holds the view read that follows the clear, 'mark' the view read markCarryEnded makes (the clear is refused,
  * so the debt is marked ended), 'carry-read' the second view read after the clear, which carryOn makes before it submits.
  */
-async function laterDebtDuringTick($: Engine, on: On, where: 'after-read' | 'mark' | 'carry-read' | 'moved', isTurnRun = false) {
+async function laterDebtDuringTick($: Engine, on: On, where: 'clear' | 'after-read' | 'mark' | 'carry-read' | 'moved', isTurnRun = false, isEnded = false) {
   const w = fresh()
   const { clock, store } = await loggedWorld(on, w)
   w.usage['tok-1'] = [20, 30, 21]
@@ -2608,6 +2608,7 @@ async function laterDebtDuringTick($: Engine, on: On, where: 'after-read' | 'mar
     if (isClear) isClearSeen = true
     if (isClear && (where === 'mark' || where === 'moved')) return { deny: 'state: refused' } as unknown as Awaited<ReturnType<typeof next>>
     last = value
+    if (isClear && where === 'clear') await pause()
     return next(e)
   })
   on('state.get', async (_$, e, next) => {
@@ -2631,12 +2632,14 @@ async function laterDebtDuringTick($: Engine, on: On, where: 'after-read' | 'mar
   expect(held.isPaused, `the tick at the debt's date waits at its ${where}`).toBe(true)
   await $.classic.StopFailure(OPUS_AT_6PM)
   await clock.settle()
+  // A person's Use now of login 2 ends the later debt, while the tick still holds the old one.
+  if (isEnded) await useNow($, clock, '2')
   held.open()
   await clock.settle()
   // Past the settle a carry-on takes before it is submitted.
   await clock.advance(60_000)
   await clock.settle()
-  expect(whats(stopLogOf(store, w)).filter(line => line.startsWith('moved to')), 'no login to move to').toEqual([])
+  if (!isEnded) expect(whats(stopLogOf(store, w)).filter(line => line.startsWith('moved to')), 'no login to move to').toEqual([])
   return { w, clock, store, view: () => last }
 }
 
@@ -2661,6 +2664,19 @@ test('MODEL-DEBT-MARK guard: a later model stop owing a later debt while the tic
   expect(ended !== undefined && later !== undefined && ended < later, `the old debt (${ended}) is marked ended, the later one (${later}) is not`).toBe(true)
   await expectLaterDebtStands(held)
 })
+
+/**
+ * The later debt a stop owed during the tick's await has ended again (a Use now): `due` is undefined as before the stop, yet
+ * the tick's debt was superseded and sends nothing. Only the tick's own line, CONTINUE_RESET's text, is looked for: the
+ * press's own carry-on is its own.
+ */
+for (const where of ['clear', 'after-read', 'mark', 'carry-read'] as const) {
+  // At the clear the read that follows finds the session moved by that Use now, so the move check already holds.
+  test(`MODEL-DEBT-ABA-${where.toUpperCase()}${where === 'clear' ? ' guard' : ''}: a later model stop's debt that a Use now ended again during the tick's ${where} leaves the old carry-on unsent`, { timeoutMs: 30_000 }, async ($, on) => {
+    const { w } = await laterDebtDuringTick($, on, where, false, true)
+    expect(w.submitted.filter(text => /usage limit has reset/.test(text)), 'the superseded debt is not sent').toEqual([])
+  })
+}
 
 test('MODEL-DEBT-MOVED: a later model stop owing a later debt while a refused clear and a login that moved are read marks the old debt ended and holds nothing', { timeoutMs: 30_000 }, async ($, on) => {
   const held = await laterDebtDuringTick($, on, 'moved')
