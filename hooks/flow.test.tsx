@@ -16482,7 +16482,7 @@ const NOT_LANDED = "stop names login 2's reset, not login 1's: the move to 1 has
 const slotValues = (w: World) => w.envSets.map(e => e.value)
 
 /** Login 1 has Fable room, login 2's Fable week is spent; the session starts on login `on`, with no switch pending. */
-async function fableOnTwo($: Engine, on: On, startsOn: '1' | '2'): Promise<{ w: World; store: Map<string, unknown>; clock: MockClock }> {
+async function fableOnTwo($: Engine, on: On, startsOn: '1' | '2', beforeStart?: () => void): Promise<{ w: World; store: Map<string, unknown>; clock: MockClock }> {
   const w = fresh()
   w.keychain['Claude Code-credentials'] = blob('tok-1')
   w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
@@ -16492,6 +16492,7 @@ async function fableOnTwo($: Engine, on: On, startsOn: '1' | '2'): Promise<{ w: 
   if (startsOn === '2') w.env.CLAUDE_SECURESTORAGE_CONFIG_DIR = SLOT2
   const store = new Map<string, unknown>(Object.entries(TWO_LOGINS))
   const clock = world(on, w, store)
+  beforeStart?.()
   await start($, clock)
   return { w, store, clock }
 }
@@ -16792,4 +16793,42 @@ test('PROOF-COUNT: a proof whose write did not apply (a press replaced the switc
   await $.classic.StopFailure(STOP_NAMING_2)
   await clock.settle()
   expect(w.toasts.filter(t => /did not land/.test(t))).toHaveLength(1)
+})
+
+// Codex round 3: a stop reads state, awaits, then acts on what it read. The failure epoch and the staged charge.
+test('TURN-EPOCH: an old stop paused while a new main turn starts and fails does not point back against the new failure', async ($, on) => {
+  const { w, store, clock, gate, stopping } = await heldSecondStop($, on)
+  await $.turn.start({ text: 'go on by hand', turnId: 'by-hand' })
+  // The new turn fails too: red again, a different failure.
+  await $.classic.StopFailure({ error: 'server_error' })
+  await clock.settle()
+  gate.release()
+  await stopping
+  await clock.settle()
+  expect(slotValues(w), 'no point-back for the old stop').toEqual([undefined])
+  expect(whats(stopLogOf(store, w))).toContain('stop dropped: the switch or the failed turn it examined has changed since')
+})
+
+test('STALE-CHARGE: a stop dropped because a press moved the session leaves the episode as it found it: a later stop can still pick the login it would have tried', async ($, on) => {
+  const held: { gate?: ReturnType<typeof gateNextViewRead> } = {}
+  const { w, store, clock } = await fableOnTwo($, on, '1', () => void (held.gate = gateNextViewRead(on)))
+  const gate = held.gate
+  if (gate === undefined) throw new Error('the gate was not registered')
+  gate.arm()
+  const stopping = $.classic.StopFailure(STOP_NAMING_1)
+  await clock.settle()
+  expect(gate.isPaused(), 'the stop waits on its read of the view').toBe(true)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  await pane.press({ key: 'use-2' })
+  await clock.settle()
+  await pane.unmount()
+  gate.release()
+  await stopping
+  await clock.settle()
+  expect(whats(stopLogOf(store, w))).toContain('stop dropped: the switch or the failed turn it examined has changed since')
+  await clock.advance(36_000)
+  await $.classic.StopFailure(STOP_NAMING_2)
+  await clock.settle()
+  // The dropped stop charged login 1 nothing: it is still untried for this stop.
+  expect(whats(stopLogOf(store, w)).filter(line => line.startsWith('picked '))).toEqual([expect.stringMatching(/^picked 1: .*; tried 2$/)])
 })
