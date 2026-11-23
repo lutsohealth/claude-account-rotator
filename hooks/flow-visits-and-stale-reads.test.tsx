@@ -2583,7 +2583,7 @@ test('MODEL-DEBT-CLEAR: a tick clearing the model debt it read sends nothing whe
  * 'after-read' holds the view read that follows the clear, 'mark' the view read markCarryEnded makes (the clear is refused,
  * so the debt is marked ended), 'carry-read' the second view read after the clear, which carryOn makes before it submits.
  */
-async function laterDebtDuringTick($: Engine, on: On, where: 'after-read' | 'mark' | 'carry-read', isTurnRun = false) {
+async function laterDebtDuringTick($: Engine, on: On, where: 'after-read' | 'mark' | 'carry-read' | 'moved', isTurnRun = false) {
   const w = fresh()
   const { clock, store } = await loggedWorld(on, w)
   w.usage['tok-1'] = [20, 30, 21]
@@ -2606,7 +2606,7 @@ async function laterDebtDuringTick($: Engine, on: On, where: 'after-read' | 'mar
     if (key !== 'view') return next(e)
     const isClear = !isClearSeen && value.carryDue === undefined && last?.carryDue !== undefined && clock.now() >= AT_1PM_Z
     if (isClear) isClearSeen = true
-    if (isClear && where === 'mark') return { deny: 'state: refused' } as unknown as Awaited<ReturnType<typeof next>>
+    if (isClear && (where === 'mark' || where === 'moved')) return { deny: 'state: refused' } as unknown as Awaited<ReturnType<typeof next>>
     last = value
     return next(e)
   })
@@ -2614,7 +2614,11 @@ async function laterDebtDuringTick($: Engine, on: On, where: 'after-read' | 'mar
     const read = await next(e)
     if (e.plugin !== 'account-rotator' || e.key !== 'view' || !isClearSeen || held.isPaused) return read
     readsSinceClear += 1
-    if (readsSinceClear === (where === 'after-read' ? 1 : 2)) await pause()
+    if (readsSinceClear === (where === 'after-read' || where === 'moved' ? 1 : 2)) await pause()
+    // 'moved': the read after the clear finds the session on login 2, as after a move that left the debt owed.
+    if (where === 'moved' && readsSinceClear === 1 && read.value !== undefined) {
+      return { value: { ...read.value, value: { ...(read.value.value as View), activeId: '2' } } }
+    }
     return read
   })
   await start($, clock)
@@ -2652,6 +2656,15 @@ test('MODEL-DEBT-AFTER-READ guard: a later model stop owing a later debt while t
 test('MODEL-DEBT-MARK guard: a later model stop owing a later debt while the tick marks the old debt ended sends nothing of the old debt', { timeoutMs: 30_000 }, async ($, on) => {
   const held = await laterDebtDuringTick($, on, 'mark')
   // The clear was refused, so the view held the old debt: the store marks it ended, and not the later one.
+  const ended = carryEndedOf(held.store, held.w)?.owedAt
+  const later = held.view()?.carryDue?.owedAt
+  expect(ended !== undefined && later !== undefined && ended < later, `the old debt (${ended}) is marked ended, the later one (${later}) is not`).toBe(true)
+  await expectLaterDebtStands(held)
+})
+
+test('MODEL-DEBT-MOVED: a later model stop owing a later debt while a refused clear and a login that moved are read marks the old debt ended and holds nothing', { timeoutMs: 30_000 }, async ($, on) => {
+  const held = await laterDebtDuringTick($, on, 'moved')
+  expect(whats(stopLogOf(held.store, held.w)).filter(line => line.startsWith('carry-on held')), 'the old debt is not held for the move').toEqual([])
   const ended = carryEndedOf(held.store, held.w)?.owedAt
   const later = held.view()?.carryDue?.owedAt
   expect(ended !== undefined && later !== undefined && ended < later, `the old debt (${ended}) is marked ended, the later one (${later}) is not`).toBe(true)
