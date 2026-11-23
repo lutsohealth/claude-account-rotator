@@ -17098,18 +17098,31 @@ test('NEED-OWED-RESUME: a Fable stop on an owed resume takes its own need, thoug
   expect(slotValues(w), 'no move to login 3, whose Fable week is spent').toEqual([SLOT2])
 })
 
-test('NEED-STICKY: a later stop of the same episode that names no Fable week keeps the Fable need', async ($, on) => {
+test('NEED-STICKY: a wordless stop of the same episode that has no owner keeps the Fable need an earlier stop set', async ($, on) => {
+  const { w, clock } = await fableNeedWorld($, on)
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  expect(slotValues(w)).toEqual([SLOT3])
+  await clock.advance(40_000)
+  w.limits = limitsOf(50, 40)
+  await respond($, clock, w)
+  // The week all three logins share proves none: no owner, no mark, and the words say nothing of the Fable week.
+  await $.classic.StopFailure({ error: 'rate_limit' })
+  await clock.settle()
+  expect(slotValues(w), 'the episode still needs the Fable week: login 2 has none').toEqual([SLOT3])
+})
+
+test('guard: a plain stop after a Fable stop, one that marks its own window, judges its own need and moves to any login with room', async ($, on) => {
   const { w, clock } = await fableNeedWorld($, on, { unique: true })
   await $.classic.StopFailure(FABLE_STOP)
   await clock.settle()
   expect(slotValues(w)).toEqual([SLOT3])
   await clock.advance(40_000)
-  // Login 3's own week answers: the switch is proven, and the next stop is login 3's.
   w.limits = limitsOf(10, 30, '2026-10-20T03:00:00Z')
   await respond($, clock, w)
   await $.classic.StopFailure({ error: 'rate_limit', last_assistant_message: PLAIN_STOPS[0] })
   await clock.settle()
-  expect(slotValues(w), 'the episode still needs the Fable week: login 2 has none').toEqual([SLOT3])
+  expect(slotValues(w), 'a 5-hour stop needs no Fable room: login 2 has the most room').toEqual([SLOT3, SLOT2])
 })
 
 // https://code.claude.com/docs/en/errors.md: "The Opus and Sonnet limits each apply only to requests to that model family".

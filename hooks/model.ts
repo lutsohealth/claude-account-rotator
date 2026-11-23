@@ -287,15 +287,28 @@ function freesAt(view: View, id: string, r: Reading | undefined, now: number, ne
  * as its try. Never one in `tried` (the logins this stop's episode already died on), one in `untaken`, one whose health
  * is not ok, or one with no read whose check failed before a profile call named its sign-in. The first tier with a
  * login in it answers; inside it, for the Fable week, a login whose read lists that week with room comes first.
+ * `live`: the logins this stop read from the usage endpoint just now: such a read that shows the login spent counts as its
+ * try, a mark standing or not (only a login that could not be read is tried blind); one that shows room under a mark
+ * leaves the mark, which covers the lag of a read after a stop. A spent-old answer lists the tier (`spentOld`), the logins
+ * a stop reads live before it tries any of them blind.
  */
-export function pickAfterStop(view: View, raw: Readonly<Record<string, Reading | undefined>>, now: number, need: Need | undefined, tried: readonly string[], untaken: ReadonlySet<string>): { account: Account; tier: StopTier; readAgeMs?: number } | undefined {
+export function pickAfterStop(
+  view: View,
+  raw: Readonly<Record<string, Reading | undefined>>,
+  now: number,
+  need: Need | undefined,
+  tried: readonly string[],
+  untaken: ReadonlySet<string>,
+  live: ReadonlySet<string> = new Set(),
+): { account: Account; tier: StopTier; readAgeMs?: number; spentOld?: Account[] } | undefined {
   const isFable = need === 'fable'
   const counts: Record<string, Reading | undefined> = {}
   for (const a of view.accounts) counts[a.id] = raw[a.id] && counted(raw[a.id] as Reading, view.fiveHourLimit, now)
   const hasRoom = (r: Reading) => !isSpent(r, now, view.weekLeave) && !(isFable && isFableSpent(r, now))
   const tierOf = (a: Account): StopTier | undefined => {
-    if (isMarked(view, a.id, now)) return 'spent-old'
     const r = counts[a.id]
+    if (live.has(a.id) && r !== undefined && !hasRoom(r)) return undefined
+    if (isMarked(view, a.id, now)) return 'spent-old'
     const error = view.checkErrors?.[a.id]
     if (r === undefined) return error === undefined || error.isUsageRead === true ? 'unread' : undefined
     const isFresh = now - r.at <= FRESH_READ_MS && !(error !== undefined && error.at > r.at)
@@ -313,7 +326,8 @@ export function pickAfterStop(view: View, raw: Readonly<Record<string, Reading |
           firstByRotateTo(view, ready, counts, now, need)
     if (account === undefined) continue
     const read = raw[account.id]
-    return read === undefined ? { account, tier } : { account, tier, readAgeMs: now - read.at }
+    const spentOld = tier === 'spent-old' ? { spentOld: ready } : {}
+    return read === undefined ? { account, tier, ...spentOld } : { account, tier, readAgeMs: now - read.at, ...spentOld }
   }
   return undefined
 }
