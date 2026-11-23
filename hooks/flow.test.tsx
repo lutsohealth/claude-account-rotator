@@ -17152,7 +17152,7 @@ for (const family of ['Opus', 'Sonnet']) {
  * week and week spent (login 2 frees first), and the usage endpoint says what each is now: `live`. Login 2's token has
  * run out where `isTwoIdle`. The schedule does not read either login before the stop.
  */
-async function oldReadings($: Engine, on: On, live: { two: [number, number, number]; three: [number, number, number] }, options: { isTwoIdle?: boolean; isThreeRead?: boolean; failing?: Record<string, number> } = {}) {
+async function oldReadings($: Engine, on: On, live: { two: [number, number, number]; three: [number, number, number] }, options: { isTwoIdle?: boolean; isThreeRead?: boolean; isTwoRoomy?: boolean; text?: string; failing?: Record<string, number> } = {}) {
   const w = fresh()
   w.keychain['Claude Code-credentials'] = blob('tok-1')
   w.keychain[await keychainItem(SLOT2)] = blob('tok-2', options.isTwoIdle ? NOW - HOUR : undefined)
@@ -17163,10 +17163,10 @@ async function oldReadings($: Engine, on: On, live: { two: [number, number, numb
   w.fableResetsBy = { 'tok-1': FABLE_RESET, 'tok-2': FABLE_RESET_2, 'tok-3': FABLE_RESET }
   w.weekResets = { 'tok-1': '2026-10-18T03:00:00Z', 'tok-2': '2026-10-14T03:00:00Z', 'tok-3': '2026-10-18T03:00:00Z' }
   if (options.failing !== undefined) w.failing = options.failing
-  const old = (id: string, week: string, fable: string) => ({
+  const old = (id: string, week: string, fable: string, pct = 100) => ({
     fiveHour: { pct: 10, resetsAt: '2026-10-12T12:00:00Z' },
-    sevenDay: { pct: 100, resetsAt: week },
-    fable: { pct: 100, resetsAt: fable },
+    sevenDay: { pct, resetsAt: week },
+    fable: { pct, resetsAt: fable },
     at: NOW - 2 * HOUR,
     by: id,
     v: 1,
@@ -17176,7 +17176,8 @@ async function oldReadings($: Engine, on: On, live: { two: [number, number, numb
     Object.entries({
       ...THREE_LOGINS,
       'rotate-to': 'room',
-      'usage:2': old('2', '2026-10-14T03:00:00Z', FABLE_RESET_2),
+      ...(options.text === undefined ? {} : { 'fable-continue-text': options.text }),
+      'usage:2': old('2', '2026-10-14T03:00:00Z', FABLE_RESET_2, options.isTwoRoomy ? 10 : 100),
       'usage-due:2': { next: NOW + HOUR, fails: 0, at: NOW - 2 * HOUR, v: 1 },
       // Login 3 holds an old reading too, unless the test has the boot read it.
       ...(options.isThreeRead ? {} : { 'usage:3': old('3', '2026-10-18T03:00:00Z', FABLE_RESET), 'usage-due:3': { next: NOW + HOUR, fails: 0, at: NOW - 2 * HOUR, v: 1 } }),
@@ -17234,4 +17235,50 @@ test('guard: a stop with a fresh login with room makes no live read of the other
   await clock.settle()
   expect(slotValues(w)).toEqual([SLOT3])
   expect(w.usageCalls.filter(token => token === 'tok-2'), 'login 2 is not read').toEqual([])
+})
+
+// ---------------------------------------------------------------- puma-9arph.109.4: the carry-on line is honest per pick
+
+const STORED_LINE = 'Go on on Fable-free ground.'
+
+test('HONEST-CARRY-ON: a stale pick (read 2 h ago) never sends the stored line: the mod\'s own line says room is not confirmed and when it was read', async ($, on) => {
+  const { w, clock } = await oldReadings($, on, { two: [10, 10, 10], three: [100, 100, 100] }, { isTwoRoomy: true, text: STORED_LINE })
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  await clock.advance(36_000)
+  expect(slotValues(w), 'login 2, stale with room').toEqual([SLOT2])
+  expect(w.submitted).toHaveLength(1)
+  expect(w.submitted[0]).not.toBe(STORED_LINE)
+  expect(w.submitted[0]).toMatch(/Fable week was last read 120 min ago, so room on it is not confirmed/)
+  expect(w.submitted[0]).toMatch(/Continue where you left off/)
+  expect(w.asUser, 'under the mod\'s name').toEqual([false])
+})
+
+test('HONEST-CARRY-ON: a spent-old pick sends the mod\'s own line naming the reset it was believed spent until, never the stored line', async ($, on) => {
+  const { w, clock } = await oldReadings($, on, { two: [100, 100, 100], three: [100, 100, 100] }, { isTwoIdle: true, text: STORED_LINE })
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  await clock.advance(36_000)
+  expect(slotValues(w), 'login 2, idle, tried blind').toEqual([SLOT2])
+  expect(w.submitted).toHaveLength(1)
+  expect(w.submitted[0]).not.toBe(STORED_LINE)
+  expect(w.submitted[0]).toMatch(/Fable week was believed spent until 2026-10-14 12:00 UTC; it is tried in case that was reset or freed elsewhere/)
+  expect(w.asUser).toEqual([false])
+})
+
+test('HONEST-CARRY-ON: a fresh read that lists no Fable week proves no room, so the stored line is not sent either', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [20, 30, 100]
+  w.usage['tok-2'] = [10, 30]
+  const clock = world(on, w, { ...TWO_LOGINS, 'fable-continue-text': STORED_LINE })
+  await start($, clock)
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  await clock.advance(36_000)
+  expect(slotValues(w)).toEqual([SLOT2])
+  expect(w.submitted).toHaveLength(1)
+  expect(w.submitted[0]).toMatch(/lists no Fable week, so room on it is not confirmed/)
+  expect(w.asUser).toEqual([false])
 })

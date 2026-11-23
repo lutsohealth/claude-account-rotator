@@ -10,6 +10,7 @@ import ROWS_FIXTURE from '../tests/fixtures/rows'
 import { REQUEST_TTL_MS, holdsLogin, isLoginOf, sameLogin, requestFrom, requestsDir, slotNumber } from './model'
 import { ESCAPE_GAP_MS, NUDGE_LEAD_MS, NUDGE_TEXT, escapeAfterFill, escapeArgv, escapeHeldBack, isBoxFree, nudgeHeld, pickAfterStop, raisesLimitModal, renudgeDue } from './model'
 import { mayWrite } from './model'
+import * as modelExports from './model'
 import { firstFreeAt, limitNotice } from './model'
 import { OWN_CONTINUE_MARGIN_MS, isCountdownOnScreen, ownContinueAfterLook, ownContinueHeldBack, ownContinueResetAt, screenLinesFrom } from './model'
 import { signInFromStatus } from './model'
@@ -2249,6 +2250,34 @@ test('row a: a login read live and spent counts as tried even with a mark standi
   v.readings['3'] = spent(NOW - 2 * HOUR)
   const got = pickAfterStop(v, v.readings, NOW, undefined, ['1'], new Set())
   expect([got?.tier, got?.spentOld?.map(a => a.id).sort()]).toEqual(['spent-old', ['2', '3']])
+})
+
+// puma-9arph.109.4: the pick says its Fable-room proof, and the carry-on line follows it.
+test('row a: only a fresh read that lists the Fable week with room proves Fable room; a spent-old pick says when it frees', () => {
+  const at = (hours: number) => new Date(NOW + hours * HOUR).toISOString()
+  const window = (pct: number, hours: number) => ({ pct, resetsAt: at(hours) })
+  const proof = (r: Reading, need: 'fable' | undefined = 'fable') => {
+    const v = view({ '1': [100, 50], '2': [0, 0] })
+    v.readings['2'] = r
+    const got = pickAfterStop(v, v.readings, NOW, need, ['1'], new Set())
+    return got === undefined ? undefined : { tier: got.tier, hasFableRoom: got.hasFableRoom, freesAt: got.freesAt, readAgeMs: got.readAgeMs }
+  }
+  expect(proof({ fiveHour: window(10, 1), sevenDay: window(10, 48), fable: window(10, 48), at: NOW - 60_000 })).toEqual({ tier: 'fresh', hasFableRoom: true, freesAt: undefined, readAgeMs: 60_000 })
+  expect(proof({ fiveHour: window(10, 1), sevenDay: window(10, 48), at: NOW - 60_000 })?.hasFableRoom, 'a fresh read that lists no Fable week').toBe(false)
+  expect(proof({ fiveHour: window(10, 1), sevenDay: window(10, 48), fable: window(10, 48), at: NOW - 3 * HOUR })).toMatchObject({ tier: 'stale', hasFableRoom: false, readAgeMs: 3 * HOUR })
+  expect(proof({ fiveHour: window(10, 1), sevenDay: window(10, 48), fable: window(100, 30), at: NOW - 3 * HOUR })).toMatchObject({ tier: 'spent-old', hasFableRoom: false, freesAt: NOW + 30 * HOUR })
+})
+
+test('fableCarryOnNote: no note where a fresh read proved Fable room; otherwise the read age or the reset believed spent until', () => {
+  const note = modelExports.fableCarryOnNote
+  expect(note({ tier: 'fresh', hasFableRoom: true, readAgeMs: 60_000 })).toBeUndefined()
+  expect(note({ tier: 'fresh', hasFableRoom: false, readAgeMs: 60_000 })).toBe('Its usage lists no Fable week, so room on it is not confirmed.')
+  expect(note({ tier: 'stale', hasFableRoom: false, readAgeMs: 2 * HOUR })).toBe('Its Fable week was last read 120 min ago, so room on it is not confirmed.')
+  expect(note({ tier: 'unread', hasFableRoom: false })).toBe('Its usage could not be read, so Fable room on it is not confirmed.')
+  expect(note({ tier: 'spent-old', hasFableRoom: false, freesAt: Date.parse('2026-10-14T12:00:00Z') })).toBe('Its Fable week was believed spent until 2026-10-14 12:00 UTC; it is tried in case that was reset or freed elsewhere.')
+  expect(note({ tier: 'spent-old', hasFableRoom: false })).toBe('Its Fable week was believed spent; it is tried in case it was reset or freed elsewhere.')
+  // No pick behind the carry-on (a retry that lost it, a nudge's): nothing proves room.
+  expect(note(undefined)).toBe('Its Fable room is not confirmed.')
 })
 
 test('the Escape goes to the one pane named, by a fixed argv with no shell (puma-9arph.34 C1)', () => {
