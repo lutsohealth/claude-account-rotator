@@ -10114,7 +10114,7 @@ test('a stop, its switch and its carry-on write their entries in order under thi
   await clock.settle()
   await clock.advance(36_000)
   expect(w.submitted).toHaveLength(1)
-  expect(whats(stopLogOf(store, w))).toEqual([STOP_RATE_LIMIT, PICKED_TWO, 'moved to 2', 'carry-on armed', 'carry-on queued', 'carry-on resolved'])
+  expect(whats(stopLogOf(store, w))).toEqual([STOP_RATE_LIMIT, PICKED_TWO, 'moved to 2 (by a stop)', 'carry-on armed', 'carry-on queued', 'carry-on resolved'])
   expect(stopLogOf(store, w).every(e => typeof e.at === 'number' && e.at >= NOW)).toBe(true)
 })
 
@@ -10135,7 +10135,7 @@ test('a stop held back for a token about to refresh logs the hold, then the move
   refresh(w)
   await clock.advance(60_000)
   await clock.advance(36_000)
-  expect(whats(stopLogOf(store, w))).toEqual([STOP_SESSION, PICKED_TWO, 'held for 2: the token in use refreshes soon', 'moved to 2', 'carry-on armed', 'carry-on queued', 'carry-on resolved'])
+  expect(whats(stopLogOf(store, w))).toEqual([STOP_SESSION, PICKED_TWO, 'held for 2: the token in use refreshes soon', 'moved to 2 (by a stop)', 'carry-on armed', 'carry-on queued', 'carry-on resolved'])
 })
 
 test('a switch made after the carry-on was armed logs that the carry-on was skipped (puma-9arph.34 B3)', async ($, on) => {
@@ -10151,7 +10151,7 @@ test('a switch made after the carry-on was armed logs that the carry-on was skip
   await pane.unmount()
   await clock.advance(36_000)
   expect(w.submitted).toEqual([])
-  expect(whats(stopLogOf(store, w))).toEqual([STOP_RATE_LIMIT, PICKED_TWO, 'moved to 2', 'carry-on armed', 'carry-on skipped: another switch since'])
+  expect(whats(stopLogOf(store, w))).toEqual([STOP_RATE_LIMIT, PICKED_TWO, 'moved to 2 (by a stop)', 'carry-on armed', 'moved to 1 (by a press or a command)', 'carry-on skipped: another switch since'])
 })
 
 for (const [name, setup, reasons] of [
@@ -10633,7 +10633,7 @@ test('a usage-limit stop whose own forced usage read throws still marks the logi
   const lines = whats(stopLogOf(store, w))
   expect(lines[0]).toBe(STOP_SESSION)
   expect(lines.filter(isReadFailed('1'))).toHaveLength(1)
-  expect(lines.filter(l => !isReadFailed('1')(l))).toEqual([STOP_SESSION, PICKED_ONE_MIN, 'moved to 2', 'carry-on armed', 'carry-on queued', 'carry-on resolved'])
+  expect(lines.filter(l => !isReadFailed('1')(l))).toEqual([STOP_SESSION, PICKED_ONE_MIN, 'moved to 2 (by a stop)', 'carry-on armed', 'carry-on queued', 'carry-on resolved'])
   expect(store.get('mark:1')).toBeDefined()
   expect(w.submitted).toHaveLength(1)
 })
@@ -10651,7 +10651,7 @@ test('a usage-limit stop whose profile call throws, its sign-in new since the la
   await clock.advance(36_000)
   const lines = whats(stopLogOf(store, w))
   expect(lines.filter(isReadFailed('1'))).toHaveLength(1)
-  expect(lines.filter(l => !isReadFailed('1')(l))).toEqual([STOP_SESSION, PICKED_ONE_MIN, 'moved to 2', 'carry-on armed', 'carry-on queued', 'carry-on resolved'])
+  expect(lines.filter(l => !isReadFailed('1')(l))).toEqual([STOP_SESSION, PICKED_ONE_MIN, 'moved to 2 (by a stop)', 'carry-on armed', 'carry-on queued', 'carry-on resolved'])
   expect(store.get('mark:1')).toBeDefined()
   expect(w.submitted).toHaveLength(1)
 })
@@ -10681,7 +10681,7 @@ test('Review HOST-FAULT-MISCLASSIFIED: a store write refused inside the stop\'s 
   await $.classic.StopFailure(PLAIN)
   await clock.settle()
   await clock.advance(36_000)
-  expect(whats(stopLogOf(store, w))).toEqual([STOP_SESSION, 'stop read failed: HooksError, login 1', PICKED_ONE_MIN, 'moved to 2', 'carry-on armed', 'carry-on queued', 'carry-on resolved'])
+  expect(whats(stopLogOf(store, w))).toEqual([STOP_SESSION, 'stop read failed: HooksError, login 1', PICKED_ONE_MIN, 'moved to 2 (by a stop)', 'carry-on armed', 'carry-on queued', 'carry-on resolved'])
   expect(store.get('mark:1')).toBeDefined()
   expect(w.submitted).toHaveLength(1)
 })
@@ -10746,7 +10746,7 @@ test('puma-9arph.59: a stop whose profile call hangs, its sign-in new since the 
   await clock.advance(READ_TIMEOUT + 36_000)
   const lines = whats(stopLogOf(store, w))
   expect(lines.filter(isReadFailed('1'))).toEqual(['stop read failed: ProfileReadTimedOut, login 1'])
-  expect(lines.filter(l => !isReadFailed('1')(l))).toEqual([STOP_SESSION, PICKED_ONE_MIN, 'moved to 2', 'carry-on armed', 'carry-on queued', 'carry-on resolved'])
+  expect(lines.filter(l => !isReadFailed('1')(l))).toEqual([STOP_SESSION, PICKED_ONE_MIN, 'moved to 2 (by a stop)', 'carry-on armed', 'carry-on queued', 'carry-on resolved'])
   expect(store.get('mark:1')).toBeDefined()
   expect(w.submitted).toHaveLength(1)
 })
@@ -11034,7 +11034,7 @@ test('a tick that moves to a login whose usage read failed, with no reading, log
   await clock.advance(36_000)
   expect(slots(w)).toEqual([SLOT2])
   expect(w.submitted).toEqual([])
-  expect(whats(stopLogOf(store, w))).toEqual(['moved to 2 by the tick or a response, its usage read failed, no carry-on'])
+  expect(whats(stopLogOf(store, w))).toEqual(['moved to 2 (by the tick or a response)', 'no carry-on after the move to 2: its usage read failed'])
 })
 
 test('a stop-log write that fails, its debug line failing too, leaves the stop-log writing the next entries (puma-9arph.34 C)', async ($, on) => {
@@ -11579,7 +11579,7 @@ test('a carry-on whose turn dies on the usage limit again moves to the next logi
     STOP_RATE_LIMIT,
     'owed resume: turns closed',
     PICKED_TWO,
-    'moved to 2',
+    'moved to 2 (by a stop)',
     'carry-on armed',
     'carry-on queued',
     'carry-on resolved',
@@ -11590,7 +11590,7 @@ test('a carry-on whose turn dies on the usage limit again moves to the next logi
     // A wordless stop on a switch no response has proven is login 2's only at its second: this first one may have gone out on login 1.
     'stop on owed resume: login 2 in use, no response since its switch, no mark',
     'picked 3: fresh, read 1 min ago; tried 1',
-    'moved to 3',
+    'moved to 3 (by a stop)',
     'carry-on armed',
     'carry-on queued',
     FILL_NO_CAUSE,
@@ -12144,7 +12144,7 @@ test('row v: a held stop with no turn open sends one nudge NUDGE_LEAD_MS before 
   await $.turn.complete({ turnId: 'turn-nudge', reason: 'error', answer: '', durationMs: 1, isAborted: false })
   await clock.settle()
   expect(slots(w)).toEqual([SLOT2])
-  expect(whats(stopLogOf(store, w)).filter(l => ['refresh nudge entered on login 1', 'moved to 2', 'resume entered'].includes(l))).toEqual(['refresh nudge entered on login 1', 'moved to 2'])
+  expect(whats(stopLogOf(store, w)).filter(l => ['refresh nudge entered on login 1', 'moved to 2 (by a stop)', 'resume entered'].includes(l))).toEqual(['refresh nudge entered on login 1', 'moved to 2 (by a stop)'])
   await clock.advance(36_000)
   expect(w.submitted).toHaveLength(2)
   const carry = w.submitted[1] ?? ''
@@ -13329,7 +13329,7 @@ test('a stop\'s switch given up on by a press says so in the stop-log when it la
   await settleReal(clock)
   await settleReal(clock)
   await pane.unmount()
-  expect([slots(w).at(-1), whats(stopLogOf(store, w))]).toEqual([SLOT3, [STOP_RATE_LIMIT, PICKED_TWO, 'stop switch given up on: landed late, no carry-on']])
+  expect([slots(w).at(-1), whats(stopLogOf(store, w))]).toEqual([SLOT3, [STOP_RATE_LIMIT, PICKED_TWO, 'moved to 3 (by a press or a command)', 'stop switch given up on: landed late, no carry-on']])
 })
 
 test('a switch given up on after SWITCH_WAIT_MS that lands late leaves the session on the login a person pressed for since (puma-9arph.39)', async ($, on) => {
@@ -17860,4 +17860,79 @@ test('PROVENANCE: the pane draws a spent window in the warning colour and one wi
   const room = await pane.find({ text: /^▰{4}▱{6}  40%$/ })
   expect([painted(spent)[0]?.color, painted(room)[0]?.color], 'the spent week is in the warning colour, the Fable week with room in none').toEqual(['warning', undefined])
   await pane.unmount()
+})
+
+// ---------------------------------------------------------------- puma-9arph.109.8: every move leaves a line in the stop-log
+
+const movesOf = (store: Map<string, unknown>, w: World) => whats(stopLogOf(store, w)).filter(line => line.startsWith('moved to '))
+
+test('MOVE-LOG: a move by a press leaves "moved to N (by a press or a command)"', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [10, 40]
+  w.usage['tok-2'] = [10, 41]
+  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off' }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  await pane.press({ key: 'use-2' })
+  await clock.settle()
+  await pane.unmount()
+  expect(movesOf(store, w)).toEqual(['moved to 2 (by a press or a command)'])
+})
+
+test('MOVE-LOG: a move by the tick or a response leaves "moved to N (by the tick or a response)"', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await loggedWorld(on, w)
+  w.usage['tok-1'] = [92, 40]
+  await start($, clock)
+  expect(slotValues(w)).toEqual([SLOT2])
+  expect(movesOf(store, w)).toEqual(['moved to 2 (by the tick or a response)'])
+})
+
+test('MOVE-LOG: a stop that rides the switch running leaves its own line beside the switch\'s', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await loggedWorld(on, w)
+  let open: () => void = () => undefined
+  const gate = new Promise<void>(resolve => { open = resolve })
+  let writes = 0
+  w.beforeEnv = () => (writes++ === 0 ? gate : Promise.resolve())
+  w.usage['tok-1'] = [100, 41]
+  await start($, clock)
+  await settleReal(clock)
+  await $.classic.StopFailure(PLAIN)
+  await settleReal(clock)
+  open()
+  await settleReal(clock)
+  expect(movesOf(store, w)).toEqual(['moved to 2 (by the tick or a response)', 'moved to 2 (by a stop riding the switch running)'])
+})
+
+test('MOVE-LOG: the point-back of a switch that did not take leaves "moved to N (by a point-back: ...)"', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [10, 40]
+  w.usage['tok-2'] = [10, 41]
+  w.weekResets = { 'tok-2': OTHER_WEEK }
+  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off' }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  await pane.press({ key: 'use-2' })
+  await clock.settle()
+  await pane.unmount()
+  // The switch did not take: responses still carry login 1's week.
+  w.limits = [{ kind: 'seven_day', percentUsed: 42, resetsAt: WEEK_RESET }]
+  await clock.advance(60_000)
+  await respond($, clock, w)
+  await clock.advance(4 * 60_000)
+  await respond($, clock, w)
+  expect(movesOf(store, w)).toEqual(['moved to 2 (by a press or a command)', 'moved to 1 (by a point-back: responses still use login 1)'])
+})
+
+test('MOVE-LOG: a stop whose reset names another login points back, and leaves its own "moved to" line', async ($, on) => {
+  const ctx = await fableOnTwo($, on, '2')
+  await movedToOneThenStoppedOnTwo($, ctx)
+  expect(movesOf(ctx.store, ctx.w)).toEqual(['moved to 1 (by a stop)', "moved to 2 (by a point-back: the stop's reset names login 2)", 'moved to 1 (by a stop)'])
 })

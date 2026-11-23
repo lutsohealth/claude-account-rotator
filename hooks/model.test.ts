@@ -2612,6 +2612,11 @@ test('PROVENANCE: a read under an hour old adds no line; a read over an hour, a 
   expect(rowText(rowOf(five, max, ROW_NOW, TALLINN)).slice(3)).toEqual(['5h: stop mark'])
 })
 
+// puma-9arph.109.8: the constant that is the Fable week's line is named for it (it was LEAVE_SEVEN_DAY, whose comment said weekly).
+test('LEAVE_FABLE: the Fable week is left at 95%, and no constant is named for a week it does not judge', () => {
+  expect([modelExports.LEAVE_FABLE, 'LEAVE_SEVEN_DAY' in modelExports]).toEqual([95, false])
+})
+
 test('PROVENANCE: the stored row carries the week and the Fable week as numbers with their source and read time, at rows version 2', () => {
   expect(modelExports.ROWS_VERSION).toBe(2)
   const windows = (v: View) => rowsOf(v, ROW_NOW)[0]?.windows
