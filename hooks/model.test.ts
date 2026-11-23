@@ -2230,6 +2230,18 @@ test('row a: the spent-old tier goes to the login that frees first for the need,
 })
 
 // puma-9arph.109.3: a login read live in this stop is judged on that read: spent counts as its try, a mark standing or not.
+// Codex final round 2: "take any with room". A login whose read completed in this stop and shows room precedes every blind try.
+test('row a: a live read with room beats a blind spent-old try, though its mark resets later than the blind one\'s', () => {
+  const at = (hours: number) => new Date(NOW + hours * HOUR).toISOString()
+  const v: View = { ...view({ '1': [100, 50], '2': [0, 0], '3': [0, 0] }), weekMarks: { '2': { pct: 100, resetsAt: at(2), at: NOW - 3 * HOUR }, '3': { pct: 100, resetsAt: at(1), at: NOW - 3 * HOUR } } }
+  v.readings['2'] = { fiveHour: { pct: 10, resetsAt: at(1) }, sevenDay: { pct: 10, resetsAt: at(48) }, at: NOW }
+  delete v.readings['3']
+  const raw = { ...v.readings, '3': undefined }
+  const got = pickAfterStop(v, raw, NOW, undefined, ['1'], new Set(), new Set(['2']))
+  expect([got?.account.id, got?.tier]).toEqual(['2', 'spent-old'])
+  expect(pickAfterStop(v, raw, NOW, undefined, ['1'], new Set())?.account.id, 'not read live: by the reset that frees first').toBe('3')
+})
+
 test('row a: a login read live and spent counts as tried even with a mark standing; read live with room it keeps the mark, and a login not read live is tried blind', () => {
   const at = (hours: number) => new Date(NOW + hours * HOUR).toISOString()
   const spent = (read: number): Reading => ({ fiveHour: { pct: 100, resetsAt: at(1) }, sevenDay: { pct: 100, resetsAt: at(48) }, at: read })
