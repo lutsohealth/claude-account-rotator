@@ -66,6 +66,7 @@ import {
   isNoBrowser,
   isPolicyRefusal,
   keepFable,
+  BODY_KEEP_COUNT,
   BODY_KEEP_MS,
   baselineBody,
   bodyOfReading,
@@ -107,6 +108,7 @@ import {
   usageDueFrom,
   isSameRows,
   rowsOf,
+  rowsV1Of,
   REQUEST_MAX_BYTES,
   isRequestNonce,
   REQUEST_POLL_MS,
@@ -1007,13 +1009,17 @@ function parsed(text: string | undefined): unknown {
 }
 
 /**
- * Stores every login's row under `rows`, for the CLI, when the lines differ from what the store holds: whichever
- * session wrote them, so sessions that see the same store write them once between them.
+ * Stores every login's row for the CLI, when it differs from what the store holds: whichever session wrote it, so sessions
+ * that see the same store write it once between them. Twice: under `rows2` with each login's windows as numbers, a key an
+ * older version never writes, and under `rows`, the lines alone, for the older readers; an older session still running
+ * rewrites `rows` only, so it cannot take the windows away.
  */
 async function saveRows($: Host, now: number): Promise<void> {
-  const rows = rowsOf(await getView($), now)
-  if (isSameRows(await $.store.get('rows'), rows)) return
-  await $.store.set('rows', { v: ROWS_VERSION, at: now, rows })
+  const view = await getView($)
+  const rows2 = rowsOf(view, now)
+  if (!isSameRows(await $.store.get('rows2'), rows2)) await $.store.set('rows2', { v: ROWS_VERSION, at: now, rows: rows2 })
+  const rows = rowsV1Of(view, now)
+  if (!isSameRows(await $.store.get('rows'), rows)) await $.store.set('rows', { v: WRITER_VERSION, at: now, rows })
 }
 
 /** Changes the footer's look for every session. */
@@ -1311,9 +1317,9 @@ async function bodyKeysOf($: Host, id: string): Promise<string[]> {
   return (await $.store.keys()).filter(key => key.startsWith(`usage-body:${id}:`))
 }
 
-/** Drops every session's body of a login, where its reading goes. */
+/** Drops every session's body of a login, where its reading goes, and the key part A's first version wrote with no session in it. */
 async function dropBodyKeys($: Host, id: string): Promise<void> {
-  for (const key of await bodyKeysOf($, id)) await $.store.delete(key)
+  for (const key of [`usage-body:${id}`, ...(await bodyKeysOf($, id))]) await $.store.delete(key)
 }
 
 /** Drops what the last sign-in's usage left on a login (its reading, its no-five-hour, its schedule), for every session. */
@@ -1531,10 +1537,12 @@ async function checkAccount($: Host, account: Account, gate: UsageGate): Promise
             // A body with no Fable row keeps the stored one's, unless the week fell since the last body: the stored read, never the view.
             await saveReading($, account.id, { ...keepFable(reading, prior === undefined ? undefined : { ...prior, sevenDay: before?.sevenDay }, now), by: account.id }, 'body')
             // This body is a baseline of the next, whichever rows are stored over the reading meanwhile, under this session's
-            // own key. A key over a week old, of a session gone, is a baseline of no window still running: it goes.
+            // own key. A key over a week old, of a session gone, is a baseline of no window still running: it goes. So do all
+            // but the newest BODY_KEEP_COUNT, as the store holds 4 MiB in all and sessions come and go.
             const ownKey = `usage-body:${account.id}:${(await getView($)).sessionMark ?? SELF}`
             await $.store.set(ownKey, { ...before, ...bodyOfReading(reading) })
-            for (const [key, body] of bodies) if (key !== ownKey && body.at < now - BODY_KEEP_MS) await $.store.delete(key)
+            const newest = [...bodies].filter(([key]) => key !== ownKey).sort(([, a], [, b]) => b.at - a.at).slice(0, BODY_KEEP_COUNT - 1)
+            for (const [key, body] of bodies) if (key !== ownKey && (body.at < now - BODY_KEEP_MS || !newest.some(([kept]) => kept === key))) await $.store.delete(key)
             hasFreshFable = reading.fable !== undefined
           }
         }
@@ -4047,6 +4055,11 @@ async function boot($: Host, isInteractive: boolean): Promise<void> {
   const survived = await getView($)
   if (survived.isBound === true && survived.isFableStopped !== undefined) kept = { ...kept, isFableStopped: survived.isFableStopped }
   if (survived.isBound === true && survived.isStuckTold !== undefined) kept = { ...kept, isStuckTold: survived.isStuckTold }
+  // So does the warning of a credentials file: the session was told, and a reload does not tell it again.
+  if (survived.isBound === true && survived.credentialsNote !== undefined) {
+    kept = { ...kept, credentialsNote: survived.credentialsNote }
+    isCredentialsFileTold = true
+  }
   // So does a carry-on owed once a login frees up: the tick, armed again by the reload, sends it. The reload zeroed the
   // count of main turns, so the grace counts from here: a turn after the reload shows Claude Code carried on by itself.
   // One this session ended though the view kept it, which the store marks by when it was owed, is cleared again instead.

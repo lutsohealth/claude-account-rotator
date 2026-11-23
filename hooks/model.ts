@@ -343,7 +343,8 @@ export function pickAfterStop(
     // The Fable week is proven roomy only by a fresh read that lists it; a spent-old pick says when it believed it frees.
     const hasFableRoom = tier === 'fresh' && counts[account.id]?.fable !== undefined && !isFableSpent(counts[account.id], now)
     const spentOld = tier === 'spent-old' ? { spentOld: ready, freesAt: finiteOr(freesAt(view, account.id, counts[account.id], now, need)) } : {}
-    return { account, tier, hasFableRoom, ...(read === undefined ? {} : { readAgeMs: now - read.at }), ...(isIdle(account) ? { isIdle: true as const } : {}), ...spentOld }
+    // The age is that of what the pick judged: a Fable pick judges the Fable row on its own read time, as isFableOld does.
+    return { account, tier, hasFableRoom, ...(read === undefined ? {} : { readAgeMs: now - (isFable ? read.fable?.at ?? read.at : read.at) }), ...(isIdle(account) ? { isIdle: true as const } : {}), ...spentOld }
   }
   return undefined
 }
@@ -752,8 +753,15 @@ export function readingFromLimits(
  */
 export const WRITER_VERSION = 1
 
-/** The version of the stored rows' shape, stamped as `v` on `rows` (`StoredRows`): 2 adds each login's windows as numbers. */
+/**
+ * The version of the stored rows' shape with each login's windows as numbers (`StoredRows`), stamped as `v` on `rows2`,
+ * the key only a session that writes the windows writes. `rows` stays version 1 (`WRITER_VERSION`), for the older readers,
+ * and an older session still running rewrites it alone, so it can never take the windows away.
+ */
 export const ROWS_VERSION = 2
+
+/** How many sessions' bodies of one login are kept, the newest: sessions come and go, and a week of them would otherwise pile up. */
+export const BODY_KEEP_COUNT = 20
 
 /**
  * Two week resets name one account's week: within an hour of each other, or a whole number of weeks apart (a
@@ -1641,6 +1649,11 @@ export function storedLine(line: readonly RowPart[]): StoredRun[] {
 /** Every login's row, as the merge stores it under `rows`. */
 export function rowsOf(view: View, now: number): StoredRows['rows'] {
   return view.accounts.map(a => ({ id: a.id, lines: rowOf(view, a, now).lines.map(storedLine), windows: windowsOf(view, a.id, now) }))
+}
+
+/** The rows an older reader reads, under `rows`: every login's lines, with no windows. */
+export function rowsV1Of(view: View, now: number): StoredRows['rows'] {
+  return rowsOf(view, now).map(({ id, lines }) => ({ id, lines }))
 }
 
 /**

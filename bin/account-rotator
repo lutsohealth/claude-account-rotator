@@ -8,8 +8,8 @@
     account-rotator account add [--folder PATH] [--agent claude] [--wait S] [--json] [--store PATH]
     account-rotator continue-text --set TEXT | --clear [--agent claude] [--wait S] [--json] [--store PATH]
 
-`list` prints each account's row as the switcher pane draws it, from the store's `rows` key, which every session of
-the mod rewrites when a row changes: its times are stored as instants, rendered here at this clock and in this zone.
+`list` prints each account's row as the switcher pane draws it, from the store's `rows2` key (the older `rows` where
+none is stored), which every session of the mod rewrites when a row changes: its times are stored as instants, rendered here at this clock and in this zone.
 Then one line says when the rows were written and which account new sessions start on.
 
 `select` sets the account new sessions start on, as the panel's New on does. `use` moves the session running it, as
@@ -86,6 +86,20 @@ def is_run(run: object) -> bool:
     return isinstance(run, dict) and len(run) == 1 and any(is_instant(run.get(key)) for key in ("clock", "until"))
 
 
+# hooks/model.ts ROWS_VERSION: the store's `rows2` holds each login's lines and windows, written only by a session that
+# writes the windows; `rows` is the older shape, which an older session still running rewrites alone.
+ROWS_KEYS = ("rows2", "rows")
+
+
+def stored_rows(data: dict) -> object:
+    """The rows `list` reads: `rows2` where one is stored, else `rows`."""
+    for key in ROWS_KEYS:
+        stored = data.get(key)
+        if isinstance(stored, dict) and isinstance(stored.get("rows"), list):
+            return stored
+    return data.get("rows")
+
+
 # hooks/model.ts WindowSource: where a stored window's number comes from.
 WINDOW_SOURCES = ("read", "kept", "stop")
 
@@ -112,12 +126,14 @@ def check(data: dict, path: str) -> None:
     for n, account in enumerate(data["accounts"]):
         if not isinstance(account, dict) or not isinstance(account.get("id"), str):
             raise damaged(f"accounts[{n}] is no account with an id")
-    stored = data.get("rows")
-    if stored is not None:
+    for key in ROWS_KEYS:
+        stored = data.get(key)
+        if stored is None:
+            continue
         if not isinstance(stored, dict) or not isinstance(stored.get("rows"), list):
-            raise damaged("rows holds no rows list")
+            raise damaged(f"{key} holds no rows list")
         if "at" in stored and not is_instant(stored["at"]):
-            raise damaged("rows.at is no time")
+            raise damaged(f"{key}.at is no time")
         for row in stored["rows"]:
             if not isinstance(row, dict) or not isinstance(row.get("id"), str) or not isinstance(row.get("lines"), list):
                 raise damaged("a row has no id or no lines")
@@ -179,7 +195,7 @@ def minutes_ago(at_ms: object, now_ms: float) -> str:
 
 def footer(data: dict, now_ms: float, zone: tzinfo | None, older: bool, passed: list[str]) -> str:
     """When the rows were written, and which account new sessions start on, as bin/account-rotator-launch words it."""
-    stored = data.get("rows")
+    stored = stored_rows(data)
     at = stored.get("at") if isinstance(stored, dict) else None
     written = f"rows written {clock_text(at, zone)} ({minutes_ago(at, now_ms)})" if is_instant(at) else "no session has stored rows yet"
     pick = data.get("launch-slot")
@@ -196,7 +212,7 @@ def footer(data: dict, now_ms: float, zone: tzinfo | None, older: bool, passed: 
 
 
 def rows_by_id(data: dict) -> dict[str, list]:
-    stored = data.get("rows")
+    stored = stored_rows(data)
     return {r["id"]: r["lines"] for r in stored["rows"]} if isinstance(stored, dict) else {}
 
 
@@ -211,7 +227,7 @@ def window_json(window: object, now_ms: float) -> dict | None:
 
 
 def windows_by_id(data: dict) -> dict[str, dict]:
-    stored = data.get("rows")
+    stored = stored_rows(data)
     return {r["id"]: r.get("windows") or {} for r in stored["rows"]} if isinstance(stored, dict) else {}
 
 
@@ -253,7 +269,7 @@ def list_json(data: dict, store: str, now_ms: float, zone: tzinfo | None) -> dic
         })
     pick = data.get("launch-slot")
     active = pick.get("id") if isinstance(pick, dict) and isinstance(pick.get("id"), str) else None
-    stored = data.get("rows")
+    stored = stored_rows(data)
     return {
         "id": str(uuid.uuid4()),
         "ok": True,
