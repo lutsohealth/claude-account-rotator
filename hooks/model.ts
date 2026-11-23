@@ -657,6 +657,7 @@ export function whoseWeek(reading: Reading | undefined, readings: Readonly<Recor
 }
 
 const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec']
+const WEEKDAYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat']
 const DAY_MS = 86_400_000
 /** A reset time the clock has passed by no more than this still reads as the one coming: the words carry minutes at best. */
 const RESET_PAST_SLACK_MS = 5 * 60_000
@@ -686,15 +687,16 @@ function zonedInstant(wall: number, timeZone: string): number | undefined {
 
 /**
  * The instant a usage-limit stop's own words give for the reset, as Claude Code writes them: "resets Nov 25 at 3pm
- * (Europe/Tallinn)", "resets 3pm (Europe/Tallinn)", "resets 3:30pm (Europe/Tallinn)". A date-less time is the next one
- * to come; a date is the next year's when this year's has passed. Minute precision at best, so a match with a stored
+ * (Europe/Tallinn)", "resets 3pm (Europe/Tallinn)", "resets 3:30pm (Europe/Tallinn)", "resets Mon 12:00am (Europe/Tallinn)".
+ * A date-less time is the next one to come; a weekday is its next occurrence; a date is the next year's when this
+ * year's has passed. A weekday is never read as a month. Minute precision at best, so a match with a stored
  * reset (`whoseReset`) is within an hour, never exact. Undefined where there is no such wording, where it names no zone
  * (the wall clock of a zone the words do not name is a guess), or where the zone or date is not one.
  */
 export function stopResetAt(text: string | undefined, now: number): number | undefined {
-  const m = /resets\s+(?:([A-Za-z]{3,9})\s+(\d{1,2})(?:,?\s+at)?\s+)?(\d{1,2})(?::(\d{2}))?\s*([ap]m)\s*\(([^)]+)\)/i.exec(text ?? '')
+  const m = /resets\s+(?:(?:(Mon|Tue|Wed|Thu|Fri|Sat|Sun)[a-z]*\s+)|(?:([A-Za-z]{3,9})\s+(\d{1,2})(?:,?\s+at)?\s+))?(\d{1,2})(?::(\d{2}))?\s*([ap]m)\s*\(([^)]+)\)/i.exec(text ?? '')
   if (m === null) return undefined
-  const [, monthWord, dayWord, hourWord, minuteWord, meridiem, timeZone] = m
+  const [, weekdayWord, monthWord, dayWord, hourWord, minuteWord, meridiem, timeZone] = m
   const hour12 = Number(hourWord)
   const minute = minuteWord === undefined ? 0 : Number(minuteWord)
   if (hour12 < 1 || hour12 > 12 || minute > 59 || timeZone === undefined || meridiem === undefined) return undefined
@@ -702,6 +704,14 @@ export function stopResetAt(text: string | undefined, now: number): number | und
   const today = wallClock(now, timeZone)
   if (today === undefined) return undefined
   const at = (year: number, month: number, day: number) => zonedInstant(Date.UTC(year, month, day, hour, minute), timeZone)
+  if (weekdayWord !== undefined) {
+    // A weekday is the next such day in the zone, today's included while its time has not passed (by more than the slack).
+    const target = WEEKDAYS.indexOf(weekdayWord.slice(0, 3).toLowerCase())
+    const todayDay = new Date(Date.UTC(today.year, today.month, today.day)).getUTCDay()
+    const ahead = (target - todayDay + 7) % 7
+    const first = at(today.year, today.month, today.day + ahead)
+    return first !== undefined && first < now - RESET_PAST_SLACK_MS ? at(today.year, today.month, today.day + ahead + 7) : first
+  }
   if (monthWord === undefined || dayWord === undefined) {
     const first = at(today.year, today.month, today.day)
     return first !== undefined && first < now - RESET_PAST_SLACK_MS ? at(today.year, today.month, today.day + 1) : first
