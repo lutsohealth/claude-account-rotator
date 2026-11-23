@@ -1,4 +1,5 @@
-import { expect, test } from 'claude-code/testing'
+import { expect } from 'claude-code/testing'
+import { test } from './flow-harness'
 import type { Engine, MockClock } from 'claude-code/testing'
 import type { On, ToolCallArgs } from 'claude-code'
 import type { StoredRows, View } from '../types'

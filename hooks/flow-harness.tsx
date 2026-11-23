@@ -1,8 +1,24 @@
-import { mock, test } from 'claude-code/testing'
+import { mock, test as kitTest } from 'claude-code/testing'
 import type { Engine, MockClock } from 'claude-code/testing'
 import type { On, ProcessRunResult, SessionRateLimit, ToolCallArgs } from 'claude-code'
 import type { StoredRows, View } from '../types'
 import { EMPTY_VIEW, REQUEST_POLL_MS, USAGE_CLAIM_WAIT_MS, USAGE_FORCE_AFTER_MS, USAGE_IDLE_MS, blockedText, keychainItem, storedLineText } from './model'
+
+/** The default timeout of a flow test: five files run in parallel, so a test can wait on a loaded machine. */
+export const DEFAULT_TEST_TIMEOUT_MS = 30_000
+const runKitTest = kitTest as (...args: unknown[]) => unknown
+/**
+ * The kit's `test` (`(name, ...rest) => collector.test(name, rest)`, rest being `[fn]` or `[options, fn]`), with
+ * `timeoutMs` defaulted. A test's own options win, every field of them.
+ */
+export const test = ((name: string, ...rest: unknown[]) => {
+  const [first] = rest
+  if (typeof first === 'function') return runKitTest(name, { timeoutMs: DEFAULT_TEST_TIMEOUT_MS }, ...rest)
+  if (typeof first === 'object' && first !== null) {
+    return runKitTest(name, { timeoutMs: DEFAULT_TEST_TIMEOUT_MS, ...first }, ...rest.slice(1))
+  }
+  return runKitTest(name, ...rest)
+}) as typeof kitTest
 
 export const NOW = Date.parse('2026-10-12T10:00:00Z')
 
