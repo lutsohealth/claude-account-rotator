@@ -65,7 +65,8 @@ import {
   isNoBrowser,
   isPolicyRefusal,
   keepFable,
-  lastBody,
+  bodyOfReading,
+  bodyReadFrom,
   isSpent,
   isUnread,
   keychainItem,
@@ -271,7 +272,7 @@ let signInQueue: Promise<void> = Promise.resolve()
  * the failure epoch the stop examined: the move goes only while that failure is still the latest and uncleared
  * (`isSameFailure`), whatever the stop awaited on the way. A press carries none.
  */
-type CarryOn = { need?: Need; epoch?: number; proof?: StopProof; model?: { resetAt?: number } }
+type CarryOn = { need?: Need; epoch?: number; proof?: StopProof }
 /** When the switch began whose landing a carry-on already follows: the switch's own, or one for a turn that died before it landed. */
 let carriedFor: number | undefined
 /** The last carry-on sent: when the switch it follows began, and when it went. The turn it starts may answer as the login left. */
@@ -282,7 +283,7 @@ let clearedFor: number | undefined
  * The one carry-on owed after a usage-limit stop found no login to move to, as the view's `carryDue` holds it: set once,
  * by the first such stop, with no await between its read and its write, so a second stop adds no notice and no retry.
  */
-let due: { at?: number; from?: string; owedAt?: number; turns?: number; isModel?: true; modelAt?: number } | undefined
+let due: { at?: number; from?: string; owedAt?: number; turns?: number } | undefined
 /** How many switches ended the carry-on owed (endDue): one landing while carryOnWhenFree writes is not undone by it. */
 let dueEndings = 0
 /** The turns open now, the main loop's and every agent's or teammate's, by id: a key sent while one runs would answer its dialog. */
@@ -614,8 +615,7 @@ async function saveReading($: Host, id: string, read: Reading, src: ReadingSourc
   const legacy = legacyMark(await legacyReading($, id), now)
   if (legacy !== undefined) await keepLegacyMark($, id, legacy)
   await $.store.set(`usage:${id}`, { ...read, v: WRITER_VERSION, src })
-  const { body: _earlierBody, ...shown } = read
-  await setView($, v => ({ ...v, readings: { ...v.readings, [id]: viewed(shown, besideOf(v, id), v.fiveHourLimit, now) } }))
+  await setView($, v => ({ ...v, readings: { ...v.readings, [id]: viewed(read, besideOf(v, id), v.fiveHourLimit, now) } }))
 }
 
 /** Moves an older version's mark to the mark's own key, unless the mark there already stands longer. */
@@ -1301,7 +1301,7 @@ function withSignIn(account: Account, who: Identity): Account {
 
 /** Drops what the last sign-in's usage left on a login (its reading, its no-five-hour, its schedule), for every session. */
 async function dropSignInUsage($: Host, id: string): Promise<void> {
-  for (const key of [`usage:${id}`, `no-five-hour:${id}`, `usage-due:${id}`]) await $.store.delete(key)
+  for (const key of [`usage:${id}`, `usage-body:${id}`, `no-five-hour:${id}`, `usage-due:${id}`]) await $.store.delete(key)
   await setView($, v => {
     const { [id]: _reading, ...readings } = v.readings
     const { [id]: _noFive, ...noFiveHour } = v.noFiveHour ?? {}
@@ -1489,8 +1489,9 @@ async function checkAccount($: Host, account: Account, gate: UsageGate): Promise
           }
           // A stored body saved at or after this read began is newer than this body, or came back with it: this body is no
           // earlier read to fall from, ends no mark, drops no kept row and never overwrites that row.
-          // Judged against the last body read, never a response row stored since (`lastBody`).
-          const before = lastBody(prior)
+          // Judged against the last body read, kept under its own key that only this path writes: never a response row stored
+          // since. A row an earlier version left, a body, stands in until the key is first written.
+          const before = bodyReadFrom(await $.store.get(`usage-body:${account.id}`)) ?? (prior?.src === 'body' ? bodyOfReading(prior) : undefined)
           const isOlder = before !== undefined && before.at >= usage.startedAt
           if (!isOlder) {
             // A body whose 5-hour window it cannot read leaves what the last one said.
@@ -1506,6 +1507,8 @@ async function checkAccount($: Host, account: Account, gate: UsageGate): Promise
             if (five !== undefined && isAfter(five) && endsFiveHourMark(reading.fiveHour, five, before?.fiveHour)) await dropMark($, account.id, five)
             // A body with no Fable row keeps the stored one's, unless the week fell since the last body: the stored read, never the view.
             await saveReading($, account.id, { ...keepFable(reading, prior === undefined ? undefined : { ...prior, sevenDay: before?.sevenDay }, now), by: account.id }, 'body')
+            // This body is the baseline of the next, whichever rows are stored over the reading meanwhile.
+            await $.store.set(`usage-body:${account.id}`, { ...before, ...bodyOfReading(reading) })
             hasFreshFable = reading.fable !== undefined
           }
         }
@@ -1619,7 +1622,7 @@ function whyLeave(view: View, now: number, need?: Need): string {
  * that never hit the Fable week stays on a login whose Fable week is spent.
  * A tick or a response moves a session only while its main loop is failed (isRed): otherwise only a usage-limit stop does.
  */
-async function maybeRotate($: Host, need?: Need, carry?: CarryOn): Promise<boolean> {
+async function maybeRotate($: Host, need?: Need, carry?: CarryOn, modelStop?: { resetAt?: number }): Promise<boolean> {
   // A view at its defaults names login 1 in use, whichever login this session runs on.
   if (!(await isBound($))) return false
   // Every check, response and tick comes through here: the login new sessions start on follows the same readings.
@@ -1669,7 +1672,8 @@ async function maybeRotate($: Host, need?: Need, carry?: CarryOn): Promise<boole
     if (pick === undefined) {
       // A plain usage-limit stop (not the Fable week, not a rejected sign-in) with every login tried owes one carry-on once a login frees up.
       if (need === undefined && view.health[view.activeId]?.kind !== 'login-needed') {
-        awaitFreeLogin($, view, now, carry.model)
+        if (modelStop === undefined) awaitFreeLogin($, view, now)
+        else owedByModelStop($, view, now, modelStop)
         // The stop's episode owes nothing now (no resume enters): the carry-on owed goes by the tick, whose own move
         // an episode standing would hold off.
         episode = undefined
@@ -1702,7 +1706,10 @@ async function maybeRotate($: Host, need?: Need, carry?: CarryOn): Promise<boole
   const target = pickTarget({ ...view, accounts: view.accounts.filter(a => !untaken.has(a.id)) }, now, need)
   if (target === undefined) {
     // A plain usage-limit stop (not the Fable week, not a rejected sign-in) owes one carry-on once a login frees up.
-    if (carry !== undefined && need === undefined && view.health[view.activeId]?.kind !== 'login-needed') awaitFreeLogin($, view, now, carry.model)
+    if (carry !== undefined && need === undefined && view.health[view.activeId]?.kind !== 'login-needed') {
+      if (modelStop === undefined) awaitFreeLogin($, view, now)
+      else owedByModelStop($, view, now, modelStop)
+    }
     return stays('no login to move to')
   }
   const isMoved = await switchTo($, target, whyLeave(view, now, need), false, carry, true)
@@ -1761,20 +1768,15 @@ async function readLiveBeforeSpentOld($: Host, candidates: readonly Account[]): 
  * line being what a reader of the store (a fleet watchdog) finds. A second stop before then finds `due` set and adds
  * nothing. `due` is read and set with no await between, as carriedFor is.
  */
-function awaitFreeLogin($: Host, view: View, now: number, model?: { resetAt?: number }): void {
+function awaitFreeLogin($: Host, view: View, now: number): void {
   if (due !== undefined) return
   const at = firstFreeAt(view, now, untaken)
   const owed = at === undefined ? { from: view.activeId, owedAt: now } : { at, from: view.activeId, owedAt: now }
   // The main turns so far, held in this module only: a reload drops it, and the carry-on then goes after the grace.
-  // A model-family stop (`model`) leaves the login in use unspent yet unable to serve that family: the tick moves to a
-  // login that frees (carryOnWhenFree), and where none does, carries on here at the family's own reset, where it is known.
-  due = { ...owed, turns: mainTurns, ...(model === undefined ? {} : { isModel: true as const, ...(model.resetAt === undefined ? {} : { modelAt: model.resetAt }) }) }
+  due = { ...owed, turns: mainTurns }
   const debt = due
   void logStop($, `no login left: one carry-on ${at === undefined ? 'once a login frees up' : `at ${new Date(at).toISOString()}`}`)
-  const text =
-    model === undefined
-      ? `${limitNotice(view, now, untaken)} This session carries on by itself once one frees up.`
-      : `This account's model limit holds and no other account is free${at === undefined ? '' : `; the next frees up ${untilText(at, now)}`}. This session carries on by itself once one frees up, or when the limit resets.`
+  const text = `${limitNotice(view, now, untaken)} This session carries on by itself once one frees up.`
   void (async () => {
     await writeCarryDue($, debt)
     $.ui.toast(text, { timeoutMs: 15_000 })
@@ -1782,18 +1784,36 @@ function awaitFreeLogin($: Host, view: View, now: number, model?: { resetAt?: nu
   })().catch(error => debug($, `carry-on owed not written to the view: ${String(error)}`))
 }
 
+/** Whether a model stop with no usable reset has told the person it owes nothing: once a session. */
+let isModelResetTold = false
+
 /**
- * Moves a session whose model-family limit stopped it to a login that has freed since (not one only believed spent), as a
- * stop's own move does: the switch carries the carry-on and ends the one owed. True where a move began.
+ * A model-family stop (Opus, Sonnet) with no login left to move to: the login in use is not spent, only unable to serve
+ * that family until the reset its words name. It owes the ordinary carry-on, dated at that reset, which no tick moves
+ * earlier (a freed login is used at the next stop or Use now). A later stop on the login moves the date later, never
+ * earlier. Words with no usable reset (none, no zone, one already past) owe nothing, and say so once.
  */
-async function moveToFreedLogin($: Host, view: View, now: number): Promise<boolean> {
-  const raw: Record<string, Reading | undefined> = {}
-  for (const a of view.accounts) raw[a.id] = await ownedReading($, a.id)
-  const pick = pickAfterStop(view, raw, now, undefined, [view.activeId], untaken)
-  if (pick === undefined || pick.tier === 'spent-old') return false
-  void logStop($, `model limit: login ${pick.account.id} has freed up, moving there`)
-  const { tier, readAgeMs, freesAt, hasFableRoom } = pick
-  return switchTo($, pick.account, 'a login has freed up and the model limit holds here', false, { proof: { tier, readAgeMs, freesAt, hasFableRoom } }, true)
+function owedByModelStop($: Host, view: View, now: number, stop: { resetAt?: number }): void {
+  const at = stop.resetAt
+  if (at === undefined || at <= now) {
+    if (isModelResetTold) return
+    isModelResetTold = true
+    tell($, "The model limit holds on this account and Claude gave no reset time: this session does not carry on by itself. Use now moves it to another account.")
+    return
+  }
+  if (due !== undefined) {
+    // The date only moves later, and only for the login that stopped.
+    if (due.from !== view.activeId || (due.at !== undefined && due.at >= at)) return
+    due = { ...due, at }
+  } else due = { at, from: view.activeId, owedAt: now, turns: mainTurns }
+  const debt = due
+  void logStop($, `model limit: one carry-on at ${new Date(at).toISOString()}`)
+  const text = `This account's model limit holds until ${untilText(at, now)}: this session carries on by itself then, on this account.`
+  void (async () => {
+    await writeCarryDue($, debt)
+    $.ui.toast(text, { timeoutMs: 15_000 })
+    notify($, text)
+  })().catch(error => debug($, `carry-on owed not written to the view: ${String(error)}`))
 }
 
 /**
@@ -1817,14 +1837,7 @@ async function carryOnWhenFree($: Host): Promise<void> {
   if (isConnectingChrome) return
   if (shouldLeave(view, now)) return
   const isSameLogin = view.activeId === due?.from
-  // A model-family stop left the login in use unspent but unable to serve that family: where another login has freed, the
-  // session moves there and carries on there (the switch ends what is owed); where none has, it waits for the family's
-  // own reset where it is known, and carries on here then.
-  if (due?.isModel === true && isSameLogin) {
-    if (await moveToFreedLogin($, view, now)) return
-    if (due.modelAt !== undefined && now < due.modelAt) return
-  }
-  if (isSameLogin && due?.at !== undefined && due.modelAt === undefined && now < due.at + CARRY_ON_GRACE_MS) return
+  if (isSameLogin && due?.at !== undefined && now < due.at + CARRY_ON_GRACE_MS) return
   // Another tick may have taken it during the reads: the check and the clear go with no await between.
   if (due === undefined) return
   const owed = due
@@ -2318,11 +2331,10 @@ async function onMeasure($: Host, limits: readonly SessionRateLimit[]): Promise<
   // A response that reports a 5-hour window shows the account has one, whatever the last usage check said: recorded once,
   // in a form the 5h limit does not filter.
   if (reading.fiveHour !== undefined && view.noFiveHour?.[view.activeId] !== false) await saveNoFiveHour($, view.activeId, false)
-  // A response never lists the Fable week: the one the last check stored stays (the view's carries the marks). So does
-  // the last body read of each window, which the next body is compared with, never this response.
-  const prior = await ownedReading($, view.activeId)
-  const body = lastBody(prior)
-  await saveReading($, view.activeId, { ...reading, ...(prior?.fable ? { fable: prior.fable } : {}), ...(body ? { body } : {}), by: view.activeId }, 'response')
+  // A response never lists the Fable week: the one the last check stored stays (the view's carries the marks). It touches
+  // no other key: the last body read of each window lives under its own, written by the body path alone.
+  const fable = (await ownedReading($, view.activeId))?.fable
+  await saveReading($, view.activeId, { ...reading, ...(fable ? { fable } : {}), by: view.activeId }, 'response')
   await maybeRotate($)
 }
 
@@ -3027,9 +3039,9 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
   // The switch sends the carry-on once it lands, held back for a refresh or not. The marks above awaited: a stop that
   // went stale meanwhile moves nothing (its marks stand, as the stop happened).
   if (!(await isCurrent())) return dropStale()
-  // A model-family stop (Opus, Sonnet) carries the family's own reset, where its words give one, for the carry-on it may owe.
-  const model = wordingClass(stop.last_assistant_message) === 'model' ? { model: { resetAt: stopResetAt(stop.last_assistant_message, await $.clock.now()) } } : {}
-  if (!(await maybeRotate($, need, { need, epoch, ...model }))) {
+  // A model-family stop (Opus, Sonnet) tells the pick the family's own reset, where its words give one, for the carry-on it may owe.
+  const modelStop = wordingClass(stop.last_assistant_message) === 'model' ? { resetAt: stopResetAt(stop.last_assistant_message, await $.clock.now()) } : undefined
+  if (!(await maybeRotate($, need, { need, epoch }, modelStop))) {
     if (isConnectingChrome) isCutByVisit = true
     if (need === 'fable') await announceStay($)
   }
@@ -3711,7 +3723,7 @@ async function adoptSlot($: Host, slot: string): Promise<{ ok: boolean; message:
 
 /** Every store key of one account's own, each dropped when an account goes and before a row takes its id. */
 async function dropAccountKeys($: Host, id: string): Promise<void> {
-  for (const key of ['reading', 'usage', 'mark', 'no-five-hour', 'week-mark', 'fable-mark', 'check-error', 'health', 'holder', 'usage-due']) {
+  for (const key of ['reading', 'usage', 'usage-body', 'mark', 'no-five-hour', 'week-mark', 'fable-mark', 'check-error', 'health', 'holder', 'usage-due']) {
     await $.store.delete(`${key}:${id}`)
   }
 }

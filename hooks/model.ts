@@ -581,11 +581,18 @@ export function withFableMark(r: Reading | undefined, mark: Mark | undefined, no
 /** How long a usage read may lag a Fable stop: a read of the mark's own week this long after it, below 100, outweighs the stop. */
 export const FABLE_MARK_LAG_MS = 30 * 60_000
 
-/** The last usage body read of a stored row: the row itself where it is one, else the one a response row carries over. */
-export function lastBody(r: Reading | undefined): BodyRead | undefined {
-  if (r === undefined) return undefined
-  if (r.src === 'body') return { at: r.at, ...(r.fiveHour ? { fiveHour: r.fiveHour } : {}), ...(r.sevenDay ? { sevenDay: r.sevenDay } : {}), ...(r.fable ? { fable: r.fable } : {}) }
-  return r.body
+/** A stored `usage-body:<id>`: the time of the body and its windows; anything else is no earlier body. */
+export function bodyReadFrom(value: unknown): BodyRead | undefined {
+  const v = typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : {}
+  if (typeof v.at !== 'number') return undefined
+  const window = (w: unknown): UsageWindow | undefined => (typeof w === 'object' && w !== null && typeof (w as UsageWindow).pct === 'number' ? (w as UsageWindow) : undefined)
+  const [fiveHour, sevenDay, fable] = [window(v.fiveHour), window(v.sevenDay), window(v.fable)]
+  return { at: v.at, ...(fiveHour ? { fiveHour } : {}), ...(sevenDay ? { sevenDay } : {}), ...(fable ? { fable } : {}) }
+}
+
+/** The body a body row is: its time and windows, for `usage-body:<id>` and, where that key is not yet written, for the baseline. */
+export function bodyOfReading(r: Reading): BodyRead {
+  return { at: r.at, ...(r.fiveHour ? { fiveHour: r.fiveHour } : {}), ...(r.sevenDay ? { sevenDay: r.sevenDay } : {}), ...(r.fable ? { fable: r.fable } : {}) }
 }
 
 /** A usage counter only grows inside a window: one that falls this many points between two reads of it was reset (Council Q10). */
