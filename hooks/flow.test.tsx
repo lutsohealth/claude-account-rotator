@@ -17282,3 +17282,63 @@ test('HONEST-CARRY-ON: a fresh read that lists no Fable week proves no room, so 
   expect(w.submitted[0]).toMatch(/lists no Fable week, so room on it is not confirmed/)
   expect(w.asUser).toEqual([false])
 })
+
+// ---------------------------------------------------------------- puma-9arph.109.5: a window's marks end on a counter fall
+
+/**
+ * Login 1 is in use with its Fable week spent, login 2 is spent. Login 3 was stopped 15 minutes ago: its mark stands and its
+ * stored body said `before` (week, Fable, 5-hour). Then the operator reset its usage by hand, and the endpoint says `live`
+ * with every reset time as before (seen live: the reset time does not move). Its read is due in three minutes.
+ */
+async function manualResetOnThree($: Engine, on: On, kind: 'fable' | 'week' | 'five', before: { week: number; fable: number; five: number }, live: [number, number, number]) {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.keychain[await keychainItem(SLOT3)] = blob('tok-3')
+  w.usage['tok-1'] = [20, 30, 100]
+  w.usage['tok-2'] = [100, 100, 100]
+  w.usage['tok-3'] = live
+  const FIVE_RESET = '2026-10-12T12:00:00Z'
+  const WEEK_3 = '2026-10-20T03:00:00Z'
+  w.fableResetsBy = { 'tok-1': FABLE_RESET, 'tok-2': FABLE_RESET_2, 'tok-3': FABLE_RESET }
+  w.weekResets = { 'tok-1': '2026-10-18T03:00:00Z', 'tok-2': '2026-10-19T03:00:00Z', 'tok-3': WEEK_3 }
+  const at = NOW - 15 * 60_000
+  const marks = {
+    fable: { 'fable-mark:3': { pct: 100, resetsAt: FABLE_RESET, at } },
+    week: { 'week-mark:3': { pct: 100, resetsAt: WEEK_3, at } },
+    five: { 'mark:3': { pct: 100, resetsAt: FIVE_RESET, at } },
+  }[kind]
+  const store = new Map<string, unknown>(
+    Object.entries({
+      ...THREE_LOGINS,
+      'rotate-to': 'room',
+      ...marks,
+      'usage:3': { fiveHour: { pct: before.five, resetsAt: FIVE_RESET }, sevenDay: { pct: before.week, resetsAt: WEEK_3 }, fable: { pct: before.fable, resetsAt: FABLE_RESET }, at, by: '3', v: 1, src: 'body' },
+      'usage-due:3': { next: NOW + 3 * 60_000, fails: 0, at, v: 1 },
+    }),
+  )
+  const clock = world(on, w, store)
+  await start($, clock)
+  // The schedule reads login 3: five minutes on, the read is due and claimed.
+  await clock.advance(5 * 60_000)
+  await clock.settle()
+  await clock.advance(USAGE_CLAIM_WAIT_MS)
+  await clock.settle()
+  return { w, store, clock, key: Object.keys(marks)[0] ?? '' }
+}
+
+for (const [kind, stop] of [['fable', FABLE_STOP], ['week', { error: 'rate_limit', last_assistant_message: PLAIN_STOPS[0] }], ['five', { error: 'rate_limit', last_assistant_message: PLAIN_STOPS[0] }]] as const) {
+  test(`MARKS-END-ON-FALL: a manual reset of login 3 (100 to 0, the same reset times) ends its ${kind} mark at the next read, and the next stop picks it fresh`, async ($, on) => {
+    const { w, store, clock, key } = await manualResetOnThree($, on, kind, { week: 100, fable: 100, five: 100 }, [0, 0, 0])
+    expect(store.get(key), 'the mark ended at the read, though it is 20 minutes old').toBeUndefined()
+    await $.classic.StopFailure(stop)
+    await clock.settle()
+    expect(slotValues(w), 'the stop moves to login 3').toEqual([SLOT3])
+    expect(whats(stopLogOf(store, w)).filter(line => line.startsWith('picked '))).toEqual([expect.stringMatching(/^picked 3: fresh, read \d+ min ago; tried 1$/)])
+  })
+
+  test(`guard: a lagging read that sits near its stop (96 then 97) keeps the ${kind} mark`, async ($, on) => {
+    const { store, key } = await manualResetOnThree($, on, kind, { week: 96, fable: 96, five: 96 }, [97, 97, 97])
+    expect(store.get(key), 'the mark stands').toBeDefined()
+  })
+}

@@ -14,6 +14,7 @@ import * as modelExports from './model'
 import { firstFreeAt, limitNotice } from './model'
 import { OWN_CONTINUE_MARGIN_MS, isCountdownOnScreen, ownContinueAfterLook, ownContinueHeldBack, ownContinueResetAt, screenLinesFrom } from './model'
 import { signInFromStatus } from './model'
+import { endsFableMark } from './model'
 import { USAGE_BACKOFF_MAX_MS, USAGE_CLAIM_MS, USAGE_CLAIM_WAIT_MS, USAGE_EARLY_MS, WRITER_VERSION, afterUsage, claimDueReads, gatingDue, isUsageDue, mayForceUsage, mayReadSince, renewClaim, retryAfterFrom, usageDueFrom } from './model'
 import { DEFAULT_FOOTER, availableNow, claudeAccount, blockedAdvice, braille, browsersFrom, chromeNote, continueTextFrom, counted, fiveHourLimitFrom, credentialFrom, credentialsFile, fableMark, fableSpentNotice, fableStay, footerStyleFrom, healthOf, identityFromProfile, isFableSpent, isFableStop, isNoBrowser, isPolicyRefusal, keepFable, keychainItem, label, legacyMark, markFrom, nextReset, pickTarget, pie, readingFromUsage, restartSteps, rotateToFrom, shouldLeave, roomColor, stuckText, windowPct, withMark, withWeekMark } from './model'
 
@@ -2278,6 +2279,56 @@ test('fableCarryOnNote: no note where a fresh read proved Fable room; otherwise 
   expect(note({ tier: 'spent-old', hasFableRoom: false })).toBe('Its Fable week was believed spent; it is tried in case it was reset or freed elsewhere.')
   // No pick behind the carry-on (a retry that lost it, a nudge's): nothing proves room.
   expect(note(undefined)).toBe('Its Fable room is not confirmed.')
+})
+
+// puma-9arph.109.5 (Council Q10): a same-window body read that falls 5 points or more below the previous read of that window
+// ends the window's marks and kept rows at once; with no earlier read of the window, a read at or below 5% does. The reset
+// time does not move on a manual reset, so it is never relied on.
+{
+  const markAt = (minutesAgo: number, resetsAt = FABLE_END) => ({ pct: 100, resetsAt, at: NOW - minutesAgo * 60_000 })
+  const win = (pct: number, resetsAt = FABLE_END) => ({ pct, resetsAt })
+  // [name, read, previous read of the window, mark, ends]
+  const cases: [string, ReturnType<typeof win> | undefined, ReturnType<typeof win> | undefined, ReturnType<typeof markAt>, boolean][] = [
+    ['0% after a read of 100, the mark 10 min old', win(0), win(100), markAt(10), true],
+    ['0% with no earlier read, the mark 10 min old', win(0), undefined, markAt(10), true],
+    ['5% with no earlier read', win(5), undefined, markAt(10), true],
+    ['6% with no earlier read', win(6), undefined, markAt(10), false],
+    ['a fall of exactly 5 points', win(55), win(60), markAt(10), true],
+    ['a fall of 4 points', win(56), win(60), markAt(10), false],
+    ['a lagging 97% after a stop at a read of 96', win(97), win(96), markAt(5), false],
+    ['a lagging 97% with no earlier read', win(97), undefined, markAt(5), false],
+    ['a lagging 97% after a read of 99 (a fall of 2)', win(97), win(99), markAt(5), false],
+    ['a fall inside another window than the mark\'s', win(0, '2026-10-24T03:00:00Z'), win(100, '2026-10-24T03:00:00Z'), markAt(10), false],
+    ['a previous read of another window: 0% reads as no earlier read', win(0), win(100, '2026-10-10T03:00:00Z'), markAt(10), true],
+    ['a window the body does not list', undefined, win(100), markAt(10), false],
+  ]
+  for (const [name, read, before, mark, ends] of cases) {
+    test(`endsFableMark (Q10): ${name} ${ends ? 'ends' : 'keeps'} the mark`, () => {
+      expect(endsFableMark(read, NOW, mark, before)).toBe(ends)
+    })
+    test(`endsWeekMark (Q10): ${name} ${ends ? 'ends' : 'keeps'} the mark`, () => {
+      expect(modelExports.endsWeekMark?.(read, mark, before)).toBe(ends)
+    })
+    test(`endsFiveHourMark (Q10): ${name} ${ends ? 'ends' : 'keeps'} the mark`, () => {
+      expect(modelExports.endsFiveHourMark?.(read, mark, before)).toBe(ends)
+    })
+  }
+}
+
+test('endsFableMark: the 30-minute lag rule still ends a mark whose week reads below 100 with no fall and no low read', () => {
+  const mark = { pct: 100, resetsAt: FABLE_END, at: NOW - 40 * 60_000 }
+  expect(endsFableMark({ pct: 60, resetsAt: FABLE_END }, NOW, mark, { pct: 60, resetsAt: FABLE_END })).toBe(true)
+  expect(endsFableMark({ pct: 60, resetsAt: FABLE_END }, NOW, { ...mark, at: NOW - 10 * 60_000 }, { pct: 60, resetsAt: FABLE_END })).toBe(false)
+})
+
+test('keepFable keeps no row older than a counter fall: the fresh week fell 5 points or more inside the stored one\'s window', () => {
+  const fresh: Reading = { sevenDay: { pct: 0, resetsAt: WEEK_END }, at: NOW }
+  const stored = (week: number, weekEnd = WEEK_END): Reading => ({ sevenDay: { pct: week, resetsAt: weekEnd }, fable: { pct: 100, resetsAt: FABLE_END }, at: NOW - 20 * 60_000 })
+  expect(keepFable(fresh, stored(100), NOW), 'a fall of 100 drops the row').toEqual(fresh)
+  expect(keepFable({ ...fresh, sevenDay: { pct: 55, resetsAt: WEEK_END } }, stored(60), NOW), 'a fall of 5 drops it').toEqual({ ...fresh, sevenDay: { pct: 55, resetsAt: WEEK_END } })
+  expect(keepFable({ ...fresh, sevenDay: { pct: 56, resetsAt: WEEK_END } }, stored(60), NOW).fable, 'a fall of 4 keeps it').toEqual({ pct: 100, resetsAt: FABLE_END })
+  expect(keepFable({ ...fresh, sevenDay: { pct: 97, resetsAt: WEEK_END } }, stored(96), NOW).fable, 'a lagging 97 keeps it').toEqual({ pct: 100, resetsAt: FABLE_END })
+  expect(keepFable(fresh, stored(100, '2026-10-11T03:00:00Z'), NOW).fable, 'a fall across two windows is no reset: the row stays').toEqual({ pct: 100, resetsAt: FABLE_END })
 })
 
 test('the Escape goes to the one pane named, by a fixed argv with no shell (puma-9arph.34 C1)', () => {
