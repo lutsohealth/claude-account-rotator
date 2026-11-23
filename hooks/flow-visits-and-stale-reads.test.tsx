@@ -2578,6 +2578,83 @@ test('MODEL-DEBT-CLEAR: a tick clearing the model debt it read sends nothing whe
   expect(w.submitted, 'the later debt goes at its own date').toHaveLength(1)
 })
 
+/**
+ * MODEL-DEBT-CLEAR's world with its one tick at the debt's date held at `where`, while a later Opus stop owes a later debt:
+ * 'after-read' holds the view read that follows the clear, 'mark' the view read markCarryEnded makes (the clear is refused,
+ * so the debt is marked ended), 'carry-read' the second view read after the clear, which carryOn makes before it submits.
+ */
+async function laterDebtDuringTick($: Engine, on: On, where: 'after-read' | 'mark' | 'carry-read') {
+  const w = fresh()
+  const { clock, store } = await loggedWorld(on, w)
+  w.usage['tok-1'] = [20, 30, 21]
+  w.usage['tok-2'] = [100, 30, 21]
+  w.fiveHourResets = { 'tok-2': '2026-10-12T17:00:00Z' }
+  let last: View | undefined
+  let readsSinceClear = 0
+  let isClearSeen = false
+  const held = { isPaused: false, open: () => {} }
+  const gate = new Promise<void>(resolve => {
+    held.open = resolve
+  })
+  const pause = async () => {
+    if (held.isPaused) return
+    held.isPaused = true
+    await gate
+  }
+  on('state.set', async (_$, e, next) => {
+    const { key, value } = e as unknown as { key: string; value: View }
+    if (key !== 'view') return next(e)
+    const isClear = !isClearSeen && value.carryDue === undefined && last?.carryDue !== undefined && clock.now() >= AT_1PM_Z
+    if (isClear) isClearSeen = true
+    if (isClear && where === 'mark') return { deny: 'state: refused' } as unknown as Awaited<ReturnType<typeof next>>
+    last = value
+    return next(e)
+  })
+  on('state.get', async (_$, e, next) => {
+    const read = await next(e)
+    if (e.plugin !== 'account-rotator' || e.key !== 'view' || !isClearSeen || held.isPaused) return read
+    readsSinceClear += 1
+    if (readsSinceClear === (where === 'after-read' ? 1 : 2)) await pause()
+    return read
+  })
+  await start($, clock)
+  await $.classic.StopFailure(OPUS_AT_4PM)
+  await clock.settle()
+  await tickUntil(clock, AT_1PM_Z - 3 * 60_000)
+  for (let waited = 0; waited < 20 * 60_000 && !held.isPaused; waited += 1_000) await clock.advance(1_000)
+  expect(held.isPaused, `the tick at the debt's date waits at its ${where}`).toBe(true)
+  await $.classic.StopFailure(OPUS_AT_6PM)
+  await clock.settle()
+  held.open()
+  await clock.settle()
+  // Past the settle a carry-on takes before it is submitted.
+  await clock.advance(60_000)
+  await clock.settle()
+  expect(whats(stopLogOf(store, w)).filter(line => line.startsWith('moved to')), 'no login to move to').toEqual([])
+  return { w, clock, view: () => last }
+}
+
+/** Sends nothing at the earlier date, keeps the later debt in the view, and sends one carry-on at its own date. */
+async function expectLaterDebtStands({ w, clock, view }: Awaited<ReturnType<typeof laterDebtDuringTick>>) {
+  expect(w.submitted, 'the debt the tick read is not sent: a later one stands').toEqual([])
+  expect(view()?.carryDue, 'the later debt stands').toMatchObject({ at: Date.parse('2026-10-12T15:00:00Z'), from: '1' })
+  await tickUntil(clock, Date.parse('2026-10-12T15:00:00Z') + 10 * 60_000)
+  expect(w.submitted, 'the later debt goes at its own date').toHaveLength(1)
+}
+
+// puma-9arph.109.11: the four awaits of carryOnWhenFree after `const owed = due`. (1) the clear: MODEL-DEBT-CLEAR above.
+test('MODEL-DEBT-AFTER-READ guard: a later model stop owing a later debt while the tick reads the view after the clear sends nothing of the old debt', { timeoutMs: 30_000 }, async ($, on) => {
+  await expectLaterDebtStands(await laterDebtDuringTick($, on, 'after-read'))
+})
+
+test('MODEL-DEBT-MARK guard: a later model stop owing a later debt while the tick marks the old debt ended sends nothing of the old debt', { timeoutMs: 30_000 }, async ($, on) => {
+  await expectLaterDebtStands(await laterDebtDuringTick($, on, 'mark'))
+})
+
+test('MODEL-DEBT-CARRY-READ: a later model stop owing a later debt while carryOn reads before it submits sends nothing of the old debt', { timeoutMs: 30_000 }, async ($, on) => {
+  await expectLaterDebtStands(await laterDebtDuringTick($, on, 'carry-read'))
+})
+
 // ---------------------------------------------------------------- PR B, epic puma-9arph.109: readings that show what they are
 // ---------------------------------------------------------------- puma-9arph.109.6: read ages
 
