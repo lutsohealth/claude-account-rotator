@@ -68,6 +68,10 @@ type World = {
   linkFiles?: string[]
   /** A look at a folder is refused. */
   listFails?: boolean
+  /** path -> the modification time `$.fs.list` gives a listed file, epoch ms; 0 where unset. */
+  mtimes?: Record<string, number>
+  /** Every path `$.fs.read` was asked for, in order. */
+  readPaths?: string[]
   /** The folders that exist under the accounts folder, signed in or not. */
   folders?: string[]
   /** How a `mkdir` fails, where it does. */
@@ -483,13 +487,14 @@ function world(on: On, w: World, store: Record<string, unknown> | Map<string, un
     const names = Object.keys(w.files).filter(p => p.startsWith(`${e.path}/`) && !p.slice(e.path.length + 1).includes('/'))
     if (w.listFails) return { deny: `EACCES: permission denied, scandir '${e.path}'` }
     if (names.length === 0) return { deny: `ENOENT: no such file or directory, scandir '${e.path}'` }
-    return { value: names.map(p => ({ name: p.slice(e.path.length + 1), kind: (w.linkFiles ?? []).includes(p.slice(e.path.length + 1)) ? 'other' : 'file', size: (w.files[p] ?? '').length, mtimeMs: 0, isLink: false })) }
+    return { value: names.map(p => ({ name: p.slice(e.path.length + 1), kind: (w.linkFiles ?? []).includes(p.slice(e.path.length + 1)) ? 'other' : 'file', size: (w.files[p] ?? '').length, mtimeMs: w.mtimes?.[p] ?? 0, isLink: false })) }
   })
   on('fs.exists', async (_$, e) => {
     await w.existsGate
     return { value: (e.path === '/System/Library/CoreServices/SystemVersion.plist' && w.system === 'macOS') || (w.folders ?? []).includes(e.path) }
   })
   on('fs.read', async (_$, e) => {
+    w.readPaths = [...(w.readPaths ?? []), e.path]
     await w.readGate
     // puma-9arph.26: the mod's own launcher file, wherever the host puts the plugin's folder.
     if (w.ownLauncher !== undefined && e.path.endsWith('/bin/account-rotator-claude')) return { value: w.ownLauncher }
@@ -17935,4 +17940,66 @@ test('MOVE-LOG: a stop whose reset names another login points back, and leaves i
   const ctx = await fableOnTwo($, on, '2')
   await movedToOneThenStoppedOnTwo($, ctx)
   expect(movesOf(ctx.store, ctx.w)).toEqual(['moved to 1 (by a stop)', "moved to 2 (by a point-back: the stop's reset names login 2)", 'moved to 1 (by a stop)'])
+})
+
+// ---------------------------------------------------------------- puma-9arph.109.9: a credentials file beside the keychain login
+
+const SECRET_FILE = '{"claudeAiOauth":{"accessToken":"SECRET-ACCESS-TOKEN","refreshToken":"SECRET-REFRESH-TOKEN","expiresAt":0},"mcpOAuth":{}}'
+const FILE_MTIME = Date.parse('2026-11-03T21:46:53Z')
+
+/** A macOS session whose normal login is in the keychain, with the file `files` holds beside it. */
+async function credentialsFileWorld($: Engine, on: On, files: Record<string, string>, system: World['system'] = 'macOS') {
+  const w = fresh(system)
+  if (system === 'macOS') w.keychain['Claude Code-credentials'] = blob('tok-1')
+  else w.files[FILE1] = blob('tok-1')
+  Object.assign(w.files, files)
+  w.mtimes = { [FILE1]: FILE_MTIME }
+  w.usage['tok-1'] = [20, 30]
+  const s = clearable(on)
+  const clock = world(on, w, { accounts: [TWO_LOGINS.accounts[0]] })
+  on('classic.SessionStart', () => ({}))
+  await start($, clock)
+  return { w, s, clock }
+}
+
+const warned = (texts: string[]) => texts.filter(t => /\.credentials\.json/.test(t))
+
+test('CREDENTIALS-FILE: a credentials file beside the keychain login is warned of once, as a toast, a notice and a pane line that name its time and moving it aside, and is never read', async ($, on) => {
+  const { w, clock } = await credentialsFileWorld($, on, { [FILE1]: SECRET_FILE })
+  expect([warned(w.toasts).length, warned(w.notices).length]).toEqual([1, 1])
+  const text = warned(w.toasts)[0] ?? ''
+  expect(text).toContain('2026-11-03 21:46 UTC')
+  expect(text).toContain(`mv ${FILE1} ${FILE1}.aside`)
+  expect(text).toMatch(/move back to Claude Code's own login/)
+  await clock.advance(30 * 60_000)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  const line = await pane.find({ text: /\.credentials\.json/ })
+  expect(painted(line)[0]?.color, 'the pane line is a warning').toBe('warning')
+  await pane.unmount()
+  expect([warned(w.toasts).length, warned(w.notices).length], 'once a session').toEqual([1, 1])
+  expect(w.readPaths ?? [], 'only its name and time are read, never its contents').not.toContain(FILE1)
+  expect(w.writes ?? []).not.toContain(FILE1)
+  expect(JSON.stringify([w.toasts, w.notices, w.logged, line]), 'no token value anywhere it was said').not.toContain('SECRET')
+})
+
+test('CREDENTIALS-FILE: with no such file nothing is warned, and on Linux, where the file is the login itself, nothing either', async ($, on) => {
+  const none = await credentialsFileWorld($, on, {})
+  expect([warned(none.w.toasts), warned(none.w.notices)]).toEqual([[], []])
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  expect(await pane.find({ text: /\.credentials\.json/ })).toBeUndefined()
+  await pane.unmount()
+})
+
+test('CREDENTIALS-FILE: on Linux the file is the login itself and is not warned of', async ($, on) => {
+  const { w } = await credentialsFileWorld($, on, {}, 'Linux')
+  expect([warned(w.toasts), warned(w.notices)]).toEqual([[], []])
+})
+
+test('CREDENTIALS-FILE: a /clear keeps the pane line and warns no second time', async ($, on) => {
+  const { w, s, clock } = await credentialsFileWorld($, on, { [FILE1]: SECRET_FILE })
+  await clearSession($, clock, s.clear)
+  const pane = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'Pane', requestId: 'claude-accounts', props: PANE_PROPS })
+  expect(await pane.find({ text: /\.credentials\.json/ })).toBeDefined()
+  await pane.unmount()
+  expect([warned(w.toasts).length, warned(w.notices).length]).toEqual([1, 1])
 })

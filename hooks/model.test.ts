@@ -2617,6 +2617,14 @@ test('LEAVE_FABLE: the Fable week is left at 95%, and no constant is named for a
   expect([modelExports.LEAVE_FABLE, 'LEAVE_SEVEN_DAY' in modelExports]).toEqual([95, false])
 })
 
+// puma-9arph.109.9: a credentials file beside the keychain login.
+test('CREDENTIALS-FILE: the warning names the file, its time in UTC, what it can stop, and the way out, and holds no other text of the file', () => {
+  const path = '/Users/tester/.claude/.credentials.json'
+  expect(modelExports.credentialsFileText(path, Date.parse('2026-11-03T21:46:53Z'))).toBe(
+    `${path} exists (last changed 2026-11-03 21:46 UTC) and can stop a move back to Claude Code's own login from landing. Move it aside: mv ${path} ${path}.aside`,
+  )
+})
+
 test('PROVENANCE: the stored row carries the week and the Fable week as numbers with their source and read time, at rows version 2', () => {
   expect(modelExports.ROWS_VERSION).toBe(2)
   const windows = (v: View) => rowsOf(v, ROW_NOW)[0]?.windows
