@@ -799,7 +799,7 @@ async function setSessionMark($: Host): Promise<void> {
 }
 
 /** What the stop-log keeps per session, and how long a session's log outlives its last entry. */
-const STOP_LOG_KEEP = 50
+const STOP_LOG_KEEP = 200
 const STOP_LOG_MAX_AGE_MS = 7 * 24 * 3600_000
 type StopLogEntry = { at: number; what: string }
 
