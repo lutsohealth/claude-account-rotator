@@ -7,22 +7,14 @@ import { NUDGE_TEXT, USAGE_CLAIM_WAIT_MS, USAGE_FORCE_AFTER_MS, keychainItem } f
 import { DAY, FABLE_RESET, FABLE_STOP, FILE1, HOUR, NOTE, NOW, OTHER_WEEK, PANE_PROPS, PLAIN, PLAIN_STOPS, SETTLE_WAIT, SLOT2, SLOT3, THREE_LOGINS, TWO_LOGINS, WEEK_RESET, answerNextLate, blob, browse, callsWith, carryEndedOf, clearSession, clearable, debugLines, fresh, isSwitchedToast, kept, limitsOf, loggedWorld, markStands, mountPane, owedWorld, painted, pastNextRead, queuedWorld, refresh, reloadedWorld, respond, resumeAnswers, sent, settleReal, slots, start, stopDuringSwitch, stopLogOf, turnStops, useNow, watchedView, whats, world } from './flow-harness'
 import type { World } from './flow-harness'
 
+/** The CONTINUE text, which the one owed and the Connect visit's line share: a text check cannot say which sent it (a reset's own line and a connected line differ). */
+const CONTINUE_90 = /^Claude Code switched to another of your Claude accounts .* Continue where you left off\.$/
+
 /**
- * Every login spent and a carry-on owed at 12:00; a Connect visit held from `from` to `to`, to login 2 (or, `isThree`,
- * to login 3, so its move back lands on login 2, freed by then); its cut turn begins two minutes in and stops on the
- * limit. Then every submit is tagged `<time> on <login>[+visit]` as the 10 s loop meets it and its turn starts, but for
- * the first one after the visit with `refuse` (`thrown` or `dropped`), after which `isPersonTurn` begins a person's turn.
+ * Tags each submit as the kit takes it, before it can throw, `<time> on <login>[+visit]`, `+visit` while a visit is open.
+ * Answers the tags and whether a submit is made to throw (the kit's `isSubmitThrown`, which the tag rides on).
  */
-async function owedVisit90($: Engine, on: On, from: string, to: string, o: { refuse?: 'thrown' | 'dropped'; isPersonTurn?: boolean; isThree?: boolean } = {}) {
-  const w = fresh()
-  w.chrome = { extensions: [''] }
-  if (o.isThree === true) {
-    w.keychain[await keychainItem(SLOT3)] = blob('tok-3')
-    w.usage['tok-3'] = [100, 30]
-  }
-  const { store, clock } = await loggedWorld(on, w, { ...(o.isThree === true ? THREE_LOGINS : {}), 'chrome-account': '1' })
-  const view = watchedView(on)
-  // Each submit is tagged as the kit takes it, before it can throw: the time, the login, and `+visit` while one is open.
+function tagSends90(w: World, clock: MockClock, view: () => View | undefined) {
   const sends: string[] = []
   let isThrown = false
   Object.defineProperty(w, 'isSubmitThrown', {
@@ -38,6 +30,28 @@ async function owedVisit90($: Engine, on: On, from: string, to: string, o: { ref
       isThrown = value
     },
   })
+  return { sends, isThrown: () => isThrown }
+}
+
+/** Nothing went while a Connect visit was open: the carry-on owed waits for it, and the visit's line is its own. */
+const visitSends90 = (sends: string[]) => sends.filter(s => s.endsWith('+visit'))
+
+/**
+ * Every login spent and a carry-on owed at 12:00; a Connect visit held from `from` to `to`, to login 2 (or, `isThree`,
+ * to login 3, so its move back lands on login 2, freed by then); its cut turn begins two minutes in and stops on the
+ * limit. Then every submit is tagged `<time> on <login>[+visit]` as the 10 s loop meets it and its turn starts, but for
+ * the first one after the visit with `refuse` (`thrown` or `dropped`), after which `isPersonTurn` begins a person's turn.
+ * With `isFine` the loop steps 1 s from 12:00:30 to 12:01:10, so a send is tagged to the second.
+ */
+async function owedVisit90($: Engine, on: On, from: string, to: string, o: { refuse?: 'thrown' | 'dropped'; isPersonTurn?: boolean; isThree?: boolean; isFine?: boolean } = {}) {
+  const w = fresh()
+  w.chrome = { extensions: [''] }
+  if (o.isThree === true) {
+    w.keychain[await keychainItem(SLOT3)] = blob('tok-3')
+    w.usage['tok-3'] = [100, 30]
+  }
+  const { store, clock } = await loggedWorld(on, w, { ...(o.isThree === true ? THREE_LOGINS : {}), 'chrome-account': '1' })
+  const { sends, isThrown } = tagSends90(w, clock, watchedView(on))
   w.usage['tok-2'] = [100, 30]
   await start($, clock)
   w.usage['tok-1'] = [100, 41]
@@ -68,11 +82,12 @@ async function owedVisit90($: Engine, on: On, from: string, to: string, o: { ref
   await settleReal(clock)
   let seen = 0
   while (clock.now() < Date.parse('2026-10-12T12:25:00Z')) {
-    await clock.advance(10_000)
+    const isFineStep = o.isFine === true && clock.now() >= Date.parse('2026-10-12T12:00:30Z') && clock.now() < Date.parse('2026-10-12T12:01:10Z')
+    await clock.advance(isFineStep ? 1_000 : 10_000)
     await clock.settle()
     while (seen < w.submitted.length) {
       seen += 1
-      if (isThrown || w.submitDrop !== undefined) {
+      if (isThrown() || w.submitDrop !== undefined) {
         w.isSubmitThrown = false
         w.submitDrop = undefined
         if (o.isPersonTurn === true) await $.turn.start({ text: 'a prompt of the person', turnId: '90-person' })
@@ -84,20 +99,39 @@ async function owedVisit90($: Engine, on: On, from: string, to: string, o: { ref
   }
   await pane.unmount()
   const log = whats(stopLogOf(store, w))
-  expect([isCut, sends.filter(s => s.endsWith('+visit'))], 'the visit cut the stop, and nothing went while one was open').toEqual([true, []])
-  // The one owed goes by the tick, whose log says so once; the visit's line says nothing before it goes.
+  expect([isCut, visitSends90(sends)], 'the visit cut the stop, and nothing went while one was open').toEqual([true, []])
+  // The tick logs `a login is free` once for the one owed. Every submit logs `carry-on queued`, so their count is the
+  // count of submits; `carry-on sent in place of the one queued` logs a submit made in place of one turned away.
   const owed = log.filter(what => what.startsWith('a login is free: carry-on on')).length
-  return { sends, log, owed, isStoodDown: log.includes('carry-on not sent: the one owed went'), waits: log.filter(what => what === 'carry-on waits on the one owed').length }
+  return {
+    sends,
+    submitted: [...w.submitted],
+    log,
+    owed,
+    queued: log.filter(what => what === 'carry-on queued').length,
+    isResent: log.includes('carry-on sent in place of the one queued'),
+    isStoodDown: log.includes('carry-on not sent: the one owed went'),
+    waits: log.filter(what => what === 'carry-on waits on the one owed').length,
+  }
 }
 
 test('90-A: a carry-on owed and a stop a Connect visit cut carry on once, the one owed going first (puma-9arph.90)', { timeoutMs: 30_000 }, async ($, on) => {
   const r = await owedVisit90($, on, '11:58:00', '12:06:00')
   expect([r.sends.length, r.owed, r.isStoodDown], 'one went, the one owed; the line stood down').toEqual([1, 1, true])
+  expect(r.submitted, 'one submit, with the CONTINUE text').toEqual([expect.stringMatching(CONTINUE_90)])
 })
 
 test('90-B: a carry-on owed and a stop a Connect visit cut carry on once, the visit\'s line due first (puma-9arph.90)', { timeoutMs: 30_000 }, async ($, on) => {
   const r = await owedVisit90($, on, '11:58:00', '12:06:30')
   expect([r.sends.length, r.waits, r.owed, r.isStoodDown], 'one went, the one owed; the line waited once, then stood down').toEqual([1, 1, 1, true])
+  expect(r.submitted, 'one submit, with the CONTINUE text').toEqual([expect.stringMatching(CONTINUE_90)])
+})
+
+test('90-Y: a Connect visit\'s line waiting on the carry-on owed, which is dropped, looks again a minute after its last look, not sooner or later (puma-9arph.96)', { timeoutMs: 30_000 }, async ($, on) => {
+  // The line looks 35 s after the visit ends, then each minute; the loop steps 1 s around the look, so no send is tagged
+  // before the second of the look (12:00:49 reads none) and the line is tagged at it.
+  const r = await owedVisit90($, on, '11:50:00', '11:55:40', { refuse: 'dropped', isFine: true })
+  expect(r.sends.map(s => s.slice(0, 8)), 'the carry-on owed at 12:00:00, dropped; the line at the next minute look, 12:00:50, to the second').toEqual(['12:00:00', '12:00:50'])
 })
 
 test('90-C: a carry-on owed still goes once a login frees up after a Connect visit that ended with none free (puma-9arph.90)', { timeoutMs: 30_000 }, async ($, on) => {
@@ -113,21 +147,25 @@ test('90-D: a Connect visit that ended with no login free sends nothing on the s
 test('90-E: where the carry-on owed is dropped, the Connect visit\'s line goes after it (puma-9arph.90)', { timeoutMs: 30_000 }, async ($, on) => {
   const r = await owedVisit90($, on, '11:58:00', '12:06:30', { refuse: 'dropped' })
   expect([r.sends.length, r.log.includes('carry-on drop'), r.owed, r.isStoodDown], 'the one owed, dropped, then the line').toEqual([2, true, 1, false])
+  expect([r.queued, r.isResent], 'two carry-on queued log lines, and no carry-on sent in place of the one queued').toEqual([2, false])
 })
 
 test('90-F: where the carry-on owed is dropped and a person\'s turn begins, the Connect visit\'s line still goes (puma-9arph.90)', { timeoutMs: 30_000 }, async ($, on) => {
   const r = await owedVisit90($, on, '11:58:00', '12:06:30', { refuse: 'dropped', isPersonTurn: true })
   expect([r.sends.length, r.owed, r.isStoodDown], 'the one owed, dropped, then the line').toEqual([2, 1, false])
+  expect([r.queued, r.isResent], 'two carry-on queued log lines, and no carry-on sent in place of the one queued').toEqual([2, false])
 })
 
 test('90-G: where the carry-on owed is refused, the Connect visit\'s line goes after it (puma-9arph.90)', { timeoutMs: 30_000 }, async ($, on) => {
   const r = await owedVisit90($, on, '11:58:00', '12:06:00', { refuse: 'thrown' })
   expect([r.sends.length, r.owed, r.isStoodDown], 'the one owed, refused, then the line').toEqual([2, 1, false])
+  expect([r.queued, r.isResent], 'two carry-on queued log lines, and no carry-on sent in place of the one queued').toEqual([2, false])
 })
 
 test('90-H: a Connect visit whose move back lands on a login just freed carries on once, not with the one the tick armed too (puma-9arph.90)', { timeoutMs: 30_000 }, async ($, on) => {
   const r = await owedVisit90($, on, '11:58:00', '12:06:00', { isThree: true })
   expect([r.log.includes('carry-on armed'), r.sends.length, r.owed, r.isStoodDown], 'one went, the one the tick armed; the line stood down').toEqual([true, 1, 1, true])
+  expect(r.submitted, 'one submit, with the CONTINUE text').toEqual([expect.stringMatching(CONTINUE_90)])
 })
 
 /**
@@ -215,6 +253,7 @@ function views90(on: On) {
     return next(e)
   })
   return {
+    view: () => last,
     opened: () => opened,
     holdOpen: () => {
       let release = () => {}
@@ -286,7 +325,7 @@ test('90-K: a person\'s turn begun after the tick cleared the carry-on owed and 
   const w = fresh()
   w.chrome = { extensions: [''] }
   const { store, clock } = await loggedWorld(on, w, { 'chrome-account': '1' })
-  views90(on)
+  const { sends } = tagSends90(w, clock, views90(on).view)
   // Holds carryOnWhenFree's read after its clear: the first view read without the debt after one that held it.
   let sawDue = false
   let isArmed = false
@@ -325,8 +364,9 @@ test('90-K: a person\'s turn begun after the tick cleared the carry-on owed and 
   w.submitDrop = undefined
   await steps90(clock, 60_000)
   await pane.unmount()
-  expect([isCut, isHeld], 'the visit cut the stop; the read after the clear was held').toEqual([true, true])
+  expect([isCut, isHeld, visitSends90(sends)], 'the visit cut the stop; the read after the clear was held; nothing went while a visit was open').toEqual([true, true, []])
   expect(w.submitted.length - dropped, 'carry-ons that went and were not dropped').toBe(1)
+  expect(w.submitted.at(-1), 'the last submit has the CONTINUE text').toMatch(CONTINUE_90)
 })
 
 test('90-L: a later Connect visit open as the line looks again, after the carry-on owed went and its turn began, sends no second line (puma-9arph.90)', { timeoutMs: 30_000 }, async ($, on) => {
@@ -334,6 +374,7 @@ test('90-L: a later Connect visit open as the line looks again, after the carry-
   w.chrome = { extensions: [''] }
   const { store, clock } = await loggedWorld(on, w, { 'chrome-account': '1' })
   const views = views90(on)
+  const { sends } = tagSends90(w, clock, views.view)
   const { pane, endVisit, isCut } = await owedVisitStart90($, w, store, clock)
   endVisit()
   await settleReal(clock)
@@ -357,8 +398,11 @@ test('90-L: a later Connect visit open as the line looks again, after the carry-
   await turnsFor90($, clock, w, 4 * 60_000)
   await pane.unmount()
   await browsing
-  expect([isCut, isOpen], 'the first visit cut the stop; a second visit opened after the owed one went').toEqual([true, true])
-  expect(w.submitted, 'one carry-on in all').toHaveLength(1)
+  const log = whats(stopLogOf(store, w))
+  expect([isCut, isOpen, visitSends90(sends)], 'the first visit cut the stop; a second visit opened after the owed one went; nothing went while a visit was open').toEqual([true, true, []])
+  // The line stood down for the one owed, not held for the second visit, which would send it once that visit ended.
+  expect([log.includes('carry-on held: Claude in Chrome is connecting'), log.includes('carry-on not sent: the one owed went')], 'the line stood down; it was not held for the visit').toEqual([false, true])
+  expect(w.submitted, 'one submit in all, with the CONTINUE text').toEqual([expect.stringMatching(CONTINUE_90)])
 })
 
 test('90-M: after a carry-on submit that throws, a later Connect visit with a carry-on owed stands its line down once that one went (puma-9arph.90)', { timeoutMs: 30_000 }, async ($, on) => {
@@ -368,7 +412,7 @@ test('90-M: after a carry-on submit that throws, a later Connect visit with a ca
   w.usage['tok-3'] = [100, 30]
   w.fiveHourResets = { 'tok-2': '2026-10-12T12:30:00Z', 'tok-3': '2026-10-12T12:30:00Z' }
   const { store, clock } = await loggedWorld(on, w, { ...THREE_LOGINS, 'chrome-account': '1' })
-  views90(on)
+  const { sends } = tagSends90(w, clock, views90(on).view)
   await start($, clock)
   // A stop on login 1 moves to login 2 and arms its carry-on, whose submit throws: answered, as sendCarryOn's catch counts.
   w.isSubmitThrown = true
@@ -409,14 +453,15 @@ test('90-M: after a carry-on submit that throws, a later Connect visit with a ca
   await pane.unmount()
   const log = whats(stopLogOf(store, w))
   expect([thrown, isCut], 'one submit threw; the visit cut the stop').toEqual([1, true])
-  expect([w.submitted.length - thrown, log.includes('carry-on not sent: the one owed went')]).toEqual([1, true])
+  expect([w.submitted.length - thrown, log.includes('carry-on not sent: the one owed went'), visitSends90(sends)], 'one went after the throw, the one owed; the line stood down; nothing went while a visit was open').toEqual([1, true, []])
+  expect(w.submitted.slice(thrown), 'one submit, with the CONTINUE text').toEqual([expect.stringMatching(CONTINUE_90)])
 })
 
 test('90-N: a person\'s turn after a Connect visit, the carry-on owed unanswered as the line looks, its own turn begun, then dropped: the line still goes (puma-9arph.90)', { timeoutMs: 30_000 }, async ($, on) => {
   const w = fresh()
   w.chrome = { extensions: [''] }
   const { store, clock } = await loggedWorld(on, w, { 'chrome-account': '1' })
-  views90(on)
+  const { sends } = tagSends90(w, clock, views90(on).view)
   const { pane, endVisit, isCut } = await owedVisitStart90($, w, store, clock)
   endVisit()
   await settleReal(clock)
@@ -436,8 +481,8 @@ test('90-N: a person\'s turn after a Connect visit, the carry-on owed unanswered
   await settleReal(clock)
   await turnsFor90($, clock, w, 4 * 60_000)
   await pane.unmount()
-  expect([isCut, owed], 'the visit cut the stop; the carry-on owed went once before the drop').toEqual([true, 1])
-  expect(w.submitted.length - 1, 'carry-ons that went and were not dropped').toBe(1)
+  expect([isCut, owed, visitSends90(sends)], 'the visit cut the stop; the carry-on owed went once before the drop; nothing went while a visit was open').toEqual([true, 1, []])
+  expect(w.submitted, 'two submits, in this order, each with the CONTINUE text').toEqual([expect.stringMatching(CONTINUE_90), expect.stringMatching(CONTINUE_90)])
 })
 
 const at95 = (hms: string) => Date.parse(`2026-10-12T${hms}Z`)
@@ -500,10 +545,12 @@ async function nudgeFirst95($: Engine, w: World, clock: MockClock) {
  * carry-on. `zero`: the debt's own submit at 10:20 stays queued, the old submit answers, then the engine drops the
  * queued one. `turned`: as `zero`, and the queued one's own turn starts after the line has looked, before the drop.
  * `quiet`: as `zero` with no person's turn, and the old submit answers before the line's first look after the debt's
- * own submit goes. `isNudgedFirst`: the first stop's switch is held and the refresh nudge goes first (nudgeFirst95).
- * Answers the carry-ons after the visit's end that were not dropped.
+ * own submit goes. `never`: no person's turn, and the old submit never answers; the debt's own submit goes at 10:20 and is
+ * answered clean, its turn never started. `dropped`: as `zero`, and the old submit never answers. `isNudgedFirst`: the first
+ * stop's switch is held and the refresh nudge goes first (nudgeFirst95). Answers the carry-ons after the visit's end that
+ * were not dropped, and the stop-log.
  */
-async function oldSubmitVisit95($: Engine, on: On, ending: 'press' | 'zero' | 'turned' | 'quiet', isNudgedFirst = false) {
+async function oldSubmitVisit95($: Engine, on: On, ending: 'press' | 'zero' | 'turned' | 'quiet' | 'never' | 'dropped', isNudgedFirst = false) {
   const w = fresh()
   w.chrome = { extensions: [''] }
   w.keychain[await keychainItem(SLOT3)] = blob('tok-3')
@@ -538,18 +585,18 @@ async function oldSubmitVisit95($: Engine, on: On, ending: 'press' | 'zero' | 't
   const { pane, isCut } = await cutVisit95($, w, store, clock)
   const atEnd = w.submitted.length
   await steps90(clock, 3 * 60_000, 60_000)
-  if (ending !== 'quiet') {
+  if (ending !== 'quiet' && ending !== 'never') {
     await $.turn.start({ text: 'a prompt of the person', turnId: '95-person' })
     await clock.settle()
   }
-  const isQueuedOwed = ending !== 'press'
+  const isQueuedOwed = ending !== 'press' && ending !== 'never'
   const dropOwed = isQueuedOwed ? answerNextLate(w, 'drop') : () => {}
-  const oldLook = ending === 'quiet' ? 1 : 3
+  const oldLook = ending === 'quiet' ? 1 : ending === 'dropped' ? Infinity : 3
   const owedAt = w.submitted.length + 1
   let isPressed = false
   let looks = 0
   let started = w.submitted.length
-  while (clock.now() < at95(isQueuedOwed ? '10:24:00' : '10:21:00')) {
+  while (clock.now() < at95(isQueuedOwed ? '10:24:00' : ending === 'never' ? '10:23:00' : '10:21:00')) {
     await clock.advance(clock.now() < at95('10:19:00') ? 60_000 : 10_000)
     await clock.settle()
     if (ending === 'press' && !isPressed && clock.now() >= at95('10:15:00')) {
@@ -573,16 +620,28 @@ async function oldSubmitVisit95($: Engine, on: On, ending: 'press' | 'zero' | 't
     }
     while (started < w.submitted.length) {
       started += 1
-      // The debt's own submit stays queued (`zero`) or starts its turn above (`turned`).
-      if (isQueuedOwed && started === owedAt) continue
+      // The debt's own submit stays queued (`zero`), starts its turn above (`turned`) or never starts it (`never`).
+      if ((isQueuedOwed || ending === 'never') && started === owedAt) continue
       await $.turn.start({ text: w.submitted[started - 1] ?? '', turnId: `95-${started}` })
       await clock.settle()
     }
   }
   await pane.unmount()
   const dropped = isQueuedOwed && looks >= 15 ? 1 : 0
-  return { old, isCut, notDropped: w.submitted.length - atEnd - dropped }
+  return { old, isCut, notDropped: w.submitted.length - atEnd - dropped, log: whats(stopLogOf(store, w)) }
 }
+
+test('90-Y3: a submit that never answers, a person\'s turn, then the carry-on owed dropped: the line still goes, not held on the one that never answers (puma-9arph.96)', async ($, on) => {
+  const r = await oldSubmitVisit95($, on, 'dropped')
+  expect([r.old, r.isCut], 'one submit never answers; the visit cut the stop').toEqual([1, true])
+  expect(r.notDropped, 'carry-ons after the visit ended that were not dropped').toBe(1)
+})
+
+test('90-Y2: a submit that never answers, then a Connect visit with a carry-on owed that goes and is answered clean: the line does not stand down on it (puma-9arph.96)', async ($, on) => {
+  const r = await oldSubmitVisit95($, on, 'never')
+  expect([r.old, r.isCut], 'one submit never answers; the visit cut the stop').toEqual([1, true])
+  expect([r.log.includes('carry-on not sent: the one owed went'), r.log.includes('carry-on not sent again: one is queued')], 'the line looked with a submit unanswered: it did not stand down, it went and was turned away').toEqual([false, true])
+})
 
 test('90-O: a submit that never answers, then a Connect visit with a carry-on owed, a person\'s turn and a press that ends the debt: the line still goes (puma-9arph.95)', async ($, on) => {
   const r = await oldSubmitVisit95($, on, 'press')
@@ -832,6 +891,9 @@ test('90-U2: a Connect visit that pairs for a browser call it held, with a carry
   const log = whats(stopLogOf(store, w))
   expect(isCut, 'the visit cut the stop').toBe(true)
   expect(w.submitted.some(text => text.startsWith('Claude in Chrome is connected')), 'the visit paired and sent its connected line').toBe(true)
+  // The connected line is never held for the carry-on owed: it goes first, with no wait, and the one owed goes once after it.
+  expect(w.submitted, 'the connected line, then the carry-on owed once').toEqual([expect.stringMatching(/^Claude in Chrome is connected as /), expect.stringMatching(CONTINUE_90)])
+  expect([log.includes('carry-on waits on the one owed'), log.filter(what => what.startsWith('a login is free: carry-on on')).length], 'the connected line did not wait; the owed one went once').toEqual([false, 1])
   expect(log.filter(what => what.startsWith('visit ended with a carry-on owed')), 'one line, though the visit connected, and it says so').toEqual([
     expect.stringMatching(/^visit ended with a carry-on owed, connected: \d+ turns, \d+ submits, \d+ nudges, \d+ refusals$/),
   ])
