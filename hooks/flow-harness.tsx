@@ -953,8 +953,8 @@ export type StopLogEntry = { at: number; what: string }
 
 export const DAY = 24 * HOUR
 
-/** The stop-log's first line of a usage-limit stop: its wording class (model.ts's wordingClass) and the login in use. */
-export const stopHeard = (wording: 'none' | 'fable' | 'session' | 'weekly' | 'unknown', id = '1') => `stop heard: rate_limit (wording: ${wording}), login ${id} in use`
+/** The stop-log's first line of a usage-limit stop: its wording class (model.ts's wordingClass) and the login believed in use, written before the stop's owner is known. */
+export const stopHeard = (wording: 'none' | 'fable' | 'session' | 'weekly' | 'unknown', id = '1') => `stop heard: rate_limit (wording: ${wording}), login ${id} believed in use`
 
 /** A stop with no words, and the plain stop (PLAIN, naming the session limit), on login 1. */
 export const STOP_RATE_LIMIT = stopHeard('none')
