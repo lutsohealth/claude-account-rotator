@@ -4,7 +4,7 @@ import type { Engine, MockClock } from 'claude-code/testing'
 import type { On } from 'claude-code'
 import type { View } from '../types'
 import { NUDGE_TEXT, USAGE_CLAIM_WAIT_MS, USAGE_FORCE_AFTER_MS, keychainItem } from './model'
-import { DAY, FABLE_RESET, FABLE_STOP, FILE1, HOUR, NOTE, NOW, OTHER_WEEK, PANE_PROPS, PLAIN, PLAIN_STOPS, SLOT2, SLOT3, THREE_LOGINS, TWO_LOGINS, WEEK_RESET, answerNextLate, blob, browse, carryEndedOf, clearSession, clearable, fresh, isSwitchedToast, kept, limitsOf, loggedWorld, markStands, mountPane, painted, pastNextRead, refresh, reloadedWorld, respond, sent, settleReal, slots, start, stopDuringSwitch, stopLogOf, useNow, watchedView, whats, world } from './flow-harness'
+import { DAY, FABLE_RESET, FABLE_STOP, FILE1, HOUR, NOTE, NOW, OTHER_WEEK, PANE_PROPS, PLAIN, PLAIN_STOPS, SETTLE_WAIT, SLOT2, SLOT3, THREE_LOGINS, TWO_LOGINS, WEEK_RESET, answerNextLate, blob, browse, carryEndedOf, clearSession, clearable, fresh, isSwitchedToast, kept, limitsOf, loggedWorld, markStands, mountPane, painted, pastNextRead, queuedWorld, refresh, reloadedWorld, respond, resumeAnswers, sent, settleReal, slots, start, stopDuringSwitch, stopLogOf, useNow, watchedView, whats, world } from './flow-harness'
 import type { World } from './flow-harness'
 
 /**
@@ -1731,9 +1731,11 @@ for (const family of ['Opus', 'Sonnet']) {
 /**
  * Login 1 is in use with its Fable week spent. Logins 2 and 3 hold stored readings two hours old that show their Fable
  * week and week spent (login 2 frees first), and the usage endpoint says what each is now: `live`. Login 2's token has
- * run out where `isTwoIdle`. The schedule does not read either login before the stop.
+ * run out where `isTwoIdle`. The schedule does not read either login before the stop. Login 1's token refreshes in 7
+ * minutes where `isNudged`, so the refresh guard holds the stop's switch and the refresh nudge goes (an Orca pane, its
+ * Escape look and every submit queued, as in queuedWorld).
  */
-async function oldReadings($: Engine, on: On, live: { two: [number, number, number]; three: [number, number, number] }, options: { isTwoIdle?: boolean; isThreeRead?: boolean; isTwoRoomy?: boolean; text?: string; failing?: Record<string, number> } = {}) {
+async function oldReadings($: Engine, on: On, live: { two: [number, number, number]; three: [number, number, number] }, options: { isTwoIdle?: boolean; isThreeRead?: boolean; isTwoRoomy?: boolean; isNudged?: boolean; text?: string; failing?: Record<string, number> } = {}) {
   const w = fresh()
   w.keychain['Claude Code-credentials'] = blob('tok-1')
   w.keychain[await keychainItem(SLOT2)] = blob('tok-2', options.isTwoIdle ? NOW - HOUR : undefined)
@@ -1764,8 +1766,10 @@ async function oldReadings($: Engine, on: On, live: { two: [number, number, numb
       ...(options.isThreeRead ? {} : { 'usage:3': old('3', '2026-10-18T03:00:00Z', FABLE_RESET), 'usage-due:3': { next: NOW + HOUR, fails: 0, at: NOW - 2 * HOUR, v: 1 } }),
     }),
   )
+  if (options.isNudged) queuedWorld(on, w)
   const clock = world(on, w, store)
   await start($, clock)
+  if (options.isNudged) w.keychain['Claude Code-credentials'] = blob('tok-1', clock.now() + 7 * 60_000)
   return { w, store, clock }
 }
 
@@ -1862,6 +1866,84 @@ test('HONEST-CARRY-ON: a fresh read that lists no Fable week proves no room, so 
   expect(w.submitted).toHaveLength(1)
   expect(w.submitted[0]).toMatch(/lists no Fable week, so room on it is not confirmed/)
   expect(w.asUser).toEqual([false])
+})
+
+/** The mod's own carry-on, as it opens and closes; a note about the pick sits between them. */
+const OWN_LEAD = 'Claude Code switched to another of your Claude accounts because the previous one hit its usage limit or lost its sign-in.'
+const OWN_TAIL = 'Continue where you left off.'
+const STALE_NOTE = 'Its Fable week was last read 120 min ago, so room on it is not confirmed.'
+
+/**
+ * A Fable stop on login 1 moves to the login the pick names (login 2 stale with room, or `fresh`: login 3 read live with
+ * room), and its carry-on is armed. Before that switch lands a person presses Use now on the other login, a switch that
+ * carries nothing and settles for 35 s. A second Fable stop of the same episode in that window rides the settling switch
+ * and arms its own carry-on (the settling branch of onStopFailure), and the person's turn answers before it is due, which
+ * ends the episode: the words that carry-on goes with are then the ones the rider itself was armed with, never the
+ * episode's (the fallback of carryOnAfterSettle reads the episode, which is gone).
+ */
+async function riderOnSettling($: Engine, on: On, pick: 'stale' | 'fresh') {
+  const isStale = pick === 'stale'
+  const { w, store, clock } = await oldReadings($, on, isStale ? { two: [10, 10, 10], three: [100, 100, 100] } : { two: [100, 100, 100], three: [0, 0, 0] }, { isTwoRoomy: isStale, text: STORED_LINE })
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  expect(slotValues(w), 'the first stop moved to the pick').toEqual([isStale ? SLOT2 : SLOT3])
+  // Seconds on, so the press's switch is another one by its time (`pending.since`), as a stop on the same instant is not.
+  await clock.advance(5_000)
+  await useNow($, clock, isStale ? '3' : '2')
+  expect(slotValues(w), 'the press moved the session again, carrying nothing').toEqual(isStale ? [SLOT2, SLOT3] : [SLOT3, SLOT2])
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  expect(whats(stopLogOf(store, w)).filter(line => line === 'carry-on armed'), 'the rider armed a second carry-on').toHaveLength(2)
+  await resumeAnswers($, clock)
+  expect(whats(stopLogOf(store, w)).filter(line => line.startsWith('work resumed')), 'the episode ended before the rider is due').toHaveLength(1)
+  await clock.advance(SETTLE_WAIT)
+  expect(whats(stopLogOf(store, w)).filter(line => line.startsWith('carry-on skipped')), 'the first stop\'s carry-on was overtaken by the press').toHaveLength(1)
+  return w
+}
+
+test('HONEST-CARRY-ON: a stop that rides a settling Fable switch carries on with the words the stale pick armed, not the mod\'s unproven line, though the episode has ended', async ($, on) => {
+  const w = await riderOnSettling($, on, 'stale')
+  expect(w.submitted).toEqual([`${OWN_LEAD} ${STALE_NOTE} ${OWN_TAIL}`])
+  expect(w.asUser, 'under the mod\'s name').toEqual([false])
+})
+
+test('HONEST-CARRY-ON: a stop that rides a settling Fable switch carries on with the stored line when the pick it carries on from read Fable room fresh, though the episode has ended', async ($, on) => {
+  const w = await riderOnSettling($, on, 'fresh')
+  expect(w.submitted).toEqual([STORED_LINE])
+  expect(w.asUser, 'as the person\'s own words').toEqual([true])
+})
+
+/**
+ * A Fable stop on login 1 whose switch the refresh guard holds (login 1's token refreshes in 7 minutes); the refresh nudge
+ * goes, and login 1 answers it, so the hold is dropped and the person's turn is carried on once. No switch lands, so the
+ * armed carry-on of a landing (carryOnAfterSettle) is not on this path: the words come from what the held pick armed.
+ */
+async function nudgeAnswered($: Engine, on: On, pick: 'stale' | 'fresh') {
+  const isStale = pick === 'stale'
+  const { w, store, clock } = await oldReadings($, on, isStale ? { two: [10, 10, 10], three: [100, 100, 100] } : { two: [100, 100, 100], three: [0, 0, 0] }, { isTwoRoomy: isStale, isNudged: true, text: STORED_LINE })
+  await $.classic.StopFailure(FABLE_STOP)
+  await clock.settle()
+  expect(whats(stopLogOf(store, w))).toContain(`held for ${isStale ? 2 : 3}: the token in use refreshes soon`)
+  await clock.advance(3 * 60_000 + 15_000)
+  expect(w.submitted, 'the nudge is out').toEqual([NUDGE_TEXT])
+  await $.turn.start({ text: NUDGE_TEXT, turnId: 'turn-nudge' })
+  await $.turn.complete({ turnId: 'turn-nudge', reason: 'answer', answer: '', durationMs: 1, isAborted: false })
+  await clock.settle()
+  expect(whats(stopLogOf(store, w)), 'the answer dropped the hold').toContain('held switch dropped: the refresh nudge answered on login 1')
+  expect(slotValues(w), 'no switch landed').toEqual([])
+  return w
+}
+
+test('HONEST-CARRY-ON: the carry-on after a refresh nudge goes with the words the held stale pick armed, never the stored line', async ($, on) => {
+  const w = await nudgeAnswered($, on, 'stale')
+  expect(w.submitted).toEqual([NUDGE_TEXT, `${OWN_LEAD} ${STALE_NOTE} ${OWN_TAIL}`])
+  expect(w.asUser.at(-1), 'under the mod\'s name').toBe(false)
+})
+
+test('HONEST-CARRY-ON: the carry-on after a refresh nudge sends the stored line when the held pick read Fable room fresh', async ($, on) => {
+  const w = await nudgeAnswered($, on, 'fresh')
+  expect(w.submitted).toEqual([NUDGE_TEXT, STORED_LINE])
+  expect(w.asUser.at(-1), 'as the person\'s own words').toBe(true)
 })
 
 // ---------------------------------------------------------------- puma-9arph.109.5: a window's marks end on a counter fall
