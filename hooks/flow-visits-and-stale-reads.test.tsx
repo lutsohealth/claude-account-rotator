@@ -837,6 +837,33 @@ test('90-U2: a Connect visit that pairs for a browser call it held, with a carry
   ])
 })
 
+test('90-U3: a connect the refresh guard ends before a visit opens, with a carry-on owed, logs no visit (puma-9arph.105)', { timeoutMs: 30_000 }, async ($, on) => {
+  const w = fresh()
+  w.chrome = { extensions: [''] }
+  const { store, clock } = await loggedWorld(on, w, { 'chrome-account': '1' })
+  w.usage['tok-2'] = [100, 30]
+  await start($, clock)
+  w.usage['tok-1'] = [100, 41]
+  await $.classic.StopFailure(PLAIN)
+  await clock.settle()
+  const owed = whats(stopLogOf(store, w)).some(what => what.startsWith('no login left'))
+  // The login in use refreshes its token in 5 minutes: the guard holds a connect to another account.
+  w.keychain['Claude Code-credentials'] = blob('tok-1', clock.now() + 5 * 60_000)
+  w.chrome.extensions.push(SLOT2)
+  const pane = await mountPane($)
+  await pane.press({ key: 'chrome-others' })
+  await clock.settle()
+  await pane.redraw()
+  void pane.press({ key: 'chrome-try-2' })
+  await settleReal(clock)
+  await steps90(clock, 2 * 60_000)
+  await pane.unmount()
+  const log = whats(stopLogOf(store, w))
+  expect(owed, 'a carry-on is owed').toBe(true)
+  expect(log.some(what => what.includes('Claude in Chrome visit')), 'no visit opened').toBe(false)
+  expect(log.filter(what => what.startsWith('visit ended with a carry-on owed')), 'no line for a visit that never opened').toEqual([])
+})
+
 /**
  * puma-9arph.100 D1: as oldSubmitVisit95's world, with a submit S0 out at the visit's end, a person's turn, then the
  * debt's own carry-on S1 answered at once, and S0 answered after it. Answers the submits after the visit's end when
