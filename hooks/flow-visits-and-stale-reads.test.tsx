@@ -5,6 +5,7 @@ import type { On } from 'claude-code'
 import type { View } from '../types'
 import { NUDGE_TEXT, USAGE_CLAIM_WAIT_MS, USAGE_FORCE_AFTER_MS, keychainItem } from './model'
 import { DAY, FABLE_RESET, FABLE_STOP, FILE1, HOUR, NOTE, NOW, OTHER_WEEK, PANE_PROPS, PLAIN, PLAIN_STOPS, SETTLE_WAIT, SLOT2, SLOT3, THREE_LOGINS, TWO_LOGINS, WEEK_RESET, answerNextLate, blob, browse, callsWith, carryEndedOf, clearSession, clearable, debugLines, fresh, isSwitchedToast, kept, limitsOf, loggedWorld, markStands, mountPane, owedWorld, painted, pastNextRead, queuedWorld, refresh, reloadedWorld, respond, resumeAnswers, sent, settleReal, slots, start, stopDuringSwitch, stopLogOf, turnStops, useNow, watchedView, whats, world } from './flow-harness'
+import { mountBand } from './flow-harness'
 import type { World } from './flow-harness'
 
 /** The CONTINUE text, which the one owed and the Connect visit's line share: a text check cannot say which sent it (a reset's own line and a connected line differ). */
@@ -924,6 +925,123 @@ test('90-U3: a connect the refresh guard ends before a visit opens, with a carry
   expect(owed, 'a carry-on is owed').toBe(true)
   expect(log.some(what => what.includes('Claude in Chrome visit')), 'no visit opened').toBe(false)
   expect(log.filter(what => what.startsWith('visit ended with a carry-on owed')), 'no line for a visit that never opened').toEqual([])
+})
+
+// puma-9arph.110 A1: a guarded connect waits on the read of the login in use's token. A stop whose words name the other
+// login's reset points the session there while it waits: a move the visit did not make, with a carry-on already owed.
+async function guardedConnectWithStop110($: Engine, on: On) {
+  const w = fresh()
+  w.chrome = { extensions: [''] }
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [20, 30, 100]
+  w.usage['tok-2'] = [100, 30, 100]
+  w.fableResetsBy = { 'tok-1': FABLE_RESET, 'tok-2': FABLE_RESET_2 }
+  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'chrome-account': '1' }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  // Every login is spent: the first stop owes a carry-on.
+  w.usage['tok-1'] = [100, 41, 100]
+  await $.classic.StopFailure(PLAIN)
+  await clock.settle()
+  // The login in use refreshes its token in 5 minutes: the guard holds a connect to another account.
+  w.keychain['Claude Code-credentials'] = blob('tok-1', clock.now() + 5 * 60_000)
+  w.chrome.extensions.push(SLOT2)
+  const pane = await mountPane($)
+  await pane.press({ key: 'chrome-others' })
+  await clock.settle()
+  await pane.redraw()
+  let open: () => void = () => undefined
+  const gate = new Promise<void>(resolve => {
+    open = resolve
+  })
+  let reads = 0
+  w.beforeKeychain = () => (reads++ === 0 ? gate : Promise.resolve())
+  void pane.press({ key: 'chrome-try-2' })
+  await settleReal(clock)
+  void $.classic.StopFailure(STOP_NAMING_2)
+  await settleReal(clock)
+  const staged = whats(stopLogOf(store, w))
+  open()
+  await settleReal(clock)
+  await steps90(clock, 2 * 60_000)
+  await pane.unmount()
+  return { staged, log: whats(stopLogOf(store, w)) }
+}
+
+test('90-U4: a move the visit did not make lands while a guarded connect waits on its read, with a carry-on owed, and logs no visit (puma-9arph.110)', { timeoutMs: 30_000 }, async ($, on) => {
+  const { staged, log } = await guardedConnectWithStop110($, on)
+  expect(staged.some(what => what.startsWith('moved to 2 (by a point-back')), 'a stop pointed the session back while the connect waited').toBe(true)
+  expect(staged.some(what => what.startsWith('no login left')), 'a carry-on is owed').toBe(true)
+  expect(staged.at(-1), 'the stop met the connect under way').toBe('stayed: Claude in Chrome is connecting')
+  expect(log.some(what => what.includes('Claude in Chrome visit')), 'no visit opened').toBe(false)
+  expect(log.filter(what => what.startsWith('visit ended with a carry-on owed')), 'no line for a visit that never opened').toEqual([])
+})
+
+test('90-U6: a Connect visit whose forward move landed and which then throws, with a carry-on owed, still logs its line once (puma-9arph.110)', { timeoutMs: 30_000 }, async ($, on) => {
+  const w = fresh()
+  w.chrome = { extensions: [''] }
+  const { store, clock } = await loggedWorld(on, w, { 'chrome-account': '1' })
+  // The view's note of what Chrome answered as login 2 is refused once: the visit throws after it moved.
+  let isNoted = false
+  let isRefused = false
+  on('state.set', async (_$, e, next) => {
+    const { key, value } = e as unknown as { key: string; value: View }
+    if (key === 'view' && value.chrome?.as === '2' && !isNoted) {
+      isNoted = true
+      isRefused = true
+      return { deny: 'state: refused' } as unknown as Awaited<ReturnType<typeof next>>
+    }
+    return next(e)
+  })
+  w.usage['tok-2'] = [100, 30]
+  await start($, clock)
+  w.usage['tok-1'] = [100, 41]
+  await $.classic.StopFailure(PLAIN)
+  await clock.settle()
+  const owed = whats(stopLogOf(store, w)).some(what => what.startsWith('no login left'))
+  w.chrome.extensions.push(SLOT2)
+  const pane = await mountPane($)
+  await pane.press({ key: 'chrome-others' })
+  await clock.settle()
+  await pane.redraw()
+  void pane.press({ key: 'chrome-try-2' })
+  await settleReal(clock)
+  await steps90(clock, 2 * 60_000)
+  await pane.unmount()
+  const log = whats(stopLogOf(store, w))
+  expect(owed, 'a carry-on is owed').toBe(true)
+  expect(isRefused, 'the visit threw').toBe(true)
+  expect(log.filter(what => what.startsWith('moved to 2 (by a Claude in Chrome visit')), 'the visit moved forward').toHaveLength(1)
+  expect(log.filter(what => what.startsWith('visit ended with a carry-on owed')), 'one line for the visit that threw').toEqual([expect.stringMatching(/^visit ended with a carry-on owed: \d+ turns, \d+ submits, \d+ nudges, \d+ refusals$/)])
+})
+
+test('90-U5: a connect on the account in use moves nothing, so with a carry-on owed it logs no visit (puma-9arph.110, ruling 8777)', { timeoutMs: 30_000 }, async ($, on) => {
+  const w = fresh()
+  // No browser answers as it opens, so the band offers Connect; one answers by the time it is pressed.
+  w.chrome = { extensions: [] }
+  const { store, clock } = await loggedWorld(on, w, { 'chrome-account': '1' })
+  w.usage['tok-2'] = [100, 30]
+  await start($, clock)
+  w.usage['tok-1'] = [100, 41]
+  await $.classic.StopFailure(PLAIN)
+  await clock.settle()
+  const owed = whats(stopLogOf(store, w)).some(what => what.startsWith('no login left'))
+  await clock.advance(36_000)
+  await browse($, 'tabs_context_mcp')
+  await clock.settle()
+  w.chrome.extensions.push('')
+  const asked = w.chromeAsked.length
+  const band = await mountBand($)
+  void band.press({ key: 'chrome-connect-band' })
+  await settleReal(clock)
+  await steps90(clock, 2 * 60_000)
+  await band.unmount()
+  const log = whats(stopLogOf(store, w))
+  expect(owed, 'a carry-on is owed').toBe(true)
+  expect(w.chromeAsked.slice(asked), 'the connect ran, on the login in use').toEqual([''])
+  expect(log.filter(what => what.startsWith('moved to ')), 'it moved nothing').toEqual([])
+  expect(log.filter(what => what.startsWith('visit ended with a carry-on owed')), 'no line for a connect that opened no visit').toEqual([])
 })
 
 /**
