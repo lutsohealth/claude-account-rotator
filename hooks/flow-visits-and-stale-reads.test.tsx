@@ -2051,6 +2051,8 @@ for (const [kind, stop] of [['fable', FABLE_STOP], ['week', { error: 'rate_limit
     expect(markStands(store, key), 'the mark ended at the read, though it is 20 minutes old').toBe(false)
     await $.classic.StopFailure(stop)
     await clock.settle()
+    const row = store.get('usage:3') as { fiveHour?: { pct: number }; sevenDay?: { pct: number }; fable?: { pct: number } } | undefined
+    expect([row?.sevenDay?.pct, row?.fable?.pct, row?.fiveHour?.pct], 'the stored row of login 3 reads the manual reset (week, Fable, 5-hour), not its old 100').toEqual([0, 0, 0])
     expect(slotValues(w), 'the stop moves to login 3').toEqual([SLOT3])
     expect(whats(stopLogOf(store, w)).filter(line => line.startsWith('picked '))).toEqual([expect.stringMatching(/^picked 3: fresh, read \d+ min ago; tried 1$/)])
   })
@@ -2976,6 +2978,25 @@ test('MOVE-LOG: a stop whose reset names another login points back, and leaves i
   const ctx = await fableOnTwo($, on, '2')
   await movedToOneThenStoppedOnTwo($, ctx)
   expect(movesOf(ctx.store, ctx.w)).toEqual(['moved to 1 (by a stop)', "moved to 2 (by a point-back: the stop's reset names login 2)", 'moved to 1 (by a stop)'])
+})
+
+test('MOVE-LOG: a move by a Claude in Chrome visit leaves "moved to N (by a Claude in Chrome visit)", and so does its move back', async ($, on) => {
+  const w = fresh()
+  w.chrome = { extensions: [''] }
+  const { store, clock } = await loggedWorld(on, w, { 'chrome-account': '1' })
+  await start($, clock)
+  // The extension signs in as login 2: a Connect visit to login 2 is the only way the session moves here.
+  w.chrome.extensions.push(SLOT2)
+  const pane = await mountPane($)
+  await pane.press({ key: 'chrome-others' })
+  await clock.settle()
+  await pane.redraw()
+  await pane.press({ key: 'chrome-try-2' })
+  await settleReal(clock)
+  await clock.advance(2 * 60_000)
+  await settleReal(clock)
+  await pane.unmount()
+  expect(movesOf(store, w)).toEqual(['moved to 2 (by a Claude in Chrome visit)', 'moved to 1 (by a Claude in Chrome visit)'])
 })
 
 // ---------------------------------------------------------------- puma-9arph.109.9: a credentials file beside the keychain login

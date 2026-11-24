@@ -2381,6 +2381,23 @@ test('a usage-limit stop with every login spent says so once, a second stop adds
   expect([w.toasts.filter(isWaitNotice).length, w.notices.filter(isWaitNotice).length]).toEqual([1, 1])
 })
 
+test('a stop with no login left and no time known for any to free up logs the whole line "no login left: one carry-on once a login frees up" (puma-9arph.35, puma-9arph.109.8)', async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await loggedWorld(on, w)
+  // Both 5-hour windows are spent and the usage endpoint gives no reset time for either, so no login's freeing is dated.
+  w.usage['tok-1'] = [100, 40]
+  w.usage['tok-2'] = [100, 30]
+  w.fiveHourResets = { 'tok-1': '', 'tok-2': '' }
+  await start($, clock)
+  // Login 2 needs a sign-in: the stop has no untried login to move to.
+  store.set('health:2', { kind: 'login-needed', why: 'its sign-in has run out' })
+  await untilTick(clock)
+  await $.classic.StopFailure(PLAIN)
+  await clock.settle()
+  // A fleet watchdog reads this line byte for byte.
+  expect(whats(stopLogOf(store, w)).filter(isWaitLine)).toEqual(['no login left: one carry-on once a login frees up'])
+})
+
 test('with every login spent, where a main turn starts after the login in use resets (Claude Code carrying on by itself), the mod sends no carry-on of its own (puma-9arph.35)', async ($, on) => {
   const w = fresh()
   const { store, clock } = await loggedWorld(on, w)
