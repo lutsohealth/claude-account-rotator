@@ -43,40 +43,51 @@ const FREE_90 = 'a login is free: carry-on on'
 const SETTLE_90 = 35_000
 
 /**
- * The path that sent each submit, read from the stop-log: every submit writes one `carry-on queued`, and a mark labels
- * only a submit the code ties to it. The carry-on owed writes `a login is free` in the same run as its submit, so it
- * labels the line right after it (`owed`); one sent in place of one turned away does the same with
- * `carry-on sent in place of the one queued` (`resent`). An armed carry-on (`carry-on armed`, after a free line `owed`,
- * else a stop's own, `stop`) acts once its timer fires: its mark labels a submit only from SETTLE_90 after the arm,
- * and a held, skipped or turned-away line then ends it. The refresh nudge has its own text (`nudge`). Connect's line
- * writes no line of its own, so a submit no mark labels is `visit`, but after a nudge, where the carry-on after the
- * nudge writes none either (`unknown`). Not told apart: a held or turned-away line of another path in the same moment
- * as an armed mark falls due. The kit cannot read a submit's call site: its hook's stack holds the kit's frames and
- * the engine's alone.
+ * The path that sent each submit, read from the stop-log entries: every submit writes one `carry-on queued`, and a mark
+ * labels a submit only where the entries' times pair them. The tick writes `a login is free` and its submit in one run,
+ * at one `at`, so a free line labels only a `carry-on queued` right after it at that `at` (`owed`); it can also write a
+ * free line and nothing after it. One sent in place of one turned away does the same with `carry-on sent in place of the
+ * one queued` (`resent`). An armed carry-on (`carry-on armed`, right after a free line at that `at` `owed`, else a stop's
+ * own, `stop`) writes its outcome at exactly SETTLE_90 after the arm: a `carry-on queued` then takes its mark, a skipped
+ * line ends it, and a mark whose moment passes with no line (its carryOn rejected) is dropped. The refresh nudge has its
+ * own text (`nudge`). Connect's line writes no line of its own, so a submit no mark labels is `visit`, but after a nudge,
+ * where the carry-on after the nudge writes none either (`unknown`). It throws, quoting the log, where two marks fit one
+ * submit, or where a held or turned-away line, which three paths write, lands at an armed mark's moment. Not proven: an
+ * entry of another path in the same millisecond as a mark's pairing is taken as that mark's; and the stop-log keeps its
+ * last 200 entries, so a longer world reads the wrong submit's text for the nudge. The kit cannot read a submit's call
+ * site: its hook's stack holds the kit's frames and the engine's alone.
  */
 function sendersOf90(entries: readonly StopLogEntry[], submitted: readonly string[]): string[] {
   const senders: string[] = []
   const armed: { sender: string; due: number }[] = []
   let isNudged = false
-  const dueArmed = (at: number) => (armed[0] !== undefined && at >= armed[0].due ? armed.shift() : undefined)
+  const unclear = (i: number, why: string) =>
+    new Error(`sendersOf90 cannot tell ${why}: ${entries.slice(Math.max(0, i - 3), i + 1).map(e => `${e.at} ${e.what}`).join(' | ')}`)
   entries.forEach(({ at, what }, i) => {
-    const before = entries[i - 1]?.what
+    while (armed[0] !== undefined && at > armed[0].due) armed.shift()
+    const prev = entries[i - 1]
+    const isRightAfter = (line: string) => prev !== undefined && prev.at === at && prev.what.startsWith(line)
+    const isFree = isRightAfter(FREE_90)
+    const isDue = armed[0]?.due === at
     if (what === 'carry-on armed') {
-      armed.push({ sender: before?.startsWith(FREE_90) === true ? 'owed' : 'stop', due: at + SETTLE_90 })
-    } else if (what === 'carry-on skipped: another switch since' || what === 'carry-on held: Claude in Chrome is connecting') {
-      dueArmed(at)
-    } else if (what === 'carry-on not sent again: one is queued' && before?.startsWith(FREE_90) !== true) {
-      dueArmed(at)
+      armed.push({ sender: isFree ? 'owed' : 'stop', due: at + SETTLE_90 })
+    } else if (what === 'carry-on skipped: another switch since') {
+      if (isDue) armed.shift()
+    } else if (what === 'carry-on held: Claude in Chrome is connecting' || (what === 'carry-on not sent again: one is queued' && !isFree)) {
+      if (isDue) throw unclear(i, 'whose line this is')
     } else if (what === 'carry-on queued') {
+      const isResent = isRightAfter('carry-on sent in place of the one queued')
       if (submitted[senders.length] === NUDGE_TEXT) {
         isNudged = true
         senders.push('nudge')
-      } else if (before === 'carry-on sent in place of the one queued') {
+      } else if ([isResent, isFree, isDue].filter(Boolean).length > 1) {
+        throw unclear(i, `which path sent submit ${senders.length + 1}`)
+      } else if (isResent) {
         senders.push('resent')
-      } else if (before?.startsWith(FREE_90) === true) {
+      } else if (isFree) {
         senders.push('owed')
       } else {
-        senders.push(dueArmed(at)?.sender ?? (isNudged ? 'unknown' : 'visit'))
+        senders.push((isDue ? armed.shift()?.sender : undefined) ?? (isNudged ? 'unknown' : 'visit'))
       }
     }
   })
@@ -100,6 +111,36 @@ test('111-S2: a visit\'s line queued before an armed carry-on that is then skipp
     { at: SETTLE_90, what: 'carry-on skipped: another switch since' },
   ]
   expect(sendersOf90(log, ['visit continue'])).toEqual(['visit'])
+})
+
+test('111-S3: a free line the tick logs with no submit labels neither the armed stop\'s submit after it nor a visit\'s line later (review cold-176 F176_STALE_MARK, puma-9arph.111)', async () => {
+  const log = [
+    { at: 0, what: 'carry-on armed' },
+    { at: 10_000, what: 'a login is free: carry-on on 2' },
+    { at: SETTLE_90, what: 'carry-on queued' },
+    { at: SETTLE_90, what: 'carry-on resolved' },
+    { at: 70_000, what: 'carry-on queued' },
+  ]
+  expect(sendersOf90(log, ['stop continue', 'visit continue'])).toEqual(['stop', 'visit'])
+})
+
+test('111-S4: no armed mark outlives its own moment: one whose outcome wrote no line labels no later submit (review cold-176 F176_STALE_MARK, puma-9arph.111)', async () => {
+  const worlds: { log: { at: number; what: string }[]; truth: string[] }[] = [
+    { log: [{ at: 0, what: 'carry-on armed' }, { at: 120_000, what: 'carry-on queued' }], truth: ['visit'] },
+    { log: [{ at: 0, what: 'carry-on armed' }, { at: 10_000, what: 'a login is free: carry-on on 2' }, { at: SETTLE_90, what: 'carry-on queued' }, { at: 70_000, what: 'carry-on queued' }], truth: ['stop', 'visit'] },
+  ]
+  const wrong = worlds.filter(w => JSON.stringify(sendersOf90(w.log, w.truth.map(() => 'continue'))) !== JSON.stringify(w.truth))
+  expect(worlds.length).toBeGreaterThan(0)
+  expect(wrong.map(w => w.log.map(e => e.what).join(' > ')), 'logs where a stale armed mark took a submit: pair a mark only at its due time, else drop it').toEqual([])
+})
+
+test('111-S5: where two marks fit one submit, sendersOf90 throws and quotes the log, never labels (ruling 8856, puma-9arph.111)', async () => {
+  const log = [
+    { at: 0, what: 'carry-on armed' },
+    { at: SETTLE_90, what: 'a login is free: carry-on on 2' },
+    { at: SETTLE_90, what: 'carry-on queued' },
+  ]
+  expect(() => sendersOf90(log, ['continue'])).toThrow(/cannot tell which path sent submit 1: .*35000 a login is free/)
 })
 
 /**
@@ -428,7 +469,8 @@ test('90-K: a person\'s turn begun after the tick cleared the carry-on owed and 
   await $.turn.start({ text: 'a prompt of the person', turnId: '90-K-person' })
   // The line looks while the read is held: the clear left nothing owed, so it goes.
   await steps90(clock, 70_000)
-  // A drop for a submit of the one owed: none is made, so none is dropped.
+  // Kept armed on purpose: a submit of the one owed, should one ever go, is dropped and counted, so `dropped` reads 1
+  // and the check below fails. None goes.
   w.submitDrop = 'a Stop stands'
   const before = w.submitted.length
   release()
@@ -1201,12 +1243,14 @@ test('111-R: a Connect visit whose forward move the policy refuses opens no visi
   const w = fresh()
   w.chrome = { extensions: [''] }
   const { store, clock } = await loggedWorld(on, w, { 'chrome-account': '1' })
+  const view = watchedView(on)
   w.usage['tok-2'] = [100, 30]
   await start($, clock)
   w.usage['tok-1'] = [100, 41]
   await $.classic.StopFailure(PLAIN)
   await clock.settle()
   const owed = whats(stopLogOf(store, w)).some(what => what.startsWith('no login left'))
+  const wasBlocked = view()?.isSwitchBlocked === true
   // Claude Code's policy refuses each switch from here: the forward move to login 2 fails, inside connectingChrome.
   w.refuseEnv = true
   w.chrome.extensions.push(SLOT2)
@@ -1220,6 +1264,8 @@ test('111-R: a Connect visit whose forward move the policy refuses opens no visi
   await steps90(clock, 2 * 60_000)
   await pane.unmount()
   const log = whats(stopLogOf(store, w))
+  // The press reached connectingChrome, and the policy refused its move: nothing else here sets the view's flag.
+  expect([wasBlocked, view()?.isSwitchBlocked], 'not refused before the press; refused by it').toEqual([false, true])
   expect(log.filter(what => what.startsWith('visit ended with a carry-on owed')), 'no line for a connect whose forward move was refused').toEqual([])
   expect([owed, w.envSets.length - sets, log.filter(what => what.startsWith('moved to '))], 'a carry-on is owed; the move was refused, so nothing moved').toEqual([true, 0, []])
 })
