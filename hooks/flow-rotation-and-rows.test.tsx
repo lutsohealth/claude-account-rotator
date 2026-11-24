@@ -4910,6 +4910,133 @@ test('two 5-hour stops on one unproven switch revert to what was there before th
   expect(store.get('no-five-hour:2')).toBe(true)
 })
 
+// puma-9arph.109.12: a read counts as a read since a switch by when it BEGAN, not when it ended. Each case holds a real scheduled
+// read of login 2 after its body is made, presses Use now to login 2 around it, releases the read, and lets the settle reach its
+// own read of login 2. The mod gives a usage read READ_TIMEOUT_MS to answer, so a read cannot span more than that: 10 minutes
+// before or after the press cannot happen, and the widest start and end that can are used (5 s before, 4 s after).
+const READ_TIME_ROWS = [
+  { name: 'began 1 ms before the press, ended 1 ms after', before: 1, after: 1 },
+  { name: 'began 1 ms before the press, ended 4 s after', before: 1, after: 4_000 },
+  { name: 'began 5 s before the press, ended 1 ms after', before: 5_000, after: 1 },
+  { name: 'began 5 s before the press, ended 4 s after', before: 5_000, after: 4_000 },
+]
+
+/** Login 2 as read at boot, with its scheduled read still ahead; `holdRead` holds that read after its body is made. */
+async function readAcrossPress($: Engine, on: On) {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [10, 40]
+  w.usage['tok-2'] = [10, 41]
+  w.weekResets = { 'tok-2': OTHER_WEEK }
+  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off' }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  let open = () => {}
+  const gate = new Promise<void>(resolve => {
+    open = resolve
+  })
+  let isHeld = false
+  const holdRead = async () => {
+    w.afterUsageBody = async token => {
+      if (token !== 'tok-2' || isHeld) return
+      isHeld = true
+      await gate
+    }
+    for (let waited = 0; waited < 40 * 60_000 && !isHeld; waited += 1_000) await clock.advance(1_000)
+    expect(isHeld, 'the scheduled read of login 2 waits after its body').toBe(true)
+  }
+  const release = async () => {
+    w.afterUsageBody = undefined
+    open()
+    await clock.settle()
+  }
+  /** The settle: the response that follows the switch's landing makes its read of login 2, or does not. */
+  const settle = async () => {
+    await clock.advance(SETTLE_WAIT)
+    w.limits = limitsOf(10, 41, OTHER_WEEK)
+    await respond($, clock, w)
+  }
+  return { w, store, clock, holdRead, release, settle }
+}
+
+for (const row of READ_TIME_ROWS) {
+  test(`SINCE-READ-TIME class: a read of login 2 begun before Use now and ended after it is no read of the switch, so the settle reads login 2 again: ${row.name}`, async ($, on) => {
+    const { w, clock, holdRead, release, settle } = await readAcrossPress($, on)
+    await holdRead()
+    await clock.advance(row.before)
+    await useNow($, clock, '2')
+    expect(slots(w), 'the press moved the session while the read waited').toEqual([SLOT2])
+    await clock.advance(row.after)
+    await release()
+    const calls = callsWith(w, 'tok-2')
+    await settle()
+    expect(callsWith(w, 'tok-2'), 'the settle read login 2 again').toBe(calls + 1)
+  })
+}
+
+test('SINCE-READ-TIME class: a read of login 2 begun after Use now is a read of the switch, so the settle makes no second read: control', async ($, on) => {
+  const { w, clock, holdRead, release, settle } = await readAcrossPress($, on)
+  // The press, then the scheduled read, which begins after it.
+  await clock.advance(28 * 60_000)
+  await useNow($, clock, '2')
+  await holdRead()
+  await clock.advance(1_000)
+  await release()
+  const calls = callsWith(w, 'tok-2')
+  await settle()
+  expect(callsWith(w, 'tok-2'), 'the settle made no read of login 2: the read since the press stands').toBe(calls)
+})
+
+test('READ-TIME write: a body read stores its request\'s start as startedAt on usage-due:<id>, before its at', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [10, 40]
+  w.usage['tok-2'] = [10, 41]
+  w.weekResets = { 'tok-2': OTHER_WEEK }
+  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off' }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  // The scheduled read of login 2 waits after its body is made: it began when the hold was entered, and ends a second on.
+  let began: number | undefined
+  let open = () => {}
+  const gate = new Promise<void>(resolve => {
+    open = resolve
+  })
+  w.afterUsageBody = async token => {
+    if (token !== 'tok-2' || began !== undefined) return
+    began = clock.now()
+    await gate
+  }
+  for (let waited = 0; waited < 40 * 60_000 && began === undefined; waited += 1_000) await clock.advance(1_000)
+  expect(began, 'the scheduled read of login 2 waits after its body').toBeDefined()
+  await clock.advance(1_000)
+  w.afterUsageBody = undefined
+  open()
+  await clock.settle()
+  const due = store.get('usage-due:2') as { at: number; startedAt?: number; fails: number }
+  expect(due.startedAt, 'usage-due:2 holds the start').toBe(began)
+  expect(due.startedAt as number, 'usage-due:2 began before it ended').toBeLessThan(due.at)
+  // A later read that is no good read (a body with no usage, then a failure) keeps the last good read's two times together.
+  const later = async (change: () => void) => {
+    const calls = callsWith(w, 'tok-2')
+    change()
+    for (let waited = 0; waited < 70 * 60_000 && callsWith(w, 'tok-2') === calls; waited += 5_000) await clock.advance(5_000)
+    await clock.settle()
+    expect(callsWith(w, 'tok-2'), 'login 2 was read again').toBeGreaterThan(calls)
+    return store.get('usage-due:2') as { at: number; startedAt?: number; fails: number }
+  }
+  const empty = await later(() => {
+    w.usage['tok-2'] = [null, null]
+  })
+  expect([empty.at, empty.startedAt, empty.fails], 'an empty body keeps the last good read').toEqual([due.at, began, 0])
+  const failed = await later(() => {
+    w.failing = { 'tok-2': 500 }
+  })
+  expect([failed.at, failed.startedAt, failed.fails], 'a failure keeps the last good read').toEqual([due.at, began, 1])
+})
+
 test('a Fable stop the revert drops is no Fable stop of this session: a later read that finds every Fable week spent draws no notice', async ($, on) => {
   const { w, clock } = await stopDuringSwitch($, on, 40_000, FABLE_STOP.last_assistant_message, undefined, { 'tok-1': [10, 40, 100], 'tok-2': [10, 41, 30] })
   await useNow($, clock, '1')

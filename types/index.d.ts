@@ -104,9 +104,10 @@ export type StoredWindows = { week?: ShownWindow; fable?: ShownWindow }
  * When a login's usage is next read, for every session, under `usage-due:<id>`: every usage call goes through it.
  * `next` is when a read is due, `at` when the last good one came, both epoch milliseconds; `fails` counts the failed
  * reads since; `claim` names the session whose read is under way; `retryAfter` is the wait the last failure's
- * Retry-After asked for, in milliseconds; `v` is the writer's version (`WRITER_VERSION`), absent where an older one wrote it.
+ * Retry-After asked for, in milliseconds; `startedAt` is when that last good read began; a row without it is treated
+ * as begun at `at`, as an older writer's is, and a read counts as since a switch only if it began after it; `v` is the writer's version (`WRITER_VERSION`), absent where an older one wrote it.
  */
-export type UsageDue = { next: number; fails: number; claim?: string; at?: number; retryAfter?: number; v?: number }
+export type UsageDue = { next: number; fails: number; claim?: string; at?: number; startedAt?: number; retryAfter?: number; v?: number }
 
 /** Whether a login can serve requests, or why not; `isIdle` where its token has run out, its usage unread until a session refreshes it. */
 export type Health =

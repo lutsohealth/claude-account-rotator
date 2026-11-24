@@ -4,7 +4,7 @@ import type { Engine, MockClock } from 'claude-code/testing'
 import type { On } from 'claude-code'
 import type { View } from '../types'
 import { NUDGE_TEXT, USAGE_CLAIM_WAIT_MS, USAGE_FORCE_AFTER_MS, keychainItem } from './model'
-import { DAY, FABLE_RESET, FABLE_STOP, FILE1, HOUR, NOTE, NOW, OTHER_WEEK, PANE_PROPS, PLAIN, PLAIN_STOPS, SETTLE_WAIT, SLOT2, SLOT3, THREE_LOGINS, TWO_LOGINS, WEEK_RESET, answerNextLate, blob, browse, carryEndedOf, clearSession, clearable, fresh, isSwitchedToast, kept, limitsOf, loggedWorld, markStands, mountPane, owedWorld, painted, pastNextRead, queuedWorld, refresh, reloadedWorld, respond, resumeAnswers, sent, settleReal, slots, start, stopDuringSwitch, stopLogOf, turnStops, useNow, watchedView, whats, world } from './flow-harness'
+import { DAY, FABLE_RESET, FABLE_STOP, FILE1, HOUR, NOTE, NOW, OTHER_WEEK, PANE_PROPS, PLAIN, PLAIN_STOPS, SETTLE_WAIT, SLOT2, SLOT3, THREE_LOGINS, TWO_LOGINS, WEEK_RESET, answerNextLate, blob, browse, callsWith, carryEndedOf, clearSession, clearable, fresh, isSwitchedToast, kept, limitsOf, loggedWorld, markStands, mountPane, owedWorld, painted, pastNextRead, queuedWorld, refresh, reloadedWorld, respond, resumeAnswers, sent, settleReal, slots, start, stopDuringSwitch, stopLogOf, turnStops, useNow, watchedView, whats, world } from './flow-harness'
 import type { World } from './flow-harness'
 
 /**
@@ -3283,3 +3283,43 @@ for (const kind of ['week', 'five'] as const) {
     expect(markStands(store, key), 'it fell 5 from the newest completed body, 96: the mark ends').toBe(false)
   })
 }
+
+// puma-9arph.109.12: a scheduled read of login 2 in flight when Use now starts a switch to it completes after the switch's
+// `since`; its completion time alone made it "a good read since the switch", so the settle's own read was refused.
+test('SINCE-READ-TIME: a read of login 2 begun before Use now and ended after it is no read of the switch, so the settle reads login 2 again', async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [10, 40]
+  w.usage['tok-2'] = [10, 41]
+  w.weekResets = { 'tok-2': OTHER_WEEK }
+  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'rotate-to': 'off' }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  // The scheduled read of login 2 (30 minutes on) waits after its body is made, so it ends after the press.
+  const held = { isPaused: false, open: () => {} }
+  const gate = new Promise<void>(resolve => {
+    held.open = resolve
+  })
+  w.afterUsageBody = async token => {
+    if (token !== 'tok-2' || held.isPaused) return
+    held.isPaused = true
+    await gate
+  }
+  for (let waited = 0; waited < 40 * 60_000 && !held.isPaused; waited += 1_000) await clock.advance(1_000)
+  expect(held.isPaused, 'the scheduled read of login 2 waits after its body').toBe(true)
+  await clock.advance(1_000)
+  await useNow($, clock, '2')
+  expect(slots(w), 'the press moved the session while the read waited').toEqual([SLOT2])
+  await clock.advance(1_000)
+  w.afterUsageBody = undefined
+  held.open()
+  await clock.settle()
+  const heldDue = store.get('usage-due:2') as { at?: number } | undefined
+  const before = callsWith(w, 'tok-2')
+  await clock.advance(SETTLE_WAIT)
+  w.limits = limitsOf(10, 41, OTHER_WEEK)
+  await respond($, clock, w)
+  expect(typeof heldDue?.at, 'the held read stored its completion').toBe('number')
+  expect(callsWith(w, 'tok-2'), 'the settle read login 2 again').toBe(before + 1)
+})
