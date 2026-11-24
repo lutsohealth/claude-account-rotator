@@ -1327,6 +1327,69 @@ test('OWNER-RESPONSE: a response since the switch that uniquely proves login 1, 
   expect(slots(w), 'login 2 by the press, back to login 1 by the stop').toEqual([SLOT2, ''])
 })
 
+// puma-9arph.109.13: the first stop-log line is written before the stop's owner is known, so it says the login BELIEVED in use.
+test("STOP-LOG-OWNER: the second stop, heard 35 s after a move to login 1 and naming login 2's reset, does not call login 1 the login in use", async ($, on) => {
+  const ctx = await fableOnTwo($, on, '2')
+  await movedToOneThenStoppedOnTwo($, ctx)
+  const second = whats(stopLogOf(ctx.store, ctx.w)).filter(line => line.startsWith('stop heard'))[1]
+  expect(second, 'the second stop wrote its first line').toBeDefined()
+  expect(second).not.toMatch(/login 1 in use/)
+  expect(second).toMatch(/login 1 believed in use/)
+})
+
+/**
+ * The stop's resolved owner, read from what the stop wrote: the login its point-back names, else (no point-back) the
+ * login believed in use. Every line that claims a login "in use" must name it; line one of the stop says `believed`
+ * where the believed login is not the owner.
+ */
+function expectEveryInUseClaimNamesOwner(store: Map<string, unknown>, w: World, want: { owner: string; believed: string }): void {
+  const lines = whats(stopLogOf(store, w))
+  const lineOne = lines.filter(line => line.startsWith('stop heard:')).at(-1)
+  expect(lineOne, 'the stop wrote its first line').toBeDefined()
+  const believed = /login (\S+) (?:believed )?in use/.exec(lineOne ?? '')?.[1]
+  expect(believed, 'line one names the believed login').toBe(want.believed)
+  const pointBack = lines.map(line => /login (\S+)'s(?: reset)?, not login (\S+)'s/.exec(line)).filter(m => m !== null).at(-1)
+  const owner = pointBack?.[1] ?? believed
+  expect(owner, 'the stop resolved this owner').toBe(want.owner)
+  const claims = lines.map(line => /login (\S+) in use/.exec(line)).filter(m => m !== null)
+  for (const claim of claims) expect(claim[1], `a line claims login ${claim[1]} in use`).toBe(owner)
+  if (believed !== owner) expect(lineOne).toMatch(/believed in use/)
+}
+
+const CLASS_TITLE = 'STOP-LOG-OWNER class: every stop-log line that claims a login in use names the stop\'s resolved owner, on every path of the stop handler'
+
+test(`${CLASS_TITLE}: reset names the other login`, async ($, on) => {
+  const ctx = await fableOnTwo($, on, '2')
+  await movedToOneThenStoppedOnTwo($, ctx)
+  expectEveryInUseClaimNamesOwner(ctx.store, ctx.w, { owner: '2', believed: '1' })
+})
+
+test(`${CLASS_TITLE}: a response since the switch proves the other login`, async ($, on) => {
+  const last = [{ kind: 'five_hour', percentUsed: 100, resetsAt: '2026-10-12T12:00:00Z' }, { kind: 'seven_day', percentUsed: 41, resetsAt: WEEK_RESET }]
+  const { w, store } = await stopDuringSwitch($, on, 61_000, 'Claude usage limit reached.', last)
+  expectEveryInUseClaimNamesOwner(store, w, { owner: '1', believed: '2' })
+})
+
+test(`${CLASS_TITLE}: a wordless stop on an unproven switch`, async ($, on) => {
+  const { w, store } = await stopDuringSwitch($, on, 61_000, 'Claude usage limit reached.')
+  expectEveryInUseClaimNamesOwner(store, w, { owner: '2', believed: '2' })
+})
+
+test(`${CLASS_TITLE}: no switch pending`, async ($, on) => {
+  const { w, store, clock } = await fableOnTwo($, on, '1')
+  await $.classic.StopFailure(STOP_NAMING_1)
+  await clock.settle()
+  expect(store.get('fable-mark:1'), 'the stop marked its owner').toBeDefined()
+  expectEveryInUseClaimNamesOwner(store, w, { owner: '1', believed: '1' })
+})
+
+test(`${CLASS_TITLE}: authentication_failed`, async ($, on) => {
+  const { w, store, clock } = await fableOnTwo($, on, '1')
+  await $.classic.StopFailure({ error: 'authentication_failed' })
+  await clock.settle()
+  expectEveryInUseClaimNamesOwner(store, w, { owner: '1', believed: '1' })
+})
+
 test('POINTBACK-TURN: a main turn that begins while the point-back writes the slot stands: nothing is published, the slot goes back to the login the view names', async ($, on) => {
   const { w, store, clock } = await fableOnTwo($, on, '2')
   await $.classic.StopFailure(STOP_NAMING_2)

@@ -2942,7 +2942,7 @@ async function onStopFailure($: Host, stop: { error: string; last_assistant_mess
   const isFable = isFableStop(stop.last_assistant_message)
   const wordNeed: Need | undefined = isFable ? 'fable' : undefined
   // Not awaited, as no stop-log line is: an await here would let a second stop act on a view read before this one's switch.
-  void logStop($, `stop heard: ${error} (wording: ${wordingClass(stop.last_assistant_message)}), login ${active.id} in use`)
+  void logStop($, `stop heard: ${error} (wording: ${wordingClass(stop.last_assistant_message)}), login ${active.id} believed in use`)
   // The login each usage-limit stop of the episode died on is never tried again in it.
   const ep = episode
   // Council B4: a nudge's request that fails another way (a refresh refused above all) drops the held switch, and marks
