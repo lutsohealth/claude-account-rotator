@@ -3463,8 +3463,10 @@ function connectChrome($: Host, isQuiet = false, tryId?: string): Promise<Chrome
       failure = { error }
     }
     isConnectingChrome = false
-    // A visit opened where the session moved to the account visited: a connect the refresh guard or a failed move ended moved nothing.
-    const isVisitOpened = moves !== movesBefore
+    // A visit opened where its own forward move to the account visited landed (connectingChrome's isVisit). Three connects
+    // open none: one the refresh guard ends, one whose forward move fails, and one on the account in use, which moves
+    // nothing and is kept so on purpose (RULING 8777). Another move landing meanwhile (a point-back) is no visit.
+    const isVisitOpened = done?.isVisit === true
     try {
       await setView($, v => ({ ...v, chromeConnecting: undefined }))
     } catch (error) {
