@@ -3463,6 +3463,8 @@ function connectChrome($: Host, isQuiet = false, tryId?: string): Promise<Chrome
       failure = { error }
     }
     isConnectingChrome = false
+    // A visit opened where the session moved to the account visited: a connect the refresh guard or a failed move ended moved nothing.
+    const isVisitOpened = moves !== movesBefore
     try {
       await setView($, v => ({ ...v, chromeConnecting: undefined }))
     } catch (error) {
@@ -3502,6 +3504,10 @@ function connectChrome($: Host, isQuiet = false, tryId?: string): Promise<Chrome
       !isConnected && due !== undefined
         ? { turns: mainTurns, submits: carryOnSubmits, nudges: nudgeSubmits, refusals: carryOnRefusals }
         : undefined
+    // Said for a visit that connected too, which sends its own line whatever is owed: the word tells the two apart.
+    if (isVisitOpened && due !== undefined) {
+      void logStop($, `visit ended with a carry-on owed${isConnected ? ', connected' : ''}: ${mainTurns} turns, ${carryOnSubmits} submits, ${nudgeSubmits} nudges, ${carryOnRefusals} refusals`)
+    }
     let isWaitLogged = false
     if (text !== undefined) {
       const wait = () => {

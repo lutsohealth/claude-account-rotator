@@ -4,7 +4,7 @@ import type { Engine, MockClock } from 'claude-code/testing'
 import type { On } from 'claude-code'
 import type { View } from '../types'
 import { NUDGE_TEXT, USAGE_CLAIM_WAIT_MS, USAGE_FORCE_AFTER_MS, keychainItem } from './model'
-import { DAY, FABLE_RESET, FABLE_STOP, FILE1, HOUR, NOTE, NOW, OTHER_WEEK, PANE_PROPS, PLAIN, PLAIN_STOPS, SETTLE_WAIT, SLOT2, SLOT3, THREE_LOGINS, TWO_LOGINS, WEEK_RESET, answerNextLate, blob, browse, callsWith, carryEndedOf, clearSession, clearable, fresh, isSwitchedToast, kept, limitsOf, loggedWorld, markStands, mountPane, owedWorld, painted, pastNextRead, queuedWorld, refresh, reloadedWorld, respond, resumeAnswers, sent, settleReal, slots, start, stopDuringSwitch, stopLogOf, turnStops, useNow, watchedView, whats, world } from './flow-harness'
+import { DAY, FABLE_RESET, FABLE_STOP, FILE1, HOUR, NOTE, NOW, OTHER_WEEK, PANE_PROPS, PLAIN, PLAIN_STOPS, SETTLE_WAIT, SLOT2, SLOT3, THREE_LOGINS, TWO_LOGINS, WEEK_RESET, answerNextLate, blob, browse, callsWith, carryEndedOf, clearSession, clearable, debugLines, fresh, isSwitchedToast, kept, limitsOf, loggedWorld, markStands, mountPane, owedWorld, painted, pastNextRead, queuedWorld, refresh, reloadedWorld, respond, resumeAnswers, sent, settleReal, slots, start, stopDuringSwitch, stopLogOf, turnStops, useNow, watchedView, whats, world } from './flow-harness'
 import type { World } from './flow-harness'
 
 /**
@@ -788,13 +788,20 @@ async function nudgedDebt100($: Engine, on: On, s1End: 'drop' | 'clean' | 'rejec
   await pane.unmount()
   const nudgeAt = w.submitted.indexOf(NUDGE_TEXT, atEnd) + 1
   const carried = w.submitted.filter((text, i) => i >= atEnd && text !== NUDGE_TEXT && (s1End === 'clean' || i + 1 !== s1)).length
-  return { isCut, isNudgeAfterS1: nudgeAt > s1, isS1Answered, phase, log: whats(stopLogOf(store, w)), carried }
+  return { isCut, isNudgeAfterS1: nudgeAt > s1, isS1Answered, phase, log: whats(stopLogOf(store, w)), carried, refused: debugLines(w, 'carry-on once a login is free failed') }
 }
 
 test('90-U: the carry-on owed after a Connect visit, dropped once a later refresh nudge went: the line still goes (puma-9arph.100)', async ($, on) => {
   const r = await nudgedDebt100($, on, 'drop')
   expect([r.isCut, r.isNudgeAfterS1, r.isS1Answered, r.log.includes('carry-on drop'), r.phase], 'the visit cut the stop; the nudge after the owed one, which dropped; the hold dropped').toEqual([true, true, true, true, 'hold dropped'])
   expect(r.carried, 'carry-ons of the work after the visit ended that went through').toBe(1)
+  // puma-9arph.105: the stop-log shows the visit ended with a carry-on owed, then what the backup line did.
+  const owed = r.log.findIndex(what => what.startsWith('visit ended with a carry-on owed'))
+  expect(r.log.filter(what => what.startsWith('visit ended with a carry-on owed')), 'one line, with the counters at the visit end').toEqual([
+    'visit ended with a carry-on owed: 2 turns, 1 submits, 0 nudges, 0 refusals',
+  ])
+  expect(owed, 'the visit line stands before the backup line waits').toBeLessThan(r.log.indexOf('carry-on waits on the one owed'))
+  expect(r.log.lastIndexOf('carry-on queued'), 'the backup line went after the owed one dropped').toBeGreaterThan(r.log.indexOf('carry-on drop'))
 })
 
 test('90-V: the carry-on owed after a Connect visit, answered once a later refresh nudge went: no second line (puma-9arph.100)', async ($, on) => {
@@ -805,8 +812,56 @@ test('90-V: the carry-on owed after a Connect visit, answered once a later refre
 
 test('90-X: the carry-on owed after a Connect visit, refused once a later refresh nudge went: the line still goes (puma-9arph.100)', async ($, on) => {
   const r = await nudgedDebt100($, on, 'reject')
-  expect([r.isCut, r.isNudgeAfterS1, r.isS1Answered, r.log.includes('carry-on drop'), r.phase], 'the visit cut the stop; the nudge after the owed one, which was refused; the hold dropped').toEqual([true, true, true, false, 'hold dropped'])
+  expect([r.isCut, r.isNudgeAfterS1, r.refused.length, r.log.includes('carry-on drop'), r.phase], 'the visit cut the stop; the nudge after the owed one, which was refused (the catch path says so once); the hold dropped').toEqual([true, true, 1, false, 'hold dropped'])
   expect(r.carried, 'carry-ons of the work after the visit ended that went through').toBe(1)
+})
+
+test('90-U2: a Connect visit that pairs for a browser call it held, with a carry-on owed at its end, logs the visit too (puma-9arph.105)', { timeoutMs: 30_000 }, async ($, on) => {
+  const w = fresh()
+  w.chrome = { extensions: [''] }
+  const { store, clock } = await loggedWorld(on, w, { 'chrome-account': '1' })
+  const { pane, endVisit, isCut } = await owedVisitStart90($, w, store, clock)
+  // A browser tool call while the visit runs is held, and waits on the visit: it connects as the visit's account.
+  const browsing = browse($, 'navigate', { url: 'https://example.com' })
+  await settleReal(clock)
+  endVisit()
+  await settleReal(clock)
+  await turnsFor90($, clock, w, 4 * 60_000)
+  await pane.unmount()
+  await browsing
+  const log = whats(stopLogOf(store, w))
+  expect(isCut, 'the visit cut the stop').toBe(true)
+  expect(w.submitted.some(text => text.startsWith('Claude in Chrome is connected')), 'the visit paired and sent its connected line').toBe(true)
+  expect(log.filter(what => what.startsWith('visit ended with a carry-on owed')), 'one line, though the visit connected, and it says so').toEqual([
+    expect.stringMatching(/^visit ended with a carry-on owed, connected: \d+ turns, \d+ submits, \d+ nudges, \d+ refusals$/),
+  ])
+})
+
+test('90-U3: a connect the refresh guard ends before a visit opens, with a carry-on owed, logs no visit (puma-9arph.105)', { timeoutMs: 30_000 }, async ($, on) => {
+  const w = fresh()
+  w.chrome = { extensions: [''] }
+  const { store, clock } = await loggedWorld(on, w, { 'chrome-account': '1' })
+  w.usage['tok-2'] = [100, 30]
+  await start($, clock)
+  w.usage['tok-1'] = [100, 41]
+  await $.classic.StopFailure(PLAIN)
+  await clock.settle()
+  const owed = whats(stopLogOf(store, w)).some(what => what.startsWith('no login left'))
+  // The login in use refreshes its token in 5 minutes: the guard holds a connect to another account.
+  w.keychain['Claude Code-credentials'] = blob('tok-1', clock.now() + 5 * 60_000)
+  w.chrome.extensions.push(SLOT2)
+  const pane = await mountPane($)
+  await pane.press({ key: 'chrome-others' })
+  await clock.settle()
+  await pane.redraw()
+  void pane.press({ key: 'chrome-try-2' })
+  await settleReal(clock)
+  await steps90(clock, 2 * 60_000)
+  await pane.unmount()
+  const log = whats(stopLogOf(store, w))
+  expect(owed, 'a carry-on is owed').toBe(true)
+  expect(log.some(what => what.includes('Claude in Chrome visit')), 'no visit opened').toBe(false)
+  expect(log.filter(what => what.startsWith('visit ended with a carry-on owed')), 'no line for a visit that never opened').toEqual([])
 })
 
 /**
