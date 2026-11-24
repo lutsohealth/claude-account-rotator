@@ -1152,6 +1152,55 @@ test('111-D: a Connect visit that ends with no carry-on owed sends its line, tho
   expect(w.submitted, 'one submit, with the CONTINUE text').toEqual([expect.stringMatching(CONTINUE_90)])
 })
 
+test('111-T: the debt\'s own login, the debt ended by a turn that ran since the stop, then a person\'s turn: the Connect visit\'s line still goes (ruling 7197 test 1, puma-9arph.111)', { timeoutMs: 30_000 }, async ($, on) => {
+  const w = fresh()
+  w.chrome = { extensions: [''] }
+  const { store, clock } = await loggedWorld(on, w, { 'chrome-account': '1' })
+  const view = watchedView(on)
+  // Every login spent: a carry-on owed from login 1, which frees at 12:00.
+  w.usage['tok-2'] = [100, 30]
+  await start($, clock)
+  w.usage['tok-1'] = [100, 41]
+  await $.classic.StopFailure(PLAIN)
+  await clock.settle()
+  // A Connect visit to login 2 from 11:50, its forward move held; its cut turn stops at 11:52, before login 1 frees.
+  await clock.advance(Date.parse('2026-10-12T11:50:00Z') - clock.now())
+  let endVisit = () => {}
+  const visit = new Promise<void>(resolve => {
+    endVisit = resolve
+  })
+  w.beforeEnv = () => visit
+  w.chrome.extensions.push(SLOT2)
+  const pane = await mountPane($)
+  await pane.press({ key: 'chrome-others' })
+  await clock.settle()
+  await pane.redraw()
+  void pane.press({ key: 'chrome-try-2' })
+  await settleReal(clock)
+  await clock.advance(2 * 60_000)
+  await $.turn.start({ text: 'a turn the limit stops', turnId: '111-T-cut' })
+  void $.classic.StopFailure(PLAIN)
+  await settleReal(clock)
+  const isCut = whats(stopLogOf(store, w)).includes('stayed: Claude in Chrome is connecting')
+  // Held past 12:00 and the grace after it, so the move back lands on login 1, which owes the carry-on and serves again.
+  await clock.advance(Date.parse('2026-10-12T12:06:00Z') - clock.now())
+  w.beforeEnv = undefined
+  endVisit()
+  await settleReal(clock)
+  while (view()?.chromeConnecting !== undefined && clock.now() < Date.parse('2026-10-12T12:10:00Z')) await steps90(clock, 1_000, 1_000)
+  const endLog = whats(stopLogOf(store, w))
+  // A main turn that is no carry-on, then each submit's own turn as the 10 s loop meets it.
+  await $.turn.start({ text: 'a prompt of the person', turnId: '111-T-person' })
+  await clock.settle()
+  await turnsFor90($, clock, w, 5 * 60_000)
+  await pane.unmount()
+  const log = whats(stopLogOf(store, w))
+  const after = log.slice(endLog.length).filter(what => what === 'a turn ran since the stop: no carry-on' || what === 'carry-on queued')
+  expect([sendersOf90(log, w.submitted), after], 'the debt ended with no carry-on of its own, then the visit\'s line went').toEqual([['visit'], ['a turn ran since the stop: no carry-on', 'carry-on queued']])
+  expect([isCut, view()?.activeId, endLog.filter(what => what.startsWith('moved to ')), endLog.some(what => what.startsWith('visit ended with a carry-on owed'))], 'the visit cut the stop, moved to login 2 and back to login 1, and ended with the carry-on owed').toEqual([true, '1', ['moved to 2 (by a Claude in Chrome visit)', 'moved to 1 (by a Claude in Chrome visit)'], true])
+  expect(w.submitted, 'one submit, with the CONTINUE text').toEqual([expect.stringMatching(CONTINUE_90)])
+})
+
 test('111-R: a Connect visit whose forward move the policy refuses opens no visit, so with a carry-on owed it logs none (puma-9arph.111)', { timeoutMs: 30_000 }, async ($, on) => {
   const w = fresh()
   w.chrome = { extensions: [''] }
