@@ -3457,16 +3457,18 @@ function connectChrome($: Host, isQuiet = false, tryId?: string): Promise<Chrome
     // Nothing on the way to that send may throw past it: the carry-on would be lost (puma-9arph.89).
     let failure: { error: unknown } | undefined
     const movesBefore = moves
+    // Set by connectingChrome where its own forward move landed: it survives a throw after the move.
+    const visit = { isMoved: false }
     try {
-      done = await connectingChrome($, isQuiet, tryId)
+      done = await connectingChrome($, isQuiet, tryId, visit)
     } catch (error) {
       failure = { error }
     }
     isConnectingChrome = false
-    // A visit opened where its own forward move to the account visited landed (connectingChrome's isVisit). Three connects
+    // A visit opened where its own forward move to the account visited landed, though it threw after. Three connects
     // open none: one the refresh guard ends, one whose forward move fails, and one on the account in use, which moves
     // nothing and is kept so on purpose (RULING 8777). Another move landing meanwhile (a point-back) is no visit.
-    const isVisitOpened = done?.isVisit === true
+    const isVisitOpened = visit.isMoved
     try {
       await setView($, v => ({ ...v, chromeConnecting: undefined }))
     } catch (error) {
@@ -3566,6 +3568,7 @@ async function connectingChrome(
   $: Host,
   isQuiet: boolean,
   tryId: string | undefined,
+  visit: { isMoved: boolean },
 ): Promise<{ target: Account; answer: ChromeAnswer; isVisit: boolean } | undefined> {
   const view = await getView($)
   const target = view.accounts.find(a => a.id === (tryId ?? view.chromeAccountId))
@@ -3581,6 +3584,7 @@ async function connectingChrome(
   await setView($, v => ({ ...v, chromeConnecting: target.id }))
   const isVisit = from.id !== target.id
   if (isVisit && !(await switchTo($, target, 'Claude in Chrome connects as it', true))) return undefined
+  visit.isMoved = isVisit
   let answer: ChromeAnswer
   try {
     const wait = movedAt === undefined ? 0 : movedAt + SETTLE_MS - (await $.clock.now())
