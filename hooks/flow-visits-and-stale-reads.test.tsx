@@ -1367,20 +1367,41 @@ function expectEveryInUseClaimNamesOwner(store: Map<string, unknown>, w: World, 
 
 const CLASS_TITLE = 'STOP-LOG-OWNER class: every stop-log line that claims a login in use names the stop\'s resolved owner, on every path of the stop handler'
 
+/** The carry-on a stop's switch sent, entering as a turn on the login moved to: asserted sent, then started. */
+async function startCarryOnTurn($: Engine, w: World): Promise<void> {
+  expect(w.submitted, 'the carry-on was sent after the first stop').toHaveLength(1)
+  await $.turn.start({ text: w.submitted[0] ?? '', turnId: 'turn-carry' })
+}
+
+/** The carry-on turn dying, as the real failed turn ends. */
+const endCarryOnTurn = ($: Engine) => $.turn.complete({ turnId: 'turn-carry', reason: 'error', answer: '', durationMs: 1, isAborted: false })
+
 test(`${CLASS_TITLE}: reset names the other login`, async ($, on) => {
   const ctx = await fableOnTwo($, on, '2')
-  await movedToOneThenStoppedOnTwo($, ctx)
+  await $.classic.StopFailure(STOP_NAMING_2)
+  await ctx.clock.settle()
+  expect(slotValues(ctx.w), 'the first stop moves the session to login 1').toEqual([undefined])
+  await ctx.clock.advance(35_000)
+  await ctx.clock.settle()
+  await startCarryOnTurn($, ctx.w)
+  await $.classic.StopFailure(STOP_NAMING_2)
+  await endCarryOnTurn($)
+  await ctx.clock.settle()
   expectEveryInUseClaimNamesOwner(ctx.store, ctx.w, { owner: '2', believed: '1' })
 })
 
 test(`${CLASS_TITLE}: a response since the switch proves the other login`, async ($, on) => {
   const last = [{ kind: 'five_hour', percentUsed: 100, resetsAt: '2026-10-12T12:00:00Z' }, { kind: 'seven_day', percentUsed: 41, resetsAt: WEEK_RESET }]
   const { w, store } = await stopDuringSwitch($, on, 61_000, 'Claude usage limit reached.', last)
+  // The switch is a press, no stop before it: no carry-on exists to start.
+  expect(w.submitted).toEqual([])
   expectEveryInUseClaimNamesOwner(store, w, { owner: '1', believed: '2' })
 })
 
 test(`${CLASS_TITLE}: a wordless stop on an unproven switch`, async ($, on) => {
   const { w, store } = await stopDuringSwitch($, on, 61_000, 'Claude usage limit reached.')
+  // The switch is a press, no stop before it: no carry-on exists to start.
+  expect(w.submitted).toEqual([])
   expectEveryInUseClaimNamesOwner(store, w, { owner: '2', believed: '2' })
 })
 
@@ -1398,9 +1419,11 @@ test(`${CLASS_TITLE}: a response both logins fit alike makes the stop nobody's`,
   await clock.settle()
   expect(slotValues(w), 'the first stop moves the session to login 2').toEqual([SLOT2])
   await clock.advance(40_000)
+  await startCarryOnTurn($, w)
   w.limits = limitsOf(50, 40)
   await respond($, clock, w)
   await $.classic.StopFailure({ error: 'rate_limit' })
+  await endCarryOnTurn($)
   await clock.settle()
   expect(slotValues(w), 'no point-back: the stop is nobody\'s').toEqual([SLOT2])
   expect(['mark:2', 'week-mark:2', 'fable-mark:2'].map(key => store.get(key)), 'no mark on the login believed in use').toEqual([undefined, undefined, undefined])
