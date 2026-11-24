@@ -1773,13 +1773,14 @@ export const USAGE_FORCE_AFTER_MS = 60_000
 /** A login's schedule as stored; anything else is none, so the read is due. */
 export function usageDueFrom(value: unknown): UsageDue | undefined {
   if (typeof value !== 'object' || value === null) return undefined
-  const { next, fails, claim, at, retryAfter, v } = value as Record<string, unknown>
+  const { next, fails, claim, at, startedAt, retryAfter, v } = value as Record<string, unknown>
   if (typeof next !== 'number' || !Number.isFinite(next)) return undefined
   return {
     next,
     fails: Number.isInteger(fails) && (fails as number) >= 0 ? (fails as number) : 0,
     ...(typeof claim === 'string' ? { claim } : {}),
     ...(typeof at === 'number' && Number.isFinite(at) ? { at } : {}),
+    ...(typeof startedAt === 'number' && Number.isFinite(startedAt) ? { startedAt } : {}),
     ...(typeof retryAfter === 'number' && Number.isFinite(retryAfter) ? { retryAfter } : {}),
     ...(Number.isInteger(v) ? { v: v as number } : {}),
   }
@@ -1814,10 +1815,11 @@ export const mayForceUsage = (due: UsageDue | undefined, sessionId: string, now:
 
 /**
  * A settling switch may read a login once: no back-off stands, no other session's read is under way, and no good
- * read came after the switch began (`since`). The minute gate does not apply: the switch is news the last read lacks.
+ * read began after the switch did (`since`; a read that began before it and ended after it is no read of the switch). The
+ * minute gate does not apply: the switch is news the last read lacks.
  */
 export const mayReadSince = (due: UsageDue | undefined, sessionId: string, now: number, since: number): boolean =>
-  !isBackedOff(due, now) && !isClaimedElsewhere(due, sessionId, now) && (due?.at === undefined || due.at <= since)
+  !isBackedOff(due, now) && !isClaimedElsewhere(due, sessionId, now) && (due?.at === undefined || (due.startedAt ?? due.at) <= since)
 
 /**
  * The claim renewed as this session's read of the login starts, so the claim lasts from the read, not from the
@@ -1888,10 +1890,11 @@ export type UsageOutcome = { kind: 'ok' | 'empty'; hasResponded: boolean } | { k
  * Retry-After asks, or 2 minutes doubled for each failure before, whichever is longer, at most 60 minutes. A rejected
  * sign-in is no rate limit: read again in 10 minutes, so a new sign-in is read at once.
  */
-export function afterUsage(due: UsageDue | undefined, outcome: UsageOutcome, now: number): UsageDue {
-  const last = due?.at === undefined ? {} : { at: due.at }
+export function afterUsage(due: UsageDue | undefined, outcome: UsageOutcome, now: number, startedAt?: number): UsageDue {
+  // The last good read's start stays with its time.
+  const last = due?.at === undefined ? {} : { at: due.at, ...(due.startedAt === undefined ? {} : { startedAt: due.startedAt }) }
   const v = WRITER_VERSION
-  if (outcome.kind === 'ok') return { next: now + (outcome.hasResponded ? USAGE_IN_USE_MS : USAGE_IDLE_MS), fails: 0, at: now, v }
+  if (outcome.kind === 'ok') return { next: now + (outcome.hasResponded ? USAGE_IN_USE_MS : USAGE_IDLE_MS), fails: 0, at: now, ...(startedAt === undefined ? {} : { startedAt }), v }
   if (outcome.kind === 'empty') return { next: now + (outcome.hasResponded ? USAGE_IN_USE_MS : USAGE_IDLE_MS), fails: 0, ...last, v }
   if (outcome.kind === 'rejected') return { next: now + USAGE_IN_USE_MS, fails: 0, ...last, v }
   const fails = due?.fails ?? 0

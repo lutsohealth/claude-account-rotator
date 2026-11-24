@@ -1455,7 +1455,7 @@ async function requestUsage($: Host, account: Account, accessToken: string, gate
   // A body that holds no usage the mod reads stores no reading: it is no good read.
   const ok = usage.kind === 'ok' ? { kind: readingFromUsage(usage.body, at) === undefined ? ('empty' as const) : ('ok' as const), hasResponded } : undefined
   const outcome = ok ?? (usage.kind === 'rejected' ? usage : { kind: 'failed' as const, retryAfter: usage.retryAfter })
-  await $.store.set(key, afterUsage(due, outcome, at))
+  await $.store.set(key, afterUsage(due, outcome, at, startedAt))
   return { ...usage, startedAt, receivedAt: at }
 }
 
@@ -1561,7 +1561,7 @@ async function checkAccount($: Host, account: Account, gate: UsageGate): Promise
             if (week !== undefined && isAfter(week) && endsWeekMark(reading.sevenDay, week, before?.sevenDay)) await endMark($, 'week', account.id, week)
             if (five !== undefined && isAfter(five) && endsFiveHourMark(reading.fiveHour, five, before?.fiveHour)) await endMark($, 'five', account.id, five)
             // A body with no Fable row keeps the stored one's, unless the week fell since the last body: the stored read, never the view.
-            await saveReading($, account.id, { ...keepFable(reading, prior === undefined ? undefined : { ...prior, sevenDay: before?.sevenDay }, now), by: account.id }, 'body')
+            await saveReading($, account.id, { ...keepFable(reading, prior === undefined ? undefined : { ...prior, sevenDay: before?.sevenDay }, now), startedAt: usage.startedAt, by: account.id }, 'body')
             hasFreshFable = reading.fable !== undefined
           }
           // This body is a baseline of the next, whichever rows are stored over the reading meanwhile, under a key of its own,
@@ -3167,7 +3167,9 @@ async function undoProvisionalStop($: Host, by: SwitchWriter): Promise<boolean> 
  */
 async function revertStop($: Host, p: ProvisionalStop): Promise<boolean> {
   const read = await storedReading($, p.id)
-  const isReadSince = read?.src === 'body' && read.at > p.readAt
+  // A body since is evidence of the stop's window where it listed a 5-hour window, or began after the stop: one that began
+  // before it and says nothing of the window gives no reason to keep the stop's value.
+  const isReadSince = read?.src === 'body' && ((read.startedAt ?? read.at) > p.readAt || read.fiveHour !== undefined)
   const gone: string[] = []
   for (const [key, { before, written }] of Object.entries(p.writes)) {
     if (key === `no-five-hour:${p.id}` && isReadSince) continue

@@ -6,14 +6,15 @@
 export type UsageWindow = { pct: number; resetsAt?: string; isStop?: true; at?: number }
 
 /**
- * A login's usage as last read, `at` in epoch milliseconds. `fable` is the
+ * A login's usage as last read, `at` in epoch milliseconds. `startedAt` is when a body's request began; a reading
+ * without it is treated as begun at `at`. `fable` is the
  * Fable week, which only the usage endpoint lists: a response never reports it.
  * `noFiveHour` where the usage endpoint listed no 5-hour window: the account
  * has none, as a verified Ultra account, so no stop marks one on it. A view's
  * reading carries it from `View.noFiveHour`; a stored one does not. `by` is the login whose sign-in produced the
  * read; a stored reading without it, or naming another login, is no login's and is not read back.
  */
-export type Reading = { fiveHour?: UsageWindow; sevenDay?: UsageWindow; fable?: UsageWindow; noFiveHour?: true; at: number; by?: string; v?: number; src?: ReadingSource }
+export type Reading = { fiveHour?: UsageWindow; sevenDay?: UsageWindow; fable?: UsageWindow; noFiveHour?: true; at: number; startedAt?: number; by?: string; v?: number; src?: ReadingSource }
 
 /**
  * A usage body read of a login's windows, under its own store key `usage-body:<id>:<read time>:<session mark>`, written once
@@ -104,9 +105,10 @@ export type StoredWindows = { week?: ShownWindow; fable?: ShownWindow }
  * When a login's usage is next read, for every session, under `usage-due:<id>`: every usage call goes through it.
  * `next` is when a read is due, `at` when the last good one came, both epoch milliseconds; `fails` counts the failed
  * reads since; `claim` names the session whose read is under way; `retryAfter` is the wait the last failure's
- * Retry-After asked for, in milliseconds; `v` is the writer's version (`WRITER_VERSION`), absent where an older one wrote it.
+ * Retry-After asked for, in milliseconds; `startedAt` is when that last good read began; a row without it is treated
+ * as begun at `at`, as an older writer's is, and a read counts as since a switch only if it began after it; `v` is the writer's version (`WRITER_VERSION`), absent where an older one wrote it.
  */
-export type UsageDue = { next: number; fails: number; claim?: string; at?: number; retryAfter?: number; v?: number }
+export type UsageDue = { next: number; fails: number; claim?: string; at?: number; startedAt?: number; retryAfter?: number; v?: number }
 
 /** Whether a login can serve requests, or why not; `isIdle` where its token has run out, its usage unread until a session refreshes it. */
 export type Health =
