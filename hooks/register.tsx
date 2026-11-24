@@ -3502,6 +3502,9 @@ function connectChrome($: Host, isQuiet = false, tryId?: string): Promise<Chrome
       !isConnected && due !== undefined
         ? { turns: mainTurns, submits: carryOnSubmits, nudges: nudgeSubmits, refusals: carryOnRefusals }
         : undefined
+    if (owedAtEnd !== undefined) {
+      void logStop($, `visit ended with a carry-on owed: ${owedAtEnd.turns} turns, ${owedAtEnd.submits} submits, ${owedAtEnd.nudges} nudges, ${owedAtEnd.refusals} refusals`)
+    }
     let isWaitLogged = false
     if (text !== undefined) {
       const wait = () => {
