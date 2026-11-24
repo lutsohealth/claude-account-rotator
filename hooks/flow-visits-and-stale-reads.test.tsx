@@ -832,7 +832,9 @@ test('90-U2: a Connect visit that pairs for a browser call it held, with a carry
   const log = whats(stopLogOf(store, w))
   expect(isCut, 'the visit cut the stop').toBe(true)
   expect(w.submitted.some(text => text.startsWith('Claude in Chrome is connected')), 'the visit paired and sent its connected line').toBe(true)
-  expect(log.filter(what => what.startsWith('visit ended with a carry-on owed')), 'one line, though the visit connected').toHaveLength(1)
+  expect(log.filter(what => what.startsWith('visit ended with a carry-on owed')), 'one line, though the visit connected, and it says so').toEqual([
+    expect.stringMatching(/^visit ended with a carry-on owed, connected: \d+ turns, \d+ submits, \d+ nudges, \d+ refusals$/),
+  ])
 })
 
 /**
