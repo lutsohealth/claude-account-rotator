@@ -37,6 +37,51 @@ function tagSends90(w: World, clock: MockClock, view: () => View | undefined) {
 /** Nothing went while a Connect visit was open: the carry-on owed waits for it, and the visit's line is its own. */
 const visitSends90 = (sends: string[]) => sends.filter(s => s.endsWith('+visit'))
 
+const FREE_90 = 'a login is free: carry-on on'
+
+/**
+ * The path that sent each submit, read from the stop-log in order: every submit writes one `carry-on queued`. The
+ * carry-on owed writes `a login is free` before it, at once or through `carry-on armed` (`owed`); a stop's own armed
+ * carry-on writes `carry-on armed` alone (`stop`), and an armed one held or skipped sends nothing; one sent in place of
+ * one turned away writes `carry-on sent in place of the one queued` (`resent`); the refresh nudge has its own text
+ * (`nudge`). Connect's line writes no line of its own, so a submit with none of these before it is `visit`, but after
+ * a nudge, where the carry-on after the nudge writes none either (`unknown`). The kit cannot read a submit's call site:
+ * its hook's stack holds the kit's frames and the engine's alone.
+ */
+function sendersOf90(log: readonly string[], submitted: readonly string[]): string[] {
+  const senders: string[] = []
+  const armed: string[] = []
+  let owed = 0
+  let resent = 0
+  let isNudged = false
+  log.forEach((what, i) => {
+    if (what.startsWith(FREE_90)) {
+      if (log[i + 1] === 'carry-on armed') armed.push('owed')
+      else owed += 1
+    } else if (what === 'carry-on armed') {
+      if (!log[i - 1]?.startsWith(FREE_90)) armed.push('stop')
+    } else if (what === 'carry-on skipped: another switch since' || (what === 'carry-on held: Claude in Chrome is connecting' && armed.length > 0)) {
+      armed.shift()
+    } else if (what === 'carry-on sent in place of the one queued') {
+      resent += 1
+    } else if (what === 'carry-on queued') {
+      if (submitted[senders.length] === NUDGE_TEXT) {
+        isNudged = true
+        senders.push('nudge')
+      } else if (resent > 0) {
+        resent -= 1
+        senders.push('resent')
+      } else if (owed > 0) {
+        owed -= 1
+        senders.push('owed')
+      } else {
+        senders.push(armed.shift() ?? (isNudged ? 'unknown' : 'visit'))
+      }
+    }
+  })
+  return senders
+}
+
 /**
  * Every login spent and a carry-on owed at 12:00; a Connect visit held from `from` to `to`, to login 2 (or, `isThree`,
  * to login 3, so its move back lands on login 2, freed by then); its cut turn begins two minutes in and stops on the
@@ -1042,6 +1087,55 @@ test('90-U5: a connect on the account in use moves nothing, so with a carry-on o
   expect(w.chromeAsked.slice(asked), 'the connect ran, on the login in use').toEqual([''])
   expect(log.filter(what => what.startsWith('moved to ')), 'it moved nothing').toEqual([])
   expect(log.filter(what => what.startsWith('visit ended with a carry-on owed')), 'no line for a connect that opened no visit').toEqual([])
+})
+
+test('111-D: a Connect visit that ends with no carry-on owed sends its line, though a stop owes one before the line looks (puma-9arph.111)', { timeoutMs: 30_000 }, async ($, on) => {
+  const w = fresh()
+  w.chrome = { extensions: [''] }
+  const { store, clock } = await loggedWorld(on, w, { 'chrome-account': '1' })
+  const view = watchedView(on)
+  await start($, clock)
+  // A Connect visit to login 2, its forward move held, cuts a stop on login 1: login 2 has room, so nothing is owed.
+  let endVisit = () => {}
+  const visit = new Promise<void>(resolve => {
+    endVisit = resolve
+  })
+  w.beforeEnv = () => visit
+  w.chrome.extensions.push(SLOT2)
+  const pane = await mountPane($)
+  await pane.press({ key: 'chrome-others' })
+  await clock.settle()
+  await pane.redraw()
+  void pane.press({ key: 'chrome-try-2' })
+  await settleReal(clock)
+  await clock.advance(2 * 60_000)
+  w.usage['tok-1'] = [100, 41]
+  await $.turn.start({ text: 'a turn the limit stops', turnId: '111-D-cut' })
+  void $.classic.StopFailure(PLAIN)
+  await settleReal(clock)
+  const isCut = whats(stopLogOf(store, w)).includes('stayed: Claude in Chrome is connecting')
+  w.beforeEnv = undefined
+  endVisit()
+  await settleReal(clock)
+  // The visit waits out its forward move's settle, then ends; its line looks SETTLE_MS after that.
+  while (view()?.chromeConnecting !== undefined && clock.now() < Date.parse('2026-10-12T11:00:00Z')) await steps90(clock, 1_000, 1_000)
+  const endLog = whats(stopLogOf(store, w))
+  // Before that look: the cut turn's resume answers, which ends its episode, and a stop on login 2, spent too, owes one.
+  await $.turn.complete({ turnId: '111-D-cut', reason: 'error', answer: '', durationMs: 1, isAborted: false })
+  await resumeAnswers($, clock, '111-D-resume')
+  w.usage['tok-2'] = [100, 30]
+  await $.turn.start({ text: 'a later turn the limit stops', turnId: '111-D-later' })
+  await $.classic.StopFailure(PLAIN)
+  await $.turn.complete({ turnId: '111-D-later', reason: 'error', answer: '', durationMs: 1, isAborted: false })
+  await settleReal(clock)
+  const owedLog = whats(stopLogOf(store, w)).slice(endLog.length)
+  await steps90(clock, 3 * 60_000)
+  await pane.unmount()
+  const log = whats(stopLogOf(store, w))
+  // The line looks once the debt is owed: with no debt at the visit's end, nothing holds it.
+  expect([sendersOf90(log, w.submitted), log.filter(what => what === 'carry-on waits on the one owed')], 'the visit\'s line went, and did not wait on the later debt').toEqual([['visit'], []])
+  expect([isCut, endLog.some(what => what.startsWith('visit ended with a carry-on owed')), owedLog.filter(what => what.startsWith('no login left'))], 'the visit cut the stop and ended with nothing owed; the later stop owed one').toEqual([true, false, ['no login left: one carry-on at 2026-10-12T12:00:00.000Z']])
+  expect(w.submitted, 'one submit, with the CONTINUE text').toEqual([expect.stringMatching(CONTINUE_90)])
 })
 
 /**
