@@ -4,7 +4,7 @@ import type { Engine, MockClock } from 'claude-code/testing'
 import type { On } from 'claude-code'
 import type { View } from '../types'
 import { NUDGE_TEXT, USAGE_CLAIM_WAIT_MS, USAGE_FORCE_AFTER_MS, keychainItem } from './model'
-import { DAY, FABLE_RESET, FABLE_STOP, FILE1, HOUR, NOTE, NOW, OTHER_WEEK, PANE_PROPS, PLAIN, PLAIN_STOPS, SETTLE_WAIT, SLOT2, SLOT3, THREE_LOGINS, TWO_LOGINS, WEEK_RESET, answerNextLate, blob, browse, carryEndedOf, clearSession, clearable, fresh, isSwitchedToast, kept, limitsOf, loggedWorld, markStands, mountPane, painted, pastNextRead, queuedWorld, refresh, reloadedWorld, respond, resumeAnswers, sent, settleReal, slots, start, stopDuringSwitch, stopLogOf, useNow, watchedView, whats, world } from './flow-harness'
+import { DAY, FABLE_RESET, FABLE_STOP, FILE1, HOUR, NOTE, NOW, OTHER_WEEK, PANE_PROPS, PLAIN, PLAIN_STOPS, SETTLE_WAIT, SLOT2, SLOT3, THREE_LOGINS, TWO_LOGINS, WEEK_RESET, answerNextLate, blob, browse, carryEndedOf, clearSession, clearable, fresh, isSwitchedToast, kept, limitsOf, loggedWorld, markStands, mountPane, owedWorld, painted, pastNextRead, queuedWorld, refresh, reloadedWorld, respond, resumeAnswers, sent, settleReal, slots, start, stopDuringSwitch, stopLogOf, turnStops, useNow, watchedView, whats, world } from './flow-harness'
 import type { World } from './flow-harness'
 
 /**
@@ -1329,31 +1329,40 @@ test('OWNER-RESPONSE: a response since the switch that uniquely proves login 1, 
 
 // puma-9arph.109.13: the first stop-log line is written before the stop's owner is known, so it says the login BELIEVED in use.
 test("STOP-LOG-OWNER: the second stop, heard 35 s after a move to login 1 and naming login 2's reset, does not call login 1 the login in use", async ($, on) => {
-  const ctx = await fableOnTwo($, on, '2')
-  await movedToOneThenStoppedOnTwo($, ctx)
-  const second = whats(stopLogOf(ctx.store, ctx.w)).filter(line => line.startsWith('stop heard'))[1]
+  const { w, store, clock } = await fableOnTwo($, on, '2')
+  await $.classic.StopFailure(STOP_NAMING_2)
+  await clock.settle()
+  expect(slotValues(w), 'the first stop moves the session to login 1').toEqual([undefined])
+  await clock.advance(35_000)
+  await clock.settle()
+  expect(w.submitted, 'the carry-on was sent after the first stop').toHaveLength(1)
+  // The carry-on turn enters on login 1, as the harness models a submitted carry-on, and that turn is the one that stops.
+  await $.turn.start({ text: w.submitted[0] ?? '', turnId: 'turn-carry' })
+  await $.classic.StopFailure(STOP_NAMING_2)
+  await $.turn.complete({ turnId: 'turn-carry', reason: 'error', answer: '', durationMs: 1, isAborted: false })
+  await clock.settle()
+  const second = whats(stopLogOf(store, w)).filter(line => line.startsWith('stop heard'))[1]
   expect(second, 'the second stop wrote its first line').toBeDefined()
   expect(second).not.toMatch(/login 1 in use/)
   expect(second).toMatch(/login 1 believed in use/)
 })
 
 /**
- * The stop's resolved owner, read from what the stop wrote: the login its point-back names, else (no point-back) the
- * login believed in use. Every line that claims a login "in use" must name it; line one of the stop says `believed`
- * where the believed login is not the owner.
+ * `want` is the test's own input: the owner the stop's sequence resolves to (`null`: nobody's stop) and the login the
+ * mod believed in use. Where they differ the stop must have written a point-back naming the owner (none for nobody);
+ * every line that claims a login "in use" names the owner (none for nobody); line one of the last stop says `believed`.
  */
-function expectEveryInUseClaimNamesOwner(store: Map<string, unknown>, w: World, want: { owner: string; believed: string }): void {
+function expectEveryInUseClaimNamesOwner(store: Map<string, unknown>, w: World, want: { owner: string | null; believed: string }): void {
   const lines = whats(stopLogOf(store, w))
   const lineOne = lines.filter(line => line.startsWith('stop heard:')).at(-1)
   expect(lineOne, 'the stop wrote its first line').toBeDefined()
-  const believed = /login (\S+) (?:believed )?in use/.exec(lineOne ?? '')?.[1]
-  expect(believed, 'line one names the believed login').toBe(want.believed)
-  const pointBack = lines.map(line => /login (\S+)'s(?: reset)?, not login (\S+)'s/.exec(line)).filter(m => m !== null).at(-1)
-  const owner = pointBack?.[1] ?? believed
-  expect(owner, 'the stop resolved this owner').toBe(want.owner)
+  expect(lineOne, 'line one names the believed login').toMatch(new RegExp(`login ${want.believed} (?:believed )?in use`))
+  expect(lineOne, 'line one never claims the login is in use').toMatch(/believed in use/)
+  const pointBacks = lines.map(line => /login (\S+)'s(?: reset)?, not login (\S+)'s: the move to/.exec(line)).filter(m => m !== null)
+  if (want.owner !== null && want.owner !== want.believed) expect(pointBacks.at(-1)?.[1], 'a point-back names the owner').toBe(want.owner)
+  else expect(pointBacks, 'no point-back where the stop is the believed login\'s or nobody\'s').toEqual([])
   const claims = lines.map(line => /login (\S+) in use/.exec(line)).filter(m => m !== null)
-  for (const claim of claims) expect(claim[1], `a line claims login ${claim[1]} in use`).toBe(owner)
-  if (believed !== owner) expect(lineOne).toMatch(/believed in use/)
+  for (const claim of claims) expect(claim[1], `a line claims login ${claim[1]} in use`).toBe(want.owner)
 }
 
 const CLASS_TITLE = 'STOP-LOG-OWNER class: every stop-log line that claims a login in use names the stop\'s resolved owner, on every path of the stop handler'
@@ -1372,6 +1381,46 @@ test(`${CLASS_TITLE}: a response since the switch proves the other login`, async
 
 test(`${CLASS_TITLE}: a wordless stop on an unproven switch`, async ($, on) => {
   const { w, store } = await stopDuringSwitch($, on, 61_000, 'Claude usage limit reached.')
+  expectEveryInUseClaimNamesOwner(store, w, { owner: '2', believed: '2' })
+})
+
+test(`${CLASS_TITLE}: a response both logins fit alike makes the stop nobody's`, async ($, on) => {
+  const w = fresh()
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  // Both logins' weeks reset at WEEK_RESET: a response carrying it is login 1's and login 2's alike.
+  w.usage['tok-1'] = [20, 30]
+  w.usage['tok-2'] = [10, 30]
+  const store = new Map<string, unknown>(Object.entries(TWO_LOGINS))
+  const clock = world(on, w, store)
+  await start($, clock)
+  await $.classic.StopFailure({ error: 'rate_limit' })
+  await clock.settle()
+  expect(slotValues(w), 'the first stop moves the session to login 2').toEqual([SLOT2])
+  await clock.advance(40_000)
+  w.limits = limitsOf(50, 40)
+  await respond($, clock, w)
+  await $.classic.StopFailure({ error: 'rate_limit' })
+  await clock.settle()
+  expect(slotValues(w), 'no point-back: the stop is nobody\'s').toEqual([SLOT2])
+  expect(['mark:2', 'week-mark:2', 'fable-mark:2'].map(key => store.get(key)), 'no mark on the login believed in use').toEqual([undefined, undefined, undefined])
+  // The first stop's line one is login 1's, believed; only the last stop's lines are judged against nobody.
+  const lines = whats(stopLogOf(store, w))
+  expect(lines.filter(line => /login 1 in use/.test(line)), 'no line claims login 1 in use').toEqual([])
+  expectEveryInUseClaimNamesOwner(store, w, { owner: null, believed: '2' })
+})
+
+test(`${CLASS_TITLE}: a stop on an owed resume`, async ($, on) => {
+  const w = fresh()
+  const { store, clock } = await owedWorld($, on, w)
+  await turnStops($, clock)
+  await clock.advance(36_000)
+  // The resume enters on login 2 and dies at once on the limit.
+  await $.turn.start({ text: w.submitted[0] ?? '', turnId: 'turn-carry' })
+  await $.classic.StopFailure({ error: 'rate_limit' })
+  await $.turn.complete({ turnId: 'turn-carry', reason: 'error', answer: '', durationMs: 1, isAborted: false })
+  await clock.settle()
+  expect(whats(stopLogOf(store, w)), 'the owed-resume line was reached').toContain('stop on owed resume: login 2 in use, no response since its switch, no mark')
   expectEveryInUseClaimNamesOwner(store, w, { owner: '2', believed: '2' })
 })
 
