@@ -1138,6 +1138,33 @@ test('111-D: a Connect visit that ends with no carry-on owed sends its line, tho
   expect(w.submitted, 'one submit, with the CONTINUE text').toEqual([expect.stringMatching(CONTINUE_90)])
 })
 
+test('111-R: a Connect visit whose forward move the policy refuses opens no visit, so with a carry-on owed it logs none (puma-9arph.111)', { timeoutMs: 30_000 }, async ($, on) => {
+  const w = fresh()
+  w.chrome = { extensions: [''] }
+  const { store, clock } = await loggedWorld(on, w, { 'chrome-account': '1' })
+  w.usage['tok-2'] = [100, 30]
+  await start($, clock)
+  w.usage['tok-1'] = [100, 41]
+  await $.classic.StopFailure(PLAIN)
+  await clock.settle()
+  const owed = whats(stopLogOf(store, w)).some(what => what.startsWith('no login left'))
+  // Claude Code's policy refuses each switch from here: the forward move to login 2 fails, inside connectingChrome.
+  w.refuseEnv = true
+  w.chrome.extensions.push(SLOT2)
+  const sets = w.envSets.length
+  const pane = await mountPane($)
+  await pane.press({ key: 'chrome-others' })
+  await clock.settle()
+  await pane.redraw()
+  void pane.press({ key: 'chrome-try-2' })
+  await settleReal(clock)
+  await steps90(clock, 2 * 60_000)
+  await pane.unmount()
+  const log = whats(stopLogOf(store, w))
+  expect(log.filter(what => what.startsWith('visit ended with a carry-on owed')), 'no line for a connect whose forward move was refused').toEqual([])
+  expect([owed, w.envSets.length - sets, log.filter(what => what.startsWith('moved to '))], 'a carry-on is owed; the move was refused, so nothing moved').toEqual([true, 0, []])
+})
+
 /**
  * puma-9arph.100 D1: as oldSubmitVisit95's world, with a submit S0 out at the visit's end, a person's turn, then the
  * debt's own carry-on S1 answered at once, and S0 answered after it. Answers the submits after the visit's end when
