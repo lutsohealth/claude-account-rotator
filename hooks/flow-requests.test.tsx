@@ -3169,17 +3169,57 @@ test('a boot drops a stop-log whose last entry is over 7 days old and keeps a fr
   expect(store.get('stop-log:fresh')).toEqual(fresh6)
 })
 
-test('a stop-log keeps only its last 50 entries (puma-9arph.34 B6)', async ($, on) => {
+test('a stop-log keeps its last 200 entries: the 51st to 200th stay and the 201st drops the oldest (puma-9arph.109.14)', async ($, on) => {
   const w = fresh()
   const { store, clock } = await loggedWorld(on, w, { 'rotate-to': 'off' })
   await start($, clock)
-  for (let i = 0; i < 30; i++) {
+  // The mark is made at start, so the seed lands after it; a recent `at` keeps the boot prune (already run) out of it.
+  const seeded = Array.from({ length: 199 }, (_, i) => ({ at: NOW - HOUR, what: `seed ${i + 1}` }))
+  store.set(`stop-log:${ownMark(w)}`, seeded)
+  await $.classic.StopFailure({ error: 'rate_limit' })
+  await clock.settle()
+  const entries = whats(stopLogOf(store, w))
+  expect(entries).toHaveLength(200)
+  expect(entries[0]).toBe('seed 2')
+  expect(entries).toContain('seed 51')
+  expect(entries).toContain('seed 199')
+  expect(entries.slice(-2)).toEqual([STOP_RATE_LIMIT, 'stayed: rotation off'])
+})
+
+// A stop-log line of each shape register.tsx's logStop writes in a stop's recovery, for logs of other sessions.
+const SAMPLE_STOP_LINES = [
+  STOP_RATE_LIMIT,
+  'read live before spent-old: 2',
+  PICKED_TWO,
+  'moved to 2 (by a stop)',
+  'carry-on queued',
+  'carry-on resolved',
+  'work resumed on login 2',
+  'own continue: armed',
+  'owed resume: Escape 1 of 2 (exit 0)',
+  'no login left: one carry-on at 2026-10-12T12:00:00.000Z',
+]
+
+test('31 stop-logs of 200 entries stay at about 400 KB of the 4 MiB store (puma-9arph.109.14)', async ($, on) => {
+  const MAX_BYTES = 512_000
+  const w = fresh()
+  const others = Object.fromEntries(
+    Array.from({ length: 30 }, (_, s) => [
+      `stop-log:session-other-${s}`,
+      Array.from({ length: 200 }, (_, i) => ({ at: NOW - HOUR, what: SAMPLE_STOP_LINES[i % SAMPLE_STOP_LINES.length] })),
+    ]),
+  )
+  const { store, clock } = await loggedWorld(on, w, { 'rotate-to': 'off', ...others })
+  await start($, clock)
+  for (let i = 0; i < 100; i++) {
     await $.classic.StopFailure({ error: 'rate_limit' })
     await clock.settle()
   }
-  const entries = whats(stopLogOf(store, w))
-  expect(entries).toHaveLength(50)
-  expect(entries.slice(-2)).toEqual([STOP_RATE_LIMIT, 'stayed: rotation off'])
+  expect(stopLogOf(store, w)).toHaveLength(200)
+  const keys = [...store.keys()].filter(k => k.startsWith('stop-log:'))
+  expect(keys).toHaveLength(31)
+  const size = keys.reduce((sum, k) => sum + JSON.stringify(store.get(k)).length, 0)
+  expect(size).toBeLessThanOrEqual(MAX_BYTES)
 })
 
 // RULING 6007: the stop-log holds what happened, never a secret.
