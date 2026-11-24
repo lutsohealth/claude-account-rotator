@@ -57,6 +57,8 @@ export type World = {
   throwing?: string[]
   /** access token -> when its week resets, as its usage body says; `WEEK_RESET` where unset */
   weekResets?: Record<string, string>
+  /** access token -> the `five_hour` value its usage body carries, as given (`undefined` leaves the field out), over what `usage` says */
+  fiveHourBody?: Record<string, unknown>
   /** access token -> when its 5-hour window resets, as its usage body says; 12:00Z on the test's day where unset */
   fiveHourResets?: Record<string, string>
   /** access token -> the HTTP status the profile endpoint fails with, where it fails */
@@ -405,7 +407,7 @@ export function world(on: On, w: World, store: Record<string, unknown> | Map<str
     if (usage === undefined) return { value: { status: 401, ok: false, headers: {}, text: '' } }
     const [five, week, fable] = usage
     const body = {
-      five_hour: five === null ? null : { utilization: five, resets_at: w.fiveHourResets?.[token] ?? '2026-10-12T12:00:00Z' },
+      five_hour: w.fiveHourBody !== undefined && token in w.fiveHourBody ? w.fiveHourBody[token] : five === null ? null : { utilization: five, resets_at: w.fiveHourResets?.[token] ?? '2026-10-12T12:00:00Z' },
       seven_day: week === null ? null : { utilization: week, resets_at: w.weekResets?.[token] ?? WEEK_RESET },
       // A row for another model beside the Fable one, spent: read as Fable's, it would show.
       ...(fable === undefined ? {} : { limits: [limitRow('Sonnet', 100), limitRow('Fable 5.1', fable, w.fableResetsBy?.[token] ?? w.fableResets)] }),

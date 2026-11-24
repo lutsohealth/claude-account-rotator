@@ -6,14 +6,15 @@
 export type UsageWindow = { pct: number; resetsAt?: string; isStop?: true; at?: number }
 
 /**
- * A login's usage as last read, `at` in epoch milliseconds. `fable` is the
+ * A login's usage as last read, `at` in epoch milliseconds. `startedAt` is when a body's request began; a reading
+ * without it is treated as begun at `at`. `fable` is the
  * Fable week, which only the usage endpoint lists: a response never reports it.
  * `noFiveHour` where the usage endpoint listed no 5-hour window: the account
  * has none, as a verified Ultra account, so no stop marks one on it. A view's
  * reading carries it from `View.noFiveHour`; a stored one does not. `by` is the login whose sign-in produced the
  * read; a stored reading without it, or naming another login, is no login's and is not read back.
  */
-export type Reading = { fiveHour?: UsageWindow; sevenDay?: UsageWindow; fable?: UsageWindow; noFiveHour?: true; at: number; by?: string; v?: number; src?: ReadingSource }
+export type Reading = { fiveHour?: UsageWindow; sevenDay?: UsageWindow; fable?: UsageWindow; noFiveHour?: true; at: number; startedAt?: number; by?: string; v?: number; src?: ReadingSource }
 
 /**
  * A usage body read of a login's windows, under its own store key `usage-body:<id>:<read time>:<session mark>`, written once
