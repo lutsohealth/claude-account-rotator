@@ -53,9 +53,11 @@ const SETTLE_90 = 35_000
  * own text (`nudge`). Connect's line writes no line of its own, so a submit no mark labels is `visit`, but after a nudge,
  * where the carry-on after the nudge writes none either (`unknown`). It throws, quoting the log, where two marks fit one
  * submit, or where a held or turned-away line, which three paths write, lands at an armed mark's moment. Not proven: an
- * entry of another path in the same millisecond as a mark's pairing is taken as that mark's; and the stop-log keeps its
- * last 200 entries, so a longer world reads the wrong submit's text for the nudge. The kit cannot read a submit's call
- * site: its hook's stack holds the kit's frames and the engine's alone.
+ * entry of another path in the same millisecond as a mark's pairing is taken as that mark's; an entry stamped late, as
+ * where the stop-log's write waits on a view or store read a test holds across a clock step, misses its mark's moment,
+ * so the mark is dropped and the submit reads `visit` (the log cannot tell that from a carryOn that wrote no line); and
+ * the stop-log keeps its last 200 entries, so a longer world reads the wrong submit's text for the nudge. The kit cannot
+ * read a submit's call site: its hook's stack holds the kit's frames and the engine's alone.
  */
 function sendersOf90(entries: readonly StopLogEntry[], submitted: readonly string[]): string[] {
   const senders: string[] = []
@@ -128,6 +130,8 @@ test('111-S4: no armed mark outlives its own moment: one whose outcome wrote no 
   const worlds: { log: { at: number; what: string }[]; truth: string[] }[] = [
     { log: [{ at: 0, what: 'carry-on armed' }, { at: 120_000, what: 'carry-on queued' }], truth: ['visit'] },
     { log: [{ at: 0, what: 'carry-on armed' }, { at: 10_000, what: 'a login is free: carry-on on 2' }, { at: SETTLE_90, what: 'carry-on queued' }, { at: 70_000, what: 'carry-on queued' }], truth: ['stop', 'visit'] },
+    // A mark with no outcome before a later one: dropped once its moment passes, it does not hide the later mark (puma-9arph.112).
+    { log: [{ at: 0, what: 'carry-on armed' }, { at: 40_000, what: 'carry-on armed' }, { at: 40_000 + SETTLE_90, what: 'carry-on queued' }], truth: ['stop'] },
   ]
   const wrong = worlds.filter(w => JSON.stringify(sendersOf90(w.log, w.truth.map(() => 'continue'))) !== JSON.stringify(w.truth))
   expect(worlds.length).toBeGreaterThan(0)
