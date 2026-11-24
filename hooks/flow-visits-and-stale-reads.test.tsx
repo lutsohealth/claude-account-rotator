@@ -926,6 +926,57 @@ test('90-U3: a connect the refresh guard ends before a visit opens, with a carry
   expect(log.filter(what => what.startsWith('visit ended with a carry-on owed')), 'no line for a visit that never opened').toEqual([])
 })
 
+// puma-9arph.110 A1: a guarded connect waits on the read of the login in use's token. A stop whose words name the other
+// login's reset points the session there while it waits: a move the visit did not make, with a carry-on already owed.
+async function guardedConnectWithStop110($: Engine, on: On) {
+  const w = fresh()
+  w.chrome = { extensions: [''] }
+  w.keychain['Claude Code-credentials'] = blob('tok-1')
+  w.keychain[await keychainItem(SLOT2)] = blob('tok-2')
+  w.usage['tok-1'] = [20, 30, 100]
+  w.usage['tok-2'] = [100, 30, 100]
+  w.fableResetsBy = { 'tok-1': FABLE_RESET, 'tok-2': FABLE_RESET_2 }
+  const store = new Map<string, unknown>(Object.entries({ ...TWO_LOGINS, 'chrome-account': '1' }))
+  const clock = world(on, w, store)
+  await start($, clock)
+  // Every login is spent: the first stop owes a carry-on.
+  w.usage['tok-1'] = [100, 41, 100]
+  await $.classic.StopFailure(PLAIN)
+  await clock.settle()
+  // The login in use refreshes its token in 5 minutes: the guard holds a connect to another account.
+  w.keychain['Claude Code-credentials'] = blob('tok-1', clock.now() + 5 * 60_000)
+  w.chrome.extensions.push(SLOT2)
+  const pane = await mountPane($)
+  await pane.press({ key: 'chrome-others' })
+  await clock.settle()
+  await pane.redraw()
+  let open: () => void = () => undefined
+  const gate = new Promise<void>(resolve => {
+    open = resolve
+  })
+  let reads = 0
+  w.beforeKeychain = () => (reads++ === 0 ? gate : Promise.resolve())
+  void pane.press({ key: 'chrome-try-2' })
+  await settleReal(clock)
+  void $.classic.StopFailure(STOP_NAMING_2)
+  await settleReal(clock)
+  const staged = whats(stopLogOf(store, w))
+  open()
+  await settleReal(clock)
+  await steps90(clock, 2 * 60_000)
+  await pane.unmount()
+  return { staged, log: whats(stopLogOf(store, w)) }
+}
+
+test('90-U4: a move the visit did not make lands while a guarded connect waits on its read, with a carry-on owed, and logs no visit (puma-9arph.110)', { timeoutMs: 30_000 }, async ($, on) => {
+  const { staged, log } = await guardedConnectWithStop110($, on)
+  expect(staged.some(what => what.startsWith('moved to 2 (by a point-back')), 'a stop pointed the session back while the connect waited').toBe(true)
+  expect(staged.some(what => what.startsWith('no login left')), 'a carry-on is owed').toBe(true)
+  expect(staged.at(-1), 'the stop met the connect under way').toBe('stayed: Claude in Chrome is connecting')
+  expect(log.some(what => what.includes('Claude in Chrome visit')), 'no visit opened').toBe(false)
+  expect(log.filter(what => what.startsWith('visit ended with a carry-on owed')), 'no line for a visit that never opened').toEqual([])
+})
+
 /**
  * puma-9arph.100 D1: as oldSubmitVisit95's world, with a submit S0 out at the visit's end, a person's turn, then the
  * debt's own carry-on S1 answered at once, and S0 answered after it. Answers the submits after the visit's end when
