@@ -978,6 +978,44 @@ test('90-U4: a move the visit did not make lands while a guarded connect waits o
   expect(log.filter(what => what.startsWith('visit ended with a carry-on owed')), 'no line for a visit that never opened').toEqual([])
 })
 
+test('90-U6: a Connect visit whose forward move landed and which then throws, with a carry-on owed, still logs its line once (puma-9arph.110)', { timeoutMs: 30_000 }, async ($, on) => {
+  const w = fresh()
+  w.chrome = { extensions: [''] }
+  const { store, clock } = await loggedWorld(on, w, { 'chrome-account': '1' })
+  // The view's note of what Chrome answered as login 2 is refused once: the visit throws after it moved.
+  let isNoted = false
+  let isRefused = false
+  on('state.set', async (_$, e, next) => {
+    const { key, value } = e as unknown as { key: string; value: View }
+    if (key === 'view' && value.chrome?.as === '2' && !isNoted) {
+      isNoted = true
+      isRefused = true
+      return { deny: 'state: refused' } as unknown as Awaited<ReturnType<typeof next>>
+    }
+    return next(e)
+  })
+  w.usage['tok-2'] = [100, 30]
+  await start($, clock)
+  w.usage['tok-1'] = [100, 41]
+  await $.classic.StopFailure(PLAIN)
+  await clock.settle()
+  const owed = whats(stopLogOf(store, w)).some(what => what.startsWith('no login left'))
+  w.chrome.extensions.push(SLOT2)
+  const pane = await mountPane($)
+  await pane.press({ key: 'chrome-others' })
+  await clock.settle()
+  await pane.redraw()
+  void pane.press({ key: 'chrome-try-2' })
+  await settleReal(clock)
+  await steps90(clock, 2 * 60_000)
+  await pane.unmount()
+  const log = whats(stopLogOf(store, w))
+  expect(owed, 'a carry-on is owed').toBe(true)
+  expect(isRefused, 'the visit threw').toBe(true)
+  expect(log.filter(what => what.startsWith('moved to 2 (by a Claude in Chrome visit')), 'the visit moved forward').toHaveLength(1)
+  expect(log.filter(what => what.startsWith('visit ended with a carry-on owed')), 'one line for the visit that threw').toEqual([expect.stringMatching(/^visit ended with a carry-on owed: \d+ turns, \d+ submits, \d+ nudges, \d+ refusals$/)])
+})
+
 test('90-U5: a connect on the account in use moves nothing, so with a carry-on owed it logs no visit (puma-9arph.110, ruling 8777)', { timeoutMs: 30_000 }, async ($, on) => {
   const w = fresh()
   // No browser answers as it opens, so the band offers Connect; one answers by the time it is pressed.
