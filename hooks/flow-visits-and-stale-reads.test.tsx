@@ -816,6 +816,25 @@ test('90-X: the carry-on owed after a Connect visit, refused once a later refres
   expect(r.carried, 'carry-ons of the work after the visit ended that went through').toBe(1)
 })
 
+test('90-U2: a Connect visit that pairs for a browser call it held, with a carry-on owed at its end, logs the visit too (puma-9arph.105)', { timeoutMs: 30_000 }, async ($, on) => {
+  const w = fresh()
+  w.chrome = { extensions: [''] }
+  const { store, clock } = await loggedWorld(on, w, { 'chrome-account': '1' })
+  const { pane, endVisit, isCut } = await owedVisitStart90($, w, store, clock)
+  // A browser tool call while the visit runs is held, and waits on the visit: it connects as the visit's account.
+  const browsing = browse($, 'navigate', { url: 'https://example.com' })
+  await settleReal(clock)
+  endVisit()
+  await settleReal(clock)
+  await turnsFor90($, clock, w, 4 * 60_000)
+  await pane.unmount()
+  await browsing
+  const log = whats(stopLogOf(store, w))
+  expect(isCut, 'the visit cut the stop').toBe(true)
+  expect(w.submitted.some(text => text.startsWith('Claude in Chrome is connected')), 'the visit paired and sent its connected line').toBe(true)
+  expect(log.filter(what => what.startsWith('visit ended with a carry-on owed')), 'one line, though the visit connected').toHaveLength(1)
+})
+
 /**
  * puma-9arph.100 D1: as oldSubmitVisit95's world, with a submit S0 out at the visit's end, a person's turn, then the
  * debt's own carry-on S1 answered at once, and S0 answered after it. Answers the submits after the visit's end when
