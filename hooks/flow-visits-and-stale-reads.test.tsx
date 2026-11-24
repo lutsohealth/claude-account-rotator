@@ -795,6 +795,13 @@ test('90-U: the carry-on owed after a Connect visit, dropped once a later refres
   const r = await nudgedDebt100($, on, 'drop')
   expect([r.isCut, r.isNudgeAfterS1, r.isS1Answered, r.log.includes('carry-on drop'), r.phase], 'the visit cut the stop; the nudge after the owed one, which dropped; the hold dropped').toEqual([true, true, true, true, 'hold dropped'])
   expect(r.carried, 'carry-ons of the work after the visit ended that went through').toBe(1)
+  // puma-9arph.105: the stop-log shows the visit ended with a carry-on owed, then what the backup line did.
+  const owed = r.log.findIndex(what => what.startsWith('visit ended with a carry-on owed'))
+  expect(r.log.filter(what => what.startsWith('visit ended with a carry-on owed')), 'one line, with the counters at the visit end').toEqual([
+    'visit ended with a carry-on owed: 2 turns, 1 submits, 0 nudges, 0 refusals',
+  ])
+  expect(owed, 'the visit line stands before the backup line waits').toBeLessThan(r.log.indexOf('carry-on waits on the one owed'))
+  expect(r.log.lastIndexOf('carry-on queued'), 'the backup line went after the owed one dropped').toBeGreaterThan(r.log.indexOf('carry-on drop'))
 })
 
 test('90-V: the carry-on owed after a Connect visit, answered once a later refresh nudge went: no second line (puma-9arph.100)', async ($, on) => {
