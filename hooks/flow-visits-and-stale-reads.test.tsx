@@ -870,6 +870,64 @@ test('90-W: a submit out at a Connect visit\'s end answers after the carry-on ow
   expect(r.carried, 'carry-ons after the visit ended').toBe(1)
 })
 
+/**
+ * puma-9arph.102: as oldCleanVisit100's world, with the older submit S0 never answered and no main turn since the
+ * visit's end. The debt's own carry-on at 10:20 answers clean at once. Answers the carry-ons after the visit's end that
+ * were sent, and whether the line stood down.
+ */
+async function oldOpenVisit102($: Engine, on: On) {
+  const w = fresh()
+  w.chrome = { extensions: [''] }
+  w.keychain[await keychainItem(SLOT3)] = blob('tok-3')
+  w.usage['tok-3'] = [10, 30]
+  w.fiveHourResets = { 'tok-1': '2026-10-12T10:20:00Z', 'tok-2': '2026-10-12T10:20:00Z', 'tok-3': '2026-10-12T10:20:00Z' }
+  const { store, clock } = await loggedWorld(on, w, { ...THREE_LOGINS, 'chrome-account': '1' })
+  w.usage['tok-2'] = [100, 30]
+  await start($, clock)
+  // The first submit is held for good: its answer never comes.
+  answerNextLate(w, 'resolve')
+  w.usage['tok-1'] = [100, 41]
+  await $.classic.StopFailure(PLAIN)
+  await settleReal(clock)
+  await steps90(clock, 60_000)
+  const old = w.submitted.length
+  w.usage['tok-3'] = [100, 30]
+  await $.turn.start({ text: 'a turn on login 3', turnId: '102-on-3' })
+  await $.classic.StopFailure(PLAIN)
+  await $.turn.complete({ turnId: '102-on-3', reason: 'error', answer: '', durationMs: 1, isAborted: false })
+  await settleReal(clock)
+  const { pane, isCut } = await cutVisit95($, w, store, clock)
+  const atEnd = w.submitted.length
+  let started = w.submitted.length
+  while (clock.now() < at95('10:24:00')) {
+    await clock.advance(clock.now() < at95('10:19:00') ? 60_000 : 10_000)
+    await clock.settle()
+    while (started < w.submitted.length) {
+      started += 1
+      // The debt's own submit answers clean and its turn does not start: no main turn since the visit's end.
+      if (started === atEnd + 1) continue
+      await $.turn.start({ text: w.submitted[started - 1] ?? '', turnId: `102-${started}` })
+      await clock.settle()
+    }
+  }
+  await pane.unmount()
+  const log = whats(stopLogOf(store, w))
+  return {
+    old,
+    isCut,
+    carried: w.submitted.length - atEnd,
+    isStoodDown: log.includes('carry-on not sent: the one owed went'),
+    isTurnedAway: log.includes('carry-on not sent again: one is queued'),
+  }
+}
+
+test('90-W2: the carry-on owed answered clean, no main turn since, an older submit still out: the line stands down (puma-9arph.102)', async ($, on) => {
+  const r = await oldOpenVisit102($, on)
+  expect([r.old, r.isCut], 'one submit out at the visit end, never answered; the visit cut the stop').toEqual([1, true])
+  expect(r.carried, 'carry-ons of the work after the visit ended').toBe(1)
+  expect([r.isStoodDown, r.isTurnedAway], 'the line stood down, and was not turned away behind the carry-on owed').toEqual([true, false])
+})
+
 // ---------------------------------------------------------------- no leaving a login while the session works on it
 
 /** The one stop-log line a hold writes, once for as long as the hold lasts. */
