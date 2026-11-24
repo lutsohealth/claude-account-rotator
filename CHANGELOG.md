@@ -2,6 +2,13 @@
 
 What each version of the account rotator changed. To get each one as Claude Code starts, turn on auto-update: in `/plugin`, open **Marketplaces**, pick **claude-account-rotator** and choose **Enable auto-update**. To update by hand, run `claude plugin marketplace update claude-account-rotator`, then `claude plugin update account-rotator@claude-account-rotator`, and start a new session.
 
+## 0.5.54-lutso.1 - 2026-11-24
+
+- **The stop-log keeps more**: each session's stop-log keeps its last 200 entries, up from 50 (#169).
+- **The stop-log's first line says what is known**: a stop's first line now reads `login N believed in use`. It is written before the mod decides which login the stop came from, and it no longer calls that login the one in use (#170).
+- **A read that crosses a switch or a stop counts by when it began**: a usage read that began before a switch and ended after it no longer stands in for the switch's own read, so the switch reads the login again. When a stop on an unproven switch is given back, its "no 5-hour window" change stands only on a read that began after the stop or that listed a 5-hour window (#171).
+- **Not fixed yet**: a stale usage read 5 or more points low can end a "spent" mark early, which costs one failed turn and marks the login again. The items listed under 0.5.52-lutso.1 still stand.
+
 ## 0.5.53-lutso.1 - 2026-11-23
 
 - **A limit stop is charged to the login it came from**: the reset time in Claude Code's own message names the login. A move that did not land no longer marks or uses up the login the mod believed it was on, and the session is pointed back (#161).
