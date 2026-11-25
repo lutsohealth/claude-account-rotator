@@ -4420,7 +4420,7 @@ export const register: Register = on => {
   on('ui.render', { component: 'SessionMode' }, async ($, e, next) => {
     const view = await getView($)
     if (view.accounts.length === 0) return next(e)
-    return Footer($.ui.resolve(e), view, e.props.modes, await $.clock.now(), actions($))
+    return Footer($.ui.resolve(e), view, await next(e), await $.clock.now(), actions($))
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {

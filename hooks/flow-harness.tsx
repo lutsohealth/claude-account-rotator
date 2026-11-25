@@ -557,6 +557,15 @@ export const fresh = (system: World['system'] = 'macOS'): World => ({
   commands: [],
 })
 
+/** Stands for what is drawn beneath the footer: Claude Code's mode labels and any mod that loads after this one. */
+export function drawBeneath(on: On) {
+  on('ui.render', { component: 'SessionMode' }, ($, e) => {
+    const { Text } = $.ui.resolve(e)
+
+    return <Text>beneath: {e.props.modes.join(' & ')}</Text>
+  })
+}
+
 export const TWO_LOGINS ={ accounts: [{ id: '1', slot: '', email: 'one@example.com' }, { id: '2', slot: SLOT2, email: 'two@example.com' }] }
 
 /** What a refused switch says in the world's session, on login 1, Claude Code's login. */

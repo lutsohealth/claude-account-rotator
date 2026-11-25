@@ -1,16 +1,6 @@
 import { expect } from 'claude-code/testing'
-import type { On } from 'claude-code'
-import { GLYPHS, SLOT2, TWO_LOGINS, blob, fresh, start, test, world } from './flow-harness'
+import { GLYPHS, SLOT2, TWO_LOGINS, blob, drawBeneath, fresh, start, test, world } from './flow-harness'
 import { keychainItem } from './model'
-
-// Stands for what is drawn beneath the footer: Claude Code's mode labels and any mod that loads after this one.
-function drawBeneath(on: On) {
-  on('ui.render', { component: 'SessionMode' }, ($$, e) => {
-    const { Text } = $$.ui.resolve(e)
-
-    return <Text>beneath: {e.props.modes.join(' & ')}</Text>
-  })
-}
 
 test('the footer keeps what is drawn beneath it, beside the accounts, and draws each mode label once', async ($, on) => {
   const w = fresh()
