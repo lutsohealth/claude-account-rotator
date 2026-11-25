@@ -2968,6 +2968,27 @@ test('a Chrome opened later on an account the box hasn\'t listed is a press away
   await pane.unmount()
 })
 
+/**
+ * puma-9arph.99: the host's notice shows 3 lines of 40 columns, cutting the rest with an ellipsis (a probe pane of 179
+ * columns, Claude Code 2.1.331). `text` laid out as the notice wraps it, word by word.
+ */
+function noticeLines(text: string, width = 40): string[] {
+  const lines: string[] = []
+  for (const word of text.split(' ')) {
+    const last = lines.at(-1)
+    if (last !== undefined && last.length + 1 + word.length <= width) lines[lines.length - 1] = `${last} ${word}`
+    else lines.push(word)
+  }
+  return lines
+}
+
+const NO_BROWSER_TWO = 'No Chrome extension answers as two@example.com. Check its Claude extension is signed in.'
+
+test('99-A: the notice that no Chrome extension answers shows its step and account whole in the host\'s 3 lines of 40 columns, for an email up to 39 characters (puma-9arph.99)', () => {
+  const longest = NO_BROWSER_TWO.replace('two@example.com', `${'x'.repeat(27)}@example.com`)
+  expect([noticeLines(NO_BROWSER_TWO).length <= 3, noticeLines(longest).length <= 3, noticeLines(longest).every(l => l.length <= 40)]).toEqual([true, true, true])
+})
+
 test('Try to connect as an account no Chrome answers as changes nothing: the box keeps the accounts that answered, lists none that didn\'t as active, and Claude in Chrome goes back to the one picked before', async ($, on) => {
   const w = fresh()
   w.chrome = { extensions: [''] }
@@ -2987,10 +3008,7 @@ test('Try to connect as an account no Chrome answers as changes nothing: the box
   expect(slots(w)).toEqual([SLOT2])
   await clock.advance(36_000)
   expect(w.chromeAsked).toEqual(['', SLOT2])
-  expect(w.toasts).toContain(
-    'No Chrome extension answers as Claude account two@example.com. Open Chrome and check its Claude extension is signed in with that email; if it is, restart Chrome and try again. ' +
-      'Claude in Chrome goes back to one@example.com.',
-  )
+  expect(w.toasts).toContain(NO_BROWSER_TWO)
   // Back on login 1, Claude in Chrome connects there again once the move lands.
   expect(slots(w)).toEqual([SLOT2, ''])
   await clock.advance(36_000)
@@ -3032,10 +3050,7 @@ test('Use for Chrome on a listed account whose Chrome has closed since finds no 
   expect(slots(w)).toEqual([SLOT2])
   await clock.advance(36_000)
   expect(w.chromeAsked).toEqual(['', SLOT2])
-  expect(w.toasts).toContain(
-    'No Chrome extension answers as Claude account two@example.com. Open Chrome and check its Claude extension is signed in with that email; if it is, restart Chrome and try again. ' +
-      'Claude in Chrome goes back to one@example.com.',
-  )
+  expect(w.toasts).toContain(NO_BROWSER_TWO)
   expect(slots(w)).toEqual([SLOT2, ''])
   await clock.advance(36_000)
   expect(w.chromeAsked).toEqual(['', SLOT2, ''])
@@ -3408,7 +3423,7 @@ test('a Connect that finds no browser says to check Chrome and its extension\'s 
   await band.unmount()
   await clock.advance(36_000)
   expect(w.commands).toEqual(['/mcp reconnect claude-in-chrome'])
-  expect(w.toasts).toContain('No Chrome extension answers as Claude account one@example.com. Open Chrome and check its Claude extension is signed in with that email; if it is, restart Chrome.')
+  expect(w.toasts).toContain(NO_BROWSER_TWO.replace('two@', 'one@'))
   expect(slots(w)).toEqual(['', SLOT2, '', SLOT2])
   await clock.advance(36_000)
   expect(w.submitted).toEqual([])
