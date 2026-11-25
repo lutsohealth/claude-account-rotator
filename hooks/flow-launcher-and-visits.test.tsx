@@ -1363,6 +1363,67 @@ test('89-I: a stop during the wait after a thrown Connect visit that moved carri
 })
 
 /**
+ * puma-9arph.94: a Connect visit to login 3 that a stop cuts and that then throws, with one step of its tail held on a
+ * gate: the move back's slot write (`back`, held from just after the forward move landed) or the visit's closing view
+ * write (`close`). The engine and the store set no limit on either, so the gate stands for one that never answers.
+ */
+async function hungTail94($: Engine, on: On, hold: 'back' | 'close') {
+  const r = await visitTailWorld($, on, '3')
+  r.k.isNoteRefused = true
+  const held = gate89()
+  if (hold === 'close') r.k.closeHold = held.p
+  const pressedAt = r.clock.now()
+  void r.pane.press({ key: 'chrome-try-3' })
+  await settleReal(r.clock)
+  const forward = r.loginOf(r.w.envSets.at(-1)?.value)
+  if (hold === 'back') r.w.beforeEnv = () => held.p
+  void $.classic.StopFailure(PLAIN)
+  await settleReal(r.clock)
+  await r.minutes(3)
+  return { r, held, pressedAt, forward }
+}
+
+test('94-A: a thrown Connect visit whose move back never answers sends the carry-on once within the bound, and closes the visit (puma-9arph.94)', async ($, on) => {
+  const { r, held, pressedAt, forward } = await hungTail94($, on, 'back')
+  const sends = r.k.sends.slice(r.before)
+  const closed = r.k.last?.chromeConnecting
+  // The visit flag cleared: a later Connect visits again.
+  await r.pane.redraw()
+  void r.pane.press({ key: 'chrome-try-3' })
+  await settleReal(r.clock)
+  const again = r.k.last?.chromeConnecting
+  held.open()
+  await r.minutes(1)
+  await r.pane.unmount()
+  expect(forward, 'the forward move landed before the hold').toBe('3')
+  // On login 3: the move back never landed, so the send goes where a failed move back leaves the session (89-G).
+  expect([sends, closed], 'one carry-on, on login 3, the visit closed').toEqual([['3'], undefined])
+  // The visit's own wait (35 s), the move back's bound and the tail's (30 s each), the settle (35 s), one 15 s step.
+  expect((r.k.sentAt[r.before] ?? Infinity) - pressedAt, 'sent within the bounds').toBeLessThanOrEqual(145_000)
+  expect(again, 'a later Connect visits').toBe('3')
+})
+
+test('94-B: a thrown Connect visit whose closing write never answers sends the carry-on once (puma-9arph.94)', async ($, on) => {
+  const { r, held } = await hungTail94($, on, 'close')
+  const sends = r.k.sends.slice(r.before)
+  held.open()
+  await r.minutes(3)
+  await r.pane.unmount()
+  expect(sends, 'one carry-on, back on login 2, the closing write still held').toEqual(['2+visit'])
+  expect(r.w.submitted.length - r.before, 'none more once the closing write lands late').toBe(1)
+})
+
+test('94-C: a thrown Connect visit\'s move back that answers after the bound lands late and sends nothing more (puma-9arph.94)', async ($, on) => {
+  const { r, held } = await hungTail94($, on, 'back')
+  const before = r.k.sends.slice(r.before)
+  held.open()
+  await r.minutes(3)
+  await r.pane.unmount()
+  const after = [r.k.sends.slice(r.before), r.loginOf(r.w.envSets.at(-1)?.value), r.k.last?.chromeConnecting]
+  expect([before, after], 'one carry-on on login 3; then the late move back lands on login 2, the visit still closed').toEqual([['3'], [['3'], '2', undefined]])
+})
+
+/**
  * puma-9arph.89 (Codex round 1, PairedTailRead): a browser call that found no browser connects Claude in Chrome as login
  * 2, which pairs; every view read after the visit's close is refused, and with `isCloseRefused` the close too. The
  * tail's maybeRotate reads the view first, so these tests also hold its catch: either catch removed, nothing is sent.
