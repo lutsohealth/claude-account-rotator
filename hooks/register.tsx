@@ -1162,10 +1162,10 @@ const oauthHeaders = (accessToken: string) => ({
 
 const LATE: unique symbol = Symbol('late')
 
-/** A read's answer, or a throw named `name` once READ_TIMEOUT_MS passes with none: a late answer is never read. */
-async function answerWithin<T>($: Host, name: string, read: Promise<T>): Promise<T> {
-  const answer = await Promise.race([read, $.clock.sleep(READ_TIMEOUT_MS).then((): typeof LATE => LATE)])
-  if (answer === LATE) throw Object.assign(new Error(`no answer in ${READ_TIMEOUT_MS} ms`), { name })
+/** A read's answer, or a throw named `name` once `ms` passes with none: a late answer is never read. */
+async function answerWithin<T>($: Host, name: string, read: Promise<T>, ms = READ_TIMEOUT_MS): Promise<T> {
+  const answer = await Promise.race([read, $.clock.sleep(ms).then((): typeof LATE => LATE)])
+  if (answer === LATE) throw Object.assign(new Error(`no answer in ${ms} ms`), { name })
   return answer
 }
 
@@ -2097,7 +2097,8 @@ function carryOnAfterSettle($: Host, owed: CarryOn): void {
 /**
  * How long a switch waits on the one running before it takes the switch over. It is longer than the 10 s of the keychain
  * read and the CHROME_WAIT_MS of Claude in Chrome, the limits a switch's own steps carry; the engine's env set and the
- * store have none, so a switch that never ends must not hold every later press for ever.
+ * store have none, so a switch that never ends must not hold every later press for ever. A thrown Connect visit's move
+ * back, and the tail before its carry-on, are held to it too (puma-9arph.94).
  */
 const SWITCH_WAIT_MS = 30_000
 /** The run of the switch or point-back this module started and still owns, awaited by a switch that waits on it. */
@@ -3469,14 +3470,23 @@ function connectChrome($: Host, isQuiet = false, tryId?: string): Promise<Chrome
     // open none: one the refresh guard ends, one whose forward move fails, and one on the account in use, which moves
     // nothing and is kept so on purpose (RULING 8777). Another move landing meanwhile (a point-back) is no visit.
     const isVisitOpened = visit.isMoved
-    try {
-      await setView($, v => ({ ...v, chromeConnecting: undefined }))
-    } catch (error) {
-      failure ??= { error }
-    }
     let isRotated = false
+    const tail = async (): Promise<void> => {
+      try {
+        await setView($, v => ({ ...v, chromeConnecting: undefined }))
+      } catch (error) {
+        failure ??= { error }
+      }
+      try {
+        isRotated = await maybeRotate($)
+      } catch (error) {
+        failure ??= { error }
+      }
+    }
+    // A store write or env set that never answers would lose the carry-on: the tail is bounded, and one that answers
+    // after the bound lands after the send (puma-9arph.94).
     try {
-      isRotated = await maybeRotate($)
+      await answerWithin($, 'VisitTailTimedOut', tail(), SWITCH_WAIT_MS)
     } catch (error) {
       failure ??= { error }
     }
@@ -3610,19 +3620,21 @@ async function connectingChrome(
     }
   } catch (error) {
     // Back while the visit still holds the session: a stop meanwhile hands its carry-on to the visit, not to a timer
-    // this move would skip. Where the move back fails, the carry-on still goes, on the login the session is on.
-    if (isVisit) await leaveVisit($, from).catch(e => debug($, `move back after a failed visit failed: ${String(e)}`))
+    // this move would skip. Where the move back fails, or does not answer within SWITCH_WAIT_MS (puma-9arph.94), the
+    // carry-on still goes, on the login the session is on.
+    if (isVisit) {
+      await answerWithin($, 'VisitMoveBackTimedOut', leaveVisit($, from), SWITCH_WAIT_MS).catch(e =>
+        debug($, `move back after a failed visit failed: ${String(e)}`),
+      )
+    }
     throw error
   }
   if (isVisit) await leaveVisit($, from)
   if (!isQuiet && answer === 'paired') tell($, `Claude in Chrome is connected as ${claudeAccount(target, view.accounts)}.`)
+  // The host's notice shows 3 lines of 40 columns and cuts the rest: the step and the account fit whole for an email up
+  // to 39 characters (puma-9arph.99). The band and the Chrome box say the rest: restart Chrome, the account gone back to.
   if (!isQuiet && answer === 'unpaired') {
-    const back = isTrial ? view.accounts.find(a => a.id === view.chromeAccountId) : undefined
-    tell(
-      $,
-      `No Chrome extension answers as ${claudeAccount(target, view.accounts)}. Open Chrome and check its Claude extension is signed in with that email; if it is, restart Chrome${isTrial ? ' and try again' : ''}.` +
-        (back === undefined ? '' : ` Claude in Chrome goes back to ${label(back, view.accounts)}.`),
-    )
+    tell($, `No Chrome extension answers as ${label(target, view.accounts)}. Check its Claude extension is signed in.`)
   }
   return { target, answer, isVisit }
 }

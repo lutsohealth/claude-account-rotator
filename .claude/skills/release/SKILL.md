@@ -12,6 +12,7 @@ Claude Code updates an installed plugin only when the `version` in `.claude-plug
 - On a branch cut from `origin/main`: `git fetch origin && git switch -c <branch> origin/main`. Everything merged to `main` goes out with the release.
 - Nothing uncommitted. Work another session left uncommitted gets a commit of its own on its own branch first, with a message that says what it does, never in the release branch. If that session is still busy (`ListAgents`), ask the user before committing its work.
 - The three checks of the README's **Develop** section pass.
+- The checks ran at the Claude Code version this machine runs, as CI installs the newest: quote `claude --version` and the last line of the local `claude plugin validate .` and `claude plugin test .` in the release pull request's body.
 
 ## 2. Pick the version
 
