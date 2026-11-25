@@ -3471,7 +3471,6 @@ function connectChrome($: Host, isQuiet = false, tryId?: string): Promise<Chrome
     // nothing and is kept so on purpose (RULING 8777). Another move landing meanwhile (a point-back) is no visit.
     const isVisitOpened = visit.isMoved
     let isRotated = false
-    let isTailDone = false
     const tail = async (): Promise<void> => {
       try {
         await setView($, v => ({ ...v, chromeConnecting: undefined }))
@@ -3483,7 +3482,6 @@ function connectChrome($: Host, isQuiet = false, tryId?: string): Promise<Chrome
       } catch (error) {
         failure ??= { error }
       }
-      isTailDone = true
     }
     // A store write or env set that never answers would lose the carry-on: the tail is bounded, and one that answers
     // after the bound lands after the send (puma-9arph.94).
@@ -3492,8 +3490,7 @@ function connectChrome($: Host, isQuiet = false, tryId?: string): Promise<Chrome
     } catch (error) {
       failure ??= { error }
     }
-    // A tail cut by the bound may yet move the session (a rotation still running): the send waits as after a move.
-    const isMoved = isRotated || moves !== movesBefore || !isTailDone
+    const isMoved = isRotated || moves !== movesBefore
     const isConnected = done?.answer === 'paired' && isChromeAwaited
     // Where the view read fails, the line names no account: a line without it still carries the turn on.
     let connectedAs = ''
@@ -3634,13 +3631,10 @@ async function connectingChrome(
   }
   if (isVisit) await leaveVisit($, from)
   if (!isQuiet && answer === 'paired') tell($, `Claude in Chrome is connected as ${claudeAccount(target, view.accounts)}.`)
+  // The host's notice shows 3 lines of 40 columns and cuts the rest: the step and the account fit whole for an email up
+  // to 39 characters (puma-9arph.99). The band and the Chrome box say the rest: restart Chrome, the account gone back to.
   if (!isQuiet && answer === 'unpaired') {
-    const back = isTrial ? view.accounts.find(a => a.id === view.chromeAccountId) : undefined
-    tell(
-      $,
-      `No Chrome extension answers as ${claudeAccount(target, view.accounts)}. Open Chrome and check its Claude extension is signed in with that email; if it is, restart Chrome${isTrial ? ' and try again' : ''}.` +
-        (back === undefined ? '' : ` Claude in Chrome goes back to ${label(back, view.accounts)}.`),
-    )
+    tell($, `No Chrome extension answers as ${label(target, view.accounts)}. Check its Claude extension is signed in.`)
   }
   return { target, answer, isVisit }
 }
