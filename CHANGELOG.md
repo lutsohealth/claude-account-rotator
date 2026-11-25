@@ -2,6 +2,13 @@
 
 What each version of the account rotator changed. To get each one as Claude Code starts, turn on auto-update: in `/plugin`, open **Marketplaces**, pick **claude-account-rotator** and choose **Enable auto-update**. To update by hand, run `claude plugin marketplace update claude-account-rotator`, then `claude plugin update account-rotator@claude-account-rotator`, and start a new session.
 
+## 0.5.55-lutso.1 - 2026-11-25
+
+- **A Claude in Chrome visit that fails still carries the turn on**: where the move back to your login, or the visit's own closing step, gives no answer, the mod waits at most 30 seconds, then the carry-on goes once and the visit ends. A move back that answers later still lands (#178).
+- **The notice that no Chrome extension answers fits on screen**: it reads `No Chrome extension answers as <email>. Check its Claude extension is signed in.`, whole in Claude Code's notice. The line above the prompt still says to restart Chrome (#178).
+- **The stop-log names a Claude in Chrome visit that ends with a carry-on owed**: `visit ended with a carry-on owed`, written only for a visit that moved the session. The visit's own line is the backup of that carry-on and stands down once it was answered (#173, #175).
+- **Not fixed yet**: a visit's closing step that lands after a newer visit began clears that visit's **Connecting Chrome…** in the panel until it ends, with nothing sent differently. The items listed under 0.5.52-lutso.1 still stand.
+
 ## 0.5.54-lutso.1 - 2026-11-24
 
 - **The stop-log keeps more**: each session's stop-log keeps its last 200 entries, up from 50 (#169).
