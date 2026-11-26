@@ -532,24 +532,8 @@ function ChromeBand(ui: Ui, view: View, act: Actions) {
   )
 }
 
-/**
- * The band above the prompt, drawn only while a login needs the person, over
- * what is drawn beneath it (any mod that loads after this one); with no band,
- * undefined.
- */
-export function Band(ui: Ui, view: View, beneath: RenderChildren, now: number, act: Actions) {
-  const band = bandContent(ui, view, now, act)
-  if (band === undefined) return undefined
-  const { Box } = ui
-  return (
-    <Box flexDirection="column">
-      {band}
-      {beneath}
-    </Box>
-  )
-}
-
-function bandContent(ui: Ui, view: View, now: number, act: Actions) {
+/** The band above the prompt, drawn only while a login needs the person. */
+export function Band(ui: Ui, view: View, now: number, act: Actions) {
   const { Box, Text, Button } = ui
   const signingIn = view.accounts.find(a => view.health[a.id]?.kind === 'logging-in')
   if (signingIn !== undefined) {
