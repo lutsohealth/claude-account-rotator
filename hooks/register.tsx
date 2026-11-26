@@ -4428,7 +4428,8 @@ export const register: Register = on => {
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey) return next(e)
     const view = await getView($)
-    return Band($.ui.resolve(e), view, await $.clock.now(), actions($)) ?? next(e)
+    const beneath = await next(e)
+    return Band($.ui.resolve(e), view, beneath, await $.clock.now(), actions($)) ?? beneath
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
