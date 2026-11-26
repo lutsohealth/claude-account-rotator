@@ -199,8 +199,8 @@ function runsText({ Text }: Ui, rows: readonly FooterRun[][]) {
 const ROW_NAMES = ['Session:', 'Weekly:'] as const
 
 /**
- * The footer, right of the prompt: what is drawn beneath it (Claude Code's mode
- * labels, and any mod that loads after this one), then a row per
+ * The footer, right of the prompt: what is drawn beneath it (any mod that loads
+ * after this one), the engine's mode labels, then a row per
  * row picked in the pane (right now, the week), glyphs and percent each on or
  * off, as one control that opens the pane, or closes it while it shows. Under
  * the pointer the glyphs light up on a shade, and each row's name shows at its
@@ -208,7 +208,7 @@ const ROW_NAMES = ['Session:', 'Weekly:'] as const
  * when no login has a 5-hour window, unless it is the one row whose glyphs can
  * say a login needs a sign-in; with both rows off, a word keeps the control.
  */
-export function Footer(ui: Ui, view: View, beneath: RenderChildren, now: number, act: Actions) {
+export function Footer(ui: Ui, view: View, beneath: RenderChildren, modes: readonly string[], now: number, act: Actions) {
   const { Box, Text, Button } = ui
   const { session, week, sessionPercent, weekPercent } = view.footer
   const hasWeek = view.accounts.some((a, i) => rooms(view, a, i, now)[1] !== undefined)
@@ -231,6 +231,7 @@ export function Footer(ui: Ui, view: View, beneath: RenderChildren, now: number,
   return (
     <Box flexDirection="row" columnGap={1}>
       {beneath}
+      {modes.length > 0 && <Text dimColor>{modes.join(' & ')}</Text>}
       <Box key="accounts-area" flexDirection="row" columnGap={1}>
         {rows.length > 0 && (
           <Box display="none" hover={{ display: 'flex' }} flexDirection="column" alignItems="flex-end">

@@ -1,6 +1,16 @@
 import { expect } from 'claude-code/testing'
-import { GLYPHS, SLOT2, TWO_LOGINS, blob, drawBeneath, fresh, start, test, world } from './flow-harness'
+import type { On } from 'claude-code'
+import { GLYPHS, SLOT2, TWO_LOGINS, blob, fresh, start, test, world } from './flow-harness'
 import { keychainItem } from './model'
+
+// Stands for what is drawn beneath the footer, and draws whatever mode labels it is handed.
+function drawBeneath(on: On) {
+  on('ui.render', { component: 'SessionMode' }, ($$, e) => {
+    const { Text } = $$.ui.resolve(e)
+
+    return <Text>beneath: {e.props.modes.join(' & ')}</Text>
+  })
+}
 
 /** Review R2 LOST_LABEL: a later mod may draw a tree of its own, with no mode label in it. */
 test('a drawing beneath that omits the modes loses no mode label, on both surfaces', async ($, on) => {
@@ -46,7 +56,7 @@ test('the footer keeps what is drawn beneath it, beside the accounts, and draws 
   await start($, clock)
   for (const surface of ['terminal', 'desktop'] as const) {
     const footer = await $.ui.mount({ plugin: 'account-rotator', surface, component: 'SessionMode', props: { modes: ['auto mode'] } })
-    expect(await footer.find({ type: 'Text', text: /beneath: auto mode/ })).toBeDefined()
+    expect(await footer.find({ type: 'Text', text: /beneath:/ })).toBeDefined()
     expect(await footer.find(GLYPHS)).toBeDefined()
     expect((await footer.findAll({ type: 'Text', text: /auto mode/ })).length).toBe(1)
     await footer.unmount()

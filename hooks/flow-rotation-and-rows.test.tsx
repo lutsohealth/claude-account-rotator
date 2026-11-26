@@ -5,7 +5,7 @@ import type { On, SessionRateLimit } from 'claude-code'
 import type { StoredRows, View } from '../types'
 import { DEFAULT_FOOTER, EMPTY_VIEW, NUDGE_LEAD_MS, USAGE_CLAIM_WAIT_MS, USAGE_IDLE_MS, fingerprint, keychainItem, laterMark, longBar, markFrom, roomColor, storedLineText } from './model'
 import { PANE_COLUMNS } from './view'
-import { drawBeneath, FABLE_HIT_STOP,FABLE_RESET, FABLE_STOP, FILE1, FILE2, GLYPHS, HOME, HOUR, LOGIN, N1, NOTE, NOW, OTHER_WEEK, PANE_PROPS, PLAIN_STOPS, REQUESTS, SETTLE_WAIT, SLOT2, SLOT3, THREE_LOGINS, TWO_LOGINS, USE_COMMAND, WEEK_RESET, bandText, bashCall, beat, blob, browse, callsWith, clearSession, clearable, endSession, fableRows, fresh, kept, limitsOf, lineOne, markOf, mountBand, mountPane, ownMark, painted, paneText, pastLastRead, pastNextRead, pressPane, ran, refresh, reloadThenClear, respond, resultOf, resumeAnswers, rmRequest, rowsOf, rowsText, rowsWorld, sent, slots, spentTwo, start, stopDuringSwitch, untilTick, useNow, useRequest, watchedView, world } from './flow-harness'
+import { FABLE_HIT_STOP, FABLE_RESET, FABLE_STOP, FILE1, FILE2, GLYPHS, HOME, HOUR, LOGIN, N1, NOTE, NOW, OTHER_WEEK, PANE_PROPS, PLAIN_STOPS, REQUESTS, SETTLE_WAIT, SLOT2, SLOT3, THREE_LOGINS, TWO_LOGINS, USE_COMMAND, WEEK_RESET, bandText, bashCall, beat, blob, browse, callsWith, clearSession, clearable, endSession, fableRows, fresh, kept, limitsOf, lineOne, markOf, mountBand, mountPane, ownMark, painted, paneText, pastLastRead, pastNextRead, pressPane, ran, refresh, reloadThenClear, respond, resultOf, resumeAnswers, rmRequest, rowsOf, rowsText, rowsWorld, sent, slots, spentTwo, start, stopDuringSwitch, untilTick, useNow, useRequest, watchedView, world } from './flow-harness'
 import type { RowsKey, World } from './flow-harness'
 
 test('a login with nothing in the keychain shows as needing a sign-in, with one button for it', async ($, on) => {
@@ -154,7 +154,6 @@ test('the band\'s Sign in signs a locked login in through the browser, in its ow
     w.usage['tok-2'] = [5, 12]
     return { value: { code: 0, signal: null } }
   })
-  drawBeneath(on)
   await start($, clock)
   const footer = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'SessionMode', props: { modes: ['auto mode'] } })
   expect((await footer.find(GLYPHS))?.text).toBe('│⣷│⚠   80% \n│▆│    70% ')
