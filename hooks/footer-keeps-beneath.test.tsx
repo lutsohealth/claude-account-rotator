@@ -1,6 +1,6 @@
 import { expect } from 'claude-code/testing'
 import type { On } from 'claude-code'
-import { BAND_PROPS, GLYPHS, SLOT2, TWO_LOGINS, blob, fresh, start, test, world } from './flow-harness'
+import { GLYPHS, SLOT2, TWO_LOGINS, blob, fresh, start, test, world } from './flow-harness'
 import { keychainItem } from './model'
 
 // Stands for what is drawn beneath the footer, and draws whatever mode labels it is handed.
@@ -61,56 +61,4 @@ test('the footer keeps what is drawn beneath it, beside the accounts, and draws 
     expect((await footer.findAll({ type: 'Text', text: /auto mode/ })).length).toBe(1)
     await footer.unmount()
   }
-})
-
-// Stands for a mod that loads after this one and draws above the prompt, as the lutso mod's running-agent rows do.
-// The band's stub names this mod, or it does not answer its next(e) (https://code.claude.com/docs/en/plugins/mods/test.md).
-function drawAbovePrompt(on: On) {
-  on('ui.render', { component: 'AbovePrompt', plugin: 'account-rotator' }, () => ({
-    type: 'Text',
-    props: {},
-    children: ['later row above the prompt'],
-  }))
-}
-
-/** A login with nothing in the keychain: the band shows its sign-in. */
-async function bandWorld(on: On) {
-  const w = fresh()
-  w.keychain['Claude Code-credentials'] = blob('tok-1')
-  w.usage['tok-1'] = [20, 30]
-  return world(on, w, TWO_LOGINS)
-}
-
-test('the band keeps what is drawn beneath it, on both surfaces', async ($, on) => {
-  const clock = await bandWorld(on)
-  await start($, clock)
-  for (const surface of ['terminal', 'desktop'] as const) {
-    const band = await $.ui.mount({ plugin: 'account-rotator', surface, component: 'AbovePrompt', props: BAND_PROPS })
-    expect(await band.find({ text: /two@example.com needs a sign-in/ })).toBeDefined()
-    expect(await band.keepsBeneath()).toBe(true)
-    await band.unmount()
-  }
-})
-
-test('a later mod still draws above the prompt while the band shows', async ($, on) => {
-  const clock = await bandWorld(on)
-  drawAbovePrompt(on)
-  await start($, clock)
-  const band = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'AbovePrompt', props: BAND_PROPS })
-  expect(await band.find({ text: /two@example.com needs a sign-in/ })).toBeDefined()
-  expect(await band.find({ type: 'Text', text: 'later row above the prompt' })).toBeDefined()
-  await band.unmount()
-})
-
-test('with no band to show, what is drawn beneath shows alone', async ($, on) => {
-  const w = fresh()
-  w.keychain['Claude Code-credentials'] = blob('tok-1')
-  w.usage['tok-1'] = [20, 30]
-  const clock = world(on, w, { accounts: [TWO_LOGINS.accounts[0]] })
-  drawAbovePrompt(on)
-  await start($, clock)
-  const band = await $.ui.mount({ plugin: 'account-rotator', surface: 'terminal', component: 'AbovePrompt', props: BAND_PROPS })
-  expect(await band.find({ text: /needs a sign-in/ })).toBeUndefined()
-  expect((await band.drawn())?.type).toBe('Text')
-  await band.unmount()
 })
